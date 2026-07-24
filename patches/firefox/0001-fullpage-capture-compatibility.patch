@@ -1406,7 +1406,7 @@ index 56a9a4eec51a..2883884bba11 100644
 @@ -542,9 +546,54 @@ this.tabs = class extends ExtensionAPIPersistent {
              throw new ExtensionError("Missing activeTab permission");
            }
-           await tabListener.awaitTabReady(tab.nativeTab);
+           await tabTracker.awaitTabReady(tab.nativeTab);
 -          const zoom = window.browsingContext.fullZoom;
 -
 -          return tab.capture(context, zoom, options);
