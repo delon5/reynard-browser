@@ -17,3 +17,4 @@ AGENTS.md
 dist/
 browser/Reynard/JIT/RPPairing/libidevice_ffi.a
 .gecko-artifact-cache/
+.build-logs/
