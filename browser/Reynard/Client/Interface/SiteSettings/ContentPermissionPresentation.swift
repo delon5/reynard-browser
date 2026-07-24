@@ -31,6 +31,7 @@ extension ContentPermission {
                 .webxr,
                 .autoplay,
                 .tracking,
+                .deviceSensors,
             nil:
             return nil
         }
@@ -51,6 +52,7 @@ extension ContentPermission {
                 .tracking,
                 .localDeviceAccess,
                 .localNetworkAccess,
+                .deviceSensors,
             nil:
             return nil
         }
