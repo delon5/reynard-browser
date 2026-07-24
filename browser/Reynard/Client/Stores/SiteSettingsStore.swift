@@ -148,8 +148,8 @@ final class SiteSettingsStore {
         }
     }
     
-    func setWebsiteMode(_ mode: SiteWebsiteMode, for url: URL) -> Bool {
-        guard let host = URLUtils.normalizedHost(url.host) else {
+    func setWebsiteMode(_ mode: SiteWebsiteMode, for host: String) -> Bool {
+        guard let host = URLUtils.normalizedHost(host) else {
             return false
         }
 
@@ -244,8 +244,8 @@ final class SiteSettingsStore {
         }
     }
     
-    func clearWebsiteMode(for url: URL) -> Bool {
-        guard let host = URLUtils.normalizedHost(url.host) else {
+    func clearWebsiteMode(for host: String) -> Bool {
+        guard let host = URLUtils.normalizedHost(host) else {
             return false
         }
 

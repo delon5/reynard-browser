@@ -246,6 +246,10 @@ final class BrowserViewController: UIViewController {
     // MARK: - Preferences
     
     private func applyGeckoPreferences() {
+        // HTTPS-only mode
+        HTTPSOnlyModePolicyController.applyHTTPSOnlyMode()
+        
+        // Tracking Protection
         TrackingProtectionPolicyController.applyEnhancedTrackingProtection()
         TrackingProtectionPolicyController.applyGlobalPrivacyControl()
     }

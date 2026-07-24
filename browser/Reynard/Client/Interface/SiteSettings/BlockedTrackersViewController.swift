@@ -45,11 +45,10 @@ final class BlockedTrackersViewController: UITableViewController {
     }
     
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        return categories[safe: section]?.title
-    }
-    
-    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        return categories[safe: section]?.description
+        guard let category = categories[safe: section] else {
+            return nil
+        }
+        return title(for: category)
     }
     
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -66,5 +65,20 @@ final class BlockedTrackersViewController: UITableViewController {
         cell.textLabel?.text = URL(string: tracker.url)?.host ?? tracker.url
         cell.selectionStyle = .none
         return cell
+    }
+    
+    private func title(for category: BlockedTrackerCategory) -> String {
+        switch category {
+        case .crossSiteTrackingCookies:
+            return NSLocalizedString("Cross-Site Tracking Cookies", tableName: "SettingsLocalizable", comment: "")
+        case .cryptominers:
+            return NSLocalizedString("Cryptominers", tableName: "SettingsLocalizable", comment: "")
+        case .fingerprinters:
+            return NSLocalizedString("Fingerprinters", tableName: "SettingsLocalizable", comment: "")
+        case .socialMediaTrackers:
+            return NSLocalizedString("Social Media Trackers", tableName: "SettingsLocalizable", comment: "")
+        case .trackingContent:
+            return NSLocalizedString("Tracking Content", tableName: "SettingsLocalizable", comment: "")
+        }
     }
 }

@@ -20,7 +20,7 @@ struct WebsiteModeReset {
 
 final class WebsiteModePolicy {
     // MARK: - State
-
+    
     private var desktopOverridesByTab: [UUID: [String: Bool]] = [:]
     private let siteSettings: SiteSettingsStore
     private let stateLock = NSRecursiveLock()
@@ -30,16 +30,16 @@ final class WebsiteModePolicy {
     }
 
     // MARK: - Mode Resolution
-
+    
     func prefersDesktopMode(for url: String, tabID: UUID?) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard let tabID else {
-            return Prefs.BrowsingSettings.requestDesktopWebsite
+            return storedMode(for: url)
         }
-        return isDesktopMode(for: url, tabID: tabID) ?? Prefs.BrowsingSettings.requestDesktopWebsite
+        return isDesktopMode(for: url, tabID: tabID) ?? storedMode(for: url)
     }
-
+    
     func isDesktopMode(for url: String, tabID: UUID) -> Bool? {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -48,7 +48,7 @@ final class WebsiteModePolicy {
               host != "addons.mozilla.org" else {
             return nil
         }
-
+        
         let overrides = desktopOverridesByTab[tabID]
         if let override = overrides?[host] ?? overrides?.first(where: {
             WebsiteModeHost.areRelated($0.key, host)
@@ -62,9 +62,9 @@ final class WebsiteModePolicy {
 
         return Prefs.BrowsingSettings.requestDesktopWebsite
     }
-
+    
     // MARK: - Overrides
-
+    
     func toggle(for url: String, tabID: UUID) -> WebsiteModeAction? {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -72,14 +72,14 @@ final class WebsiteModePolicy {
               let isDesktop = isDesktopMode(for: url, tabID: tabID) else {
             return nil
         }
-
+        
         let enablesDesktopMode = !isDesktop
         let persistentDefault = storedWebsiteMode(for: host).map { $0 == .desktop }
             ?? Prefs.BrowsingSettings.requestDesktopWebsite
         let desktopURL = enablesDesktopMode ? desktopURL(from: url) : nil
         let desktopHost = desktopURL.flatMap(DomainMatcher.host)
         var tabOverrides = desktopOverridesByTab[tabID] ?? [:]
-
+        
         for relatedHost in relatedOverrideHosts(
             for: host,
             desktopHost: desktopHost,
@@ -98,7 +98,7 @@ final class WebsiteModePolicy {
             tabOverrides[desktopHost ?? host] = enablesDesktopMode
             desktopOverridesByTab[tabID] = tabOverrides
         }
-
+        
         return desktopURL.map(WebsiteModeAction.load) ?? .reload
     }
 
@@ -172,25 +172,33 @@ final class WebsiteModePolicy {
         defer { stateLock.unlock() }
         desktopOverridesByTab.removeValue(forKey: tabID)
     }
-
+    
+    private func storedMode(for url: String) -> Bool {
+        guard let url = URL(string: url),
+              let mode = SiteSettingsStore.shared.settings(for: url)?.websiteMode else {
+            return Prefs.BrowsingSettings.requestDesktopWebsite
+        }
+        return mode == .desktop
+    }
+    
     // MARK: - URL Resolution
-
+    
     private func desktopURL(from url: String) -> String? {
         guard var components = URLComponents(string: url),
               let host = components.host else {
             return nil
         }
-
+        
         let normalizedHost = host.lowercased()
         let prefixes = ["m.", "mobile."]
         guard let prefix = prefixes.first(where: { normalizedHost.hasPrefix($0) }) else {
             return nil
         }
-
+        
         components.host = String(normalizedHost.dropFirst(prefix.count))
         return components.url?.absoluteString
     }
-
+    
     private func relatedOverrideHosts(
         for host: String,
         desktopHost: String?,
@@ -200,7 +208,7 @@ final class WebsiteModePolicy {
         if let desktopHost {
             relatedHosts.insert(desktopHost)
         }
-
+        
         for existingHost in existingOverrides.keys where relatedHosts.contains(where: {
             WebsiteModeHost.areRelated(existingHost, $0)
         }) {
