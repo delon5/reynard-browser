@@ -47,7 +47,7 @@ final class AddressBarButton: UIButton {
             addTarget(self, action: #selector(handleLegacyPrimaryTap), for: .touchUpInside)
         }
     }
-    
+
     @objc private func handleLegacyPrimaryTap() {
         guard let interaction = interactions.compactMap({ $0 as? UIContextMenuInteraction }).first else {
             return
@@ -167,6 +167,7 @@ final class AddressBarButton: UIButton {
         
         return hitFrame.contains(point)
     }
+
 }
 
 // MARK: - iOS 13 Context Menu Support
