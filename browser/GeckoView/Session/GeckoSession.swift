@@ -8,7 +8,7 @@
 import UIKit
 
 protocol GeckoSessionHandlerCommon: GeckoEventListenerInternal {
-    var moduleName: String { get }
+    var moduleName: String? { get }
     var events: [String] { get }
     var enabled: Bool { get }
 }
