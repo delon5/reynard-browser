@@ -61,6 +61,12 @@ public class GeckoSession {
         }
     }
     
+    lazy var contentBlockingHandler = newContentBlockingHandler(self)
+    public var contentBlockingDelegate: ContentBlockingDelegate? {
+        get { contentBlockingHandler.delegate(as: ContentBlockingDelegate.self) }
+        set { contentBlockingHandler.setDelegate(newValue) }
+    }
+    
     lazy var navigationHandler = newNavigationHandler(self)
     public var navigationDelegate: NavigationDelegate? {
         get { navigationHandler.delegate(as: NavigationDelegate.self) }
@@ -107,10 +113,20 @@ public class GeckoSession {
     }
     public lazy var mediaSession = MediaSession(session: self)
     private lazy var autofillHandler = GeckoAutofillHandler(session: self)
+    private lazy var pictureInPictureHandler = newPictureInPictureHandler(self)
+    public var pictureInPictureDelegate: PictureInPictureDelegate? {
+        get { pictureInPictureHandler.delegate }
+        set { pictureInPictureHandler.delegate = newValue }
+    }
+    public var pictureInPictureDisplayLayer: AVSampleBufferDisplayLayer? {
+        return pictureInPictureHandler.displayLayer
+    }
+    
     // MARK: - Session Handlers
     
     lazy var sessionHandlers: [GeckoSessionHandlerCommon] = [
         contentHandler,
+        contentBlockingHandler,
         processHangHandler,
         navigationHandler,
         historyHandler,
@@ -120,7 +136,9 @@ public class GeckoSession {
         selectionActionHandler,
         mediaSessionHandler,
         autofillHandler,
+        pictureInPictureHandler,
     ]
+    
     // MARK: - Lifecycle
     
     public init(
@@ -169,9 +187,14 @@ public class GeckoSession {
             "unsafeSessionContextId": nil,
         ]
         
-        let modules = Dictionary(uniqueKeysWithValues: sessionHandlers.map {
-            ($0.moduleName, $0.enabled)
-        })
+        let modules: [String: Bool] = Dictionary(
+            uniqueKeysWithValues: sessionHandlers.compactMap {
+                guard let moduleName = $0.moduleName else {
+                    return nil
+                }
+                return (moduleName, $0.enabled)
+            }
+        )
         
         window = GeckoViewOpenWindow(
             id,
@@ -231,6 +254,7 @@ public class GeckoSession {
 
     public func close() {
         contentDelegate = nil
+        contentBlockingDelegate = nil
         navigationDelegate = nil
         historyDelegate = nil
         permissionDelegate = nil
@@ -239,6 +263,7 @@ public class GeckoSession {
         selectionActionDelegate = nil
         mediaSessionDelegate?.onDeactivated(session: self)
         mediaSessionDelegate = nil
+        pictureInPictureDelegate = nil
         
         guard let window else {
             return
@@ -290,6 +315,18 @@ public class GeckoSession {
             type: "GeckoView:GoForward",
             message: [
                 "userInteraction": userInteraction
+            ])
+    }
+    
+    public func scrollTo(_ position: CGPoint, animated: Bool = true) {
+        dispatcher.dispatch(
+            type: "GeckoView:ScrollTo",
+            message: [
+                "widthValue": position.x,
+                "widthType": 0,
+                "heightValue": position.y,
+                "heightType": 0,
+                "behavior": animated ? 0 : 1,
             ])
     }
     
