@@ -33,6 +33,20 @@ fi
 export WASM_CC WASM_CXX
 export RUSTUP_TOOLCHAIN="$REYNARD_RUST_TOOLCHAIN"
 
+# Homebrew LLVM toolchain for building Gecko/Rust, scoped to this
+# script's own process (and its children, like ./mach build) only.
+# Deliberately NOT exported globally via shell profiles: Xcode's own
+# app builds pick up CC/CXX/AR/LD/RANLIB from the environment too, and
+# a global LD=ld.lld in particular breaks ordinary Xcode archiving —
+# Apple's linker driver passes flags (-isysroot, -fapplication-extension,
+# -dead_strip, etc.) that ld.lld doesn't understand at all.
+export CC="$LLVM_PREFIX/bin/clang"
+export CXX="$LLVM_PREFIX/bin/clang++"
+export AR="$LLVM_PREFIX/bin/llvm-ar"
+export RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
+export LD="$LLVM_PREFIX/bin/ld.lld"
+export PATH="$LLVM_PREFIX/bin:${PATH}"
+
 cd "$ROOT_DIR"
 
 "$ROOT_DIR/tools/firefox/prepare-firefox.sh"
@@ -55,13 +69,13 @@ GECKO_DIST="$FIREFOX_DIR/obj-aarch64-apple-ios/dist"
 GECKO_ARCHIVE="$ROOT_DIR/.gecko-artifact-cache/gecko-dist.tar.gz"
 
 # If there's no build here at all (e.g. a fresh checkout, or .build/
-# was wiped — as happened here after an earlier disk-full build),
-# try restoring a previously-packed artifact before falling back to a
-# full rebuild. This is purely an optimization attempt: if there's no
-# archive, or it fails to restore, or the restored artifact turns out
-# to be stale for the current source/patches/toolchain, the existing
-# check step right below this handles that exactly as it always has,
-# and the script proceeds to a normal rebuild unchanged.
+# was wiped), try restoring a previously-packed artifact before
+# falling back to a full rebuild. This is purely an optimization
+# attempt: if there's no archive, or it fails to restore, or the
+# restored artifact turns out to be stale for the current
+# source/patches/toolchain, the existing check step right below this
+# handles that exactly as it always has, and the script proceeds to a
+# normal rebuild unchanged.
 if [ "$REBUILD" = false ] && [ ! -f "$GECKO_DIST/bin/XUL" ] && [ -f "$GECKO_ARCHIVE" ]; then
 	echo "No existing Gecko build found; attempting to restore cached artifact..."
 	"$ROOT_DIR/tools/firefox/gecko-artifact-archive.sh" restore "$GECKO_ARCHIVE" || \
