@@ -13,12 +13,19 @@ public protocol ProgressDelegate {
     func onPageStart(session: GeckoSession, url: String)
     func onPageStop(session: GeckoSession, success: Bool)
     func onProgressChange(session: GeckoSession, progress: Int)
+    /// Called whenever the engine reports an updated session state
+    /// (navigation history, scroll position, or form data changed).
+    /// Fires automatically on ordinary state changes, and can be
+    /// requested on demand via GeckoSession.flushSessionState() — for
+    /// example, right before persisting a tab's state to disk.
+    func onSessionStateChange(session: GeckoSession, state: GeckoSessionState)
 }
 
 extension ProgressDelegate {
     public func onPageStart(session: GeckoSession, url: String) {}
     public func onPageStop(session: GeckoSession, success: Bool) {}
     public func onProgressChange(session: GeckoSession, progress: Int) {}
+    public func onSessionStateChange(session: GeckoSession, state: GeckoSessionState) {}
 }
 
 // MARK: - Progress Events
@@ -60,6 +67,14 @@ func newProgressHandler(_ session: GeckoSession) -> GeckoSessionHandler {
         case .securityChanged:
             return nil
         case .stateUpdated:
+            guard let update = message?["data"] as? [String: Any?] else {
+                return nil
+            }
+            let state = session.mergeSessionStateUpdate(update)
+            guard !state.isEmpty else {
+                return nil
+            }
+            delegate?.onSessionStateChange(session: session, state: state)
             return nil
         }
     }

@@ -8,7 +8,7 @@
 import UIKit
 
 protocol GeckoSessionHandlerCommon: GeckoEventListenerInternal {
-    var moduleName: String? { get }
+    var moduleName: String { get }
     var events: [String] { get }
     var enabled: Bool { get }
 }
@@ -61,12 +61,6 @@ public class GeckoSession {
         }
     }
     
-    lazy var contentBlockingHandler = newContentBlockingHandler(self)
-    public var contentBlockingDelegate: ContentBlockingDelegate? {
-        get { contentBlockingHandler.delegate(as: ContentBlockingDelegate.self) }
-        set { contentBlockingHandler.setDelegate(newValue) }
-    }
-    
     lazy var navigationHandler = newNavigationHandler(self)
     public var navigationDelegate: NavigationDelegate? {
         get { navigationHandler.delegate(as: NavigationDelegate.self) }
@@ -113,20 +107,12 @@ public class GeckoSession {
     }
     public lazy var mediaSession = MediaSession(session: self)
     private lazy var autofillHandler = GeckoAutofillHandler(session: self)
-    private lazy var pictureInPictureHandler = newPictureInPictureHandler(self)
-    public var pictureInPictureDelegate: PictureInPictureDelegate? {
-        get { pictureInPictureHandler.delegate }
-        set { pictureInPictureHandler.delegate = newValue }
-    }
-    public var pictureInPictureDisplayLayer: AVSampleBufferDisplayLayer? {
-        return pictureInPictureHandler.displayLayer
-    }
+    private lazy var webAuthnHandler = GeckoWebAuthnHandler(session: self)
     
     // MARK: - Session Handlers
     
     lazy var sessionHandlers: [GeckoSessionHandlerCommon] = [
         contentHandler,
-        contentBlockingHandler,
         processHangHandler,
         navigationHandler,
         historyHandler,
@@ -136,7 +122,7 @@ public class GeckoSession {
         selectionActionHandler,
         mediaSessionHandler,
         autofillHandler,
-        pictureInPictureHandler,
+        webAuthnHandler,
     ]
     
     // MARK: - Lifecycle
@@ -187,14 +173,9 @@ public class GeckoSession {
             "unsafeSessionContextId": nil,
         ]
         
-        let modules: [String: Bool] = Dictionary(
-            uniqueKeysWithValues: sessionHandlers.compactMap {
-                guard let moduleName = $0.moduleName else {
-                    return nil
-                }
-                return (moduleName, $0.enabled)
-            }
-        )
+        let modules = Dictionary(uniqueKeysWithValues: sessionHandlers.map {
+            ($0.moduleName, $0.enabled)
+        })
         
         window = GeckoViewOpenWindow(
             id,
@@ -254,7 +235,6 @@ public class GeckoSession {
 
     public func close() {
         contentDelegate = nil
-        contentBlockingDelegate = nil
         navigationDelegate = nil
         historyDelegate = nil
         permissionDelegate = nil
@@ -263,7 +243,6 @@ public class GeckoSession {
         selectionActionDelegate = nil
         mediaSessionDelegate?.onDeactivated(session: self)
         mediaSessionDelegate = nil
-        pictureInPictureDelegate = nil
         
         guard let window else {
             return
@@ -318,26 +297,74 @@ public class GeckoSession {
             ])
     }
     
-    public func scrollTo(_ position: CGPoint, animated: Bool = true) {
-        dispatcher.dispatch(
-            type: "GeckoView:ScrollTo",
-            message: [
-                "widthValue": position.x,
-                "widthType": 0,
-                "heightValue": position.y,
-                "heightType": 0,
-                "behavior": animated ? 0 : 1,
-            ])
-    }
-    
     // MARK: - State Updates
     
     public func setActive(_ active: Bool) {
         dispatcher.dispatch(type: "GeckoView:SetActive", message: ["active": active])
+        if !active {
+            flushSessionState()
+        }
     }
     
     public func setFocused(_ focused: Bool) {
         dispatcher.dispatch(type: "GeckoView:SetFocused", message: ["focused": focused])
+    }
+    
+    // MARK: - Session State
+    
+    /// Accumulating cache of this session's persisted state, keyed the
+    /// same way the engine's own cache keys it ("history", "scrolldata",
+    /// "formdata"). Mirrors Android's GeckoSession.mStateCache, which
+    /// lives on the session for its whole lifetime and is merged into
+    /// incrementally as "GeckoView:StateUpdated" messages arrive, rather
+    /// than each message carrying the full state on its own.
+    private var sessionStateCache: [String: Any?] = [:]
+    
+    /// Requests that Gecko flush the most current session state (history,
+    /// scroll position, form data) and report it via a
+    /// "GeckoView:StateUpdated" message. This is asynchronous — the
+    /// flush is not guaranteed to have completed by the time this
+    /// method returns. setActive(false) already calls this
+    /// automatically, matching GeckoView's own documented Android
+    /// behavior ("[setActive(false)] will flush the session state and
+    /// trigger a ProgressDelegate.onSessionStateChange callback").
+    public func flushSessionState() {
+        dispatcher.dispatch(type: "GeckoView:FlushSessionState", message: nil)
+    }
+    
+    /// Restores a previously-saved state to this session; only data
+    /// that was saved (history, scroll position, and form data) is
+    /// restored, overwriting the corresponding state of this session.
+    ///
+    /// - Parameter state: A state that originated from this session's
+    ///   own ProgressDelegate.onSessionStateChange callback.
+    public func restoreSessionState(_ state: GeckoSessionState) {
+        dispatcher.dispatch(type: "GeckoView:RestoreState", message: ["state": state.state])
+    }
+    
+    /// Merges an incoming "data" payload from a "GeckoView:StateUpdated"
+    /// message into this session's accumulating state cache, and
+    /// returns the full, merged state.
+    ///
+    /// Deliberately simpler than Android's own merge logic: Android
+    /// applies an index-based partial splice to the history array as a
+    /// CPU-time optimization, with a code comment noting it exists
+    /// purely for performance ("the legacy bundle operation performs
+    /// better" for a full replace) — not for correctness. Reynard always
+    /// takes the full-replace path here, trading a little efficiency on
+    /// large history updates for meaningfully lower risk of a subtly
+    /// incorrect incremental merge.
+    func mergeSessionStateUpdate(_ update: [String: Any?]) -> GeckoSessionState {
+        if let history = update["historychange"] as? [String: Any?] {
+            sessionStateCache["history"] = history
+        }
+        if let scroll = update["scroll"] as? [String: Any?] {
+            sessionStateCache["scrolldata"] = scroll
+        }
+        if let formData = update["formdata"] as? [String: Any?] {
+            sessionStateCache["formdata"] = formData
+        }
+        return GeckoSessionState(state: sessionStateCache)
     }
     
     public func focusedInputBottomRatio() async -> CGFloat? {
