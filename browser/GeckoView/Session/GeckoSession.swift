@@ -107,8 +107,6 @@ public class GeckoSession {
     }
     public lazy var mediaSession = MediaSession(session: self)
     private lazy var autofillHandler = GeckoAutofillHandler(session: self)
-    private lazy var webAuthnHandler = GeckoWebAuthnHandler(session: self)
-    
     // MARK: - Session Handlers
     
     lazy var sessionHandlers: [GeckoSessionHandlerCommon] = [
@@ -122,9 +120,7 @@ public class GeckoSession {
         selectionActionHandler,
         mediaSessionHandler,
         autofillHandler,
-        webAuthnHandler,
     ]
-    
     // MARK: - Lifecycle
     
     public init(
