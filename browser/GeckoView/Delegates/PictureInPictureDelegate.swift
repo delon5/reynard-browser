@@ -6,6 +6,9 @@
 //
 
 import AVFoundation
+import os
+
+private let pipLog = Logger(subsystem: "com.minh-ton.Reynard", category: "PiPDebug")
 
 public protocol PictureInPictureDelegate: AnyObject {
     func onSourceChanged(session: GeckoSession)
@@ -35,12 +38,16 @@ final class PictureInPictureHandler: GeckoSessionHandlerCommon {
     
     @MainActor
     func handleMessage(type: String, message: [String: Any?]?) async throws -> Any? {
+        pipLog.debug("handleMessage fired: type=\(type)")
         guard events.contains(type) else {
             throw GeckoHandlerError("unknown message \(type)")
         }
         guard let session else {
+            pipLog.debug("handleMessage: session was nil/destroyed")
             throw GeckoHandlerError("session has been destroyed")
         }
+        let layer = session.window?.pictureInPictureDisplayLayer()
+        pipLog.debug("handleMessage: displayLayer is \(layer == nil ? "nil" : "present")")
         delegate?.onSourceChanged(session: session)
         return nil
     }

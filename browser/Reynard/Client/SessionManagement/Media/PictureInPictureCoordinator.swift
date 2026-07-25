@@ -6,6 +6,9 @@
 //
 
 import AVFoundation
+import os
+
+private let pipLog = Logger(subsystem: "com.minh-ton.Reynard", category: "PiPDebug")
 import AVKit
 import Foundation
 import GeckoView
@@ -172,14 +175,27 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     }
     
     private func eligibleSession() -> EligibleSession? {
-        guard let snapshot = mediaSession.selectedSnapshot,
-              snapshot.playbackState == .playing,
-              let displayLayer =
-                snapshot.session.pictureInPictureDisplayLayer,
-              let positionState = snapshot.positionState,
-              isValid(positionState) else {
+        guard let snapshot = mediaSession.selectedSnapshot else {
+            pipLog.debug("eligibleSession: no selectedSnapshot")
             return nil
         }
+        guard snapshot.playbackState == .playing else {
+            pipLog.debug("eligibleSession: playbackState is \(String(describing: snapshot.playbackState)), not .playing")
+            return nil
+        }
+        guard let displayLayer = snapshot.session.pictureInPictureDisplayLayer else {
+            pipLog.debug("eligibleSession: pictureInPictureDisplayLayer is nil")
+            return nil
+        }
+        guard let positionState = snapshot.positionState else {
+            pipLog.debug("eligibleSession: positionState is nil")
+            return nil
+        }
+        guard isValid(positionState) else {
+            pipLog.debug("eligibleSession: positionState failed isValid check")
+            return nil
+        }
+        pipLog.debug("eligibleSession: all checks passed, session is eligible")
         return EligibleSession(
             session: snapshot.session,
             displayLayer: displayLayer,
