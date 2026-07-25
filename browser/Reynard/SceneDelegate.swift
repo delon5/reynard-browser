@@ -82,8 +82,38 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.setApplicationForeground(false)
         browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
-        browserViewController.tabManager.sleepBackgroundedTabs()
+        sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
         flushNavigationHistoryInBackground()
+    }
+    
+    /// sceneDidEnterBackground only gets a few seconds of guaranteed
+    /// runtime before iOS can suspend the app outright — closing and
+    /// recreating a Gecko session per tab is real, cumulative work that
+    /// could plausibly outrun that default window with many tabs open,
+    /// especially under the same memory pressure this feature exists to
+    /// relieve. Wrapping it in an explicit background task tells iOS to
+    /// grant more time (up to its own ~30s budget) rather than assuming
+    /// the default window is enough — same reasoning, same pattern, as
+    /// flushNavigationHistoryInBackground() just below. This work has to
+    /// stay synchronous on the main thread (GeckoSession isn't safe to
+    /// touch from a background queue), so unlike that method, there's no
+    /// dispatch to a background queue here — just the wider time budget.
+    private func sleepBackgroundedTabsWithTimeBudget(for browserViewController: BrowserViewController) {
+        let application = UIApplication.shared
+        var taskIdentifier = UIBackgroundTaskIdentifier.invalid
+        taskIdentifier = application.beginBackgroundTask(withName: "TabSleep") {
+            if taskIdentifier != .invalid {
+                application.endBackgroundTask(taskIdentifier)
+                taskIdentifier = .invalid
+            }
+        }
+        
+        browserViewController.tabManager.sleepBackgroundedTabs()
+        
+        if taskIdentifier != .invalid {
+            application.endBackgroundTask(taskIdentifier)
+            taskIdentifier = .invalid
+        }
     }
 
     private func flushNavigationHistoryInBackground() {
