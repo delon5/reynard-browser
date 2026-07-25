@@ -43,8 +43,15 @@ struct UserAgentPolicy {
         // A user-entered override for this specific site takes priority
         // over everything below, including the global custom user
         // agent — a per-site choice is more specific than a general one.
+        // Matched the same way as the existing Android-UA domain list
+        // (exact host, or any subdomain of it) so that e.g. an override
+        // entered for "youtube.com" also applies on "www.youtube.com"
+        // and "m.youtube.com".
         if let host,
-           let siteOverride = Prefs.CompatibilitySettings.perSiteUserAgentOverrides[host] {
+           let matchedDomain = Prefs.CompatibilitySettings.perSiteUserAgentOverrides.keys.first(where: {
+               DomainMatcher.matches(host: host, domain: $0)
+           }),
+           let siteOverride = Prefs.CompatibilitySettings.perSiteUserAgentOverrides[matchedDomain] {
             let trimmedSiteOverride = siteOverride.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedSiteOverride.isEmpty {
                 return UserAgentConfiguration(override: trimmedSiteOverride, forcesMobileMode: false)
