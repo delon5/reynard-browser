@@ -53,8 +53,25 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     
     func sceneWillResignActive(_ scene: UIScene) {
-        (window?.rootViewController as? BrowserViewController)?
-            .sessionManager.applicationWillResignActive()
+        guard let browserViewController = window?.rootViewController as? BrowserViewController else {
+            return
+        }
+        browserViewController.sessionManager.applicationWillResignActive()
+        
+        // Lock and actually present the cover screen here — the
+        // earliest possible moment the app starts losing focus —
+        // rather than waiting for sceneDidEnterBackground. Two real
+        // problems this fixes: (1) iOS takes its app-switcher preview
+        // snapshot around this same time, so if the private tab is
+        // still visible when that happens, the private content gets
+        // captured directly into that system-level snapshot; (2)
+        // without the lock screen already presented and covering the
+        // window before backgrounding completes, there's a visible
+        // flash of the actual private tab when the app is reopened,
+        // during the moments before sceneDidBecomeActive's own
+        // presentLockIfNeeded call gets a chance to run.
+        browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
+        browserViewController.privateBrowsingLockCoordinator.presentLockIfNeeded(animated: false)
     }
     
     func sceneWillEnterForeground(_ scene: UIScene) {
