@@ -65,7 +65,7 @@ final class PrivateBrowsingLockCoordinator {
     /// restored session left the user on a private tab, this locks the app
     /// immediately so `presentLockIfNeeded` has something to enforce.
     func lockInitialStateIfNeeded() {
-        guard isProtectionEnabled, tabManager.selectedTabMode == .private else {
+        guard isProtectionEnabled, isEffectivelyOnPrivateTabs else {
             return
         }
         isLocked = true
@@ -74,13 +74,26 @@ final class PrivateBrowsingLockCoordinator {
     /// Call when the app is about to leave the foreground (backgrounding,
     /// or about to be suspended).
     func lockIfNeeded() {
-        os_log("lockIfNeeded called, isProtectionEnabled=%{public}@, mode=%{public}@", log: lockLog, type: .debug, String(isProtectionEnabled), String(describing: tabManager.selectedTabMode))
-        guard isProtectionEnabled, tabManager.selectedTabMode == .private else {
+        os_log("lockIfNeeded called, isProtectionEnabled=%{public}@, mode=%{public}@, tabOverviewMode=%{public}@", log: lockLog, type: .debug, String(isProtectionEnabled), String(describing: tabManager.selectedTabMode), String(describing: host?.tabOverview.mode))
+        guard isProtectionEnabled, isEffectivelyOnPrivateTabs else {
             return
         }
         isLocked = true
         os_log("lockIfNeeded: isLocked=true, showing curtain", log: lockLog, type: .debug)
         showPrivacyCurtain()
+    }
+    
+    /// True if either the actual selected tab is private, or the tab
+    /// switcher is currently displaying the private side — even if
+    /// nothing has actually been tapped into yet. Switching the tab
+    /// switcher's own display to the private side does NOT, on its own,
+    /// change tabManager.selectedTabMode at all — that only updates once
+    /// a specific tab is actually selected — so relying on
+    /// selectedTabMode alone misses the case where private tab titles
+    /// and thumbnails are visibly on screen in the switcher itself, with
+    /// nothing yet selected.
+    private var isEffectivelyOnPrivateTabs: Bool {
+        return tabManager.selectedTabMode == .private || host?.tabOverview.mode == .privateTabs
     }
     
     private func showPrivacyCurtain() {
@@ -100,7 +113,7 @@ final class PrivateBrowsingLockCoordinator {
     /// needed; otherwise does nothing.
     func presentLockIfNeeded(animated: Bool) {
         os_log("presentLockIfNeeded called, isLocked=%{public}@, alreadyPresented=%{public}@", log: lockLog, type: .debug, String(isLocked), String(presentedLockViewController != nil))
-        guard isLocked, isProtectionEnabled, tabManager.selectedTabMode == .private else {
+        guard isLocked, isProtectionEnabled, isEffectivelyOnPrivateTabs else {
             return
         }
         presentLockScreen(animated: animated)
