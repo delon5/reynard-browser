@@ -28,10 +28,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     private let customUserAgentSwitch = UISwitch()
     
     private var displayedRows: [Row] {
-        var rows: [Row] = Prefs.CompatibilitySettings.useAndroidUserAgent
-            ? [.useAndroidUserAgent]
-            : [.useAndroidUserAgent, .userAgentOverrides]
-        rows.append(.useCustomUserAgent)
+        var rows: [Row] = [.useAndroidUserAgent, .useCustomUserAgent]
         if Prefs.CompatibilitySettings.useCustomUserAgent {
             rows.append(.customUserAgent)
         }
@@ -173,24 +170,11 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     }
     
     @objc private func applyAndroidUserAgentPreference() {
-        let nowOn = androidUserAgentSwitch.isOn
-        Prefs.CompatibilitySettings.useAndroidUserAgent = nowOn
+        Prefs.CompatibilitySettings.useAndroidUserAgent = androidUserAgentSwitch.isOn
         
-        guard let overrideRow = Row.allCases.firstIndex(of: .userAgentOverrides),
-              let section = Section.allCases.firstIndex(of: .userAgent) else {
+        guard let section = Section.allCases.firstIndex(of: .userAgent) else {
             return
         }
-        let overrideRowIndexPath = IndexPath(row: overrideRow, section: section)
-        UIView.performWithoutAnimation {
-            tableView.beginUpdates()
-            if nowOn {
-                tableView.deleteRows(at: [overrideRowIndexPath], with: .none)
-            } else {
-                tableView.insertRows(at: [overrideRowIndexPath], with: .none)
-            }
-            tableView.endUpdates()
-        }
-        
         if let footer = tableView.footerView(forSection: section) {
             footer.textLabel?.text = sectionText(for: section).footerTitle
             footer.sizeToFit()
