@@ -6,8 +6,10 @@
 import UIKit
 
 /// The small floating capsule shown in place of the full toolbars while
-/// scrolled down, matching Safari's condensed address pill. Uses a
-/// plain background matching the toolbars' own .systemGray6 styling.
+/// scrolled down, matching Safari's condensed address pill. Uses real
+/// Liquid Glass (`UIGlassEffect`) on iOS 26+, falling back to
+/// `UIBlurEffect(.systemMaterial)` on older versions or when Reduce
+/// Transparency is on.
 final class CondensedAddressPill: UIView {
     /// The pill's actual height — exposed so other layout code (e.g.
     /// the artificial safe-area clearance in BrowserChrome) can derive
@@ -34,9 +36,10 @@ final class CondensedAddressPill: UIView {
         view.clipsToBounds = true
         view.layer.cornerCurve = .continuous
         view.layer.cornerRadius = CondensedAddressPill.height / 2
-        view.backgroundColor = .toolbarBackground
         return view
     }()
+    
+    private let glassBackground = ToolbarGlassBackgroundView()
     
     private let locationLabel: UILabel = {
         let label = UILabel()
@@ -81,6 +84,7 @@ final class CondensedAddressPill: UIView {
     
     private func configureHierarchy() {
         addSubview(contentView)
+        glassBackground.install(in: contentView)
         contentView.addSubview(locationLabel)
     }
     

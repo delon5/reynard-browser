@@ -509,9 +509,15 @@ final class BrowserViewController: UIViewController {
         contentView.applyLayout(
             ContentView.LayoutState(mode: isSearchFocused ? .searchFocused : .standard),
             topAnchor: view.safeAreaLayoutGuide.topAnchor,
-            bottomAnchor: isSearchFocused
-            ? view.safeAreaLayoutGuide.bottomAnchor
-            : browserChrome.bottomToolbarTopAnchor
+            // The toolbar condensing to a pill only fades it out — it
+            // doesn't shrink its own layout frame — so without this,
+            // content would stay pinned to where the toolbar's top edge
+            // always is, leaving a real gap between it and the true
+            // screen bottom showing the window's own background
+            // underneath instead of more page content.
+            bottomAnchor: browserChrome.isScrollCondensed
+            ? view.bottomAnchor
+            : (isSearchFocused ? view.safeAreaLayoutGuide.bottomAnchor : browserChrome.bottomToolbarTopAnchor)
         )
         setTabBarVisible(false)
     }
@@ -520,7 +526,13 @@ final class BrowserViewController: UIViewController {
         contentView.applyLayout(
             ContentView.LayoutState(mode: .standard),
             topAnchor: browserChrome.topToolbarBottomAnchor,
-            bottomAnchor: browserChrome.bottomToolbarTopAnchor
+            // Same reasoning as applyPhoneLayout above — the toolbar's
+            // layout frame doesn't shrink when condensed, only its
+            // visual appearance fades, so this has to be handled
+            // explicitly rather than left to the toolbar's own bounds.
+            bottomAnchor: browserChrome.isScrollCondensed
+            ? view.bottomAnchor
+            : browserChrome.bottomToolbarTopAnchor
         )
         setTabBarVisible(false)
     }
