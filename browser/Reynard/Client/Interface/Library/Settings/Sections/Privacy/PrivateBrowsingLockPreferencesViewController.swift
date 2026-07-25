@@ -81,7 +81,28 @@ final class PrivateBrowsingLockPreferencesViewController: SettingsTableViewContr
     }
 
     @objc private func requiresAuthenticationSwitchDidChange(_ sender: UISwitch) {
-        Prefs.PrivacySettings.requiresAuthenticationForPrivateTabs = sender.isOn
+        guard !sender.isOn else {
+            // Turning protection ON is always safe to apply immediately.
+            Prefs.PrivacySettings.requiresAuthenticationForPrivateTabs = true
+            return
+        }
+        
+        // Turning protection OFF must itself be authenticated —
+        // otherwise anyone holding an unlocked phone could simply
+        // disable the lock here and freely browse private tabs from
+        // then on, defeating the whole point of the feature.
+        PrivateBrowsingAuthenticator.shared.authenticate(
+            reason: NSLocalizedString("Authenticate to turn off private browsing lock", comment: "")
+        ) { result in
+            switch result {
+            case .success, .unavailable:
+                Prefs.PrivacySettings.requiresAuthenticationForPrivateTabs = false
+            case .cancelled, .failed:
+                // Authentication didn't succeed — leave protection on
+                // and revert the switch back to reflect that.
+                sender.setOn(true, animated: true)
+            }
+        }
     }
     
     private func switchCell(title: String, accessoryView: UISwitch) -> UITableViewCell {
