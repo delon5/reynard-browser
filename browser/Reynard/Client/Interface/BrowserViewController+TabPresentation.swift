@@ -79,7 +79,8 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
     // MARK: - TabOverviewDelegate
     
     func tabOverviewDidRequestClearTabs(_ tabOverview: TabOverview) {
-        clearTabsForCurrentOverviewMode()
+        NSLog("[TabRemoval] tabOverviewDidRequestClearTabs fired — tabOverview.isPresented=%@", String(tabOverview.isPresented))
+        confirmAndClearTabsForCurrentOverviewMode()
     }
     
     func tabOverviewDidRequestNewTab(_ tabOverview: TabOverview) {
@@ -178,16 +179,41 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
         collectionView.layoutIfNeeded()
     }
     
-    private func clearTabsForCurrentOverviewMode() {
-        tabBar.setPendingExpansion(at: nil)
+    private func confirmAndClearTabsForCurrentOverviewMode() {
+        // The mode to clear is resolved once, up front, and explicitly —
+        // no implicit fallback inside removeAllTabs itself anymore. If
+        // the overview isn't presented, this preserves the original
+        // intent (clear whatever mode is currently active) but makes
+        // that intent visible here, at the call site, rather than
+        // hidden as a default deep inside TabManagerImpl.
+        let mode = tabOverview.isPresented ? tabOverview.mode.tabMode : tabManager.selectedTabMode
+        let tabCount = mode == .regular ? tabManager.regularTabs.count : tabManager.privateTabs.count
+        NSLog("[TabRemoval] confirmAndClearTabsForCurrentOverviewMode: mode=%@, tabCount=%d, overviewPresented=%@", String(describing: mode), tabCount, String(tabOverview.isPresented))
         
-        guard tabOverview.isPresented else {
-            tabManager.removeAllTabs(mode: nil)
+        guard tabCount > 0 else {
             return
         }
         
-        let mode = tabOverview.mode.tabMode
-        guard mode == .regular else {
+        let alert = UIAlertController(
+            title: NSLocalizedString("Close All Tabs?", comment: ""),
+            message: String(format: NSLocalizedString("This will close all %d open tabs. This can't be undone.", comment: ""), tabCount),
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { [weak self] _ in
+            NSLog("[TabRemoval] User cancelled clear-all-tabs confirmation")
+            self?.tabBar.setPendingExpansion(at: nil)
+        })
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Close All Tabs", comment: ""), style: .destructive) { [weak self] _ in
+            NSLog("[TabRemoval] User confirmed clear-all-tabs")
+            self?.performClearTabs(mode: mode)
+        })
+        present(alert, animated: true)
+    }
+    
+    private func performClearTabs(mode: TabMode) {
+        tabBar.setPendingExpansion(at: nil)
+        
+        guard mode == .regular, tabOverview.isPresented else {
             tabManager.removeAllTabs(mode: mode)
             return
         }

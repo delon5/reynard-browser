@@ -29,7 +29,7 @@ protocol TabManager: AnyObject {
     func selectTab(at index: Int, mode: TabMode?)
     func moveTab(from sourceIndex: Int, to destinationIndex: Int, mode: TabMode?)
     func removeTab(at index: Int, mode: TabMode?)
-    func removeAllTabs(mode: TabMode?)
+    func removeAllTabs(mode: TabMode)
     /// Closes the underlying Gecko session for every tab except the
     /// currently selected one and any tab actively mid-navigation,
     /// freeing their memory while leaving them untouched in the tab

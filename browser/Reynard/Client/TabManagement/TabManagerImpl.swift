@@ -812,8 +812,14 @@ final class TabManagerImplementation: NSObject, TabManager {
         sessionManager.discard(removedTab.session, forTab: removedTab.id, keepingHistory: mode == .regular)
     }
     
-    func removeAllTabs(mode: TabMode? = nil) {
-        let mode = mode ?? selectedTabMode
+    func removeAllTabs(mode: TabMode) {
+        // Deliberately no default/optional here anymore, and no
+        // fallback to whatever mode happens to be currently selected —
+        // a real incident (5 tabs lost at once, unconfirmed root cause)
+        // made clear how dangerous an implicit fallback is for an
+        // operation this destructive. Every caller must now say exactly
+        // which mode it means to clear.
+        NSLog("[TabRemoval] removeAllTabs(mode: %@) called — about to remove %d tabs", String(describing: mode), tabs(for: mode).count)
         guard !tabs(for: mode).isEmpty else {
             return
         }
@@ -833,6 +839,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         removedTabs.forEach { saveClosedTabIfNeeded($0, mode: mode) }
         removedTabs.forEach { cancelFaviconTask(for: $0.id) }
         delegate?.tabManagerDidChangeTabs(self)
+        NSLog("[TabRemoval] removeAllTabs(mode: %@) completed — removed %d tabs", String(describing: mode), removedTabs.count)
         
         if mode == selectedTabMode {
             if mode == .private && !regularTabs.isEmpty {
