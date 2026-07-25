@@ -13,6 +13,7 @@ struct PrivacySettingsSection {
         case clearBrowsingData
         case httpsOnlyMode
         case trackingProtection
+        case privateBrowsingLock
     }
     
     var rowCount: Int {
@@ -33,6 +34,8 @@ struct PrivacySettingsSection {
             return SettingsViewUtils.disclosureCell(title: NSLocalizedString("HTTPS-Only Mode", tableName: "SettingsLocalizable", comment: ""))
         case .trackingProtection:
             return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Tracking Protection", comment: ""))
+        case .privateBrowsingLock:
+            return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Private Browsing Lock", comment: ""))
         }
     }
     
@@ -53,6 +56,9 @@ struct PrivacySettingsSection {
             viewController.navigationController?.pushViewController(destination, animated: true)
         case .trackingProtection:
             let destination = TrackingProtectionPreferencesViewController()
+            viewController.navigationController?.pushViewController(destination, animated: true)
+        case .privateBrowsingLock:
+            let destination = PrivateBrowsingLockPreferencesViewController()
             viewController.navigationController?.pushViewController(destination, animated: true)
         }
     }

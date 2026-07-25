@@ -45,8 +45,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneDidDisconnect(_ scene: UIScene) {}
     
     func sceneDidBecomeActive(_ scene: UIScene) {
-        (window?.rootViewController as? BrowserViewController)?
-            .sessionManager.applicationDidBecomeActive()
+        guard let browserViewController = window?.rootViewController as? BrowserViewController else {
+            return
+        }
+        browserViewController.sessionManager.applicationDidBecomeActive()
+        browserViewController.privateBrowsingLockCoordinator.presentLockIfNeeded(animated: true)
     }
     
     func sceneWillResignActive(_ scene: UIScene) {
@@ -64,6 +67,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return
         }
         browserViewController.sessionManager.setApplicationForeground(false)
+        browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
         flushNavigationHistoryInBackground()
     }
 

@@ -28,6 +28,10 @@ final class BrowserViewController: UIViewController {
         delegate: self,
         sessionManager: sessionManager
     )
+    lazy var privateBrowsingLockCoordinator = PrivateBrowsingLockCoordinator(
+        host: self,
+        tabManager: tabManager
+    )
     private var preFullscreenOrientation: UIInterfaceOrientation?
     var pendingNewTabKeyboardFocusTabID: UUID?
     var isPendingNewTabKeyboardFocusEventDispatchComplete = false
@@ -156,6 +160,7 @@ final class BrowserViewController: UIViewController {
         applyUpdateMenuButtonBadge()
         
         tabManager.createInitialTab(openingScreen: Prefs.HomepageSettings.openingScreen)
+        privateBrowsingLockCoordinator.lockInitialStateIfNeeded()
         refreshAddressBar()
         homepageOverlayCoordinator.updatePresentation(animated: false)
         

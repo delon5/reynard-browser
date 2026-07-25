@@ -59,6 +59,7 @@ final class BrowserPreferences {
             
             // Experimental
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
+            key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
@@ -962,6 +963,18 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isVideoPictureInPictureEnabled")
+            }
+        }
+    }
+    
+    // MARK: - Privacy
+    struct PrivacySettings {
+        static var requiresAuthenticationForPrivateTabs: Bool {
+            get {
+                return prefs.bool(forSetting: "PrivacySettings", key: "requiresAuthenticationForPrivateTabs")
+            }
+            set {
+                prefs.set(newValue, forSetting: "PrivacySettings", key: "requiresAuthenticationForPrivateTabs")
             }
         }
     }
