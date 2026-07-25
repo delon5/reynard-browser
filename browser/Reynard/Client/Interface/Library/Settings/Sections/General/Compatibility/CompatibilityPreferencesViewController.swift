@@ -166,11 +166,28 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     
     @objc private func applyCustomUserAgentPreference() {
         Prefs.CompatibilitySettings.useCustomUserAgent = customUserAgentSwitch.isOn
+        
+        if customUserAgentSwitch.isOn, Prefs.CompatibilitySettings.useAndroidUserAgent {
+            Prefs.CompatibilitySettings.useAndroidUserAgent = false
+            androidUserAgentSwitch.setOn(false, animated: true)
+        }
+        
         tableView.reloadData()
     }
     
     @objc private func applyAndroidUserAgentPreference() {
         Prefs.CompatibilitySettings.useAndroidUserAgent = androidUserAgentSwitch.isOn
+        
+        // These two global user agent modes can never both meaningfully
+        // apply at once — only one is ever actually used, so leaving
+        // both switches "on" would be misleading about which one is
+        // really in effect.
+        if androidUserAgentSwitch.isOn, Prefs.CompatibilitySettings.useCustomUserAgent {
+            Prefs.CompatibilitySettings.useCustomUserAgent = false
+            customUserAgentSwitch.setOn(false, animated: true)
+            tableView.reloadData()
+            return
+        }
         
         guard let section = Section.allCases.firstIndex(of: .userAgent) else {
             return
