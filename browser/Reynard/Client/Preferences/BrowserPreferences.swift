@@ -61,6 +61,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
+            key("BrowsingSettings", "swipeUpForTabSwitcher"): true,
             key("AppearanceSettings", "hidesToolbarOnScroll"): true,
             
             // Compatibility
@@ -329,6 +330,17 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "BrowsingSettings", key: "showImagePreviews")
+            }
+        }
+        
+        /// Whether swiping up from the toolbar opens the tab switcher.
+        /// On by default.
+        static var swipeUpForTabSwitcher: Bool {
+            get {
+                return prefs.bool(forSetting: "BrowsingSettings", key: "swipeUpForTabSwitcher")
+            }
+            set {
+                prefs.set(newValue, forSetting: "BrowsingSettings", key: "swipeUpForTabSwitcher")
             }
         }
 

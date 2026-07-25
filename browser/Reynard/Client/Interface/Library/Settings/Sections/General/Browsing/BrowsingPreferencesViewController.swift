@@ -11,6 +11,7 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
     private enum Section: CaseIterable {
         case links
         case media
+        case gestures
         case desktopWebsite
         
         var text: SettingsSectionText {
@@ -19,6 +20,8 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
                 return SettingsSectionText(headerTitle: NSLocalizedString("Links", comment: ""))
             case .media:
                 return SettingsSectionText(headerTitle: NSLocalizedString("Media", comment: ""))
+            case .gestures:
+                return SettingsSectionText(headerTitle: NSLocalizedString("Gestures", comment: ""))
             case .desktopWebsite:
                 return SettingsSectionText(headerTitle: NSLocalizedString("Content", comment: "Browsing settings section title"))
             }
@@ -39,9 +42,14 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
         case allWebsites
     }
     
+    private enum GesturesRow: CaseIterable {
+        case swipeUpForTabSwitcher
+    }
+    
     private let showLinkPreviewsSwitch = UISwitch()
     private let openLinksInAppsSwitch = UISwitch()
     private let showImagePreviewsSwitch = UISwitch()
+    private let swipeUpForTabSwitcherSwitch = UISwitch()
     
     init() {
         super.init(style: .insetGrouped)
@@ -78,6 +86,8 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
             return LinksRow.allCases.count
         case .media:
             return MediaRow.allCases.count
+        case .gestures:
+            return GesturesRow.allCases.count
         case .desktopWebsite:
             return DesktopWebsiteRow.allCases.count
         }
@@ -140,6 +150,20 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
                 cell.accessoryView = showImagePreviewsSwitch
                 return cell
             }
+        case .gestures:
+            guard GesturesRow.allCases.indices.contains(indexPath.row) else {
+                return UITableViewCell()
+            }
+            switch GesturesRow.allCases[indexPath.row] {
+            case .swipeUpForTabSwitcher:
+                let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+                cell.selectionStyle = .none
+                cell.textLabel?.text = NSLocalizedString("Swipe Up for Tab Switcher", comment: "")
+                cell.detailTextLabel?.text = NSLocalizedString("Swiping up from the toolbar opens the tab switcher", comment: "")
+                cell.detailTextLabel?.textColor = .secondaryLabel
+                cell.accessoryView = swipeUpForTabSwitcherSwitch
+                return cell
+            }
         case .desktopWebsite:
             guard DesktopWebsiteRow.allCases.indices.contains(indexPath.row) else {
                 return UITableViewCell()
@@ -173,6 +197,8 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
             case .showImagePreviews:
                 return
             }
+        case .gestures:
+            return
         case .desktopWebsite:
             navigationController?.pushViewController(RequestDesktopWebsitePreferencesViewController(), animated: true)
         }
@@ -182,12 +208,14 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
         openLinksInAppsSwitch.addTarget(self, action: #selector(openLinksInAppsSwitchDidChange(_:)), for: .valueChanged)
         showLinkPreviewsSwitch.addTarget(self, action: #selector(showLinkPreviewsSwitchDidChange(_:)), for: .valueChanged)
         showImagePreviewsSwitch.addTarget(self, action: #selector(showImagePreviewsSwitchDidChange(_:)), for: .valueChanged)
+        swipeUpForTabSwitcherSwitch.addTarget(self, action: #selector(swipeUpForTabSwitcherSwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         openLinksInAppsSwitch.isOn = Prefs.BrowsingSettings.openLinksInApps
         showLinkPreviewsSwitch.isOn = Prefs.BrowsingSettings.showLinkPreviews
         showImagePreviewsSwitch.isOn = Prefs.BrowsingSettings.showImagePreviews
+        swipeUpForTabSwitcherSwitch.isOn = Prefs.BrowsingSettings.swipeUpForTabSwitcher
     }
     
     @objc private func showLinkPreviewsSwitchDidChange(_ sender: UISwitch) {
@@ -200,5 +228,9 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
     
     @objc private func showImagePreviewsSwitchDidChange(_ sender: UISwitch) {
         Prefs.BrowsingSettings.showImagePreviews = sender.isOn
+    }
+    
+    @objc private func swipeUpForTabSwitcherSwitchDidChange(_ sender: UISwitch) {
+        Prefs.BrowsingSettings.swipeUpForTabSwitcher = sender.isOn
     }
 }

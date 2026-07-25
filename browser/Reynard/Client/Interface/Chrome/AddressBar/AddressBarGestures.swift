@@ -807,6 +807,7 @@ final class AddressBarGestures: NSObject {
     
     @objc private func handleSearchSwipeUp(_ recognizer: UISwipeGestureRecognizer) {
         guard recognizer.state == .ended,
+              Prefs.BrowsingSettings.swipeUpForTabSwitcher,
               let delegate,
               delegate.chromeMode == .phone,
               !delegate.isSearchFocused,
