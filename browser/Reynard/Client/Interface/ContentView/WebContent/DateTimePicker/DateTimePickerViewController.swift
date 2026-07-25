@@ -43,7 +43,7 @@ final class DateTimePickerViewController: UIViewController {
     required init?(coder: NSCoder) { fatalError() }
     
     private func configureView() {
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         preferredContentSize = UX.contentSize
     }
     

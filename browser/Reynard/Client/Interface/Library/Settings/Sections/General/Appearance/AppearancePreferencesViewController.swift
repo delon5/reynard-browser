@@ -30,7 +30,7 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
         var rows: [Row] {
             switch self {
             case .appAppearance:
-                return [.appAppearance]
+                return [.appAppearance, .oledBackground]
             case .addressBar:
                 if UIDevice.current.userInterfaceIdiom == .pad {
                     return [.showFullWebsiteAddress]
@@ -49,6 +49,7 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
     
     private enum Row {
         case appAppearance
+        case oledBackground
         case BrowserChromePosition
         case showFullWebsiteAddress
         case landscapeTabBar
@@ -57,6 +58,7 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
     
     private let showFullWebsiteAddressSwitch = UISwitch()
     private let landscapeTabBarSwitch = UISwitch()
+    private let oledBackgroundSwitch = UISwitch()
     
     private var displayedSections: [Section] {
         return Section.allCases.filter { section in
@@ -118,6 +120,12 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
                 AppAppearanceController.apply(appearance)
             }
             return cell
+        case .oledBackground:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Pure Black in Dark Mode", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = oledBackgroundSwitch
+            return cell
         case .BrowserChromePosition:
             let cell = AddressBarPositionPickerCell(style: .default, reuseIdentifier: nil)
             cell.display(selectedPosition: Prefs.AppearanceSettings.addressBarPosition)
@@ -163,11 +171,13 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
     private func configureSwitch() {
         showFullWebsiteAddressSwitch.addTarget(self, action: #selector(showFullWebsiteAddressSwitchDidChange), for: .valueChanged)
         landscapeTabBarSwitch.addTarget(self, action: #selector(landscapeTabBarSwitchDidChange), for: .valueChanged)
+        oledBackgroundSwitch.addTarget(self, action: #selector(oledBackgroundSwitchDidChange), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         showFullWebsiteAddressSwitch.isOn = Prefs.AppearanceSettings.showsFullWebsiteAddress
         landscapeTabBarSwitch.isOn = Prefs.AppearanceSettings.showsLandscapeTabBar
+        oledBackgroundSwitch.isOn = Prefs.AppearanceSettings.usesOLEDBlackBackground
     }
     
     @objc private func showFullWebsiteAddressSwitchDidChange() {
@@ -176,5 +186,27 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
     
     @objc private func landscapeTabBarSwitchDidChange() {
         Prefs.AppearanceSettings.showsLandscapeTabBar = landscapeTabBarSwitch.isOn
+    }
+    
+    @objc private func oledBackgroundSwitchDidChange() {
+        Prefs.AppearanceSettings.usesOLEDBlackBackground = oledBackgroundSwitch.isOn
+        
+        // .appBackground is a dynamic color that only re-resolves when
+        // the system's own light/dark trait changes — it won't refresh
+        // live across every already-displayed screen just because this
+        // preference changed. Restarting is the simplest, most reliable
+        // way to make sure every view picks up the new value cleanly.
+        let alert = UIAlertController(
+            title: NSLocalizedString("Restart Required", comment: ""),
+            message: NSLocalizedString("The app will now close for this change to take effect.", comment: ""),
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { _ in
+            UIApplication.shared.perform(#selector(NSXPCConnection.suspend))
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) {
+                exit(0)
+            }
+        })
+        present(alert, animated: true)
     }
 }

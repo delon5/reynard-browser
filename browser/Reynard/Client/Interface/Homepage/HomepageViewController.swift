@@ -98,7 +98,7 @@ final class HomepageViewController: UINavigationController {
     }
     
     private func updateBackgroundColor() {
-        view.backgroundColor = showsBackground ? .systemBackground : .clear
+        view.backgroundColor = showsBackground ? .appBackground : .clear
     }
 }
 

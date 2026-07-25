@@ -168,7 +168,7 @@ final class FrequentlyVisitedSiteCardView: UIControl {
     // MARK: - Appearance
     
     private func updateAppearance() {
-        backgroundColor = traitCollection.userInterfaceStyle == .dark ? .systemGray5 : .systemBackground
+        backgroundColor = traitCollection.userInterfaceStyle == .dark ? .systemGray5 : .appBackground
         previewView.backgroundColor = .systemGray6
         titleLabel.textColor = .label
         layer.shadowColor = traitCollection.userInterfaceStyle == .dark

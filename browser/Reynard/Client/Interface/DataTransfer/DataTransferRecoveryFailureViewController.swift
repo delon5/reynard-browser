@@ -8,7 +8,7 @@ import UIKit
 final class DataTransferRecoveryFailureViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
 
         let titleLabel = UILabel()
         titleLabel.font = .preferredFont(forTextStyle: .title2)

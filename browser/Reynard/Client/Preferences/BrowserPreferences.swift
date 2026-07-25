@@ -886,6 +886,18 @@ final class BrowserPreferences {
             }
         }
         
+        /// Uses pure black instead of the standard system background
+        /// color while in dark mode, for better contrast and battery
+        /// savings on OLED screens.
+        static var usesOLEDBlackBackground: Bool {
+            get {
+                prefs.bool(forSetting: "AppearanceSettings", key: "usesOLEDBlackBackground")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AppearanceSettings", key: "usesOLEDBlackBackground")
+            }
+        }
+        
         static var addressBarPosition: BrowserChromePosition {
             get {
                 let rawValue = prefs.string(forSetting: "AppearanceSettings", key: "addressBarPosition") ?? BrowserChromePosition.bottom.rawValue

@@ -50,7 +50,7 @@ final class AddressBarDismissButton: UIButton {
         alpha = 0
         isHidden = true
         backgroundColor = UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ? .tertiarySystemBackground : .systemBackground
+            traitCollection.userInterfaceStyle == .dark ? .tertiarySystemBackground : .appBackground
         }
         tintColor = .label
         layer.cornerCurve = .continuous

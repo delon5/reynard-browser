@@ -65,7 +65,7 @@ final class JITFailureView: UIView {
     }
     
     private func configureView() {
-        backgroundColor = .systemBackground
+        backgroundColor = .appBackground
         let horizontalInset: CGFloat = 24
         
         let symbolConfiguration = UIImage.SymbolConfiguration(pointSize: 96, weight: .regular)
@@ -116,7 +116,7 @@ final class JITFailureView: UIView {
         quitButton.titleLabel?.font = .preferredFont(forTextStyle: .headline)
         quitButton.titleLabel?.adjustsFontForContentSizeCategory = true
         quitButton.backgroundColor = .label
-        quitButton.setTitleColor(.systemBackground, for: .normal)
+        quitButton.setTitleColor(.appBackground, for: .normal)
         quitButton.layer.cornerRadius = 12
         quitButton.layer.cornerCurve = .continuous
         quitButton.contentEdgeInsets = UIEdgeInsets(top: 14, left: 20, bottom: 14, right: 20)

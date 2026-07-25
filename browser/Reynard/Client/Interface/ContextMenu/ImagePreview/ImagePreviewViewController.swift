@@ -50,7 +50,7 @@ final class ImagePreviewViewController: UIViewController {
     
     private func configureView() {
         let view = UIView()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         
         imageView.translatesAutoresizingMaskIntoConstraints = false
         imageView.contentMode = .scaleAspectFit

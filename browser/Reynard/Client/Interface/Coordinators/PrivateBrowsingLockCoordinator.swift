@@ -33,7 +33,7 @@ final class PrivateBrowsingLockCoordinator {
     /// window doesn't carry the same presentation-timing hazards.
     private lazy var privacyCurtain: UIView = {
         let view = UIView()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         let imageView = UIImageView(image: UIImage(systemName: "lock.fill"))
         imageView.translatesAutoresizingMaskIntoConstraints = false
         imageView.tintColor = .secondaryLabel

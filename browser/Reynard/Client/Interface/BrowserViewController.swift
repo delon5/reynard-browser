@@ -53,7 +53,7 @@ final class BrowserViewController: UIViewController {
     lazy var addonPopupLoadingView: UIView = {
         let loadingView = UIView()
         loadingView.translatesAutoresizingMaskIntoConstraints = false
-        loadingView.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.94)
+        loadingView.backgroundColor = UIColor.appBackground.withAlphaComponent(0.94)
         loadingView.layer.cornerRadius = 16
         loadingView.layer.shadowColor = UIColor.black.cgColor
         loadingView.layer.shadowOpacity = 0.18
@@ -142,7 +142,7 @@ final class BrowserViewController: UIViewController {
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         
         if sidebarCoordinator.installHostIfNeeded() {
             return

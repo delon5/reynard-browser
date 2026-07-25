@@ -34,7 +34,7 @@ final class DataTransferOperationViewController: UIViewController, UIDocumentPic
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
 
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = .preferredFont(forTextStyle: .body)

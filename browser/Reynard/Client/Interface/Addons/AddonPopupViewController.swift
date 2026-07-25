@@ -154,7 +154,7 @@ final class AddonPopupViewController: UIViewController, ContentDelegate, Navigat
     private func makeSheetView() -> UIView {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         view.layer.cornerRadius = UX.sheetCornerRadius
         view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         view.clipsToBounds = true

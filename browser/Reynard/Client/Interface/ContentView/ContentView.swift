@@ -104,7 +104,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     
     private func configureAppearance() {
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = .systemBackground
+        backgroundColor = .appBackground
     }
     
     private func configureHierarchy() {
@@ -113,7 +113,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         historyTransitionOverlayView.translatesAutoresizingMaskIntoConstraints = false
         overlayContentView.translatesAutoresizingMaskIntoConstraints = false
         historyPreviewImageView.isHidden = true
-        historyPreviewImageView.backgroundColor = .systemBackground
+        historyPreviewImageView.backgroundColor = .appBackground
         historyPreviewImageView.contentMode = .scaleAspectFill
         historyPreviewImageView.clipsToBounds = true
         historyTransitionOverlayView.isHidden = true

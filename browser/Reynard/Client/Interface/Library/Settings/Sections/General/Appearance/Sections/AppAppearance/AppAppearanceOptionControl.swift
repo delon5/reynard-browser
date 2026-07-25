@@ -56,7 +56,7 @@ final class AppAppearanceOptionControl: UIControl {
     func displaySelection(selected: Bool) {
         isSelected = selected
         if selected {
-            previewView.backgroundColor = traitCollection.userInterfaceStyle == .dark ? .systemGray5 : .systemBackground
+            previewView.backgroundColor = traitCollection.userInterfaceStyle == .dark ? .systemGray5 : .appBackground
         } else {
             previewView.backgroundColor = .clear
         }

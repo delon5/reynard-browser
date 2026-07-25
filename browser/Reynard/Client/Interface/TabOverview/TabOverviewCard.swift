@@ -59,7 +59,7 @@ final class TabOverviewCard: UICollectionViewCell {
     private let webpagePreviewShadowView: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         view.layer.cornerRadius = UX.webpagePreviewCornerRadius
         view.layer.cornerCurve = .continuous
         view.layer.shadowOpacity = UX.webpagePreviewRestingShadowOpacity
@@ -79,7 +79,7 @@ final class TabOverviewCard: UICollectionViewCell {
     private let webpagePreviewClippingView: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         view.layer.cornerRadius = UX.webpagePreviewCornerRadius
         view.layer.cornerCurve = .continuous
         view.layer.masksToBounds = true

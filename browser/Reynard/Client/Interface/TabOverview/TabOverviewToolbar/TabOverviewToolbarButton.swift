@@ -43,7 +43,7 @@ final class TabOverviewToolbarButton: UIButton {
     
     private func configureAppearance() {
         translatesAutoresizingMaskIntoConstraints = false
-        tintColor = action == .done ? .systemBackground : .label
+        tintColor = action == .done ? .appBackground : .label
         backgroundColor = action == .done ? .label : .quaternarySystemFill
         layer.borderWidth = action == .done ? 0 : UX.toolbarButtonBorderWidth
         layer.borderColor = action == .done ? UIColor.clear.cgColor : UIColor.systemFill.cgColor

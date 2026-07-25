@@ -242,7 +242,7 @@ final class AddressBarGestures: NSObject {
     private func createAddressBarPreview(for tab: Tab) -> UIView {
         let container = UIView()
         container.backgroundColor = UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ? .tertiarySystemBackground : .systemBackground
+            traitCollection.userInterfaceStyle == .dark ? .tertiarySystemBackground : .appBackground
         }
         container.layer.cornerRadius = UX.addressBarPreviewCornerRadius
         container.layer.cornerCurve = .continuous
@@ -345,7 +345,7 @@ final class AddressBarGestures: NSObject {
     
     private func createContentPreview(image: UIImage?) -> UIView {
         let preview = UIView()
-        preview.backgroundColor = .systemBackground
+        preview.backgroundColor = .appBackground
         
         if let image {
             let imageView = UIImageView(image: image)

@@ -84,7 +84,7 @@ final class BookmarkSymbolPickerViewController: UIViewController, UICollectionVi
         layout.minimumLineSpacing = 12
         let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         view.dataSource = self
         view.delegate = self
         view.register(BookmarkSymbolCell.self, forCellWithReuseIdentifier: BookmarkSymbolCell.reuseIdentifier)
@@ -115,7 +115,7 @@ final class BookmarkSymbolPickerViewController: UIViewController, UICollectionVi
     override func viewDidLoad() {
         super.viewDidLoad()
         title = NSLocalizedString("Symbol & Color", comment: "")
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .appBackground
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .cancel,
             target: self,

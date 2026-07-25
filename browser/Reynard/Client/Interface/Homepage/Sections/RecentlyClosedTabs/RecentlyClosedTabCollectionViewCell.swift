@@ -143,7 +143,7 @@ final class RecentlyClosedTabCollectionViewCell: UICollectionViewCell {
     private func updateAppearance() {
         pillView.backgroundColor = traitCollection.userInterfaceStyle == .dark
         ? .systemGray5
-        : .systemBackground
+        : .appBackground
         titleLabel.textColor = .label
         layer.shadowColor = traitCollection.userInterfaceStyle == .dark
         ? UIColor.white.cgColor
