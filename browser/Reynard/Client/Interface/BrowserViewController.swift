@@ -33,6 +33,7 @@ final class BrowserViewController: UIViewController {
         tabManager: tabManager
     )
     lazy var scrollChromeCoordinator = ScrollChromeCoordinator(browserChrome: browserChrome)
+    lazy var scrollbarHapticCoordinator = ScrollbarHapticCoordinator()
     private var preFullscreenOrientation: UIInterfaceOrientation?
     var pendingNewTabKeyboardFocusTabID: UUID?
     var isPendingNewTabKeyboardFocusEventDispatchComplete = false
@@ -184,6 +185,16 @@ final class BrowserViewController: UIViewController {
                 && !self.isShowingFullscreenMedia
                 && !self.tabOverview.isPresented
                 && !self.searchOverlayCoordinator.isFocused
+        }
+        
+        scrollbarHapticCoordinator.attach(to: contentView)
+        scrollbarHapticCoordinator.isEnabled = { [weak self] in
+            guard let self else {
+                return false
+            }
+            let selectedURL = self.tabManager.selectedTab?.url?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasRealURL = !(selectedURL?.isEmpty ?? true)
+            return hasRealURL && !self.isShowingFullscreenMedia
         }
         browserChrome.onScrollCondensedChange = { [weak self] condensed in
             guard let self else {
