@@ -63,6 +63,27 @@ final class TabManagerImplementation: NSObject, TabManager {
         return try! NSRegularExpression(pattern: pattern)
     }()
     
+    private struct EmergencyTabSnapshot {
+        let regularTabs: [(id: UUID, title: String, url: String?)]
+        let privateTabs: [(id: UUID, title: String, url: String?)]
+        let selectedRegularTabID: UUID?
+        let selectedPrivateTabID: UUID?
+        let selectedTabMode: TabMode
+    }
+    private let emergencySnapshotLock = NSLock()
+    private var emergencySnapshot: EmergencyTabSnapshot?
+    
+    /// Detects a genuinely unresponsive main thread and proactively
+    /// flushes the last known tab state to disk before the OS's own,
+    /// much harsher watchdog gets a chance to SIGKILL the process — see
+    /// MainThreadHangWatchdog's own doc comment for the full reasoning.
+    /// This exists specifically because a real crash showed a SIGKILL
+    /// can happen with zero cooperation from any lifecycle hook this
+    /// app already flushes on.
+    private lazy var hangWatchdog = MainThreadHangWatchdog { [weak self] in
+        self?.performEmergencyFlush()
+    }
+    
     init(
         delegate: TabManagerDelegate?,
         sessionManager: SessionManager,
@@ -75,6 +96,13 @@ final class TabManagerImplementation: NSObject, TabManager {
         self.store = store
         self.faviconStore = faviconStore
         self.historyStore = historyStore
+        super.init()
+        
+        hangWatchdog.start()
+    }
+    
+    deinit {
+        hangWatchdog.stop()
     }
     
     // MARK: - Persistence And Lookup
@@ -84,12 +112,51 @@ final class TabManagerImplementation: NSObject, TabManager {
     }
     
     private func persistState() {
+        let selectedRegularTabID = regularTabs[safe: selectedRegularTabIndex]?.id
+        let selectedPrivateTabID = privateTabs[safe: selectedPrivateTabIndex]?.id
+        
+        // Cheap value-type copy, safe for the watchdog to read from a
+        // background thread later — must happen on the main thread,
+        // here, while regularTabs/privateTabs are still safe to read.
+        emergencySnapshotLock.lock()
+        emergencySnapshot = EmergencyTabSnapshot(
+            regularTabs: regularTabs.map { (id: $0.id, title: $0.title, url: $0.url) },
+            privateTabs: privateTabs.map { (id: $0.id, title: $0.title, url: $0.url) },
+            selectedRegularTabID: selectedRegularTabID,
+            selectedPrivateTabID: selectedPrivateTabID,
+            selectedTabMode: selectedTabMode
+        )
+        emergencySnapshotLock.unlock()
+        
         store.persistTabs(
             regularTabs: regularTabs,
             privateTabs: privateTabs,
-            selectedRegularTabID: regularTabs[safe: selectedRegularTabIndex]?.id,
-            selectedPrivateTabID: privateTabs[safe: selectedPrivateTabIndex]?.id,
+            selectedRegularTabID: selectedRegularTabID,
+            selectedPrivateTabID: selectedPrivateTabID,
             selectedTabMode: selectedTabMode
+        )
+    }
+    
+    /// Called from MainThreadHangWatchdog's background queue — never
+    /// the main thread, since that's the one that's stuck. Reads the
+    /// last snapshot persistState() captured and writes it directly,
+    /// bypassing the normal async queue entirely for maximum immediacy.
+    private func performEmergencyFlush() {
+        emergencySnapshotLock.lock()
+        let snapshot = emergencySnapshot
+        emergencySnapshotLock.unlock()
+        
+        guard let snapshot else {
+            NSLog("[HangWatchdog] No snapshot available yet to emergency-flush")
+            return
+        }
+        
+        store.emergencyPersistTabs(
+            regularTabs: snapshot.regularTabs,
+            privateTabs: snapshot.privateTabs,
+            selectedRegularTabID: snapshot.selectedRegularTabID,
+            selectedPrivateTabID: snapshot.selectedPrivateTabID,
+            selectedTabMode: snapshot.selectedTabMode
         )
     }
     

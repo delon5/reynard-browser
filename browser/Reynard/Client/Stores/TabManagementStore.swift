@@ -178,6 +178,89 @@ final class TabManagementStore {
         }
     }
     
+    private final class ResultBox<T> {
+        private var value: T?
+        func set(_ newValue: T) { value = newValue }
+        func get() -> T? { value }
+    }
+    
+    /// Runs `work` on stateQueue and waits, but never longer than
+    /// `seconds` — used specifically for the emergency-flush path,
+    /// where blocking indefinitely (e.g. because stateQueue is itself
+    /// backlogged or a lock is stuck) would defeat the whole point of
+    /// reacting to a hang quickly.
+    private func syncWithTimeout<T>(
+        _ seconds: TimeInterval,
+        default defaultValue: T,
+        label: String,
+        work: @escaping () -> T
+    ) -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ResultBox<T>()
+        
+        stateQueue.async {
+            box.set(work())
+            semaphore.signal()
+        }
+        
+        guard semaphore.wait(timeout: .now() + seconds) == .success else {
+            NSLog("[TabPersistence] %@ timed out after %.1fs — stateQueue is genuinely backlogged or stuck; returning default rather than blocking further", label, seconds)
+            return defaultValue
+        }
+        
+        return box.get() ?? defaultValue
+    }
+    
+    /// Called from MainThreadHangWatchdog's background queue when the
+    /// main thread has genuinely stopped responding. Writes directly
+    /// and synchronously (within the bounded wait above), rather than
+    /// going through the normal async stateQueue.async path that every
+    /// other persistence method here uses — that path would just queue
+    /// up behind whatever's already stuck, with no guarantee it ever
+    /// runs before the OS's own watchdog kills the process.
+    func emergencyPersistTabs(
+        regularTabs: [(id: UUID, title: String, url: String?)],
+        privateTabs: [(id: UUID, title: String, url: String?)],
+        selectedRegularTabID: UUID?,
+        selectedPrivateTabID: UUID?,
+        selectedTabMode: TabMode
+    ) {
+        let persistedRegularTabs = regularTabs.map { PersistedTab(id: $0.id, title: $0.title, url: $0.url) }
+        let persistedPrivateTabs = privateTabs.map { PersistedTab(id: $0.id, title: $0.title, url: $0.url) }
+        NSLog("[TabPersistence] emergencyPersistTabs STARTED: %d regular, %d private", persistedRegularTabs.count, persistedPrivateTabs.count)
+        
+        _ = syncWithTimeout(2, default: (), label: "emergencyPersistTabs()") {
+            let lastTabOverview = self.persistedStateLocked().lastTabOverview
+            
+            guard self.executeLocked("BEGIN IMMEDIATE TRANSACTION;") else {
+                NSLog("[TabPersistence] emergencyPersistTabs FAILED to begin transaction")
+                return
+            }
+            
+            guard self.executeLocked("DELETE FROM tabs;"),
+                  self.saveStateLocked(
+                    selectedRegularTabID: selectedRegularTabID,
+                    selectedPrivateTabID: selectedPrivateTabID,
+                    selectedTabMode: selectedTabMode,
+                    lastTabOverview: lastTabOverview
+                  ),
+                  self.insertTabsLocked(persistedRegularTabs, isPrivate: false),
+                  self.insertTabsLocked(persistedPrivateTabs, isPrivate: true) else {
+                NSLog("[TabPersistence] emergencyPersistTabs FAILED mid-transaction, rolling back")
+                _ = self.executeLocked("ROLLBACK TRANSACTION;")
+                return
+            }
+            
+            guard self.executeLocked("COMMIT TRANSACTION;") else {
+                NSLog("[TabPersistence] emergencyPersistTabs FAILED to commit, rolling back")
+                _ = self.executeLocked("ROLLBACK TRANSACTION;")
+                return
+            }
+            
+            NSLog("[TabPersistence] emergencyPersistTabs COMMITTED: %d regular, %d private", persistedRegularTabs.count, persistedPrivateTabs.count)
+        }
+    }
+    
     func persistLastOverview(_ lastTabOverview: LastTabOverview) {
         stateQueue.async {
             let state = self.persistedStateLocked()
