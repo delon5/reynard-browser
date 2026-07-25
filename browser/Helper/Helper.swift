@@ -36,8 +36,21 @@ private final class ProcessBootstrap {
 
 		let connection = NSXPCConnection(listenerEndpoint: endpoint)
 		connection.remoteObjectInterface = NSXPCInterface(with: BootstrapPing.self)
-		connection.interruptionHandler = {}
-		connection.invalidationHandler = {}
+		connection.interruptionHandler = {
+		    // The main app's end of this connection broke — it may
+		    // have crashed, or explicitly torn this connection down.
+		    // Previously this was a no-op, meaning this process would
+		    // keep running indefinitely with no way to communicate
+		    // back to anything. Nothing left for this process to
+		    // usefully do at that point; exit rather than linger as
+		    // dead weight competing for memory/CPU.
+		    NSLog("[ReynardHelper] XPC connection interrupted — main app connection lost, exiting")
+		    exit(EXIT_SUCCESS)
+		}
+		connection.invalidationHandler = {
+		    NSLog("[ReynardHelper] XPC connection invalidated — exiting")
+		    exit(EXIT_SUCCESS)
+		}
 		connection.resume()
 
 		guard let xpcConnection = XPCConnectionFromNSXPC(connection) else {
