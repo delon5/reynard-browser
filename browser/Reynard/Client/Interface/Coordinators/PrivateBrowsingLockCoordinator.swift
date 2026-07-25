@@ -4,6 +4,9 @@
 //
 
 import UIKit
+import os
+
+private let lockLog = OSLog(subsystem: "com.minh-ton.Reynard", category: "PrivateLockDebug")
 
 /// Gates access to private tabs behind Face ID / Touch ID / passcode when
 /// `Prefs.PrivacySettings.requiresAuthenticationForPrivateTabs` is on.
@@ -21,6 +24,28 @@ final class PrivateBrowsingLockCoordinator {
 
     private(set) var isLocked = false
     private var presentedLockViewController: PrivateBrowsingLockViewController?
+    
+    /// A simple, non-interactive curtain shown the instant locking
+    /// begins and kept up until real, successful authentication — not
+    /// tied to any scene-lifecycle timing, and never itself a presented
+    /// view controller, which is what made the earlier, broken attempt
+    /// at this unreliable. Adding a plain subview to an already-stable
+    /// window doesn't carry the same presentation-timing hazards.
+    private lazy var privacyCurtain: UIView = {
+        let view = UIView()
+        view.backgroundColor = .systemBackground
+        let imageView = UIImageView(image: UIImage(systemName: "lock.fill"))
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.tintColor = .secondaryLabel
+        imageView.contentMode = .scaleAspectFit
+        imageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 44, weight: .medium)
+        view.addSubview(imageView)
+        NSLayoutConstraint.activate([
+            imageView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        return view
+    }()
 
     init(host: BrowserViewController, tabManager: TabManager) {
         self.host = host
@@ -49,16 +74,32 @@ final class PrivateBrowsingLockCoordinator {
     /// Call when the app is about to leave the foreground (backgrounding,
     /// or about to be suspended).
     func lockIfNeeded() {
+        os_log("lockIfNeeded called, isProtectionEnabled=%{public}@, mode=%{public}@", log: lockLog, type: .debug, String(isProtectionEnabled), String(describing: tabManager.selectedTabMode))
         guard isProtectionEnabled, tabManager.selectedTabMode == .private else {
             return
         }
         isLocked = true
+        os_log("lockIfNeeded: isLocked=true, showing curtain", log: lockLog, type: .debug)
+        showPrivacyCurtain()
+    }
+    
+    private func showPrivacyCurtain() {
+        guard let window = host?.view.window, privacyCurtain.superview == nil else {
+            return
+        }
+        privacyCurtain.frame = window.bounds
+        window.addSubview(privacyCurtain)
+    }
+    
+    private func hidePrivacyCurtain() {
+        privacyCurtain.removeFromSuperview()
     }
 
     /// Call when the app becomes visible again (foreground, or right after
     /// the initial tab is created on launch). Presents the lock screen if
     /// needed; otherwise does nothing.
     func presentLockIfNeeded(animated: Bool) {
+        os_log("presentLockIfNeeded called, isLocked=%{public}@, alreadyPresented=%{public}@", log: lockLog, type: .debug, String(isLocked), String(presentedLockViewController != nil))
         guard isLocked, isProtectionEnabled, tabManager.selectedTabMode == .private else {
             return
         }
@@ -112,9 +153,11 @@ final class PrivateBrowsingLockCoordinator {
     }
 
     private func authenticateAndUnlock() {
+        os_log("authenticateAndUnlock: starting authentication request", log: lockLog, type: .debug)
         PrivateBrowsingAuthenticator.shared.authenticate(
             reason: NSLocalizedString("Authenticate to view your private tabs", comment: "")
         ) { [weak self] result in
+            os_log("authenticateAndUnlock: result=%{public}@", log: lockLog, type: .debug, String(describing: result))
             switch result {
             case .success, .unavailable:
                 self?.dismissLockScreen(unlocked: true)
@@ -136,8 +179,12 @@ final class PrivateBrowsingLockCoordinator {
     }
 
     private func dismissLockScreen(unlocked: Bool) {
+        os_log("dismissLockScreen: unlocked=%{public}@", log: lockLog, type: .debug, String(unlocked))
         isLocked = !unlocked
         presentedLockViewController?.dismiss(animated: true)
         presentedLockViewController = nil
+        if unlocked {
+            hidePrivacyCurtain()
+        }
     }
 }
