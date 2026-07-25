@@ -82,6 +82,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.setApplicationForeground(false)
         browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
+        browserViewController.tabManager.sleepBackgroundedTabs()
         flushNavigationHistoryInBackground()
     }
 

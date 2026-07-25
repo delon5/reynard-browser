@@ -84,6 +84,8 @@ final class TabManagerImplementation: NSObject, TabManager {
         self?.performEmergencyFlush()
     }
     
+    private var memoryWarningObservationToken: NSObjectProtocol?
+    
     init(
         delegate: TabManagerDelegate?,
         sessionManager: SessionManager,
@@ -99,10 +101,64 @@ final class TabManagerImplementation: NSObject, TabManager {
         super.init()
         
         hangWatchdog.start()
+        
+        // Defensive safety net alongside the explicit backgrounding
+        // trigger (called separately from SceneDelegate) — genuine
+        // memory pressure can happen while still in the foreground too,
+        // and sleeping background tabs at that point is strictly safe:
+        // sleepBackgroundedTabs() never touches the tab actually on
+        // screen.
+        memoryWarningObservationToken = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.sleepBackgroundedTabs()
+        }
     }
     
     deinit {
         hangWatchdog.stop()
+        if let memoryWarningObservationToken {
+            NotificationCenter.default.removeObserver(memoryWarningObservationToken)
+        }
+    }
+    
+    // MARK: - Tab Sleeping
+    
+    func sleepBackgroundedTabs() {
+        NSLog("[TabMemory] Sleeping backgrounded tab sessions")
+        for tab in regularTabs {
+            evictSessionIfNeeded(for: tab, isPrivate: false)
+        }
+        for tab in privateTabs {
+            evictSessionIfNeeded(for: tab, isPrivate: true)
+        }
+    }
+    
+    /// Closes `tab`'s Gecko session and replaces it with a fresh, unopened
+    /// one marked as pending restoration — the same state a tab restored
+    /// from a previous launch starts in. Title, favicon, thumbnail, and
+    /// navigation (back/forward) history are untouched, since none of
+    /// those live on the session itself.
+    private func evictSessionIfNeeded(for tab: Tab, isPrivate: Bool) {
+        // Already evicted, or never had anything loaded worth evicting.
+        guard case .none = tab.state.restoreState,
+              let url = displayedURL(for: tab) else {
+            return
+        }
+        
+        // Never evict the tab currently on-screen, or one that's actively
+        // mid-navigation (evicting it would strand the load).
+        guard tab !== selectedTab, !tab.state.loadingState.isLoading else {
+            return
+        }
+        
+        sessionManager.close(tab.session)
+        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
+        tab.state.restoreState = .pending(url)
+        tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
+        NSLog("[TabMemory] Slept background session for tab %@", tab.id.uuidString)
     }
     
     // MARK: - Persistence And Lookup

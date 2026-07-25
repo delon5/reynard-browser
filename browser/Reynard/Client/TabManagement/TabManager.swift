@@ -30,6 +30,15 @@ protocol TabManager: AnyObject {
     func moveTab(from sourceIndex: Int, to destinationIndex: Int, mode: TabMode?)
     func removeTab(at index: Int, mode: TabMode?)
     func removeAllTabs(mode: TabMode?)
+    /// Closes the underlying Gecko session for every tab except the
+    /// currently selected one and any tab actively mid-navigation,
+    /// freeing their memory while leaving them untouched in the tab
+    /// list — title, favicon, thumbnail, and navigation history all
+    /// stay exactly as they were. Each affected tab reloads fresh from
+    /// its saved URL the next time it's actually selected again, the
+    /// same way a tab restored from a previous app launch already
+    /// works.
+    func sleepBackgroundedTabs()
     @discardableResult
     func restoreRecentlyClosedTab(id: UUID) -> Bool
     func browse(to term: String)
