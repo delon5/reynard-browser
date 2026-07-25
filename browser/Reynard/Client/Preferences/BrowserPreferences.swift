@@ -60,6 +60,7 @@ final class BrowserPreferences {
             // Experimental
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
+            key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
             
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
@@ -839,6 +840,19 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "CompatibilitySettings", key: "customUserAgent")
+            }
+        }
+        
+        /// Whether per-site user agent overrides are applied at all.
+        /// Separate from useCustomUserAgent/useAndroidUserAgent, since
+        /// per-site overrides are additive to whichever global mode (if
+        /// any) is active, not a third mutually-exclusive global mode.
+        static var enablePerSiteUserAgentOverrides: Bool {
+            get {
+                prefs.bool(forSetting: "CompatibilitySettings", key: "enablePerSiteUserAgentOverrides")
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings", key: "enablePerSiteUserAgentOverrides")
             }
         }
         

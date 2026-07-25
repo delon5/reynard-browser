@@ -10,29 +10,51 @@ import UIKit
 final class CompatibilityPreferencesViewController: SettingsTableViewController {
     private enum Section: CaseIterable {
         case userAgent
+        case perSiteOverrides
         
         var text: SettingsSectionText {
-            return SettingsSectionText()
+            switch self {
+            case .userAgent:
+                return SettingsSectionText()
+            case .perSiteOverrides:
+                return SettingsSectionText(
+                    footerTitle: NSLocalizedString(
+                        "Set a specific user agent for individual websites. A site's own override, when enabled, takes priority over the settings above.",
+                        comment: ""
+                    )
+                )
+            }
         }
     }
     
-    private enum Row: CaseIterable {
+    private enum UserAgentRow: CaseIterable {
         case useAndroidUserAgent
-        case userAgentOverrides
         case useCustomUserAgent
         case customUserAgent
-        case perSiteOverrides
+    }
+    
+    private enum PerSiteOverridesRow: CaseIterable {
+        case enableOverrides
+        case manageOverrides
     }
     
     private let androidUserAgentSwitch = UISwitch()
     private let customUserAgentSwitch = UISwitch()
+    private let enablePerSiteOverridesSwitch = UISwitch()
     
-    private var displayedRows: [Row] {
-        var rows: [Row] = [.useAndroidUserAgent, .useCustomUserAgent]
+    private var displayedUserAgentRows: [UserAgentRow] {
+        var rows: [UserAgentRow] = [.useAndroidUserAgent, .useCustomUserAgent]
         if Prefs.CompatibilitySettings.useCustomUserAgent {
             rows.append(.customUserAgent)
         }
-        rows.append(.perSiteOverrides)
+        return rows
+    }
+    
+    private var displayedPerSiteOverridesRows: [PerSiteOverridesRow] {
+        var rows: [PerSiteOverridesRow] = [.enableOverrides]
+        if Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides {
+            rows.append(.manageOverrides)
+        }
         return rows
     }
     
@@ -51,7 +73,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        configureSwitch()
+        configureSwitches()
         refreshDisplayedState()
     }
     
@@ -72,28 +94,36 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         
         switch Section.allCases[section] {
         case .userAgent:
-            return displayedRows.count
+            return displayedUserAgentRows.count
+        case .perSiteOverrides:
+            return displayedPerSiteOverridesRows.count
         }
     }
     
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        guard Section.allCases.indices.contains(indexPath.section),
-              displayedRows.indices.contains(indexPath.row) else {
+        guard Section.allCases.indices.contains(indexPath.section) else {
             return UITableViewCell()
         }
         
-        let row = displayedRows[indexPath.row]
-        switch row {
+        switch Section.allCases[indexPath.section] {
+        case .userAgent:
+            return userAgentCell(at: indexPath.row, in: tableView)
+        case .perSiteOverrides:
+            return perSiteOverridesCell(at: indexPath.row, in: tableView)
+        }
+    }
+    
+    private func userAgentCell(at row: Int, in tableView: UITableView) -> UITableViewCell {
+        guard displayedUserAgentRows.indices.contains(row) else {
+            return UITableViewCell()
+        }
+        
+        switch displayedUserAgentRows[row] {
         case .useAndroidUserAgent:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
             cell.textLabel?.text = NSLocalizedString("Use Compatibility User Agent", comment: "")
             cell.selectionStyle = .none
             cell.accessoryView = androidUserAgentSwitch
-            return cell
-        case .userAgentOverrides:
-            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-            cell.textLabel?.text = NSLocalizedString("User Agent Overrides", comment: "")
-            cell.accessoryType = .disclosureIndicator
             return cell
         case .useCustomUserAgent:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
@@ -111,9 +141,24 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             cell.detailTextLabel?.lineBreakMode = .byTruncatingHead
             cell.accessoryType = .disclosureIndicator
             return cell
-        case .perSiteOverrides:
+        }
+    }
+    
+    private func perSiteOverridesCell(at row: Int, in tableView: UITableView) -> UITableViewCell {
+        guard displayedPerSiteOverridesRows.indices.contains(row) else {
+            return UITableViewCell()
+        }
+        
+        switch displayedPerSiteOverridesRows[row] {
+        case .enableOverrides:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
             cell.textLabel?.text = NSLocalizedString("User Agent Overrides", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = enablePerSiteOverridesSwitch
+            return cell
+        case .manageOverrides:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Manage Websites", comment: "")
             cell.accessoryType = .disclosureIndicator
             return cell
         }
@@ -121,19 +166,23 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         defer { tableView.deselectRow(at: indexPath, animated: true) }
-        guard Section.allCases.indices.contains(indexPath.section),
-              displayedRows.indices.contains(indexPath.row) else {
+        guard Section.allCases.indices.contains(indexPath.section) else {
             return
         }
-        switch displayedRows[indexPath.row] {
-        case .userAgentOverrides:
-            navigationController?.pushViewController(UserAgentOverridesPreferencesViewController(), animated: true)
-        case .customUserAgent:
+        
+        switch Section.allCases[indexPath.section] {
+        case .userAgent:
+            guard displayedUserAgentRows.indices.contains(indexPath.row),
+                  displayedUserAgentRows[indexPath.row] == .customUserAgent else {
+                return
+            }
             navigationController?.pushViewController(CustomUserAgentPreferencesViewController(), animated: true)
         case .perSiteOverrides:
+            guard displayedPerSiteOverridesRows.indices.contains(indexPath.row),
+                  displayedPerSiteOverridesRows[indexPath.row] == .manageOverrides else {
+                return
+            }
             navigationController?.pushViewController(PerSiteUserAgentOverridesViewController(), animated: true)
-        default:
-            break
         }
     }
     
@@ -142,26 +191,37 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             return SettingsSectionText()
         }
         
-        let headerTitle = Section.allCases[section].text.headerTitle
-        if Prefs.CompatibilitySettings.useAndroidUserAgent {
-            let footerTitle = String(format: NSLocalizedString("Use the %@ user agent for all websites to improve compatibility.", comment: "User agent name placeholder"), compatibilityUserAgentName)
-            return SettingsSectionText(headerTitle: headerTitle, footerTitle: footerTitle)
+        switch Section.allCases[section] {
+        case .userAgent:
+            let headerTitle = Section.userAgent.text.headerTitle
+            if Prefs.CompatibilitySettings.useAndroidUserAgent {
+                let footerTitle = String(format: NSLocalizedString("Use the %@ user agent for all websites to improve compatibility.", comment: "User agent name placeholder"), compatibilityUserAgentName)
+                return SettingsSectionText(headerTitle: headerTitle, footerTitle: footerTitle)
+            }
+            return SettingsSectionText(
+                headerTitle: headerTitle,
+                footerTitle: String(format: NSLocalizedString("Add websites with sign-in failures, human verification challenges, or other issues to use the %@ user agent.", comment: "User agent name placeholder"), compatibilityUserAgentName)
+            )
+        case .perSiteOverrides:
+            return Section.perSiteOverrides.text
         }
-        
-        return SettingsSectionText(
-            headerTitle: headerTitle,
-            footerTitle: String(format: NSLocalizedString("Add websites with sign-in failures, human verification challenges, or other issues to use the %@ user agent.", comment: "User agent name placeholder"), compatibilityUserAgentName)
-        )
     }
     
     private func refreshDisplayedState() {
         androidUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useAndroidUserAgent
         customUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useCustomUserAgent
+        enablePerSiteOverridesSwitch.isOn = Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides
     }
     
-    private func configureSwitch() {
+    private func configureSwitches() {
         androidUserAgentSwitch.addTarget(self, action: #selector(applyAndroidUserAgentPreference), for: .valueChanged)
         customUserAgentSwitch.addTarget(self, action: #selector(applyCustomUserAgentPreference), for: .valueChanged)
+        enablePerSiteOverridesSwitch.addTarget(self, action: #selector(applyPerSiteOverridesPreference), for: .valueChanged)
+    }
+    
+    @objc private func applyPerSiteOverridesPreference() {
+        Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides = enablePerSiteOverridesSwitch.isOn
+        tableView.reloadData()
     }
     
     @objc private func applyCustomUserAgentPreference() {

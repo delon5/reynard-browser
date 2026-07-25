@@ -47,7 +47,8 @@ struct UserAgentPolicy {
         // (exact host, or any subdomain of it) so that e.g. an override
         // entered for "youtube.com" also applies on "www.youtube.com"
         // and "m.youtube.com".
-        if let host,
+        if Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides,
+           let host,
            let matchedDomain = Prefs.CompatibilitySettings.perSiteUserAgentOverrides.keys.first(where: {
                DomainMatcher.matches(host: host, domain: $0)
            }),
