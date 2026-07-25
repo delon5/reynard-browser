@@ -3,7 +3,6 @@
 //  Reynard
 //
 
-import LocalAuthentication
 import UIKit
 
 /// A full-screen cover shown over private tabs when
@@ -32,11 +31,9 @@ final class PrivateBrowsingLockViewController: UIViewController {
     private var hasRequestedAutomaticUnlock = false
 
     private let iconView: UIImageView = {
-        let imageView = UIImageView(image: UIImage(systemName: PrivateBrowsingLockViewController.iconName()))
+        let imageView = UIImageView(image: UIImage(named: "private.mode.icon"))
         imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.tintColor = .label
         imageView.contentMode = .scaleAspectFit
-        imageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: UX.iconPointSize, weight: .medium)
         return imageView
     }()
 
@@ -145,18 +142,6 @@ final class PrivateBrowsingLockViewController: UIViewController {
         onSwitchToRegularTabsRequested?()
     }
 
-    private static func iconName() -> String {
-        let context = LAContext()
-        _ = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil)
-        switch context.biometryType {
-        case .faceID:
-            return "faceid"
-        case .touchID:
-            return "touchid"
-        default:
-            return "lock.fill"
-        }
-    }
 }
 
 private extension UIFont {
