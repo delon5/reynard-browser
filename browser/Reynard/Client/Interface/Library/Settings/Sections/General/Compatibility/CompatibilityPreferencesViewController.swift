@@ -19,12 +19,24 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     private enum Row: CaseIterable {
         case useAndroidUserAgent
         case userAgentOverrides
+        case useCustomUserAgent
+        case customUserAgent
+        case perSiteOverrides
     }
     
     private let androidUserAgentSwitch = UISwitch()
+    private let customUserAgentSwitch = UISwitch()
     
     private var displayedRows: [Row] {
-        return Prefs.CompatibilitySettings.useAndroidUserAgent ? [.useAndroidUserAgent] : Row.allCases
+        var rows: [Row] = Prefs.CompatibilitySettings.useAndroidUserAgent
+            ? [.useAndroidUserAgent]
+            : [.useAndroidUserAgent, .userAgentOverrides]
+        rows.append(.useCustomUserAgent)
+        if Prefs.CompatibilitySettings.useCustomUserAgent {
+            rows.append(.customUserAgent)
+        }
+        rows.append(.perSiteOverrides)
+        return rows
     }
     
     private var compatibilityUserAgentName: String {
@@ -86,6 +98,27 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             cell.textLabel?.text = NSLocalizedString("User Agent Overrides", comment: "")
             cell.accessoryType = .disclosureIndicator
             return cell
+        case .useCustomUserAgent:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Use Custom User Agent", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = customUserAgentSwitch
+            return cell
+        case .customUserAgent:
+            let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Custom User Agent", comment: "")
+            cell.detailTextLabel?.text = Prefs.CompatibilitySettings.customUserAgent.isEmpty
+                ? NSLocalizedString("Not Set", comment: "")
+                : Prefs.CompatibilitySettings.customUserAgent
+            cell.detailTextLabel?.textColor = .secondaryLabel
+            cell.detailTextLabel?.lineBreakMode = .byTruncatingHead
+            cell.accessoryType = .disclosureIndicator
+            return cell
+        case .perSiteOverrides:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("User Agent Overrides", comment: "")
+            cell.accessoryType = .disclosureIndicator
+            return cell
         }
     }
     
@@ -95,8 +128,15 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
               displayedRows.indices.contains(indexPath.row) else {
             return
         }
-        if displayedRows[indexPath.row] == .userAgentOverrides {
+        switch displayedRows[indexPath.row] {
+        case .userAgentOverrides:
             navigationController?.pushViewController(UserAgentOverridesPreferencesViewController(), animated: true)
+        case .customUserAgent:
+            navigationController?.pushViewController(CustomUserAgentPreferencesViewController(), animated: true)
+        case .perSiteOverrides:
+            navigationController?.pushViewController(PerSiteUserAgentOverridesViewController(), animated: true)
+        default:
+            break
         }
     }
     
@@ -119,10 +159,17 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     
     private func refreshDisplayedState() {
         androidUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useAndroidUserAgent
+        customUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useCustomUserAgent
     }
     
     private func configureSwitch() {
         androidUserAgentSwitch.addTarget(self, action: #selector(applyAndroidUserAgentPreference), for: .valueChanged)
+        customUserAgentSwitch.addTarget(self, action: #selector(applyCustomUserAgentPreference), for: .valueChanged)
+    }
+    
+    @objc private func applyCustomUserAgentPreference() {
+        Prefs.CompatibilitySettings.useCustomUserAgent = customUserAgentSwitch.isOn
+        tableView.reloadData()
     }
     
     @objc private func applyAndroidUserAgentPreference() {

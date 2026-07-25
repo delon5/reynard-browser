@@ -823,6 +823,41 @@ final class BrowserPreferences {
                 prefs.set(newValue, forSetting: "CompatibilitySettings", key: "useAndroidUserAgent")
             }
         }
+        
+        static var useCustomUserAgent: Bool {
+            get {
+                prefs.bool(forSetting: "CompatibilitySettings", key: "useCustomUserAgent")
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings", key: "useCustomUserAgent")
+            }
+        }
+        
+        static var customUserAgent: String {
+            get {
+                prefs.string(forSetting: "CompatibilitySettings", key: "customUserAgent") ?? ""
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings", key: "customUserAgent")
+            }
+        }
+        
+        /// Per-site user agent overrides, keyed by host. Takes priority
+        /// over both the global custom user agent and the Android
+        /// compatibility heuristics for any host present in this map.
+        static var perSiteUserAgentOverrides: [String: String] {
+            get {
+                guard let data = prefs.data(forSetting: "CompatibilitySettings", key: "perSiteUserAgentOverrides"),
+                      let map = try? JSONDecoder().decode([String: String].self, from: data) else {
+                    return [:]
+                }
+                return map
+            }
+            set {
+                let data = try? JSONEncoder().encode(newValue)
+                prefs.set(data, forSetting: "CompatibilitySettings", key: "perSiteUserAgentOverrides")
+            }
+        }
     }
     
     // MARK: - Appearance

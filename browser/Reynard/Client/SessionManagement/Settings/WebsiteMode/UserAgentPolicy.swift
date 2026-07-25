@@ -40,6 +40,28 @@ struct UserAgentPolicy {
             return UserAgentConfiguration(override: androidMobileUserAgent, forcesMobileMode: true)
         }
 
+        // A user-entered override for this specific site takes priority
+        // over everything below, including the global custom user
+        // agent — a per-site choice is more specific than a general one.
+        if let host,
+           let siteOverride = Prefs.CompatibilitySettings.perSiteUserAgentOverrides[host] {
+            let trimmedSiteOverride = siteOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedSiteOverride.isEmpty {
+                return UserAgentConfiguration(override: trimmedSiteOverride, forcesMobileMode: false)
+            }
+        }
+
+        // A deliberately-entered global custom user agent takes
+        // priority over the general Android/Google compatibility
+        // heuristics below — the person picked this string on purpose
+        // for every site that doesn't have a more specific override.
+        if Prefs.CompatibilitySettings.useCustomUserAgent {
+            let trimmedCustomUserAgent = Prefs.CompatibilitySettings.customUserAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedCustomUserAgent.isEmpty {
+                return UserAgentConfiguration(override: trimmedCustomUserAgent, forcesMobileMode: false)
+            }
+        }
+
         // I have so many people reporting broken UI issues, login
         // issues, etc on Google services, so this is a compatibility
         // hack stolen from the Google Search Fixer extension.
