@@ -8,7 +8,7 @@
 import AVFoundation
 import os
 
-private let pipLog = Logger(subsystem: "com.minh-ton.Reynard", category: "PiPDebug")
+private let pipLog = OSLog(subsystem: "com.minh-ton.Reynard", category: "PiPDebug")
 import AVKit
 import Foundation
 import GeckoView
@@ -176,26 +176,26 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     
     private func eligibleSession() -> EligibleSession? {
         guard let snapshot = mediaSession.selectedSnapshot else {
-            pipLog.debug("eligibleSession: no selectedSnapshot")
+            os_log("eligibleSession: no selectedSnapshot", log: pipLog, type: .debug)
             return nil
         }
         guard snapshot.playbackState == .playing else {
-            pipLog.debug("eligibleSession: playbackState is \(String(describing: snapshot.playbackState)), not .playing")
+            os_log("eligibleSession: playbackState is %{public}@, not .playing", log: pipLog, type: .debug, String(describing: snapshot.playbackState))
             return nil
         }
         guard let displayLayer = snapshot.session.pictureInPictureDisplayLayer else {
-            pipLog.debug("eligibleSession: pictureInPictureDisplayLayer is nil")
+            os_log("eligibleSession: pictureInPictureDisplayLayer is nil", log: pipLog, type: .debug)
             return nil
         }
         guard let positionState = snapshot.positionState else {
-            pipLog.debug("eligibleSession: positionState is nil")
+            os_log("eligibleSession: positionState is nil", log: pipLog, type: .debug)
             return nil
         }
         guard isValid(positionState) else {
-            pipLog.debug("eligibleSession: positionState failed isValid check")
+            os_log("eligibleSession: positionState failed isValid check", log: pipLog, type: .debug)
             return nil
         }
-        pipLog.debug("eligibleSession: all checks passed, session is eligible")
+        os_log("eligibleSession: all checks passed, session is eligible", log: pipLog, type: .debug)
         return EligibleSession(
             session: snapshot.session,
             displayLayer: displayLayer,
