@@ -262,7 +262,7 @@ final class TopToolbar: UIView {
     
     private func configureAppearance() {
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = .systemGray6
+        backgroundColor = .toolbarBackground
     }
     
     private func configureHierarchy() {

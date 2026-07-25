@@ -32,6 +32,7 @@ class SettingsTableViewController: UITableViewController {
     private func configureTableView() {
         tableView.alwaysBounceVertical = true
         tableView.keyboardDismissMode = .interactive
+        tableView.backgroundColor = .settingsBackground
         if #available(iOS 14.0, *) {
             tableView.selectionFollowsFocus = false
         }

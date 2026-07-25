@@ -29,4 +29,34 @@ extension UIColor {
             return .black
         }
     }
+    
+    /// Same idea as `.appBackground`, but for surfaces (like the
+    /// toolbars) that normally use `.systemGray6` rather than
+    /// `.systemBackground` — preserves that existing look when the OLED
+    /// preference is off, so this doesn't change anything's everyday
+    /// appearance, only what happens specifically when OLED mode is on.
+    static var toolbarBackground: UIColor {
+        return UIColor { traitCollection in
+            guard Prefs.AppearanceSettings.usesOLEDBlackBackground,
+                  traitCollection.userInterfaceStyle == .dark else {
+                return .systemGray6
+            }
+            return .black
+        }
+    }
+    
+    /// Same idea again, for grouped-style table views (Settings
+    /// screens), which get `.systemGroupedBackground` implicitly from
+    /// UIKit itself rather than any explicit assignment in this app's
+    /// own code — preserves that existing grouped look normally, only
+    /// going pure black when OLED mode is actually on.
+    static var settingsBackground: UIColor {
+        return UIColor { traitCollection in
+            guard Prefs.AppearanceSettings.usesOLEDBlackBackground,
+                  traitCollection.userInterfaceStyle == .dark else {
+                return .systemGroupedBackground
+            }
+            return .black
+        }
+    }
 }
