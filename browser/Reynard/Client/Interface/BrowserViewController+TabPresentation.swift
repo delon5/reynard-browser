@@ -98,6 +98,10 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
         tabBar.setPendingExpansion(at: nil)
     }
     
+    func tabOverview(_ tabOverview: TabOverview, requestsAccessToPrivateTabsWithCompletion completion: @escaping (Bool) -> Void) {
+        privateBrowsingLockCoordinator.requestAccessToPrivateTabs(completion: completion)
+    }
+    
     // MARK: - TabOverviewPresentationContext
     
     var containerView: UIView {

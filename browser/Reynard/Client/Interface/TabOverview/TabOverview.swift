@@ -25,6 +25,7 @@ protocol TabOverviewDelegate: AnyObject {
     func tabOverviewDidRequestDone(_ tabOverview: TabOverview)
     func tabOverviewDidRequestDismiss(_ tabOverview: TabOverview, animated: Bool)
     func tabOverviewDidRequestClearPendingTabExpansion(_ tabOverview: TabOverview)
+    func tabOverview(_ tabOverview: TabOverview, requestsAccessToPrivateTabsWithCompletion completion: @escaping (Bool) -> Void)
 }
 
 protocol TabOverviewPresentationContext: AnyObject {
@@ -316,8 +317,27 @@ final class TabOverview: UIView {
     }
     
     private func handleTabModeChange(_ mode: Mode) {
-        setMode(mode, animated: true)
-        TabManagementStore.shared.persistLastOverview(mode == .privateTabs ? .private : .regular)
+        guard mode == .privateTabs else {
+            setMode(mode, animated: true)
+            TabManagementStore.shared.persistLastOverview(.regular)
+            return
+        }
+        
+        delegate?.tabOverview(self, requestsAccessToPrivateTabsWithCompletion: { [weak self] granted in
+            guard let self else {
+                return
+            }
+            
+            guard granted else {
+                // Revert the toolbar's segmented control back to Regular;
+                // the underlying collection mode never changed.
+                self.setMode(.regularTabs, animated: false)
+                return
+            }
+            
+            self.setMode(mode, animated: true)
+            TabManagementStore.shared.persistLastOverview(.private)
+        })
     }
     
     private func requestNewTab() {

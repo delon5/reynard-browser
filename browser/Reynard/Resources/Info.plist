@@ -23,6 +23,8 @@
 		<string>comgooglemapsurl</string>
 		<string>reddit</string>
 	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Face ID is used to unlock your private tabs.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
