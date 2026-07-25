@@ -102,6 +102,13 @@ final class PrivateBrowsingLockCoordinator {
         }
         privacyCurtain.frame = window.bounds
         window.addSubview(privacyCurtain)
+        // Force the curtain to actually render immediately, rather than
+        // leaving it to UIKit's normal, deferred layout pass. Without
+        // this, the system's app-switcher snapshot can be captured
+        // before the curtain has genuinely been drawn to screen, even
+        // though it was already added here in code — resulting in the
+        // snapshot still showing the real page underneath.
+        window.layoutIfNeeded()
     }
     
     private func hidePrivacyCurtain() {
