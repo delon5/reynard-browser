@@ -8,6 +8,26 @@
 import UIKit
 
 final class BrowserChrome: UIView {
+    /// The pill's own bottom margin from the safe area guide — named so
+    /// it's referenced once, not duplicated as a bare "-4" wherever the
+    /// pill is positioned.
+    static let condensedPillBottomMargin: CGFloat = 4
+    
+    /// How far above the true bottom of the pill's own clearance the
+    /// artificial safe-area boundary should sit. Reached empirically
+    /// (bisecting between "too low, overlapping a page's own fixed bar"
+    /// and "too far up, gap looked too large") rather than derived from
+    /// a formula.
+    private static let condensedPillClearanceBuffer: CGFloat = 14
+    
+    /// The artificial safe-area boundary reported to web content's own
+    /// CSS while condensed, via additionalSafeAreaInsets — computed from
+    /// the pill's actual height and margin rather than an independent
+    /// hardcoded number, so it can never silently drift out of sync with
+    /// the pill's real size.
+    static var condensedPillArtificialInset: CGFloat {
+        CondensedAddressPill.height + condensedPillBottomMargin - condensedPillClearanceBuffer
+    }
     private enum UX {
         static let overlayTopSpacing: CGFloat = 12
         static let actionBarSpacing: CGFloat = 0
@@ -75,6 +95,7 @@ final class BrowserChrome: UIView {
     
     private let topToolbar: TopToolbar
     private let bottomToolbar: BottomToolbar
+    private let condensedPill = CondensedAddressPill()
     private let overlayDismissView: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -94,6 +115,14 @@ final class BrowserChrome: UIView {
     private var actionBarBottomConstraint: NSLayoutConstraint?
     
     private var state: State?
+    private(set) var isScrollCondensed = false
+    /// Fires whenever `setScrollCondensed` actually changes state (not on
+    /// redundant calls). `BrowserViewController` uses this to extend the
+    /// content view down to fill the space the full-size toolbar used to
+    /// occupy — condensing the toolbar to a pill only fades it out, it
+    /// doesn't shrink its layout frame, so without this the content view
+    /// stays pinned to where the toolbar's top edge always was.
+    var onScrollCondensedChange: ((Bool) -> Void)?
     
     // MARK: - Lifecycle
     
@@ -106,6 +135,9 @@ final class BrowserChrome: UIView {
         configureConstraints()
         configureToolbarActions()
         configureOverlayDismissGesture()
+        condensedPill.onTap = { [weak self] in
+            self?.setScrollCondensed(false, animated: true)
+        }
     }
     
     required init?(coder: NSCoder) {
@@ -149,6 +181,12 @@ final class BrowserChrome: UIView {
     
     func apply(state: State) {
         self.state = state
+        if state.presentation != .browsing || state.search != .inactive {
+            // Never stay scroll-condensed while search, tab overview, or
+            // fullscreen media is active — those have their own chrome
+            // rules and scroll-driven condensing would just be confusing.
+            setScrollCondensed(false, animated: false)
+        }
         addressBar.updateLayout(position: state.position, chromeMode: state.mode)
         attachAddressBar(for: state.mode)
         attachActionBar(for: state.mode)
@@ -347,6 +385,59 @@ final class BrowserChrome: UIView {
             locationTitle: locationTitle,
             showsBarMenu: showsBarMenu
         )
+        condensedPill.setLocationText(locationText ?? text)
+    }
+    
+    /// Condenses the top and bottom toolbars into a small floating pill
+    /// (or expands back), matching Safari's scroll behavior. As with
+    /// `ScrollChromeCoordinator` generally, this is driven by gesture
+    /// direction rather than true scroll position, since GeckoView
+    /// exposes no real scroll-offset API.
+    func setScrollCondensed(_ condensed: Bool, animated: Bool) {
+        guard condensed != isScrollCondensed else {
+            return
+        }
+        isScrollCondensed = condensed
+        onScrollCondensedChange?(condensed)
+        
+        if condensed {
+            condensedPill.isHidden = false
+        }
+        
+        let animations = {
+            self.topToolbar.alpha = condensed ? 0 : 1
+            self.topToolbar.transform = condensed
+                ? CGAffineTransform(scaleX: 0.92, y: 0.92)
+                : .identity
+            self.bottomToolbar.alpha = condensed ? 0 : 1
+            self.bottomToolbar.transform = condensed
+                ? CGAffineTransform(scaleX: 0.92, y: 0.92)
+                : .identity
+            self.condensedPill.alpha = condensed ? 1 : 0
+        }
+        
+        let completion: (Bool) -> Void = { [weak self] _ in
+            guard let self, !self.isScrollCondensed else {
+                return
+            }
+            self.condensedPill.isHidden = true
+        }
+        
+        guard animated else {
+            animations()
+            completion(true)
+            return
+        }
+        
+        UIView.animate(
+            withDuration: 0.28,
+            delay: 0,
+            usingSpringWithDamping: 0.85,
+            initialSpringVelocity: 0,
+            options: [.beginFromCurrentState],
+            animations: animations,
+            completion: completion
+        )
     }
     
     func updateAddressBarMenu(url: String?, usesDesktopWebsite: Bool?) {
@@ -523,6 +614,7 @@ final class BrowserChrome: UIView {
         addSubview(overlayDismissView)
         addSubview(overlayContentView)
         addSubview(actionBar)
+        addSubview(condensedPill)
     }
     
     private func configureConstraints() {
@@ -548,6 +640,12 @@ final class BrowserChrome: UIView {
             
             actionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             actionBar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            
+            condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor),
+            condensedPill.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -Self.condensedPillBottomMargin),
+            condensedPill.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+            condensedPill.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+            condensedPill.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
         ])
         bottomToolbar.configureTopAnchor(to: safeAreaLayoutGuide.bottomAnchor)
     }

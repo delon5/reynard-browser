@@ -35,7 +35,7 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
                 if UIDevice.current.userInterfaceIdiom == .pad {
                     return [.showFullWebsiteAddress]
                 }
-                return [.BrowserChromePosition, .showFullWebsiteAddress]
+                return [.BrowserChromePosition, .showFullWebsiteAddress, .hideToolbarOnScroll]
             case .tabs:
                 if UIDevice.current.userInterfaceIdiom == .pad {
                     return []
@@ -52,6 +52,7 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
         case oledBackground
         case BrowserChromePosition
         case showFullWebsiteAddress
+        case hideToolbarOnScroll
         case landscapeTabBar
         case pageZoom
     }
@@ -59,6 +60,7 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
     private let showFullWebsiteAddressSwitch = UISwitch()
     private let landscapeTabBarSwitch = UISwitch()
     private let oledBackgroundSwitch = UISwitch()
+    private let hideToolbarOnScrollSwitch = UISwitch()
     
     private var displayedSections: [Section] {
         return Section.allCases.filter { section in
@@ -139,6 +141,12 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
             cell.selectionStyle = .none
             cell.accessoryView = showFullWebsiteAddressSwitch
             return cell
+        case .hideToolbarOnScroll:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Hide Toolbar on Scroll", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = hideToolbarOnScrollSwitch
+            return cell
         case .landscapeTabBar:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
             cell.textLabel?.text = NSLocalizedString("Show Tab Bar in Landscape", comment: "")
@@ -172,12 +180,18 @@ final class AppearancePreferencesViewController: SettingsTableViewController {
         showFullWebsiteAddressSwitch.addTarget(self, action: #selector(showFullWebsiteAddressSwitchDidChange), for: .valueChanged)
         landscapeTabBarSwitch.addTarget(self, action: #selector(landscapeTabBarSwitchDidChange), for: .valueChanged)
         oledBackgroundSwitch.addTarget(self, action: #selector(oledBackgroundSwitchDidChange), for: .valueChanged)
+        hideToolbarOnScrollSwitch.addTarget(self, action: #selector(hideToolbarOnScrollSwitchDidChange), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         showFullWebsiteAddressSwitch.isOn = Prefs.AppearanceSettings.showsFullWebsiteAddress
         landscapeTabBarSwitch.isOn = Prefs.AppearanceSettings.showsLandscapeTabBar
         oledBackgroundSwitch.isOn = Prefs.AppearanceSettings.usesOLEDBlackBackground
+        hideToolbarOnScrollSwitch.isOn = Prefs.AppearanceSettings.hidesToolbarOnScroll
+    }
+    
+    @objc private func hideToolbarOnScrollSwitchDidChange() {
+        Prefs.AppearanceSettings.hidesToolbarOnScroll = hideToolbarOnScrollSwitch.isOn
     }
     
     @objc private func showFullWebsiteAddressSwitchDidChange() {

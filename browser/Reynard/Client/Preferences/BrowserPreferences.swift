@@ -61,6 +61,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
+            key("AppearanceSettings", "hidesToolbarOnScroll"): true,
             
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
@@ -895,6 +896,18 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "AppearanceSettings", key: "usesOLEDBlackBackground")
+            }
+        }
+        
+        /// Condenses the toolbars into a small floating pill while
+        /// scrolling down a page, matching Safari's behavior. On by
+        /// default.
+        static var hidesToolbarOnScroll: Bool {
+            get {
+                prefs.bool(forSetting: "AppearanceSettings", key: "hidesToolbarOnScroll")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AppearanceSettings", key: "hidesToolbarOnScroll")
             }
         }
         

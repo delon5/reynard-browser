@@ -32,6 +32,7 @@ final class BrowserViewController: UIViewController {
         host: self,
         tabManager: tabManager
     )
+    lazy var scrollChromeCoordinator = ScrollChromeCoordinator(browserChrome: browserChrome)
     private var preFullscreenOrientation: UIInterfaceOrientation?
     var pendingNewTabKeyboardFocusTabID: UUID?
     var isPendingNewTabKeyboardFocusEventDispatchComplete = false
@@ -163,6 +164,52 @@ final class BrowserViewController: UIViewController {
         privateBrowsingLockCoordinator.lockInitialStateIfNeeded()
         refreshAddressBar()
         homepageOverlayCoordinator.updatePresentation(animated: false)
+        
+        scrollChromeCoordinator.attach(to: contentView)
+        scrollChromeCoordinator.isEnabled = { [weak self] in
+            guard let self else {
+                return false
+            }
+            guard Prefs.AppearanceSettings.hidesToolbarOnScroll else {
+                return false
+            }
+            // Also require an actual, non-blank URL on the selected tab —
+            // without this, scrolling the homepage's own content (which
+            // is independently scrollable) could condense the pill even
+            // though there's no page to show, leaving the reload icon
+            // visible with an empty location label next to it.
+            let selectedURL = self.tabManager.selectedTab?.url?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasRealURL = !(selectedURL?.isEmpty ?? true)
+            return hasRealURL
+                && !self.isShowingFullscreenMedia
+                && !self.tabOverview.isPresented
+                && !self.searchOverlayCoordinator.isFocused
+        }
+        browserChrome.onScrollCondensedChange = { [weak self] condensed in
+            guard let self else {
+                return
+            }
+            // Content's actual frame always extends to the true window
+            // bottom — condensing to a pill only fades the toolbar, it
+            // doesn't shrink its layout frame, so without adjusting the
+            // safe area here there'd be a real gap between the content
+            // and the screen bottom.
+            //
+            // additionalSafeAreaInsets doesn't change any view's frame,
+            // only what gets reported as the safe area — which becomes
+            // env(safe-area-inset-bottom) for the page's own CSS. This
+            // gives the page an artificial boundary just above the pill
+            // without touching content's real size, so a page using
+            // that CSS variable correctly positions its own
+            // fixed-position elements above the pill rather than
+            // underneath it.
+            self.additionalSafeAreaInsets.bottom = condensed ? BrowserChrome.condensedPillArtificialInset : 0
+            // Deliberately not animated: content's resize is snapped
+            // instantly, before the (separately animated) chrome fade
+            // begins, so GeckoView gets its real final size immediately
+            // rather than a continuously-changing target.
+            self.applyBrowserLayout(animated: false)
+        }
         
         Task { @MainActor [weak self] in
             guard let self else {
