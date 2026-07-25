@@ -83,4 +83,12 @@ final class PrivateBrowsingLockPreferencesViewController: SettingsTableViewContr
     @objc private func requiresAuthenticationSwitchDidChange(_ sender: UISwitch) {
         Prefs.PrivacySettings.requiresAuthenticationForPrivateTabs = sender.isOn
     }
+    
+    private func switchCell(title: String, accessoryView: UISwitch) -> UITableViewCell {
+        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+        cell.selectionStyle = .none
+        cell.textLabel?.text = title
+        cell.accessoryView = accessoryView
+        return cell
+    }
 }
