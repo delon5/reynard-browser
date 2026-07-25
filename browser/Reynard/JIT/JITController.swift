@@ -359,17 +359,26 @@ final class JITController {
             return
         }
         
-        if let pid = (notification.userInfo?["pid"] as? NSNumber)?.int32Value, pid > 0 {
-            ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
+        // Previously this reported the disconnect to Gecko and went
+        // straight to the failure screen, with no attempt to recover —
+        // real, observed "no JIT" incidents made clear that's too eager
+        // to give up. A tab process's own JIT connection can plausibly
+        // be lost transiently (e.g. iOS reclaiming resources under
+        // memory pressure) without the underlying ptrace-based grant
+        // itself being permanently gone. One retry, reusing the exact
+        // same enablement path childProcessDidStart uses originally,
+        // costs little and can recover from a transient disconnect
+        // without ever bothering the user. attachToProcess already
+        // handles both outcomes on its own — success reports back to
+        // Gecko silently, failure reports back and falls through to the
+        // same failure screen as before — so no separate fallback logic
+        // is needed here.
+        guard let pid = (notification.userInfo?["pid"] as? NSNumber)?.int32Value, pid > 0 else {
+            return
         }
         
-        DispatchQueue.main.async {
-            guard !self.hasHandledFailure else {
-                return
-            }
-            
-            self.hasHandledFailure = true
-            self.presentEnablementFailureScreen(error: NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: nil), showsErrorDetails: false)
+        attachQueue.async {
+            self.attachToProcess(pid: pid)
         }
     }
 }
