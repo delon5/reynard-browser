@@ -144,6 +144,7 @@ final class PrivateBrowsingLockCoordinator {
             switch result {
             case .success, .unavailable:
                 self?.isLocked = false
+                self?.hidePrivacyCurtain()
                 completion(true)
             case .cancelled, .failed:
                 completion(false)
