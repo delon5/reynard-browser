@@ -131,26 +131,32 @@ static void startHeartbeat(DeviceProvider *provider) {
             if (!provider->heartbeatRunning) break;
             
             if (ffiError) {
-                // TEMPORARY TEST — reverted back to the original,
-                // dies-on-first-error behavior, to directly test
-                // whether the heartbeat's now-longer-running presence
-                // (retrying instead of dying immediately) is
-                // interfering with the DDI mount attempt somehow, given
-                // both share the same underlying tunnel connection.
-                // Revert this comment block and restore the retry
-                // logic once this test is complete, regardless of the
-                // result — the retry behavior itself is a genuine,
-                // separate, confirmed fix for a different issue
-                // (heartbeat dying permanently on any transient error).
+                // Test complete: reverting to the retry behavior.
+                // Directly, empirically ruled out as the cause of the
+                // DDI mount failure - reverting to this original,
+                // dies-on-first-error state produced the exact same
+                // "Error -28: BadBuildManifest" result, confirming the
+                // two are unrelated. Restoring the genuine, separate
+                // fix this was before the test (see the heartbeat
+                // resilience investigation from earlier this session
+                // for the original reasoning).
+                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                break;
+                if (shouldStop) break;
+                currentInterval = 2;
+                continue;
             }
             
             ffiError = heartbeat_send_polo(provider->heartbeatClient);
             if (ffiError) {
+                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                break;
+                if (shouldStop) break;
+                currentInterval = 2;
+                continue;
             }
+            
+            currentInterval = MAX(MIN(newInterval, 3), 1);
         }
     });
 }
