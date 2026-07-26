@@ -9,14 +9,6 @@
 #import "JITErrors.h"
 #import "JITUtils.h"
 #import "IdeviceFFI.h"
-// Same reasoning as JITUtils.m's own identical comment — this file also
-// compiles into three separate targets, each with its own, differently
-// named bridging header.
-#if __has_include("Reynard-Swift.h")
-#import "Reynard-Swift.h"
-#elif __has_include("Reynard_Helper-Swift.h")
-#import "Reynard_Helper-Swift.h"
-#endif
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -518,21 +510,17 @@ void freeDeviceProvider(DeviceProvider *provider) {
 // of the logic from there with only a few modifications here.
 
 static NSURL *ddiDirectoryURL(NSError **error) {
-    // Was ReynardDirectoriesBridge.ddiPath (this app's own private
-    // container) — moved to the shared App Group container for the
-    // same reason as pairingFilePath() in JITUtils.m: the Helper
-    // extension's own RPPairing JIT self-enablement needs to genuinely
-    // reach the same, real DDI files, which its own separate sandbox
-    // container can't see otherwise. A one-time migration moves an
-    // existing, already-downloaded DDI from the old location into this
-    // new one.
-    NSString *path = ReynardDirectoriesBridge.sharedDDIPath;
-    if (path.length == 0) {
+    // Was ReynardDirectoriesBridge.ddiPath, then
+    // ReynardDirectoriesBridge.sharedDDIPath — same reasoning as
+    // pairingFilePath()'s own updated comment in JITUtils.m. Direct,
+    // standard NSFileManager App Group API, no Swift bridging needed.
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:@"group.com.minh-ton.Reynard"];
+    if (!containerURL) {
         if (error) *error = MakeError(DDIMountPathResolveFailed);
         return nil;
     }
 
-    return [NSURL fileURLWithPath:path isDirectory:YES];
+    return [containerURL URLByAppendingPathComponent:@"DDI" isDirectory:YES];
 }
 
 static NSData *ddiFileData(NSURL *ddiDirectory, NSString *fileName, NSError **error) {
