@@ -9,7 +9,6 @@
 #import "JITErrors.h"
 #import "JITSupport.h"
 #import "JITUtils.h"
-#import "Reynard-Swift.h"
 #import "Utils.h"
 #include <sys/stat.h>
 #include <errno.h>
@@ -65,7 +64,21 @@
         if (result != 0 && result != EACCES && result != ENOENT && result != ENOEXEC && result != 126 && result != 127) {
             // keep existing behavior for non-permission failures
         } else if (result == EACCES || result == ENOENT || result == ENOEXEC || result == 126 || result == 127) {
-            NSString *tempPath = ReynardDirectoriesBridge.jitTemporaryPath;
+            // Was ReynardDirectoriesBridge.jitTemporaryPath — that
+            // required Reynard-Swift.h, the main app target's own
+            // private bridging header, unavailable now that this file
+            // also compiles into the Reynard Helper target (added
+            // tonight, for the Helper's own RPPairing JIT
+            // self-enablement). This entire branch only runs on
+            // TrollStore/jailbroken devices, a case the Helper's own
+            // new call path deliberately never reaches at all — but
+            // Objective-C still needs this to resolve at compile time
+            // regardless of whether it's ever actually reached at
+            // runtime for a given caller. NSTemporaryDirectory() is a
+            // standard, always-available equivalent for this specific,
+            // rare-edge-case fallback's actual need (a writable temp
+            // location to copy a binary to).
+            NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"jit_temp_ptrace"];
             NSError *copyError = nil;
             [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
             if ([[NSFileManager defaultManager] copyItemAtPath:helperPath toPath:tempPath error:&copyError]) {
