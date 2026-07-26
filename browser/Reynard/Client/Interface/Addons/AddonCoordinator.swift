@@ -75,6 +75,7 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     func start() async {
         AddonRuntime.shared.delegate = self
         checkDDIManifestFileSize()
+        presentDiagnosticAlert(title: "DDI version check", message: DDIManager.shared.checkDDIVersionStaleness())
         await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
