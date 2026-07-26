@@ -1024,8 +1024,18 @@ final class BrowserPreferences {
     
     // MARK: - JIT
     struct JITSettings {
+        /// Was ReynardDirectories.shared.pairingFile (this app's own
+        /// private container) — same reasoning as
+        /// JITSettingsSection.swift's own updated comment on
+        /// installPairingFile(from:). Both needed fixing together,
+        /// since fixing only the import location while this still
+        /// checked the old one would have left the "Enable JIT" switch
+        /// permanently unable to turn on at all.
         static var hasPairingFile: Bool {
-            FileManager.default.fileExists(atPath: ReynardDirectories.shared.pairingFile.path)
+            guard let sharedPairingFile = ReynardDirectories.shared.sharedPairingFile else {
+                return false
+            }
+            return FileManager.default.fileExists(atPath: sharedPairingFile.path)
         }
         
         static var isJITEnabled: Bool {

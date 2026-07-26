@@ -323,9 +323,29 @@ private func allowedPairingDocumentTypeIdentifiers() -> [String] {
     return identifiers
 }
 
+private enum PairingFileImportError: LocalizedError {
+    case sharedContainerUnavailable
+    
+    var errorDescription: String? {
+        switch self {
+        case .sharedContainerUnavailable:
+            return NSLocalizedString("The shared App Group container is unavailable.", comment: "")
+        }
+    }
+}
+
+/// Was ReynardDirectories.shared.pairingFile (this app's own private
+/// container) — a genuine, confirmed bug found by tracing through why
+/// a freshly re-imported pairing file never actually got picked up by
+/// the real JIT-enablement code (JITUtils.m's pairingFilePath, which
+/// already correctly reads from the shared location). This import
+/// screen was the one remaining piece still writing to the old spot,
+/// completely disconnected from everything else updated earlier.
 private func installPairingFile(from downloadLocation: URL) throws {
     let fileManager = FileManager.default
-    let destinationURL = ReynardDirectories.shared.pairingFile
+    guard let destinationURL = ReynardDirectories.shared.sharedPairingFile else {
+        throw PairingFileImportError.sharedContainerUnavailable
+    }
     try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     
     let normalizedSourceURL = downloadLocation.standardizedFileURL
