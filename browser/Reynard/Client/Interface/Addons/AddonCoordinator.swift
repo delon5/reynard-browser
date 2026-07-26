@@ -113,17 +113,23 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     /// investigation is done.
     @MainActor
     private func presentDiagnosticAlert(title: String, message: String) {
-        guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-              let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
-            return
+        // This runs very early during app launch — likely before the
+        // window has genuinely become key/active yet, which would
+        // explain a silent no-op with no popup at all. A short delay
+        // gives the app time to genuinely finish launching first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+                  let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+                return
+            }
+            var topViewController = rootViewController
+            while let presented = topViewController.presentedViewController {
+                topViewController = presented
+            }
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            topViewController.present(alert, animated: true)
         }
-        var topViewController = rootViewController
-        while let presented = topViewController.presentedViewController {
-            topViewController = presented
-        }
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        topViewController.present(alert, animated: true)
     }
     
     func handleExternalResponse(_ response: ExternalResponseInfo) -> Bool {
