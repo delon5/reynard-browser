@@ -164,19 +164,6 @@ final class BrowserChrome: UIView {
         return bottomToolbar.topAnchor
     }
     
-    /// The pill's own top edge — used as content's bottom anchor while
-    /// scroll-condensed, so a real, physical strip of screen space is
-    /// reserved above it, the same trick the full-size toolbar already
-    /// uses via bottomToolbarTopAnchor. This works identically for every
-    /// website regardless of whether its own CSS uses
-    /// env(safe-area-inset-bottom) at all, since the page's own viewport
-    /// simply never extends into that space in the first place — unlike
-    /// additionalSafeAreaInsets, which only helps pages that choose to
-    /// read it.
-    var condensedPillTopAnchor: NSLayoutYAxisAnchor {
-        return condensedPill.topAnchor
-    }
-    
     var addressBarBottomAnchor: NSLayoutYAxisAnchor {
         return addressBar.bottomAnchor
     }

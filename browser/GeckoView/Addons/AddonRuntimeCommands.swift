@@ -59,34 +59,6 @@ public extension AddonRuntime {
         return addon
     }
     
-    /// Installs a first-party, app-bundled extension — distinct from
-    /// `install(url:)` above, which is for user-initiated installs of
-    /// signed, third-party .xpi packages. Built-in extensions don't
-    /// require Mozilla's own signature and gain access to native
-    /// messaging, exactly matching the official GeckoView platform API
-    /// this project's engine is built on (WebExtensionController's own
-    /// installBuiltIn, documented to require a resource:// URI pointing
-    /// at a folder bundled inside the app itself, not a downloaded
-    /// .xpi). Genuinely new to this project — no existing caller uses
-    /// this message type yet, so the exact resource:// path convention
-    /// this specific iOS port expects still needs empirical
-    /// confirmation before this is relied on for anything real.
-    func installBuiltIn(uri: String) async throws -> Addon {
-        let response = try await GeckoEventDispatcherWrapper.runtimeInstance.query(
-            type: "GeckoView:WebExtension:InstallBuiltIn",
-            message: [
-                "locationUri": uri,
-            ]
-        )
-        guard let payload = response as? [String: Any?],
-              let addonPayload = payload["extension"] as? [String: Any?] else {
-            throw GeckoHandlerError("Invalid installBuiltIn response")
-        }
-        let addon = upsertAddon(from: addonPayload)
-        delegate?.addonController(self, didUpdate: addon)
-        return addon
-    }
-    
     func enable(_ addon: Addon, source: AddonEnableSource = .user) async throws -> Addon {
         try await mutateAddon(
             type: "GeckoView:WebExtension:Enable",

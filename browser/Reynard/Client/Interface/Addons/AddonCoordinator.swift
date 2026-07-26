@@ -73,66 +73,9 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
-        await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
         delegate?.refreshAddonChrome(self)
-    }
-    
-    /// Genuinely experimental, first attempt at this project's first
-    /// built-in extension. The exact URI scheme this specific iOS port
-    /// expects for installBuiltIn isn't confirmed anywhere — the
-    /// official GeckoView-Android docs specifically require
-    /// resource://android URIs on that platform, but that restriction
-    /// may be enforced by Android's own embedding layer rather than
-    /// Gecko's shared core, so a direct file:// URI is tried here first
-    /// as the more directly constructible option. Logs clearly either
-    /// way so the real answer is known after one test, rather than
-    /// guessed at twice.
-    private func installSafeAreaDetectorIfNeeded() async {
-        // TEMPORARY EXPERIMENT: the real error confirmed the underlying
-        // validation is a literal string-prefix check for
-        // "resource://android/", hardcoded in Gecko's own shared C++
-        // core — not real platform detection. Trying that exact literal
-        // prefix here, even on iOS, to see whether it's purely a string
-        // check (which might pass, then fail differently at actual file
-        // resolution, since no "android" substitution is genuinely
-        // registered on this iOS port) or something else entirely.
-        // This hardcoded string doesn't point at anything real yet —
-        // purely diagnostic.
-        let addonURI = "resource://android/SafeAreaDetector/"
-        do {
-            let addon = try await AddonRuntime.shared.installBuiltIn(uri: addonURI)
-            presentDiagnosticAlert(title: "SafeAreaDetector: Success", message: "id: \(addon.id)\nisBuiltIn: \(addon.isBuiltIn)")
-        } catch {
-            presentDiagnosticAlert(title: "SafeAreaDetector: Failed", message: "URI tried:\n\(addonURI)\n\nError:\n\(String(describing: error))")
-        }
-    }
-    
-    /// TEMPORARY DIAGNOSTIC — direct on-screen alert, bypassing logging
-    /// entirely, since Console.app/device-log tools haven't reliably
-    /// shown this project's own log lines tonight despite several
-    /// genuine attempts. Safe to remove once this specific
-    /// investigation is done.
-    @MainActor
-    private func presentDiagnosticAlert(title: String, message: String) {
-        // This runs very early during app launch — likely before the
-        // window has genuinely become key/active yet, which would
-        // explain a silent no-op with no popup at all. A short delay
-        // gives the app time to genuinely finish launching first.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-                  let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
-                return
-            }
-            var topViewController = rootViewController
-            while let presented = topViewController.presentedViewController {
-                topViewController = presented
-            }
-            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            topViewController.present(alert, animated: true)
-        }
     }
     
     func handleExternalResponse(_ response: ExternalResponseInfo) -> Bool {

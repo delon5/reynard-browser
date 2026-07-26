@@ -12,12 +12,6 @@
 		01GECKO0022F2F289C001F0001 /* GeckoView.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 01GECKO0002F2F289C001F0001 /* GeckoView.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		02WCPBF12F3000000000001 /* Reynard Helper.appex in Embed Process Extensions */ = {isa = PBXBuildFile; fileRef = 02WCPAPP2F3000000000001 /* Reynard Helper.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		03OLPBF12F3100000000001 /* OpenIn.appex in Embed Process Extensions */ = {isa = PBXBuildFile; fileRef = 03OLAPP2F3100000000001 /* OpenIn.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		846B17D430159108001287C1 /* background.js in Resources */ = {isa = PBXBuildFile; fileRef = 846B17D030159108001287C1 /* background.js */; };
-		846B17D530159108001287C1 /* content.js in Resources */ = {isa = PBXBuildFile; fileRef = 846B17D130159108001287C1 /* content.js */; };
-		846B17D630159108001287C1 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 846B17D230159108001287C1 /* manifest.json */; };
-		846B17D7301591A7001287C1 /* background.js in Sources */ = {isa = PBXBuildFile; fileRef = 846B17D030159108001287C1 /* background.js */; };
-		846B17D8301591A7001287C1 /* content.js in Sources */ = {isa = PBXBuildFile; fileRef = 846B17D130159108001287C1 /* content.js */; };
-		846B17D9301591A7001287C1 /* manifest.json in Sources */ = {isa = PBXBuildFile; fileRef = 846B17D230159108001287C1 /* manifest.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -83,9 +77,6 @@
 		01GECKO0052F2F289C001F0001 /* Reynard.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Reynard.xcconfig; sourceTree = "<group>"; };
 		02WCPAPP2F3000000000001 /* Reynard Helper.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Reynard Helper.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		03OLAPP2F3100000000001 /* OpenIn.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenIn.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		846B17D030159108001287C1 /* background.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = background.js; sourceTree = "<group>"; };
-		846B17D130159108001287C1 /* content.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = content.js; sourceTree = "<group>"; };
-		846B17D230159108001287C1 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = manifest.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -216,7 +207,6 @@
 				0111EABD2F48369400490C82 /* Helper */,
 				03OLGRP12F3100000000001 /* Extensions */,
 				018C67A02F2F289C001F0BBB /* Reynard */,
-				846B17D330159108001287C1 /* SafeAreaDetector */,
 				018C679F2F2F289C001F0BBB /* Products */,
 			);
 			sourceTree = "<group>";
@@ -238,16 +228,6 @@
 				01GECKO0052F2F289C001F0001 /* Reynard.xcconfig */,
 			);
 			path = Configuration;
-			sourceTree = "<group>";
-		};
-		846B17D330159108001287C1 /* SafeAreaDetector */ = {
-			isa = PBXGroup;
-			children = (
-				846B17D030159108001287C1 /* background.js */,
-				846B17D130159108001287C1 /* content.js */,
-				846B17D230159108001287C1 /* manifest.json */,
-			);
-			path = SafeAreaDetector;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -408,9 +388,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				846B17D430159108001287C1 /* background.js in Resources */,
-				846B17D530159108001287C1 /* content.js in Resources */,
-				846B17D630159108001287C1 /* manifest.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -460,9 +437,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				846B17D7301591A7001287C1 /* background.js in Sources */,
-				846B17D8301591A7001287C1 /* content.js in Sources */,
-				846B17D9301591A7001287C1 /* manifest.json in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
