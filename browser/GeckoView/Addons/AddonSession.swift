@@ -46,6 +46,14 @@ final class AddonSessionListener: GeckoEventListenerInternal {
         "GeckoView:WebExtension:UpdateTab",
         "GeckoView:WebExtension:CloseTab",
         "GeckoView:WebExtension:CaptureVisibleTab",
+        // Real message type confirmed from Mozilla's own WebExtension.java
+        // source, not this project's own prior code — genuinely new to
+        // this project. Fires on runtime.sendNativeMessage() from an
+        // installed built-in extension's background script (content
+        // scripts can't call this directly due to a known GeckoView bug,
+        // mozilla/geckoview#220 — routed through a background script
+        // instead, see SafeAreaDetector's own background.js).
+        "GeckoView:WebExtension:Message",
     ]
     
     @MainActor

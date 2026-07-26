@@ -60,6 +60,17 @@ extension AddonRuntime {
                 requestedHeight: CGFloat(PayloadValue.double(message?["height"] ?? nil) ?? 0),
                 requestedPixelScale: CGFloat(PayloadValue.double(message?["pixelScale"] ?? nil) ?? 1)
             )
+        case "GeckoView:WebExtension:Message":
+            // Deliberately just logging the complete, raw payload for
+            // now, rather than guessing at specific key names — the
+            // exact dictionary shape GeckoView actually sends for this
+            // event isn't confirmed anywhere in this project or in
+            // Mozilla's own public API docs (which describe the Java
+            // method signature, not the underlying wire format). Once
+            // this is seen for real, the actual fields can be extracted
+            // properly instead of guessed at twice.
+            NSLog("[SafeAreaDetector] GeckoView:WebExtension:Message received, raw payload: %@", String(describing: message))
+            return nil
         default:
             throw GeckoHandlerError("Unhandled WebExtension session event \(type)")
         }

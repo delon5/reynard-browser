@@ -73,9 +73,35 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
+        await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
         delegate?.refreshAddonChrome(self)
+    }
+    
+    /// Genuinely experimental, first attempt at this project's first
+    /// built-in extension. The exact URI scheme this specific iOS port
+    /// expects for installBuiltIn isn't confirmed anywhere — the
+    /// official GeckoView-Android docs specifically require
+    /// resource://android URIs on that platform, but that restriction
+    /// may be enforced by Android's own embedding layer rather than
+    /// Gecko's shared core, so a direct file:// URI is tried here first
+    /// as the more directly constructible option. Logs clearly either
+    /// way so the real answer is known after one test, rather than
+    /// guessed at twice.
+    private func installSafeAreaDetectorIfNeeded() async {
+        guard let resourceURL = Bundle.main.resourceURL else {
+            NSLog("[SafeAreaDetector] Bundle.main.resourceURL was nil — cannot construct install URI")
+            return
+        }
+        let addonURL = resourceURL.appendingPathComponent("SafeAreaDetector", isDirectory: true)
+        NSLog("[SafeAreaDetector] Attempting installBuiltIn with URI: %@", addonURL.absoluteString)
+        do {
+            let addon = try await AddonRuntime.shared.installBuiltIn(uri: addonURL.absoluteString)
+            NSLog("[SafeAreaDetector] installBuiltIn succeeded — addon id: %@, isBuiltIn: %@", addon.id, String(addon.isBuiltIn))
+        } catch {
+            NSLog("[SafeAreaDetector] installBuiltIn failed: %@", String(describing: error))
+        }
     }
     
     func handleExternalResponse(_ response: ExternalResponseInfo) -> Bool {
