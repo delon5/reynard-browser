@@ -6,14 +6,31 @@
 //
 
 #import "JITUtils.h"
+// This file compiles into three separate targets (Reynard, GeckoView,
+// Reynard Helper), each with its own, differently-named auto-generated
+// Swift bridging header — a single, fixed #import can't be correct for
+// all three at once. __has_include checks, at compile time, which
+// header actually exists for whichever target happens to be building
+// this file right now.
+#if __has_include("Reynard-Swift.h")
 #import "Reynard-Swift.h"
+#elif __has_include("Reynard_Helper-Swift.h")
+#import "Reynard_Helper-Swift.h"
+#endif
 
 void logger(NSString *message) {
     NSLog(@"[Reynard] %@", message);
 }
 
 NSString *pairingFilePath(void) {
-    return ReynardDirectoriesBridge.pairingFilePath ?: @"";
+    // Was ReynardDirectoriesBridge.pairingFilePath (this app's own
+    // private container) — moved to the shared App Group container so
+    // the Helper extension's own RPPairing JIT self-enablement (added
+    // tonight) can genuinely reach the same, real pairing file, since
+    // app extensions get their own, separate sandbox container by
+    // default. A one-time migration moves an existing, already-imported
+    // file from the old location into this new one.
+    return ReynardDirectoriesBridge.sharedPairingFilePath ?: @"";
 }
 
 uint64_t parseLittleEndianHex64(NSString *hexString) {

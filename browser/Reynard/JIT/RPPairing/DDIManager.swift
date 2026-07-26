@@ -12,6 +12,7 @@ final class DDIManager: NSObject {
         case alreadyInProgress
         case cancelled
         case invalidRemoteURL
+        case sharedContainerUnavailable
         
         var errorDescription: String? {
             switch self {
@@ -21,6 +22,8 @@ final class DDIManager: NSObject {
                 return NSLocalizedString("Developer Disk Image download was cancelled.", comment: "")
             case .invalidRemoteURL:
                 return NSLocalizedString("Developer Disk Image source URL is invalid.", comment: "")
+            case .sharedContainerUnavailable:
+                return NSLocalizedString("The shared App Group container is unavailable.", comment: "")
             }
         }
     }
@@ -292,7 +295,18 @@ final class DDIManager: NSObject {
     }
     
     private func ddiRootDirectoryURL() throws -> URL {
-        ReynardDirectories.shared.ddi
+        // Was ReynardDirectories.shared.ddi (this app's own private
+        // container). Genuinely important this points at the same
+        // shared location the Helper's own RPPairing JIT
+        // self-enablement reads from (see JITSupport.m's
+        // ddiDirectoryURL) — otherwise any future download here would
+        // silently write back to the old, Helper-inaccessible location,
+        // undoing the one-time migration that moves an existing,
+        // already-downloaded DDI into this new location.
+        guard let sharedDDI = ReynardDirectories.shared.sharedDDI else {
+            throw DDIError.sharedContainerUnavailable
+        }
+        return sharedDDI
     }
 }
 
