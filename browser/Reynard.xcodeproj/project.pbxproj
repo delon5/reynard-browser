@@ -12,6 +12,8 @@
 		01GECKO0022F2F289C001F0001 /* GeckoView.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 01GECKO0002F2F289C001F0001 /* GeckoView.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		02WCPBF12F3000000000001 /* Reynard Helper.appex in Embed Process Extensions */ = {isa = PBXBuildFile; fileRef = 02WCPAPP2F3000000000001 /* Reynard Helper.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		03OLPBF12F3100000000001 /* OpenIn.appex in Embed Process Extensions */ = {isa = PBXBuildFile; fileRef = 03OLAPP2F3100000000001 /* OpenIn.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		84595E913015EA0100A2AA69 /* SafeAreaDetector-signed.xpi in Resources */ = {isa = PBXBuildFile; fileRef = 84595E903015EA0100A2AA69 /* SafeAreaDetector-signed.xpi */; };
+		84595E923015EA2000A2AA69 /* SafeAreaDetector-signed.xpi in Sources */ = {isa = PBXBuildFile; fileRef = 84595E903015EA0100A2AA69 /* SafeAreaDetector-signed.xpi */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,6 +79,7 @@
 		01GECKO0052F2F289C001F0001 /* Reynard.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Reynard.xcconfig; sourceTree = "<group>"; };
 		02WCPAPP2F3000000000001 /* Reynard Helper.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Reynard Helper.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		03OLAPP2F3100000000001 /* OpenIn.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenIn.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		84595E903015EA0100A2AA69 /* SafeAreaDetector-signed.xpi */ = {isa = PBXFileReference; lastKnownFileType = file; path = "SafeAreaDetector-signed.xpi"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -207,6 +210,7 @@
 				0111EABD2F48369400490C82 /* Helper */,
 				03OLGRP12F3100000000001 /* Extensions */,
 				018C67A02F2F289C001F0BBB /* Reynard */,
+				84595E903015EA0100A2AA69 /* SafeAreaDetector-signed.xpi */,
 				018C679F2F2F289C001F0BBB /* Products */,
 			);
 			sourceTree = "<group>";
@@ -388,6 +392,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				84595E913015EA0100A2AA69 /* SafeAreaDetector-signed.xpi in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -437,6 +442,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				84595E923015EA2000A2AA69 /* SafeAreaDetector-signed.xpi in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

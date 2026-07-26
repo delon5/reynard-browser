@@ -164,6 +164,17 @@ final class BrowserChrome: UIView {
         return bottomToolbar.topAnchor
     }
     
+    /// The pill's own top edge — used as content's bottom anchor while
+    /// scroll-condensed on pages the SafeAreaDetector addon confirmed
+    /// use env(safe-area-inset-bottom), the same trick the full-size
+    /// toolbar already uses via bottomToolbarTopAnchor. Not used
+    /// unconditionally — only on pages confirmed to actually respect
+    /// the CSS boundary; other pages get the full screen extent
+    /// instead, with the pill floating over them as before.
+    var condensedPillTopAnchor: NSLayoutYAxisAnchor {
+        return condensedPill.topAnchor
+    }
+    
     var addressBarBottomAnchor: NSLayoutYAxisAnchor {
         return addressBar.bottomAnchor
     }

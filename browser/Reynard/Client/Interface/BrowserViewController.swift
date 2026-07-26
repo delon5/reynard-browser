@@ -526,8 +526,18 @@ final class BrowserViewController: UIViewController {
             // always is, leaving a real gap between it and the true
             // screen bottom showing the window's own background
             // underneath instead of more page content.
+            // Two-rule pill behavior: pages the SafeAreaDetector addon
+            // confirmed use env(safe-area-inset-bottom) get a real,
+            // reserved strip of space above the pill — the same trick
+            // the full-size toolbar already uses — so the pill can
+            // never sit above that page's own content. Pages with no
+            // confirmed signal (nil, or explicitly false) get the full
+            // screen extent instead, same as this app's original,
+            // established behavior, with the pill floating over them.
             bottomAnchor: browserChrome.isScrollCondensed
-            ? view.bottomAnchor
+            ? (tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
+                ? browserChrome.condensedPillTopAnchor
+                : view.bottomAnchor)
             : (isSearchFocused ? view.safeAreaLayoutGuide.bottomAnchor : browserChrome.bottomToolbarTopAnchor)
         )
         setTabBarVisible(false)
@@ -541,8 +551,11 @@ final class BrowserViewController: UIViewController {
             // layout frame doesn't shrink when condensed, only its
             // visual appearance fades, so this has to be handled
             // explicitly rather than left to the toolbar's own bounds.
+            // Same two-rule reasoning as applyPhoneLayout above.
             bottomAnchor: browserChrome.isScrollCondensed
-            ? view.bottomAnchor
+            ? (tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
+                ? browserChrome.condensedPillTopAnchor
+                : view.bottomAnchor)
             : browserChrome.bottomToolbarTopAnchor
         )
         setTabBarVisible(false)

@@ -60,6 +60,16 @@ extension AddonRuntime {
                 requestedHeight: CGFloat(PayloadValue.double(message?["height"] ?? nil) ?? 0),
                 requestedPixelScale: CGFloat(PayloadValue.double(message?["pixelScale"] ?? nil) ?? 1)
             )
+        case "GeckoView:WebExtension:Message":
+            // Deliberately not touching Tab here at all — matching this
+            // file's own, established GeckoView-layer boundary (every
+            // other case here only ever hands the delegate a
+            // GeckoSession, never an app-level Tab). The actual
+            // session-to-tab mapping and payload extraction happens in
+            // AddonCoordinator, the app-level delegate — this file's
+            // only job is passing the raw event through correctly.
+            delegate?.addonController(self, didReceiveNativeMessage: message, session: session)
+            return nil
         default:
             throw GeckoHandlerError("Unhandled WebExtension session event \(type)")
         }

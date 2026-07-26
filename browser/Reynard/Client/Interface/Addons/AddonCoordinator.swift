@@ -73,9 +73,89 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
+        await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
         delegate?.refreshAddonChrome(self)
+    }
+    
+    /// Installs the signed SafeAreaDetector.xpi via the same, already-
+    /// proven install(url:) path this app already uses for real,
+    /// user-initiated .xpi installs — deliberately not installBuiltIn,
+    /// which hit a genuine, unfixable wall tonight (this specific iOS
+    /// port has no "android" resource-substitution registered at all,
+    /// confirmed via two separate, real, on-device errors).
+    ///
+    /// Expects a file literally named "SafeAreaDetector-signed.xpi"
+    /// bundled into the app's own resources (same drag-into-Xcode,
+    /// folder-reference process as before, just a single file this
+    /// time rather than a folder) — rename the actual file Mozilla's
+    /// signing service returns to match this exact name, or update the
+    /// string below to match whatever it's actually called.
+    ///
+    /// This install call, and everything downstream of it (the
+    /// "GeckoView:WebExtension:Message" event handling, the payload
+    /// extraction in AddonRuntimeEvents.swift and here in
+    /// AddonCoordinator, and the pill's own two-rule layout logic) is
+    /// all genuinely untested — prepared and ready, but not yet
+    /// verified end to end on a real device with the real, signed file.
+    private func installSafeAreaDetectorIfNeeded() async {
+        guard let xpiURL = Bundle.main.url(forResource: "SafeAreaDetector-signed", withExtension: "xpi") else {
+            presentDiagnosticAlert(title: "SafeAreaDetector", message: "SafeAreaDetector-signed.xpi not found in app bundle — check it's added to Copy Bundle Resources under the Reynard target")
+            return
+        }
+        do {
+            let addon = try await AddonRuntime.shared.install(url: xpiURL.absoluteString)
+            presentDiagnosticAlert(title: "SafeAreaDetector: Installed", message: "id: \(addon.id)\nisBuiltIn: \(addon.isBuiltIn)\n\nNow browse to any page and check for a second alert confirming the detection message was received.")
+        } catch {
+            presentDiagnosticAlert(title: "SafeAreaDetector: Install Failed", message: "URI tried:\n\(xpiURL.absoluteString)\n\nError:\n\(String(describing: error))")
+        }
+    }
+    
+    /// Same on-screen diagnostic pattern proven useful earlier tonight —
+    /// bypasses logging entirely, which was genuinely unreliable to
+    /// check. Delayed slightly to give the app time to fully launch
+    /// before attempting to present anything.
+    @MainActor
+    private func presentDiagnosticAlert(title: String, message: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+                  let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+                return
+            }
+            var topViewController = rootViewController
+            while let presented = topViewController.presentedViewController {
+                topViewController = presented
+            }
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            topViewController.present(alert, animated: true)
+        }
+    }
+    
+    /// New tonight, for the SafeAreaDetector addon specifically. No
+    /// immediate UI refresh triggered here deliberately — the pill
+    /// checks this stored value lazily, whenever it's actually about to
+    /// condense, rather than needing to be proactively notified the
+    /// moment a result arrives. Detection should complete well before a
+    /// user starts scrolling in practice, so this simpler design avoids
+    /// needing any additional notification chain at all.
+    func addonController(_ controller: AddonRuntime, didReceiveNativeMessage message: [String: Any?]?, session: GeckoSession) {
+        guard let dataSource,
+              let index = dataSource.indexOfAddonTab(for: session),
+              dataSource.addonTabs.indices.contains(index) else {
+            return
+        }
+        let tab = dataSource.addonTabs[index]
+        
+        // Same defensive, best-effort extraction as the GeckoView-layer
+        // logging — genuinely needs verification against the real
+        // payload once this actually runs.
+        let payload = (message?["message"] as? [String: Any?]) ?? message
+        guard let usesSafeAreaInset = payload?["usesSafeAreaInset"] as? Bool else {
+            return
+        }
+        tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
     }
     
     func handleExternalResponse(_ response: ExternalResponseInfo) -> Bool {

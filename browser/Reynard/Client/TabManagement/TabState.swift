@@ -55,4 +55,13 @@ final class TabSessionState {
     var sessionNavigationAvailability = SessionNavigationAvailability.unavailable
     var navigationState = NavigationAvailability(canGoBack: false, canGoForward: false)
     var loadingState = TabLoadingState.idle
+    
+    /// Whether the current page's own CSS was detected using
+    /// env(safe-area-inset-bottom), reported by the SafeAreaDetector
+    /// addon's content script via native messaging. nil means no result
+    /// has been received yet for this tab's current page (a fresh tab,
+    /// a page that hasn't finished loading, or the addon simply isn't
+    /// installed/signed yet) — callers should treat nil the same as the
+    /// pill's existing, established default behavior.
+    var usesSafeAreaInsetCSS: Bool?
 }

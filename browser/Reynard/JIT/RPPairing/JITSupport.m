@@ -107,6 +107,18 @@ static BOOL shouldDetachDebugSessionPID(int32_t pid) {
     return shouldDetach;
 }
 
+// Whether an FFI error's own message indicates the device intentionally
+// went to sleep — the one case StikDebug's own heartbeat (this project's
+// direct source for this mechanism) treats as a genuine, expected stop
+// rather than something to retry through. Matching that exact string
+// rather than inventing a new classification, since it's presumably a
+// standardized message from the shared, underlying idevice library both
+// projects use, not something either project defines itself.
+static BOOL isHeartbeatSleepyTimeError(IdeviceFfiError *ffiError) {
+    if (!ffiError || !ffiError->message) return NO;
+    return strstr(ffiError->message, "HeartbeatSleepyTime") != NULL;
+}
+
 static void startHeartbeat(DeviceProvider *provider) {
     dispatch_queue_t heartbeatQueue = dispatch_queue_create("com.minh-ton.Reynard.JITSupport.ProviderHeartbeatQueue",DISPATCH_QUEUE_SERIAL);
     provider->heartbeatRunning = YES;
@@ -120,15 +132,37 @@ static void startHeartbeat(DeviceProvider *provider) {
             if (!provider->heartbeatRunning) break;
             
             if (ffiError) {
+                // Previously this treated any single error at all as
+                // fatal, permanently ending the heartbeat for the rest
+                // of the app's session — even a single, ordinary,
+                // transient network hiccup. StikDebug's own heartbeat,
+                // the direct source this was adapted from, only stops
+                // for one specific, expected case (the device itself
+                // intentionally going to sleep); everything else just
+                // gets retried on the next tick. Matching that here,
+                // since a heartbeat that silently dies on its first
+                // hiccup leaves the long-lived, shared connection this
+                // provider represents unprotected against timing out
+                // for the remainder of the app's session — a plausible,
+                // concrete explanation for intermittent JIT trouble tied
+                // to how long the app has been open, not just at launch.
+                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                break;
+                if (shouldStop) break;
+                currentInterval = 2;
+                continue;
             }
             
             ffiError = heartbeat_send_polo(provider->heartbeatClient);
             if (ffiError) {
+                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                break;
+                if (shouldStop) break;
+                currentInterval = 2;
+                continue;
             }
+            
+            currentInterval = MAX(MIN(newInterval, 3), 1);
         }
     });
 }
@@ -805,6 +839,17 @@ void registerJITEndpointForPID(int32_t pid, NSString *targetAddress, uint16_t po
         };
         
         [endpointFailureCounts() removeObjectForKey:endpointKey];
+        // Previously, once any single endpoint failure latched this
+        // flag, the entire monitoring system stayed permanently
+        // disabled for the rest of the app's session — every future
+        // tab, including ones with a perfectly healthy connection,
+        // silently lost this safety net for good. A genuinely new PID
+        // registering here means a fresh JIT attachment just succeeded,
+        // which deserves its own real chance at being monitored rather
+        // than staying blocked by a past failure that may have been
+        // specific to a since-closed tab's own, now-irrelevant
+        // connection.
+        endpointFailureLatched = NO;
         startEndpointMonitorLocked();
     });
 }

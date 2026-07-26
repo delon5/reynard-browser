@@ -52,9 +52,16 @@ public protocol AddonEmbedderDelegate: AnyObject {
     func addonController(_ controller: AddonRuntime, updateTab session: GeckoSession, for addon: Addon, details: AddonUpdateTabDetails) -> AllowOrDeny
     func addonController(_ controller: AddonRuntime, closeTab session: GeckoSession, for addon: Addon) -> AllowOrDeny
     func addonController(_ controller: AddonRuntime, download request: AddonDownloadRequest) -> AddonDownloadResult?
+    /// Genuinely new tonight, for the SafeAreaDetector addon specifically
+    /// — GeckoView-layer code deliberately never touches app-level Tab
+    /// objects directly (matching every other method here, which only
+    /// ever pass GeckoSession), so mapping this back to a specific Tab
+    /// is the app-level delegate's own responsibility.
+    func addonController(_ controller: AddonRuntime, didReceiveNativeMessage message: [String: Any?]?, session: GeckoSession)
 }
 
 public extension AddonEmbedderDelegate {
+    func addonController(_ controller: AddonRuntime, didReceiveNativeMessage message: [String: Any?]?, session: GeckoSession) {}
     func addonController(_ controller: AddonRuntime, didUpdate addon: Addon) {}
     func addonController(_ controller: AddonRuntime, didFailInstall failure: AddonInstallFailure) {}
     @MainActor
