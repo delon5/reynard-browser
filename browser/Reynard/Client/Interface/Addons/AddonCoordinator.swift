@@ -74,7 +74,6 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
-        resetSharedDDIOnceIfNeeded()
         await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
