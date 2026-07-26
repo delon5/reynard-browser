@@ -74,10 +74,36 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
+        resetSharedDDIOnceIfNeeded()
         await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
         delegate?.refreshAddonChrome(self)
+    }
+    
+    /// TEMPORARY, ONE-TIME UTILITY — deletes the DDI folder from the
+    /// shared App Group container if present, forcing a completely
+    /// fresh re-download on the next JIT attempt, rather than trusting
+    /// whatever migrated over from the old, private location (this
+    /// device's DDI was moved there for the very first time tonight,
+    /// by code that had never been tested before). "Error -28:
+    /// BadBuildManifest" (confirmed directly from this project's own
+    /// vendored idevice source) points specifically at one of the
+    /// three DDI files being malformed — a fresh download is the
+    /// simplest way to rule this out. Safe to remove once confirmed
+    /// either way.
+    private func resetSharedDDIOnceIfNeeded() {
+        guard let sharedDDI = ReynardDirectories.shared.sharedDDI,
+              FileManager.default.fileExists(atPath: sharedDDI.path) else {
+            presentDiagnosticAlert(title: "DDI reset", message: "No DDI folder found at the shared location — nothing to delete.")
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: sharedDDI)
+            presentDiagnosticAlert(title: "DDI reset", message: "Deleted DDI folder at:\n\(sharedDDI.path)\n\nThe next JIT attempt should now trigger a completely fresh download.")
+        } catch {
+            presentDiagnosticAlert(title: "DDI reset failed", message: "\(error)")
+        }
     }
     
     /// TEMPORARY DIAGNOSTIC — simplified after discovering
