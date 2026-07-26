@@ -136,6 +136,7 @@
 				JIT/JITErrors.m,
 				JIT/RPPairing/JITSupport.m,
 				JIT/RPPairing/JITUtils.m,
+				JIT/RPPairing/libidevice_ffi.a,
 			);
 			target = 02WCPTGT2F3000000000001 /* Reynard Helper */;
 		};
@@ -222,6 +223,7 @@
 				03OLGRP12F3100000000001 /* Extensions */,
 				018C67A02F2F289C001F0BBB /* Reynard */,
 				84595E903015EA0100A2AA69 /* SafeAreaDetector-signed.xpi */,
+				84BAC7943015FE29001B9544 /* Frameworks */,
 				018C679F2F2F289C001F0BBB /* Products */,
 			);
 			sourceTree = "<group>";
@@ -243,6 +245,13 @@
 				01GECKO0052F2F289C001F0001 /* Reynard.xcconfig */,
 			);
 			path = Configuration;
+			sourceTree = "<group>";
+		};
+		84BAC7943015FE29001B9544 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -900,6 +909,10 @@
 					"@executable_path/../../Frameworks/GeckoView.framework",
 					"@loader_path/../../Frameworks/GeckoView.framework",
 				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Reynard/JIT/RPPairing",
+				);
 				MARKETING_VERSION = "$(CURRENT_VERSION)";
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -947,6 +960,10 @@
 					"@executable_path/../../Frameworks",
 					"@executable_path/../../Frameworks/GeckoView.framework",
 					"@loader_path/../../Frameworks/GeckoView.framework",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Reynard/JIT/RPPairing",
 				);
 				MARKETING_VERSION = "$(CURRENT_VERSION)";
 				OTHER_LDFLAGS = (
