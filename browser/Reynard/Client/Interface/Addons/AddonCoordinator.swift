@@ -6,6 +6,7 @@
 //
 
 import GeckoView
+import Security
 import UIKit
 
 protocol AddonCoordinatorDataSource: AnyObject {
@@ -73,10 +74,27 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
+        checkLiveAppGroupEntitlement()
         await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
         delegate?.refreshAddonChrome(self)
+    }
+    
+    /// TEMPORARY DIAGNOSTIC — checks this actual, currently-running
+    /// process's own, real entitlements directly via SecTask, the same
+    /// way the OS itself sees them right now. Genuinely definitive,
+    /// unlike inspecting the pre-AltStore-resigned binary on disk,
+    /// since AltStore's own re-signing (against Apple's real servers)
+    /// happens after that point and could plausibly drop this
+    /// capability even if the source binary correctly declared it.
+    private func checkLiveAppGroupEntitlement() {
+        guard let task = SecTaskCreateFromSelf(nil) else {
+            presentDiagnosticAlert(title: "Live entitlement check", message: "SecTaskCreateFromSelf returned nil")
+            return
+        }
+        let value = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString, nil)
+        presentDiagnosticAlert(title: "Live entitlement check", message: "com.apple.security.application-groups:\n\(String(describing: value))")
     }
     
     /// Installs the signed SafeAreaDetector.xpi via the same, already-
