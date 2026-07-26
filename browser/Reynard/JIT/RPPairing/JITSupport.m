@@ -131,37 +131,26 @@ static void startHeartbeat(DeviceProvider *provider) {
             if (!provider->heartbeatRunning) break;
             
             if (ffiError) {
-                // Previously this treated any single error at all as
-                // fatal, permanently ending the heartbeat for the rest
-                // of the app's session — even a single, ordinary,
-                // transient network hiccup. StikDebug's own heartbeat,
-                // the direct source this was adapted from, only stops
-                // for one specific, expected case (the device itself
-                // intentionally going to sleep); everything else just
-                // gets retried on the next tick. Matching that here,
-                // since a heartbeat that silently dies on its first
-                // hiccup leaves the long-lived, shared connection this
-                // provider represents unprotected against timing out
-                // for the remainder of the app's session — a plausible,
-                // concrete explanation for intermittent JIT trouble tied
-                // to how long the app has been open, not just at launch.
-                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
+                // TEMPORARY TEST — reverted back to the original,
+                // dies-on-first-error behavior, to directly test
+                // whether the heartbeat's now-longer-running presence
+                // (retrying instead of dying immediately) is
+                // interfering with the DDI mount attempt somehow, given
+                // both share the same underlying tunnel connection.
+                // Revert this comment block and restore the retry
+                // logic once this test is complete, regardless of the
+                // result — the retry behavior itself is a genuine,
+                // separate, confirmed fix for a different issue
+                // (heartbeat dying permanently on any transient error).
                 idevice_error_free(ffiError);
-                if (shouldStop) break;
-                currentInterval = 2;
-                continue;
+                break;
             }
             
             ffiError = heartbeat_send_polo(provider->heartbeatClient);
             if (ffiError) {
-                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                if (shouldStop) break;
-                currentInterval = 2;
-                continue;
+                break;
             }
-            
-            currentInterval = MAX(MIN(newInterval, 3), 1);
         }
     });
 }
