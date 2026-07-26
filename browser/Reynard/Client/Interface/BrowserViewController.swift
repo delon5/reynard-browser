@@ -520,14 +520,13 @@ final class BrowserViewController: UIViewController {
         contentView.applyLayout(
             ContentView.LayoutState(mode: isSearchFocused ? .searchFocused : .standard),
             topAnchor: view.safeAreaLayoutGuide.topAnchor,
-            // The toolbar condensing to a pill only fades it out — it
-            // doesn't shrink its own layout frame — so without this,
-            // content would stay pinned to where the toolbar's top edge
-            // always is, leaving a real gap between it and the true
-            // screen bottom showing the window's own background
-            // underneath instead of more page content.
+            // Reserves real space above the pill, matching exactly how
+            // the full-size toolbar already reserves space above itself
+            // via bottomToolbarTopAnchor — so any website's own
+            // bottom-fixed UI naturally renders above the pill, on every
+            // site, without needing that site's own cooperation via CSS.
             bottomAnchor: browserChrome.isScrollCondensed
-            ? view.bottomAnchor
+            ? browserChrome.condensedPillTopAnchor
             : (isSearchFocused ? view.safeAreaLayoutGuide.bottomAnchor : browserChrome.bottomToolbarTopAnchor)
         )
         setTabBarVisible(false)
@@ -537,12 +536,9 @@ final class BrowserViewController: UIViewController {
         contentView.applyLayout(
             ContentView.LayoutState(mode: .standard),
             topAnchor: browserChrome.topToolbarBottomAnchor,
-            // Same reasoning as applyPhoneLayout above — the toolbar's
-            // layout frame doesn't shrink when condensed, only its
-            // visual appearance fades, so this has to be handled
-            // explicitly rather than left to the toolbar's own bounds.
+            // Same reasoning as applyPhoneLayout above.
             bottomAnchor: browserChrome.isScrollCondensed
-            ? view.bottomAnchor
+            ? browserChrome.condensedPillTopAnchor
             : browserChrome.bottomToolbarTopAnchor
         )
         setTabBarVisible(false)
