@@ -347,7 +347,12 @@ final class AddonsPreferencesViewController: SettingsTableViewController {
     // MARK: - Add-on Loading
     
     private func loadCachedAddons() {
-        let visibleAddons = AddonRuntime.shared.installedAddons.filter { !$0.isBuiltIn }
+        // TEMPORARY DIAGNOSTIC — showing built-in addons too, to directly,
+        // visually confirm whether SafeAreaDetector's installBuiltIn call
+        // actually succeeded, given Console.app/device-log tools have been
+        // genuinely unreliable to check this any other way tonight.
+        // Revert to `.filter { !$0.isBuiltIn }` once confirmed either way.
+        let visibleAddons = AddonRuntime.shared.installedAddons
         installedAddons = visibleAddons.filter { !$0.metaData.isUnsupported }
         unsupportedAddons = visibleAddons.filter { $0.metaData.isUnsupported }
         
@@ -377,7 +382,8 @@ final class AddonsPreferencesViewController: SettingsTableViewController {
         
         await MainActor.run {
             Self.hasLoadedInstalledAddons = true
-            let visibleAddons = refreshedAddons.filter { !$0.isBuiltIn }
+            // TEMPORARY DIAGNOSTIC — see matching comment in loadCachedAddons above.
+            let visibleAddons = refreshedAddons
             self.installedAddons = visibleAddons.filter { !$0.metaData.isUnsupported }
             self.unsupportedAddons = visibleAddons.filter { $0.metaData.isUnsupported }
             self.isLoadingAddons = false
