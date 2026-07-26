@@ -133,6 +133,9 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				JIT/JITEnabler.m,
+				JIT/JITErrors.m,
+				JIT/RPPairing/JITSupport.m,
+				JIT/RPPairing/JITUtils.m,
 			);
 			target = 02WCPTGT2F3000000000001 /* Reynard Helper */;
 		};
