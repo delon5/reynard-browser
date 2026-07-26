@@ -81,20 +81,23 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
         delegate?.refreshAddonChrome(self)
     }
     
-    /// TEMPORARY DIAGNOSTIC — checks this actual, currently-running
-    /// process's own, real entitlements directly via SecTask, the same
-    /// way the OS itself sees them right now. Genuinely definitive,
-    /// unlike inspecting the pre-AltStore-resigned binary on disk,
-    /// since AltStore's own re-signing (against Apple's real servers)
-    /// happens after that point and could plausibly drop this
-    /// capability even if the source binary correctly declared it.
+    /// TEMPORARY DIAGNOSTIC — simplified after discovering
+    /// SecTaskCreateFromSelf/SecTaskCopyValueForEntitlement are private
+    /// APIs not actually exposed via a plain `import Security` in
+    /// Swift, unlike a first attempt assumed. This version sticks to
+    /// standard, already-proven Foundation APIs only: shows the real,
+    /// live bundle ID, the exact group ID string this code is actually
+    /// using, and whether containerURL genuinely resolves or not —
+    /// directly answering the practical question that matters, without
+    /// needing risky private-API declarations this late.
     private func checkLiveAppGroupEntitlement() {
-        guard let task = SecTaskCreateFromSelf(nil) else {
-            presentDiagnosticAlert(title: "Live entitlement check", message: "SecTaskCreateFromSelf returned nil")
-            return
-        }
-        let value = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString, nil)
-        presentDiagnosticAlert(title: "Live entitlement check", message: "com.apple.security.application-groups:\n\(String(describing: value))")
+        let bundleID = Bundle.main.bundleIdentifier ?? "(nil)"
+        let groupID = "group.com.minh-ton.Reynard"
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)
+        presentDiagnosticAlert(
+            title: "Live App Group check",
+            message: "Bundle ID:\n\(bundleID)\n\nGroup ID used:\n\(groupID)\n\ncontainerURL result:\n\(String(describing: container))"
+        )
     }
     
     /// Installs the signed SafeAreaDetector.xpi via the same, already-
