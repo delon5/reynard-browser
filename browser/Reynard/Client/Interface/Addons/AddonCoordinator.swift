@@ -98,6 +98,51 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
             title: "Live App Group check",
             message: "Bundle ID:\n\(bundleID)\n\nGroup ID used:\n\(groupID)\n\ncontainerURL result:\n\(String(describing: container))"
         )
+        checkEmbeddedProvisioningProfile()
+    }
+    
+    /// TEMPORARY DIAGNOSTIC — reads and displays the literal
+    /// provisioning profile Apple's own servers embedded in this
+    /// exact, currently-running install, via AltStore's own re-signing.
+    /// The most direct possible evidence available: not a copy, not
+    /// something re-extracted externally, the actual file the OS itself
+    /// is using right now. embedded.mobileprovision is a CMS/PKCS7-
+    /// signed envelope, not a plain plist — rather than fully decoding
+    /// that signature (which needs more Security-framework APIs, one of
+    /// which already turned out to be private/inaccessible tonight),
+    /// this uses a simpler, well-known trick: the plist's own XML text
+    /// remains directly readable within the raw file bytes regardless
+    /// of the binary signature wrapped around it.
+    private func checkEmbeddedProvisioningProfile() {
+        guard let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let rawData = try? Data(contentsOf: profileURL) else {
+            presentDiagnosticAlert(title: "Provisioning profile", message: "No embedded.mobileprovision found in this app's bundle at all — AltStore's re-signing may not embed one the way Xcode normally would.")
+            return
+        }
+        
+        let rawString = String(decoding: rawData, as: UTF8.self)
+        guard let xmlStart = rawString.range(of: "<?xml"),
+              let plistEnd = rawString.range(of: "</plist>") else {
+            presentDiagnosticAlert(title: "Provisioning profile", message: "Found the file (\(rawData.count) bytes) but couldn't locate readable plist markers inside it.")
+            return
+        }
+        
+        let plistText = String(rawString[xmlStart.lowerBound..<plistEnd.upperBound])
+        guard let plistData = plistText.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any] else {
+            presentDiagnosticAlert(title: "Provisioning profile", message: "Extracted plist text but couldn't parse it:\n\n\(plistText.prefix(2000))")
+            return
+        }
+        
+        let entitlements = plist["Entitlements"] as? [String: Any]
+        let appGroupsValue = entitlements?["com.apple.security.application-groups"]
+        let appIDName = plist["AppIDName"] as? String ?? "(missing)"
+        let applicationIdentifierPrefix = plist["ApplicationIdentifierPrefix"] as? [String] ?? []
+        
+        presentDiagnosticAlert(
+            title: "Provisioning profile (real, embedded)",
+            message: "AppIDName:\n\(appIDName)\n\nApplicationIdentifierPrefix:\n\(applicationIdentifierPrefix)\n\nEntitlements' app-groups value:\n\(String(describing: appGroupsValue))\n\nAll entitlement keys present:\n\(entitlements?.keys.sorted().joined(separator: ", ") ?? "(none)")"
+        )
     }
     
     /// Installs the signed SafeAreaDetector.xpi via the same, already-
