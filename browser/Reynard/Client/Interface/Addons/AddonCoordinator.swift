@@ -74,10 +74,37 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     func start() async {
         AddonRuntime.shared.delegate = self
+        checkDDIManifestFileSize()
         await installSafeAreaDetectorIfNeeded()
         _ = try? await AddonRuntime.shared.list()
         updateCoordinator.start()
         delegate?.refreshAddonChrome(self)
+    }
+    
+    /// TEMPORARY DIAGNOSTIC — compares the actual, real BuildManifest.plist
+    /// this app downloaded (via URLSession, in DDIManager) against a
+    /// known-good, directly-verified size (805005 bytes, confirmed via
+    /// curl on the same source URL) — checking whether the app's own
+    /// download process might be producing something different/corrupted
+    /// even though the source file itself is confirmed valid and
+    /// genuinely supports this exact device model.
+    private func checkDDIManifestFileSize() {
+        guard let sharedDDI = ReynardDirectories.shared.sharedDDI else {
+            presentDiagnosticAlert(title: "Manifest check", message: "Shared DDI location unavailable.")
+            return
+        }
+        let manifestURL = sharedDDI.appendingPathComponent("BuildManifest.plist", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            presentDiagnosticAlert(title: "Manifest check", message: "No BuildManifest.plist found at:\n\(manifestURL.path)")
+            return
+        }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: manifestURL.path)
+        let size = (attributes?[.size] as? Int) ?? -1
+        let isValidPlist = (try? Data(contentsOf: manifestURL)).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) } != nil
+        presentDiagnosticAlert(
+            title: "Manifest check",
+            message: "Size: \(size) bytes\n(known-good curl download was 805005 bytes)\n\nParses as valid plist: \(isValidPlist)"
+        )
     }
     
     /// TEMPORARY, ONE-TIME UTILITY — deletes the DDI folder from the
