@@ -99,7 +99,17 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     /// AddonCoordinator, and the pill's own two-rule layout logic) is
     /// all genuinely untested — prepared and ready, but not yet
     /// verified end to end on a real device with the real, signed file.
+    private static let safeAreaDetectorAddonID = "safe-area-detector@reynard.internal"
+    
     private func installSafeAreaDetectorIfNeeded() async {
+        // Genuinely "if needed" now — this was previously unconditional
+        // despite its own name, causing the install attempt (and its
+        // diagnostic alert) to fire on every single launch rather than
+        // just the first one.
+        if let existing = try? await AddonRuntime.shared.addon(byID: Self.safeAreaDetectorAddonID), existing != nil {
+            return
+        }
+        
         guard let xpiURL = Bundle.main.url(forResource: "SafeAreaDetector-signed", withExtension: "xpi") else {
             presentDiagnosticAlert(title: "SafeAreaDetector", message: "SafeAreaDetector-signed.xpi not found in app bundle — check it's added to Copy Bundle Resources under the Reynard target")
             return
