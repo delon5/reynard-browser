@@ -90,19 +90,22 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     /// way so the real answer is known after one test, rather than
     /// guessed at twice.
     private func installSafeAreaDetectorIfNeeded() async {
-        guard let resourceURL = Bundle.main.resourceURL else {
-            presentDiagnosticAlert(title: "SafeAreaDetector", message: "Bundle.main.resourceURL was nil")
-            return
-        }
-        let addonURL = resourceURL.appendingPathComponent("SafeAreaDetector", isDirectory: true)
+        // TEMPORARY EXPERIMENT: the real error confirmed the underlying
+        // validation is a literal string-prefix check for
+        // "resource://android/", hardcoded in Gecko's own shared C++
+        // core — not real platform detection. Trying that exact literal
+        // prefix here, even on iOS, to see whether it's purely a string
+        // check (which might pass, then fail differently at actual file
+        // resolution, since no "android" substitution is genuinely
+        // registered on this iOS port) or something else entirely.
+        // This hardcoded string doesn't point at anything real yet —
+        // purely diagnostic.
+        let addonURI = "resource://android/SafeAreaDetector/"
         do {
-            let addon = try await AddonRuntime.shared.installBuiltIn(uri: addonURL.absoluteString)
+            let addon = try await AddonRuntime.shared.installBuiltIn(uri: addonURI)
             presentDiagnosticAlert(title: "SafeAreaDetector: Success", message: "id: \(addon.id)\nisBuiltIn: \(addon.isBuiltIn)")
         } catch {
-            // Full, untruncated error shown on-screen directly — logging
-            // tools have proven genuinely unreliable to check tonight, so
-            // this is a real, guaranteed-visible answer instead.
-            presentDiagnosticAlert(title: "SafeAreaDetector: Failed", message: "URI tried:\n\(addonURL.absoluteString)\n\nError:\n\(String(describing: error))")
+            presentDiagnosticAlert(title: "SafeAreaDetector: Failed", message: "URI tried:\n\(addonURI)\n\nError:\n\(String(describing: error))")
         }
     }
     
