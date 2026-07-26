@@ -91,17 +91,39 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     /// guessed at twice.
     private func installSafeAreaDetectorIfNeeded() async {
         guard let resourceURL = Bundle.main.resourceURL else {
-            NSLog("[SafeAreaDetector] Bundle.main.resourceURL was nil — cannot construct install URI")
+            presentDiagnosticAlert(title: "SafeAreaDetector", message: "Bundle.main.resourceURL was nil")
             return
         }
         let addonURL = resourceURL.appendingPathComponent("SafeAreaDetector", isDirectory: true)
-        NSLog("[SafeAreaDetector] Attempting installBuiltIn with URI: %@", addonURL.absoluteString)
         do {
             let addon = try await AddonRuntime.shared.installBuiltIn(uri: addonURL.absoluteString)
-            NSLog("[SafeAreaDetector] installBuiltIn succeeded — addon id: %@, isBuiltIn: %@", addon.id, String(addon.isBuiltIn))
+            presentDiagnosticAlert(title: "SafeAreaDetector: Success", message: "id: \(addon.id)\nisBuiltIn: \(addon.isBuiltIn)")
         } catch {
-            NSLog("[SafeAreaDetector] installBuiltIn failed: %@", String(describing: error))
+            // Full, untruncated error shown on-screen directly — logging
+            // tools have proven genuinely unreliable to check tonight, so
+            // this is a real, guaranteed-visible answer instead.
+            presentDiagnosticAlert(title: "SafeAreaDetector: Failed", message: "URI tried:\n\(addonURL.absoluteString)\n\nError:\n\(String(describing: error))")
         }
+    }
+    
+    /// TEMPORARY DIAGNOSTIC — direct on-screen alert, bypassing logging
+    /// entirely, since Console.app/device-log tools haven't reliably
+    /// shown this project's own log lines tonight despite several
+    /// genuine attempts. Safe to remove once this specific
+    /// investigation is done.
+    @MainActor
+    private func presentDiagnosticAlert(title: String, message: String) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+              let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+            return
+        }
+        var topViewController = rootViewController
+        while let presented = topViewController.presentedViewController {
+            topViewController = presented
+        }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        topViewController.present(alert, animated: true)
     }
     
     func handleExternalResponse(_ response: ExternalResponseInfo) -> Bool {
