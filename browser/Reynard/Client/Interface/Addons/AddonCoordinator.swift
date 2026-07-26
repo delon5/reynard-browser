@@ -141,6 +141,13 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     /// user starts scrolling in practice, so this simpler design avoids
     /// needing any additional notification chain at all.
     func addonController(_ controller: AddonRuntime, didReceiveNativeMessage message: [String: Any?]?, session: GeckoSession) {
+        // TEMPORARY DIAGNOSTIC — on-screen, since Console.app/NSLog have
+        // proven genuinely unreliable to check tonight. Fires
+        // regardless of whether tab lookup or payload extraction
+        // actually succeed, so a real answer either way, not just on
+        // the success path.
+        presentDiagnosticAlert(title: "Native message received", message: "Raw payload:\n\(String(describing: message))")
+        
         guard let dataSource,
               let index = dataSource.indexOfAddonTab(for: session),
               dataSource.addonTabs.indices.contains(index) else {
