@@ -92,7 +92,7 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     /// needing risky private-API declarations this late.
     private func checkLiveAppGroupEntitlement() {
         let bundleID = Bundle.main.bundleIdentifier ?? "(nil)"
-        let groupID = "group.com.minh-ton.Reynard"
+        let groupID = ReynardDirectories.sharedAppGroupIdentifier()
         let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)
         presentDiagnosticAlert(
             title: "Live App Group check",

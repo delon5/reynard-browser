@@ -514,7 +514,15 @@ static NSURL *ddiDirectoryURL(NSError **error) {
     // ReynardDirectoriesBridge.sharedDDIPath — same reasoning as
     // pairingFilePath()'s own updated comment in JITUtils.m. Direct,
     // standard NSFileManager App Group API, no Swift bridging needed.
-    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:@"group.com.minh-ton.Reynard"];
+    // Same reasoning and derivation logic as JITUtils.m's own,
+    // identical comment on pairingFilePath().
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"com.minh-ton.Reynard";
+    NSString *helperSuffix = @".Helper";
+    if ([bundleID hasSuffix:helperSuffix]) {
+        bundleID = [bundleID substringToIndex:bundleID.length - helperSuffix.length];
+    }
+    NSString *groupID = [@"group." stringByAppendingString:bundleID];
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
     if (!containerURL) {
         if (error) *error = MakeError(DDIMountPathResolveFailed);
         return nil;

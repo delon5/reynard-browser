@@ -6,6 +6,27 @@
 import Foundation
 
 struct ReynardDirectories {
+    /// AltStore (and likely other sideloading tools) append a unique,
+    /// per-installation suffix to the App Group identifier itself, not
+    /// just the app's own bundle ID — confirmed directly from a real,
+    /// installed device's actual embedded provisioning profile, which
+    /// showed "group.com.minh-ton.Reynard.M3ULXVYRUP" rather than the
+    /// plain "group.com.minh-ton.Reynard" this code was previously
+    /// hardcoded to use. Deriving from the current process's own,
+    /// actual bundle identifier at runtime matches whatever's genuinely
+    /// in effect for this specific install instead. The Helper's own
+    /// bundle ID ends in ".Helper" — stripped here so both the main app
+    /// and the Helper derive the exact same, shared group identifier
+    /// despite having different bundle IDs themselves.
+    static func sharedAppGroupIdentifier() -> String {
+        var bundleID = Bundle.main.bundleIdentifier ?? "com.minh-ton.Reynard"
+        let helperSuffix = ".Helper"
+        if bundleID.hasSuffix(helperSuffix) {
+            bundleID = String(bundleID.dropLast(helperSuffix.count))
+        }
+        return "group.\(bundleID)"
+    }
+
     let applicationSupport: URL
     let caches: URL
     let documents: URL
@@ -93,7 +114,7 @@ struct ReynardDirectories {
             caches: caches,
             documents: documents,
             temporary: fileManager.temporaryDirectory,
-            sharedContainer: fileManager.containerURL(forSecurityApplicationGroupIdentifier: "group.com.minh-ton.Reynard")
+            sharedContainer: fileManager.containerURL(forSecurityApplicationGroupIdentifier: ReynardDirectories.sharedAppGroupIdentifier())
         )
     }()
 

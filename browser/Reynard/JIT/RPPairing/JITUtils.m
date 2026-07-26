@@ -21,7 +21,21 @@ NSString *pairingFilePath(void) {
     // NSFileManager's own App Group container API is a standard,
     // direct Foundation call — no Swift bridging needed at all,
     // sidestepping that whole problem entirely.
-    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:@"group.com.minh-ton.Reynard"];
+    // Was a hardcoded "group.com.minh-ton.Reynard" — confirmed wrong
+    // directly from a real device's own embedded provisioning profile,
+    // which showed AltStore genuinely appends a unique, per-install
+    // suffix to the App Group identifier itself, not just the bundle
+    // ID. Same derivation logic as ReynardDirectories.swift's own
+    // sharedAppGroupIdentifier() — duplicated here since this file
+    // compiles into three separate targets, some without straightforward
+    // access to that Swift type.
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"com.minh-ton.Reynard";
+    NSString *helperSuffix = @".Helper";
+    if ([bundleID hasSuffix:helperSuffix]) {
+        bundleID = [bundleID substringToIndex:bundleID.length - helperSuffix.length];
+    }
+    NSString *groupID = [@"group." stringByAppendingString:bundleID];
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
     if (!containerURL) return @"";
     return [containerURL URLByAppendingPathComponent:@"pairingFile.plist" isDirectory:NO].path;
 }
