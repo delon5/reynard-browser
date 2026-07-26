@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "Reynard Safe Area Detector",
+  "version": "1.0",
+  "description": "Internal, first-party addon — detects whether the current page's CSS uses env(safe-area-inset-bottom), so the condensed address pill can position itself correctly. Not user-facing.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "safe-area-detector@reynard.internal"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "geckoViewAddons"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
