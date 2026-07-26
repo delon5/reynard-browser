@@ -71,6 +71,39 @@ final class DDIManager: NSObject {
         return plan.items.allSatisfy { fileManager.fileExists(atPath: $0.destinationURL.path) }
     }
     
+    /// TEMPORARY DIAGNOSTIC — checks the downloaded manifest's own
+    /// ProductBuildVersion against the version this same, hosted DDI
+    /// source was confirmed to be at when last independently verified
+    /// (June 2026, via pymobiledevice3's own LATEST_DDI_BUILD_ID
+    /// constant: "17E5179g"). A real, separate log from a genuinely
+    /// successful mount showed a different, older version
+    /// ("16E5121h") — direct, concrete confirmation that DDI build
+    /// versions do change over time, and a stale/mismatched version is
+    /// a real, plausible explanation for "Error -28: BadBuildManifest"
+    /// specifically failing during the live TSS negotiation step
+    /// (see JITSupport.m's ensureDDIMounted and the investigation notes
+    /// from this session for the full reasoning). This only reports
+    /// what it finds — doesn't change any actual JIT behavior, and is
+    /// safe to leave in or remove freely.
+    func checkDDIVersionStaleness() -> String {
+        guard let plan = try? makeDownloadPlan(),
+              let manifestItem = plan.items.first(where: { $0.destinationURL.lastPathComponent == "BuildManifest.plist" }),
+              fileManager.fileExists(atPath: manifestItem.destinationURL.path),
+              let data = try? Data(contentsOf: manifestItem.destinationURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            return "Could not read/parse the downloaded manifest to check its version."
+        }
+        
+        let knownGoodVersion = "17E5179g"
+        let actualVersion = plist["ProductBuildVersion"] as? String ?? "(missing)"
+        
+        if actualVersion == knownGoodVersion {
+            return "DDI ProductBuildVersion: \(actualVersion) — matches the known-current version. Staleness is NOT the cause."
+        } else {
+            return "DDI ProductBuildVersion: \(actualVersion) — does NOT match the known-current version (\(knownGoodVersion)). This IS a plausible, genuine cause of the mount failure."
+        }
+    }
+    
     func ensureRequiredDDIFiles(
         progress: @escaping (Double) -> Void,
         completion: @escaping (Result<Void, Error>) -> Void
