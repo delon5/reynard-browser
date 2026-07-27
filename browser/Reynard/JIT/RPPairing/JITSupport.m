@@ -106,18 +106,19 @@ static BOOL shouldDetachDebugSessionPID(int32_t pid) {
     return shouldDetach;
 }
 
-// Whether an FFI error's own message indicates the device intentionally
-// went to sleep — the one case StikDebug's own heartbeat (this project's
-// direct source for this mechanism) treats as a genuine, expected stop
-// rather than something to retry through. Matching that exact string
-// rather than inventing a new classification, since it's presumably a
-// standardized message from the shared, underlying idevice library both
-// projects use, not something either project defines itself.
-static BOOL isHeartbeatSleepyTimeError(IdeviceFfiError *ffiError) {
-    if (!ffiError || !ffiError->message) return NO;
-    return strstr(ffiError->message, "HeartbeatSleepyTime") != NULL;
-}
-
+// TEST - genuinely reverted to minh-ton's original behavior (stop on
+// ANY error), not the earlier, flawed test (which set heartbeatRunning
+// = NO too late - right before ensureDDIMounted - when the heartbeat
+// could already have been mid-call at that exact moment, so the flag
+// never actually stopped anything in flight). This is the real,
+// precise difference from upstream: our heartbeat retries on any
+// error except one specific message, keeping itself alive and
+// contending for the connection indefinitely; theirs dies permanently
+// on the very first error. Testing whether THAT is what actually
+// matters for tonight's isDDIMounted hang specifically - the earlier
+// same-change test (noted below, now removed) was against a
+// different, later, discrete error (BadBuildManifest), not this
+// silent hang, which wasn't even isolated until later in this session.
 static void startHeartbeat(DeviceProvider *provider) {
     dispatch_queue_t heartbeatQueue = dispatch_queue_create("com.minh-ton.Reynard.JITSupport.ProviderHeartbeatQueue",DISPATCH_QUEUE_SERIAL);
     provider->heartbeatRunning = YES;
@@ -131,32 +132,15 @@ static void startHeartbeat(DeviceProvider *provider) {
             if (!provider->heartbeatRunning) break;
             
             if (ffiError) {
-                // Test complete: reverting to the retry behavior.
-                // Directly, empirically ruled out as the cause of the
-                // DDI mount failure - reverting to this original,
-                // dies-on-first-error state produced the exact same
-                // "Error -28: BadBuildManifest" result, confirming the
-                // two are unrelated. Restoring the genuine, separate
-                // fix this was before the test (see the heartbeat
-                // resilience investigation from earlier this session
-                // for the original reasoning).
-                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                if (shouldStop) break;
-                currentInterval = 2;
-                continue;
+                break;
             }
             
             ffiError = heartbeat_send_polo(provider->heartbeatClient);
             if (ffiError) {
-                BOOL shouldStop = isHeartbeatSleepyTimeError(ffiError);
                 idevice_error_free(ffiError);
-                if (shouldStop) break;
-                currentInterval = 2;
-                continue;
+                break;
             }
-            
-            currentInterval = MAX(MIN(newInterval, 3), 1);
         }
     });
 }
@@ -607,20 +591,10 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
         return NO;
     }
     
-    // TEST - lockdown-ordering fix (established+queried before the
-    // mounter check, per the idevice library's own doc comment) was
-    // directly, empirically ruled out tonight - image_mounter_copy_devices()
-    // still hangs indefinitely even with that satisfied. New
-    // hypothesis: the heartbeat runs continuously on its own task,
-    // sharing the SAME underlying adapter/handshake connection as
-    // this mounter query - a genuine transport-level contention
-    // issue, not a scheduling one (already ruled out separately via
-    // the tokio runtime test). Stopping it permanently here,
-    // diagnostic-only, not restarted - just testing whether the
-    // query finally returns with it genuinely quiet.
-    logger(@"ensureDDIMounted: TEST - stopping heartbeat before any mounter/lockdown work");
-    provider->heartbeatRunning = NO;
-    
+    // (Earlier "stop heartbeat here" test removed - it set the flag
+    // too late to be a fair test, since the heartbeat could still have
+    // been mid-call at that exact moment. Testing the real retry-logic
+    // difference instead now, at its actual source in startHeartbeat.)
     LockdowndClientHandle *lockdownClient = NULL;
     ImageMounterHandle *mounterClient = NULL;
     IdeviceFfiError *ffiError = NULL;
