@@ -12,6 +12,7 @@
 #import <objc/runtime.h>
 #import <os/log.h>
 #import <sys/utsname.h>
+#import <unistd.h>
 #import "Utils.h"
 #import "JITEnabler.h"
 
@@ -37,34 +38,93 @@ static void hook_do_nothing(void) {}
 // same target). Small amount of redundancy, but avoids restructuring
 // that file's visibility this late, and this specific check is simple
 // and self-contained enough that duplicating it carries little real risk.
-static BOOL selfHasTXMSupport(void) {
-    struct utsname systemInfo;
-    uname(&systemInfo);
-    NSString *hardware = [NSString stringWithUTF8String:systemInfo.machine];
+// Was a hardcoded, device-model/OS-version threshold check only.
+// Replaced with DolphiniOS's own, later, corrected approach - their
+// real commit history shows this exact threshold-only logic was the
+// ORIGINAL version, which they themselves found insufficient and
+// specifically fixed for iOS 26.6 (commit "Fix TXM detection for iOS
+// 26.6", June 1 2026). The fix: check for the actual, real
+// Ap,TrustedExecutionMonitor.img4 firmware file's genuine presence on
+// disk first: this is ground truth, not an inference from device
+// model/OS version at all. The old, hardcoded-threshold check now
+// only serves as a fallback if that real, direct check comes back
+// negative on iOS 26.6+, matching DolphiniOS's own current logic
+// exactly. This matters directly for this device: iOS 27.0 is past
+// the exact threshold where DolphiniOS's own team found the old
+// approach was already getting the wrong answer.
+static NSString *txmFilePathAtPath(NSString *path, NSUInteger length) {
+    NSError *error = nil;
+    NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:&error];
+    if (!items) return nil;
 
-    if (@available(iOS 27.0, *)) {
-        return ![hardware isEqualToString:@"iPad8,11"] && ![hardware isEqualToString:@"iPad8,12"];
+    for (NSString *entry in items) {
+        if (entry.length == length) {
+            return [path stringByAppendingPathComponent:entry];
+        }
+    }
+    return nil;
+}
+
+static BOOL deviceUsesTXMClassic(void) {
+    if (@available(iOS 14.0, *)) {
+        if ([[NSProcessInfo processInfo] isiOSAppOnMac]) {
+            return NO;
+        }
     }
 
+    // Primary: /System/Volumes/Preboot/<36>/boot/<96>/usr/.../Ap,TrustedExecutionMonitor.img4
+    NSString *bootUUID = txmFilePathAtPath(@"/System/Volumes/Preboot", 36);
+    if (bootUUID) {
+        NSString *bootDir = [bootUUID stringByAppendingPathComponent:@"boot"];
+        NSString *ninetySixCharPath = txmFilePathAtPath(bootDir, 96);
+        if (ninetySixCharPath) {
+            NSString *img = [ninetySixCharPath stringByAppendingPathComponent:@"usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4"];
+            return access(img.fileSystemRepresentation, F_OK) == 0;
+        }
+    }
+
+    // Fallback: /private/preboot/<96>/usr/.../Ap,TrustedExecutionMonitor.img4
+    NSString *fallback = txmFilePathAtPath(@"/private/preboot", 96);
+    if (fallback) {
+        NSString *img = [fallback stringByAppendingPathComponent:@"usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4"];
+        return access(img.fileSystemRepresentation, F_OK) == 0;
+    }
+
+    return NO;
+}
+
+static BOOL selfHasTXMSupport(void) {
     if (@available(iOS 26.0, *)) {
-        NSString *pattern = [hardware hasPrefix:@"iPad"] ? @"iPad(\\d+),(\\d+)" : @"iPhone(\\d+),(\\d+)";
-        double threshold = [hardware hasPrefix:@"iPad"] ? 14.5 : 14.2;
+        BOOL hasTXMClassic = deviceUsesTXMClassic();
 
-        NSError *regexError = nil;
-        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:&regexError];
-        if (!regex) return NO;
+        if (@available(iOS 26.6, *)) {
+            if (!hasTXMClassic) {
+                struct utsname systemInfo;
+                uname(&systemInfo);
+                NSString *hardware = [NSString stringWithUTF8String:systemInfo.machine];
 
-        NSTextCheckingResult *match = [regex firstMatchInString:hardware options:0 range:NSMakeRange(0, hardware.length)];
-        if (!match || match.numberOfRanges < 3) return NO;
+                NSString *pattern = [hardware hasPrefix:@"iPad"] ? @"iPad(\\d+),(\\d+)" : @"iPhone(\\d+),(\\d+)";
+                double threshold = [hardware hasPrefix:@"iPad"] ? 14.5 : 14.2;
 
-        NSString *majorString = [hardware substringWithRange:[match rangeAtIndex:1]];
-        NSString *minorString = [hardware substringWithRange:[match rangeAtIndex:2]];
-        double major = majorString.doubleValue;
-        double minor = minorString.doubleValue;
+                NSError *regexError = nil;
+                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:&regexError];
+                if (!regex) return NO;
 
-        double divisor = pow(10.0, (double)minorString.length);
-        double version = major + (minor / divisor);
-        return version >= threshold;
+                NSTextCheckingResult *match = [regex firstMatchInString:hardware options:0 range:NSMakeRange(0, hardware.length)];
+                if (!match || match.numberOfRanges < 3) return NO;
+
+                NSString *majorString = [hardware substringWithRange:[match rangeAtIndex:1]];
+                NSString *minorString = [hardware substringWithRange:[match rangeAtIndex:2]];
+                double major = majorString.doubleValue;
+                double minor = minorString.doubleValue;
+
+                double divisor = pow(10.0, (double)minorString.length);
+                double version = major + (minor / divisor);
+                return version >= threshold;
+            }
+        }
+
+        return hasTXMClassic;
     }
 
     return NO;
@@ -127,7 +187,22 @@ static void enableJITForSelfIfNeeded(void) {
 __attribute__((used, visibility("default"))) int NSExtensionMain(int argc,
                                                                  char *argv[]) {
   enableJITForSelfIfNeeded();
-  enableRPPairingJITForSelfIfNeeded();
+  // Was a direct, synchronous call here - a real, confirmed bug found
+  // from an actual crash log tonight. This attempts a genuine network
+  // operation (establishing the RPPairing tunnel) with no timeout at
+  // all, directly inside the Helper's own startup path. The main app
+  // synchronously waits for the Helper to finish starting via XPC - if
+  // this call ever hangs instead of failing quickly (confirmed
+  // possible, regardless of the exact underlying cause), the entire
+  // app's launch hangs with it, eventually hit by iOS's own 20-second
+  // launch watchdog (0x8BADF00D) and killed outright - exactly
+  // matching a real "hard lock blackscreen" crash log from tonight.
+  // Moving this off the startup path entirely onto a background queue
+  // means a hang here can genuinely, structurally never block the
+  // Helper's own startup, or the main app's, ever again.
+  dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    enableRPPairingJITForSelfIfNeeded();
+  });
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundeclared-selector"

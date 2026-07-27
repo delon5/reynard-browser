@@ -444,7 +444,23 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     rp_pairing_file_free(rpPairingFile);
     
     if (ffiError) {
-        if (error) *error = MakeError(TunnelCreateFailed);
+        // Was: silently discarded the real, underlying error and
+        // replaced it with the generic MakeError(TunnelCreateFailed)
+        // label - meaning the actual, specific reason this call fails
+        // has never once been visible tonight, despite hours spent
+        // investigating a completely different, wrong function
+        // entirely (mistakenly reading Reynard's own error code -28
+        // as if it were the Rust library's own, different numbering
+        // scheme). Surfacing the real code/sub_code/message here now.
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
+        if (error) {
+            *error = [NSError errorWithDomain:ErrorDomain code:TunnelCreateFailed userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to create RPPairing tunnel (real cause code %ld/%ld): %@", (long)realCode, (long)realSubCode, realMessage]
+            }];
+        }
         idevice_error_free(ffiError);
         return NULL;
     }
