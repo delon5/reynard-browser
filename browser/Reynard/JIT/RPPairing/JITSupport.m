@@ -632,7 +632,52 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
     }
     logger(@"ensureDDIMounted: image_mounter_connect_rsd succeeded");
     
-    logger(@"ensureDDIMounted: starting isDDIMounted check");
+    // FIX - moved here, before isDDIMounted()/copy_devices(). The
+    // idevice library's own doc comment on copy_devices(), read
+    // directly from source tonight: "A lockdown client must be
+    // established and queried after establishing a mounter client,
+    // or the device will stop responding to requests." This function
+    // was doing exactly that - querying the mounter (copy_devices, via
+    // isDDIMounted) before ever establishing/querying a lockdown
+    // client, which only happened much later. That ordering violation
+    // is the direct, confirmed cause of tonight's indefinite hang -
+    // extensively tested and empirically ruled out every other
+    // explanation (pairing file, tunnel creation x2, tokio runtime
+    // threading model) before finding this.
+    logger(@"ensureDDIMounted: starting lockdownd_connect_rsd (must happen before any mounter query, per idevice library docs)");
+    ffiError = lockdownd_connect_rsd(provider->adapter, provider->handshake, &lockdownClient);
+    if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at lockdownd_connect_rsd - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
+        if (error) *error = MakeError(LockdowndConnectFailed);
+        idevice_error_free(ffiError);
+        goto cleanup;
+    }
+    logger(@"ensureDDIMounted: lockdownd_connect_rsd succeeded");
+    
+    logger(@"ensureDDIMounted: starting lockdownd_get_value UniqueChipID (the required query)");
+    ffiError = lockdownd_get_value(lockdownClient, "UniqueChipID", NULL, &chipIDNode);
+    if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at lockdownd_get_value UniqueChipID - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
+        if (error) *error = MakeError(UniqueChipIDReadFailed);
+        idevice_error_free(ffiError);
+        goto cleanup;
+    }
+    
+    plist_get_uint_val(chipIDNode, &uniqueChipID);
+    if (uniqueChipID == 0) {
+        logger(@"ensureDDIMounted: UniqueChipID resolved to 0 - invalid");
+        if (error) *error = MakeError(UniqueChipIDInvalid);
+        goto cleanup;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: UniqueChipID = %llu", uniqueChipID]);
+    
+    logger(@"ensureDDIMounted: starting isDDIMounted check (now safe - lockdown client already established and queried above)");
     if (!isDDIMounted(mounterClient, &mounted, error)) {
         logger(@"ensureDDIMounted: isDDIMounted check itself failed");
         goto cleanup;
@@ -675,39 +720,6 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
         goto cleanup;
     }
     logger([NSString stringWithFormat:@"ensureDDIMounted: BuildManifest.plist read succeeded, %lu bytes", (unsigned long)buildManifestData.length]);
-    
-    logger(@"ensureDDIMounted: starting lockdownd_connect_rsd");
-    ffiError = lockdownd_connect_rsd(provider->adapter, provider->handshake, &lockdownClient);
-    if (ffiError) {
-        NSInteger realCode = ffiError->code;
-        NSInteger realSubCode = ffiError->sub_code;
-        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at lockdownd_connect_rsd - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
-        if (error) *error = MakeError(LockdowndConnectFailed);
-        idevice_error_free(ffiError);
-        goto cleanup;
-    }
-    logger(@"ensureDDIMounted: lockdownd_connect_rsd succeeded");
-    
-    logger(@"ensureDDIMounted: starting lockdownd_get_value UniqueChipID");
-    ffiError = lockdownd_get_value(lockdownClient, "UniqueChipID", NULL, &chipIDNode);
-    if (ffiError) {
-        NSInteger realCode = ffiError->code;
-        NSInteger realSubCode = ffiError->sub_code;
-        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at lockdownd_get_value UniqueChipID - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
-        if (error) *error = MakeError(UniqueChipIDReadFailed);
-        idevice_error_free(ffiError);
-        goto cleanup;
-    }
-    
-    plist_get_uint_val(chipIDNode, &uniqueChipID);
-    if (uniqueChipID == 0) {
-        logger(@"ensureDDIMounted: UniqueChipID resolved to 0 - invalid");
-        if (error) *error = MakeError(UniqueChipIDInvalid);
-        goto cleanup;
-    }
-    logger([NSString stringWithFormat:@"ensureDDIMounted: UniqueChipID = %llu", uniqueChipID]);
     
     logger(@"ensureDDIMounted: starting image_mounter_mount_personalized_rsd (the actual mount)");
     ffiError = image_mounter_mount_personalized_rsd(mounterClient, provider->adapter, provider->handshake, imageData.bytes, imageData.length, trustCacheData.bytes, trustCacheData.length, buildManifestData.bytes, buildManifestData.length, NULL, uniqueChipID);
