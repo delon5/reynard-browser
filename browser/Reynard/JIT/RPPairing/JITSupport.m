@@ -607,6 +607,20 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
         return NO;
     }
     
+    // TEST - lockdown-ordering fix (established+queried before the
+    // mounter check, per the idevice library's own doc comment) was
+    // directly, empirically ruled out tonight - image_mounter_copy_devices()
+    // still hangs indefinitely even with that satisfied. New
+    // hypothesis: the heartbeat runs continuously on its own task,
+    // sharing the SAME underlying adapter/handshake connection as
+    // this mounter query - a genuine transport-level contention
+    // issue, not a scheduling one (already ruled out separately via
+    // the tokio runtime test). Stopping it permanently here,
+    // diagnostic-only, not restarted - just testing whether the
+    // query finally returns with it genuinely quiet.
+    logger(@"ensureDDIMounted: TEST - stopping heartbeat before any mounter/lockdown work");
+    provider->heartbeatRunning = NO;
+    
     LockdowndClientHandle *lockdownClient = NULL;
     ImageMounterHandle *mounterClient = NULL;
     IdeviceFfiError *ffiError = NULL;
