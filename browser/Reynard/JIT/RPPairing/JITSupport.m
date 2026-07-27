@@ -591,6 +591,16 @@ static BOOL isDDIMounted(ImageMounterHandle *mounterClient, BOOL *mountedOut, NS
     return YES;
 }
 
+// TEST - instrumented throughout. createDeviceProvider() and
+// connectDebugSession() have both been directly, empirically ruled
+// out tonight (real-error logging added to both, neither ever fired
+// across two separate full-timeout tests) - this function is the
+// only remaining, unexamined step between them. The app has hit the
+// FULL 20s timeout on every attempt, not a fast, discrete failure -
+// so a log line before each step starts is added here too, not just
+// real-error surfacing on each FFI call, specifically to catch a
+// genuine hang inside one specific call, where no error is ever
+// returned at all.
 BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
     if (!provider || !provider->adapter || !provider->handshake) {
         if (error) *error = MakeError(DeviceProviderCreateFailed);
@@ -609,43 +619,83 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
     uint64_t uniqueChipID = 0;
     BOOL success = NO;
     
+    logger(@"ensureDDIMounted: starting image_mounter_connect_rsd");
     ffiError = image_mounter_connect_rsd(provider->adapter, provider->handshake, &mounterClient);
     if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at image_mounter_connect_rsd - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
         if (error) *error = MakeError(ImageMounterConnectFailed);
         idevice_error_free(ffiError);
         goto cleanup;
     }
+    logger(@"ensureDDIMounted: image_mounter_connect_rsd succeeded");
     
+    logger(@"ensureDDIMounted: starting isDDIMounted check");
     if (!isDDIMounted(mounterClient, &mounted, error)) {
+        logger(@"ensureDDIMounted: isDDIMounted check itself failed");
         goto cleanup;
     }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: isDDIMounted check succeeded, mounted=%d", mounted]);
     
     if (mounted) {
         success = YES;
         goto cleanup;
     }
     
+    logger(@"ensureDDIMounted: resolving ddiDirectoryURL");
     ddiDirectory = ddiDirectoryURL(error);
-    if (!ddiDirectory) goto cleanup;
+    if (!ddiDirectory) {
+        logger(@"ensureDDIMounted: ddiDirectoryURL FAILED to resolve");
+        goto cleanup;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: ddiDirectory resolved to %@", ddiDirectory.path]);
     
+    logger(@"ensureDDIMounted: starting Image.dmg read");
     imageData = ddiFileData(ddiDirectory, @"Image.dmg", error);
-    if (!imageData) goto cleanup;
+    if (!imageData) {
+        logger(@"ensureDDIMounted: Image.dmg read FAILED");
+        goto cleanup;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: Image.dmg read succeeded, %lu bytes", (unsigned long)imageData.length]);
     
+    logger(@"ensureDDIMounted: starting Image.dmg.trustcache read");
     trustCacheData = ddiFileData(ddiDirectory, @"Image.dmg.trustcache", error);
-    if (!trustCacheData) goto cleanup;
+    if (!trustCacheData) {
+        logger(@"ensureDDIMounted: Image.dmg.trustcache read FAILED");
+        goto cleanup;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: trustcache read succeeded, %lu bytes", (unsigned long)trustCacheData.length]);
     
+    logger(@"ensureDDIMounted: starting BuildManifest.plist read");
     buildManifestData = ddiFileData(ddiDirectory, @"BuildManifest.plist", error);
-    if (!buildManifestData) goto cleanup;
+    if (!buildManifestData) {
+        logger(@"ensureDDIMounted: BuildManifest.plist read FAILED");
+        goto cleanup;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: BuildManifest.plist read succeeded, %lu bytes", (unsigned long)buildManifestData.length]);
     
+    logger(@"ensureDDIMounted: starting lockdownd_connect_rsd");
     ffiError = lockdownd_connect_rsd(provider->adapter, provider->handshake, &lockdownClient);
     if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at lockdownd_connect_rsd - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
         if (error) *error = MakeError(LockdowndConnectFailed);
         idevice_error_free(ffiError);
         goto cleanup;
     }
+    logger(@"ensureDDIMounted: lockdownd_connect_rsd succeeded");
     
+    logger(@"ensureDDIMounted: starting lockdownd_get_value UniqueChipID");
     ffiError = lockdownd_get_value(lockdownClient, "UniqueChipID", NULL, &chipIDNode);
     if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at lockdownd_get_value UniqueChipID - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
         if (error) *error = MakeError(UniqueChipIDReadFailed);
         idevice_error_free(ffiError);
         goto cleanup;
@@ -653,16 +703,24 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
     
     plist_get_uint_val(chipIDNode, &uniqueChipID);
     if (uniqueChipID == 0) {
+        logger(@"ensureDDIMounted: UniqueChipID resolved to 0 - invalid");
         if (error) *error = MakeError(UniqueChipIDInvalid);
         goto cleanup;
     }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: UniqueChipID = %llu", uniqueChipID]);
     
+    logger(@"ensureDDIMounted: starting image_mounter_mount_personalized_rsd (the actual mount)");
     ffiError = image_mounter_mount_personalized_rsd(mounterClient, provider->adapter, provider->handshake, imageData.bytes, imageData.length, trustCacheData.bytes, trustCacheData.length, buildManifestData.bytes, buildManifestData.length, NULL, uniqueChipID);
     if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at image_mounter_mount_personalized_rsd - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
         if (error) *error = MakeError(ModernDDIMountFailed);
         idevice_error_free(ffiError);
         goto cleanup;
     }
+    logger(@"ensureDDIMounted: image_mounter_mount_personalized_rsd succeeded - DDI mounted");
     
     success = YES;
     
