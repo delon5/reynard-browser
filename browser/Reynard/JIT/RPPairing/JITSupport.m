@@ -260,7 +260,24 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
     rp_pairing_file_free(rpPairingFile);
     
     if (ffiError) {
-        if (error) *error = MakeError(TunnelCreateFailed);
+        // TEST - surfacing the real, underlying error here too. This
+        // is the FIRST tunnel_create_rppairing call in the entire
+        // flow - called directly from JITEnabler.m's
+        // enableJITForPID:, before runDebugService() ever runs. The
+        // real-error logging added earlier today only covers
+        // runDebugService()'s own, separate, later call to this same
+        // underlying function - which this specific call site,
+        // reached first on every single attempt, was never covered
+        // by at all.
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"connectDebugSession tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
+        if (error) {
+            *error = [NSError errorWithDomain:ErrorDomain code:TunnelCreateFailed userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to create RPPairing tunnel (real cause code %ld/%ld): %@", (long)realCode, (long)realSubCode, realMessage]
+            }];
+        }
         idevice_error_free(ffiError);
         return NO;
     }
