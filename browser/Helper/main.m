@@ -151,17 +151,13 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
     if (@available(iOS 17.4, *)) {
         pid_t selfPID = getpid();
         NSError *jitError = nil;
-        // TEMPORARY TEST - a real kernel sandbox log confirmed the
-        // Helper's own extension process gets "deny(1) file-read-data
-        // /private/preboot" - the exact path selfHasTXMSupport()
-        // reads from. Hardcoding TRUE here (matching this exact
-        // device's already-confirmed-correct answer from earlier
-        // tonight) to test directly whether this sandbox-denied read,
-        // happening right before the tunnel attempt, is somehow
-        // connected to the ConnectionReset failure - rather than
-        // theorizing about it further.
+        // Test complete: directly, empirically ruled out. Bypassing
+        // this call to a hardcoded value produced the exact same
+        // ConnectionReset result, confirming the sandbox-denied
+        // /private/preboot read is unrelated to the tunnel failure.
+        // Restoring the genuine, real check.
         BOOL success = [JITEnabler.shared enableJITForPID:selfPID
-                                             hasTXMSupport:YES
+                                             hasTXMSupport:selfHasTXMSupport()
                                                      error:&jitError];
         os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing enableJIT for self (pid %d) success: %d, error: %{public}@", selfPID, success, jitError.localizedDescription ?: @"none");
     } else {
