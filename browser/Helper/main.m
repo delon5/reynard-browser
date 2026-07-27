@@ -205,9 +205,17 @@ __attribute__((used, visibility("default"))) int NSExtensionMain(int argc,
   // Moving this off the startup path entirely onto a background queue
   // means a hang here can genuinely, structurally never block the
   // Helper's own startup, or the main app's, ever again.
-  dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-    enableRPPairingJITForSelfIfNeeded();
-  });
+  // TEMPORARY TEST - disabled entirely. Confirmed tonight: general web
+  // browsing becomes very slow specifically while JIT enablement is in
+  // progress, only on this fork's build, never on a clean build without
+  // this Helper-side RPPairing attempt. Testing directly whether the
+  // Helper independently establishing its own tunnel, alongside the
+  // main app's own, already-working one, is the actual cause -
+  // regardless of whether the Helper's own attempt ultimately succeeds
+  // or fails/times out afterward.
+  // dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+  //   enableRPPairingJITForSelfIfNeeded();
+  // });
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundeclared-selector"
