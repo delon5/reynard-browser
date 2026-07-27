@@ -19,7 +19,15 @@ final class JITController {
     private var hasHandledFailure = false
     private(set) var isJITLessModeActive = false
     private var pendingFailureAction: (() -> Void)?
-    private let preflightTimeoutSeconds: Int = 5
+    // TEMPORARY TEST - widened from the original 5s. The watchdog covers
+    // the entire enableJIT(forPID:hasTXMSupport:) call synchronously -
+    // tunnel creation, lockdownd, process control, debug proxy attach,
+    // session allocation, and DDI mounting, all in one budget. A
+    // freshly re-imported pairing file and a first-time DDI mount can
+    // genuinely take longer than 5s. Testing directly whether widening
+    // this resolves the intermittent, codeless "Failed to enable JIT"
+    // timeout seen tonight.
+    private let preflightTimeoutSeconds: Int = 20
     private let failurePresentationRetryLimit = 12
     
     private init() {}
