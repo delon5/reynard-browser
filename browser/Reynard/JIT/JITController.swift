@@ -8,6 +8,7 @@
 import Foundation
 import Darwin
 import UIKit
+import os
 
 final class JITController {
     static let shared = JITController()
@@ -70,11 +71,30 @@ final class JITController {
         return normalized == "tab"
     }
     
+    private static let txmLog = OSLog(subsystem: "com.minh-ton.Reynard", category: "TXMDetection")
+    
+    // DIAGNOSTIC TEST - previously used try? and returned nil for
+    // both failure modes indistinguishably: "directory listing itself
+    // failed (e.g. permission denied)" vs "listing succeeded but
+    // nothing matched the expected length". This distinguishes them
+    // and logs every intermediate step, to find out why this device
+    // shows "TXM Enabled: No" while DolphiniOS on the same device,
+    // same iOS 27, shows "JIT Acquisition - Acquired (TXM)" -
+    // confirming the device genuinely has working TXM, meaning this
+    // check is very likely wrong, not the hardware.
     private static func filePath(atPath path: String, withLength length: Int) -> String? {
-        guard let file = try? FileManager.default.contentsOfDirectory(atPath: path).first(where: { $0.count == length }) else {
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(atPath: path)
+            os_log("filePath: listed %{public}@ successfully, %{public}d entries", log: txmLog, type: .default, path, contents.count)
+            guard let file = contents.first(where: { $0.count == length }) else {
+                os_log("filePath: no entry with length %{public}d found in %{public}@ - entries: %{public}@", log: txmLog, type: .default, length, path, contents.joined(separator: ", "))
+                return nil
+            }
+            return "\(path)/\(file)"
+        } catch {
+            os_log("filePath: FAILED to list %{public}@ - %{public}@", log: txmLog, type: .default, path, error.localizedDescription)
             return nil
         }
-        return "\(path)/\(file)"
     }
     
     // Matches StikDebug's own detectLocalTXM() exactly - a direct,
@@ -88,14 +108,31 @@ final class JITController {
     // for any iOS version. filePath(atPath:withLength:) above already
     // existed in this file, unused anywhere - this is what it was for.
     static func hasTXMSupport() -> Bool {
-        if let boot = filePath(atPath: "/System/Volumes/Preboot", withLength: 36),
-           let file = filePath(atPath: "\(boot)/boot", withLength: 96) {
-            return access("\(file)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0
+        os_log("hasTXMSupport: checking /System/Volumes/Preboot", log: txmLog, type: .default)
+        if let boot = filePath(atPath: "/System/Volumes/Preboot", withLength: 36) {
+            os_log("hasTXMSupport: found boot subdirectory: %{public}@", log: txmLog, type: .default, boot)
+            if let file = filePath(atPath: "\(boot)/boot", withLength: 96) {
+                os_log("hasTXMSupport: found file subdirectory: %{public}@", log: txmLog, type: .default, file)
+                let firmwarePath = "\(file)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4"
+                let result = access(firmwarePath, F_OK) == 0
+                os_log("hasTXMSupport: access(%{public}@) -> %{public}@", log: txmLog, type: .default, firmwarePath, result ? "found (TXM present)" : "NOT found (no TXM)")
+                return result
+            }
+            os_log("hasTXMSupport: did not find a 96-char subdirectory under %{public}@/boot", log: txmLog, type: .default, boot)
         } else {
-            return (filePath(atPath: "/private/preboot", withLength: 96).map {
-                access("\($0)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0
-            }) ?? false
+            os_log("hasTXMSupport: did not find a 36-char subdirectory under /System/Volumes/Preboot", log: txmLog, type: .default)
         }
+        
+        os_log("hasTXMSupport: falling back to /private/preboot", log: txmLog, type: .default)
+        guard let privateBoot = filePath(atPath: "/private/preboot", withLength: 96) else {
+            os_log("hasTXMSupport: did not find a 96-char subdirectory under /private/preboot either - returning false", log: txmLog, type: .default)
+            return false
+        }
+        os_log("hasTXMSupport: found fallback subdirectory: %{public}@", log: txmLog, type: .default, privateBoot)
+        let firmwarePath = "\(privateBoot)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4"
+        let result = access(firmwarePath, F_OK) == 0
+        os_log("hasTXMSupport: access(%{public}@) -> %{public}@", log: txmLog, type: .default, firmwarePath, result ? "found (TXM present)" : "NOT found (no TXM)")
+        return result
     }
     
     private func newDeviceOSVersion() -> DeviceOSVersion {
