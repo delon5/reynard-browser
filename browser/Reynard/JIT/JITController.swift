@@ -73,66 +73,62 @@ final class JITController {
     
     private static let txmLog = OSLog(subsystem: "com.minh-ton.Reynard", category: "TXMDetection")
     
-    // DIAGNOSTIC TEST - previously used try? and returned nil for
-    // both failure modes indistinguishably: "directory listing itself
-    // failed (e.g. permission denied)" vs "listing succeeded but
-    // nothing matched the expected length". This distinguishes them
-    // and logs every intermediate step, to find out why this device
-    // shows "TXM Enabled: No" while DolphiniOS on the same device,
-    // same iOS 27, shows "JIT Acquisition - Acquired (TXM)" -
-    // confirming the device genuinely has working TXM, meaning this
-    // check is very likely wrong, not the hardware.
-    private static func filePath(atPath path: String, withLength length: Int) -> String? {
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(atPath: path)
-            os_log("filePath: listed %{public}@ successfully, %{public}d entries", log: txmLog, type: .default, path, contents.count)
-            guard let file = contents.first(where: { $0.count == length }) else {
-                os_log("filePath: no entry with length %{public}d found in %{public}@ - entries: %{public}@", log: txmLog, type: .default, length, path, contents.joined(separator: ", "))
-                return nil
-            }
-            return "\(path)/\(file)"
-        } catch {
-            os_log("filePath: FAILED to list %{public}@ - %{public}@", log: txmLog, type: .default, path, error.localizedDescription)
-            return nil
-        }
-    }
-    
-    // Matches StikDebug's own detectLocalTXM() exactly - a direct,
-    // empirical check for the TXM firmware file's presence, rather
-    // than the hardcoded device-model/iOS-version table this used to
-    // be (StikDebug's own changelog shows that style needing repeated
-    // patching over time as new hardware ships - e.g. "Fixes TXM
-    // checks for devices with A13/A14/M1 chips on iOS 27"). No
-    // explicit #available gating needed either - the firmware file
-    // simply won't exist pre-TXM, so the check is correct on its own
-    // for any iOS version. filePath(atPath:withLength:) above already
-    // existed in this file, unused anywhere - this is what it was for.
+    // REVERTED - the file-existence check that was here (matching an
+    // older StikDebug commit's detectLocalTXM()) has been removed.
+    // StikDebug's own PR #416, "Fix TXM detection on iOS 27" (merged
+    // June 17), replaced that exact approach with this device-model /
+    // iOS-version-threshold check instead - confirming the older
+    // commit this was ported from predated their own fix for this
+    // exact problem, which is why it returned false on this device
+    // despite DolphiniOS confirming working TXM on the same hardware.
+    // "Adapted from StikDebug" was correct the first time; this
+    // restores that original logic exactly, keeping it static (needed
+    // for the Settings UI row) and adding lightweight logging for
+    // future visibility.
     static func hasTXMSupport() -> Bool {
-        os_log("hasTXMSupport: checking /System/Volumes/Preboot", log: txmLog, type: .default)
-        if let boot = filePath(atPath: "/System/Volumes/Preboot", withLength: 36) {
-            os_log("hasTXMSupport: found boot subdirectory: %{public}@", log: txmLog, type: .default, boot)
-            if let file = filePath(atPath: "\(boot)/boot", withLength: 96) {
-                os_log("hasTXMSupport: found file subdirectory: %{public}@", log: txmLog, type: .default, file)
-                let firmwarePath = "\(file)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4"
-                let result = access(firmwarePath, F_OK) == 0
-                os_log("hasTXMSupport: access(%{public}@) -> %{public}@", log: txmLog, type: .default, firmwarePath, result ? "found (TXM present)" : "NOT found (no TXM)")
-                return result
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let hardware = withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
+                String(cString: $0)
             }
-            os_log("hasTXMSupport: did not find a 96-char subdirectory under %{public}@/boot", log: txmLog, type: .default, boot)
-        } else {
-            os_log("hasTXMSupport: did not find a 36-char subdirectory under /System/Volumes/Preboot", log: txmLog, type: .default)
         }
         
-        os_log("hasTXMSupport: falling back to /private/preboot", log: txmLog, type: .default)
-        guard let privateBoot = filePath(atPath: "/private/preboot", withLength: 96) else {
-            os_log("hasTXMSupport: did not find a 96-char subdirectory under /private/preboot either - returning false", log: txmLog, type: .default)
-            return false
+        if #available(iOS 27.0, *) {
+            let result = hardware != "iPad8,11" && hardware != "iPad8,12"
+            os_log("hasTXMSupport: hardware=%{public}@, iOS 27+ branch, result=%{public}@", log: txmLog, type: .default, hardware, result ? "true" : "false")
+            return result
         }
-        os_log("hasTXMSupport: found fallback subdirectory: %{public}@", log: txmLog, type: .default, privateBoot)
-        let firmwarePath = "\(privateBoot)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4"
-        let result = access(firmwarePath, F_OK) == 0
-        os_log("hasTXMSupport: access(%{public}@) -> %{public}@", log: txmLog, type: .default, firmwarePath, result ? "found (TXM present)" : "NOT found (no TXM)")
-        return result
+        
+        if #available(iOS 26.0, *) {
+            let pattern = hardware.hasPrefix("iPad")
+            ? #"iPad(\d+),(\d+)"#
+            : #"iPhone(\d+),(\d+)"#
+            let threshold: Double = hardware.hasPrefix("iPad") ? 14.5 : 14.2
+            
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(
+                    in: hardware,
+                    range: NSRange(hardware.startIndex..., in: hardware)
+                  ),
+                  let majorRange = Range(match.range(at: 1), in: hardware),
+                  let minorRange = Range(match.range(at: 2), in: hardware),
+                  let major = Double(hardware[majorRange]),
+                  let minor = Double(hardware[minorRange])
+            else {
+                os_log("hasTXMSupport: hardware=%{public}@, iOS 26+ branch, failed to parse version - returning false", log: txmLog, type: .default, hardware)
+                return false
+            }
+            
+            let divisor = pow(10.0, Double(String(Int(minor)).count))
+            let ver = major + (minor / divisor)
+            let result = ver >= threshold
+            os_log("hasTXMSupport: hardware=%{public}@, iOS 26+ branch, ver=%{public}f, threshold=%{public}f, result=%{public}@", log: txmLog, type: .default, hardware, ver, threshold, result ? "true" : "false")
+            return result
+        }
+        
+        os_log("hasTXMSupport: hardware=%{public}@, pre-iOS-26 - returning false", log: txmLog, type: .default, hardware)
+        return false
     }
     
     private func newDeviceOSVersion() -> DeviceOSVersion {
