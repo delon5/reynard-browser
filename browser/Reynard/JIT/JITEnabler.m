@@ -19,7 +19,7 @@
 @property(nonatomic, strong) dispatch_queue_t providerQueue;
 @property(nonatomic, assign) BOOL didEnsureDDIMounted;
 
-- (DeviceProvider *)getProvider:(NSError **)error;
+- (DeviceProvider *)getProviderForPID:(int32_t)pid error:(NSError **)error;
 
 @end
 
@@ -109,7 +109,7 @@
         // Thanks StikDebug!
         // https://github.com/StephenDev0/StikDebug
         
-        DeviceProvider *provider = [self getProvider:error];
+        DeviceProvider *provider = [self getProviderForPID:pid error:error];
         if (!provider) return NO;
         
         DebugSession session = {0};
@@ -214,26 +214,54 @@
     });
 }
 
-- (DeviceProvider *)getProvider:(NSError **)error {
+- (DeviceProvider *)getProviderForPID:(int32_t)pid error:(NSError **)error {
     __block DeviceProvider *provider = NULL;
     __block NSError *providerError = nil;
     
+    // providerQueue is DISPATCH_QUEUE_SERIAL - every call to this
+    // method, for every PID, across the whole process, goes through
+    // it. If one call gets stuck inside ensureDDIMounted below, every
+    // other concurrent call for a different PID queues up behind it
+    // right here. The "entered providerQueue" line makes that visible
+    // directly rather than left to infer.
+    CFAbsoluteTime getProviderCallStart = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"getProvider: (pid %d) starting, waiting for providerQueue", pid]);
+    
     dispatch_sync(self.providerQueue, ^{
+        CFAbsoluteTime queueEntryTime = CFAbsoluteTimeGetCurrent();
+        logger([NSString stringWithFormat:@"getProvider: (pid %d) entered providerQueue after %.0fms wait", pid, (queueEntryTime - getProviderCallStart) * 1000.0]);
+        
         if (!self.sharedProvider) {
+            CFAbsoluteTime createCallStart = CFAbsoluteTimeGetCurrent();
+            logger([NSString stringWithFormat:@"getProvider: (pid %d) starting createDeviceProvider (no cached provider)", pid]);
             self.sharedProvider = createDeviceProvider(pairingFilePath(), @"10.7.0.1", &providerError);
             self.didEnsureDDIMounted = NO;
+            CFAbsoluteTime createCallEnd = CFAbsoluteTimeGetCurrent();
+            logger([NSString stringWithFormat:@"getProvider: (pid %d) createDeviceProvider %@, call took %.0fms", pid, self.sharedProvider ? @"succeeded" : @"FAILED", (createCallEnd - createCallStart) * 1000.0]);
+        } else {
+            logger([NSString stringWithFormat:@"getProvider: (pid %d) reusing cached provider, skipping createDeviceProvider", pid]);
         }
         
         if (self.sharedProvider && !self.didEnsureDDIMounted) {
-            if (!ensureDDIMounted(self.sharedProvider, &providerError)) {
+            CFAbsoluteTime ddiCallStart = CFAbsoluteTimeGetCurrent();
+            logger([NSString stringWithFormat:@"getProvider: (pid %d) starting ensureDDIMounted (not yet confirmed this session)", pid]);
+            BOOL ddiOK = ensureDDIMounted(self.sharedProvider, &providerError);
+            CFAbsoluteTime ddiCallEnd = CFAbsoluteTimeGetCurrent();
+            logger([NSString stringWithFormat:@"getProvider: (pid %d) ensureDDIMounted %@, call took %.0fms", pid, ddiOK ? @"succeeded" : @"FAILED", (ddiCallEnd - ddiCallStart) * 1000.0]);
+            if (!ddiOK) {
                 provider = NULL;
                 return;
             }
             self.didEnsureDDIMounted = YES;
+        } else if (self.sharedProvider) {
+            logger([NSString stringWithFormat:@"getProvider: (pid %d) DDI already confirmed mounted this session, skipping ensureDDIMounted", pid]);
         }
         
         provider = self.sharedProvider;
     });
+    
+    CFAbsoluteTime getProviderCallEnd = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"getProvider: (pid %d) returning %@, total call took %.0fms", pid, provider ? @"a valid provider" : @"NULL", (getProviderCallEnd - getProviderCallStart) * 1000.0]);
     
     if (!provider && error) *error = providerError;
     return provider;
