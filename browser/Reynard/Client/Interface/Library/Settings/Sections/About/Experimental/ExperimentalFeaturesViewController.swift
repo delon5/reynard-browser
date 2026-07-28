@@ -32,11 +32,12 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private enum Row: CaseIterable {
         case videoPictureInPicture
         case hideUpdateNotification
+        case hideUpdateAvailableBanner
         case resetDDIStorage
         
         var section: Section {
             switch self {
-            case .videoPictureInPicture, .hideUpdateNotification:
+            case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
             case .resetDDIStorage:
                 return .jitDiagnostics
@@ -46,6 +47,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private let videoPictureInPictureSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
+    private let hideUpdateAvailableBannerSwitch = UISwitch()
     
     init() {
         super.init(style: .insetGrouped)
@@ -113,6 +115,20 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("Hide Reynard Update Notification", comment: ""),
                 accessoryView: hideUpdateNotificationSwitch
             )
+        case .hideUpdateAvailableBanner:
+            // A completely separate mechanism from the row above -
+            // this hides the "Update Available" section header,
+            // release notes, and Update Now button shown at the top
+            // of the main Settings screen itself
+            // (SettingsViewController.Section.updates), not the
+            // homepage card. Deliberately a separate toggle rather
+            // than folded into the one above, since these two have
+            // nothing to do with each other beyond both being update
+            // notifications.
+            return switchCell(
+                title: NSLocalizedString("Hide Update Available Banner", comment: ""),
+                accessoryView: hideUpdateAvailableBannerSwitch
+            )
         case .resetDDIStorage:
             // Destructive-red — this deletes on-disk data, so it
             // should read as destructive like "Erase All Content"
@@ -136,7 +152,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         }
         
         switch sectionRows[indexPath.row] {
-        case .videoPictureInPicture, .hideUpdateNotification:
+        case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
             break
         case .resetDDIStorage:
             confirmResetDDIStorage()
@@ -150,11 +166,13 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private func configureSwitch() {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
+        hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
+        hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
     }
     
     @objc private func videoPictureInPictureSwitchDidChange(_ sender: UISwitch) {
@@ -169,6 +187,15 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     // value at launch.
     @objc private func hideUpdateNotificationSwitchDidChange(_ sender: UISwitch) {
         Prefs.HomepageSettings.showsNewUpdates = !sender.isOn
+    }
+    
+    // No restart needed here either -
+    // SettingsViewController.displayedSections is a plain computed
+    // property with no caching, and that screen already calls
+    // tableView.reloadData() in its own viewWillAppear, so navigating
+    // back there from here picks up the new value naturally.
+    @objc private func hideUpdateAvailableBannerSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.hidesUpdateAvailableBanner = sender.isOn
     }
     
     // MARK: - DDI Storage Reset

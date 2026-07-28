@@ -50,7 +50,7 @@ final class SettingsViewController: SettingsTableViewController {
         var hiddenSections: Set<Section> = []
         let unsandboxed = getEntitlementValue("com.apple.private.security.no-sandbox")
         
-        if !BrowserUpdates.shared.hasUpdate {
+        if !BrowserUpdates.shared.hasUpdate || Prefs.ExperimentalSettings.hidesUpdateAvailableBanner {
             hiddenSections.insert(.updates)
         }
         

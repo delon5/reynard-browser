@@ -59,6 +59,7 @@ final class BrowserPreferences {
             
             // Experimental
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
+            key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
             key("BrowsingSettings", "swipeUpForTabSwitcher"): true,
@@ -1059,6 +1060,22 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isVideoPictureInPictureEnabled")
+            }
+        }
+        
+        // Gates SettingsViewController.Section.updates - the "Update
+        // Available" section header, release notes, and Update Now
+        // button shown at the top of the main Settings screen itself.
+        // Distinct from Prefs.HomepageSettings.showsNewUpdates, which
+        // gates a completely separate homepage card - these two have
+        // nothing to do with each other beyond both being update
+        // notifications, hence two separate toggles rather than one.
+        static var hidesUpdateAvailableBanner: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "hidesUpdateAvailableBanner")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "hidesUpdateAvailableBanner")
             }
         }
     }
