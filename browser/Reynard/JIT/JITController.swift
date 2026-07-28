@@ -70,52 +70,32 @@ final class JITController {
         return normalized == "tab"
     }
     
-    private func filePath(atPath path: String, withLength length: Int) -> String? {
+    private static func filePath(atPath path: String, withLength length: Int) -> String? {
         guard let file = try? FileManager.default.contentsOfDirectory(atPath: path).first(where: { $0.count == length }) else {
             return nil
         }
         return "\(path)/\(file)"
     }
     
-    // Adapted from StikDebug
+    // Matches StikDebug's own detectLocalTXM() exactly - a direct,
+    // empirical check for the TXM firmware file's presence, rather
+    // than the hardcoded device-model/iOS-version table this used to
+    // be (StikDebug's own changelog shows that style needing repeated
+    // patching over time as new hardware ships - e.g. "Fixes TXM
+    // checks for devices with A13/A14/M1 chips on iOS 27"). No
+    // explicit #available gating needed either - the firmware file
+    // simply won't exist pre-TXM, so the check is correct on its own
+    // for any iOS version. filePath(atPath:withLength:) above already
+    // existed in this file, unused anywhere - this is what it was for.
     static func hasTXMSupport() -> Bool {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        let hardware = withUnsafePointer(to: &systemInfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
-                String(cString: $0)
-            }
+        if let boot = filePath(atPath: "/System/Volumes/Preboot", withLength: 36),
+           let file = filePath(atPath: "\(boot)/boot", withLength: 96) {
+            return access("\(file)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0
+        } else {
+            return (filePath(atPath: "/private/preboot", withLength: 96).map {
+                access("\($0)/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", F_OK) == 0
+            }) ?? false
         }
-        
-        if #available(iOS 27.0, *) {
-            return hardware != "iPad8,11" && hardware != "iPad8,12"
-        }
-        
-        if #available(iOS 26.0, *) {
-            let pattern = hardware.hasPrefix("iPad")
-            ? #"iPad(\d+),(\d+)"#
-            : #"iPhone(\d+),(\d+)"#
-            let threshold: Double = hardware.hasPrefix("iPad") ? 14.5 : 14.2
-            
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(
-                    in: hardware,
-                    range: NSRange(hardware.startIndex..., in: hardware)
-                  ),
-                  let majorRange = Range(match.range(at: 1), in: hardware),
-                  let minorRange = Range(match.range(at: 2), in: hardware),
-                  let major = Double(hardware[majorRange]),
-                  let minor = Double(hardware[minorRange])
-            else {
-                return false
-            }
-            
-            let divisor = pow(10.0, Double(String(Int(minor)).count))
-            let ver = major + (minor / divisor)
-            return ver >= threshold
-        }
-        
-        return false
     }
     
     private func newDeviceOSVersion() -> DeviceOSVersion {
