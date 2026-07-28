@@ -13,6 +13,9 @@
 #import <os/log.h>
 #import <sys/utsname.h>
 #import <unistd.h>
+#import <sys/file.h>
+#import <fcntl.h>
+#import <math.h>
 #import "Utils.h"
 #import "JITEnabler.h"
 #import "JITUtils.h"
@@ -172,6 +175,159 @@ static void recordHelperJITOutcome(NSString *outcome, NSString *errorDescription
     [jsonData writeToURL:outcomeFileURL atomically:YES];
 }
 
+// Limits how many Helper instances are actively attempting JIT
+// self-enable AT ONCE, device-wide - see the top-of-file-generating
+// script's docstring for the full reasoning (test36 motivated this:
+// spreading out attempt START times alone didn't meaningfully reduce
+// the watchdog hang rate). Every wait here is bounded and every
+// reservation self-expires, so a genuinely stuck attempt can only
+// ever delay others by a fixed, known amount - never block them
+// indefinitely.
+static const NSInteger kMaxConcurrentSlots = 2;
+static const NSTimeInterval kConcurrencySlotExpirySeconds = 9.0;
+static const NSTimeInterval kConcurrencySlotWaitBudgetSeconds = 8.0;
+
+static NSURL *concurrencySlotsFileURL(void) {
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
+    if (!containerURL) {
+        return nil;
+    }
+    return [containerURL URLByAppendingPathComponent:@"helper-jit-concurrency-slots.txt" isDirectory:NO];
+}
+
+static NSArray<NSNumber *> *readNonExpiredSlots(int fd, NSTimeInterval now) {
+    NSMutableArray<NSNumber *> *active = [NSMutableArray array];
+    off_t fileSize = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
+    if (fileSize > 0 && fileSize < (1024 * 1024)) {
+        NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)fileSize];
+        read(fd, data.mutableBytes, (size_t)fileSize);
+        NSString *contents = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        for (NSString *line in [contents componentsSeparatedByString:@"\n"]) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmed.length == 0) {
+                continue;
+            }
+            NSTimeInterval ts = trimmed.doubleValue;
+            if ((now - ts) < kConcurrencySlotExpirySeconds) {
+                [active addObject:@(ts)];
+            }
+        }
+    }
+    return active;
+}
+
+static void writeSlots(int fd, NSArray<NSNumber *> *slots) {
+    NSMutableString *newContents = [NSMutableString string];
+    for (NSNumber *ts in slots) {
+        [newContents appendFormat:@"%.6f\n", ts.doubleValue];
+    }
+    NSData *newData = [newContents dataUsingEncoding:NSUTF8StringEncoding];
+    lseek(fd, 0, SEEK_SET);
+    ftruncate(fd, 0);
+    write(fd, newData.bytes, newData.length);
+}
+
+// Brief, bounded internal lock (LOCK_NB with a short polling loop, up
+// to 0.5s) purely to make the read-prune-write of the shared slots
+// list atomic across processes - never held across the actual JIT
+// attempt itself. Fails open (returns YES, as if a slot were claimed)
+// if the shared container or the brief lock itself is unavailable,
+// so the concurrency-limiting mechanism's own machinery can never be
+// the thing that blocks JIT entirely.
+static BOOL tryClaimConcurrencySlot(NSTimeInterval *claimedAtOut) {
+    NSURL *fileURL = concurrencySlotsFileURL();
+    if (!fileURL) {
+        return YES;
+    }
+    
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        return YES;
+    }
+    
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return YES;
+        }
+        usleep(5000);
+    }
+    
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSMutableArray<NSNumber *> *active = [readNonExpiredSlots(fd, now) mutableCopy];
+    
+    BOOL claimed = NO;
+    NSTimeInterval myClaim = now;
+    if (active.count < (NSUInteger)kMaxConcurrentSlots) {
+        [active addObject:@(myClaim)];
+        claimed = YES;
+    }
+    
+    writeSlots(fd, active);
+    flock(fd, LOCK_UN);
+    close(fd);
+    
+    if (claimed && claimedAtOut) {
+        *claimedAtOut = myClaim;
+    }
+    return claimed;
+}
+
+static void releaseConcurrencySlot(NSTimeInterval claimedAt) {
+    NSURL *fileURL = concurrencySlotsFileURL();
+    if (!fileURL) {
+        return;
+    }
+    
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR);
+    if (fd < 0) {
+        return;
+    }
+    
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return;
+        }
+        usleep(5000);
+    }
+    
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSArray<NSNumber *> *active = readNonExpiredSlots(fd, now);
+    NSMutableArray<NSNumber *> *remaining = [NSMutableArray array];
+    for (NSNumber *ts in active) {
+        if (fabs(ts.doubleValue - claimedAt) >= 0.000001) {
+            [remaining addObject:ts];
+        }
+    }
+    
+    writeSlots(fd, remaining);
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+// Waits, with a bounded budget, for a concurrency slot to free up.
+// Returns YES with *claimedAtOut set if claimed within budget; NO if
+// the budget was exceeded - the caller proceeds without a slot rather
+// than waiting indefinitely, exactly as documented above.
+static BOOL waitForConcurrencySlot(NSTimeInterval *claimedAtOut) {
+    NSTimeInterval waitDeadline = [NSDate date].timeIntervalSince1970 + kConcurrencySlotWaitBudgetSeconds;
+    
+    while (YES) {
+        if (tryClaimConcurrencySlot(claimedAtOut)) {
+            return YES;
+        }
+        if ([NSDate date].timeIntervalSince1970 > waitDeadline) {
+            return NO;
+        }
+        usleep(200000);
+    }
+}
+
 static void enableRPPairingJITForSelfIfNeeded(void) {
     if (getEntitlementValue(@"com.apple.private.security.no-sandbox")) {
         // TrollStore/jailbroken devices are handled entirely by
@@ -222,6 +378,19 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
         // retry loop below does eventually finish - fast or slow -
         // it overwrites this with the real, final outcome.
         pid_t selfPID = getpid();
+        
+        // CONCURRENCY LIMIT TEST - test36 found that spreading out
+        // attempt START times (the jitter below) did NOT meaningfully
+        // reduce the watchdog hang rate, pointing at overlapping
+        // in-flight session count as the real constraint rather than
+        // burst timing alone. Waits here, before the watchdog is even
+        // scheduled, so its 8s budget measures the actual attempt,
+        // not time spent waiting for a slot.
+        NSTimeInterval slotClaimedAt = 0;
+        BOOL hasConcurrencySlot = waitForConcurrencySlot(&slotClaimedAt);
+        if (!hasConcurrencySlot) {
+            os_log(OS_LOG_DEFAULT, "[HelperJIT] (pid %d) proceeding without a concurrency slot after %.0fs wait budget exceeded", selfPID, kConcurrencySlotWaitBudgetSeconds);
+        }
         
         // Includes selfPID (declared just above, so the block below
         // captures its already-set value) specifically so a single
@@ -287,6 +456,10 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
             didFinish = YES;
         });
         recordHelperJITOutcome(success ? @"succeeded" : @"failed", success ? nil : lastErrorDescription);
+        
+        if (hasConcurrencySlot) {
+            releaseConcurrencySlot(slotClaimedAt);
+        }
     } else {
         os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing JIT requires iOS 17.4+, unavailable on this OS version");
     }
