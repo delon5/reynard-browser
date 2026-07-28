@@ -221,11 +221,21 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
         // whether the original call ever actually returns. If the
         // retry loop below does eventually finish - fast or slow -
         // it overwrites this with the real, final outcome.
+        pid_t selfPID = getpid();
+        
+        // Includes selfPID (declared just above, so the block below
+        // captures its already-set value) specifically so a single
+        // capture can match this line up with the retry loop's own
+        // "(pid %d) attempt..." lines below and show the real gap
+        // between when the watchdog gave up waiting and when (if
+        // ever) the underlying call actually returned - the open
+        // question of whether process_control_new is a genuinely
+        // permanent hang or just very slow.
         dispatch_queue_t watchdogRecordQueue = dispatch_queue_create("com.minh-ton.Reynard.HelperJIT.WatchdogRecordQueue", DISPATCH_QUEUE_SERIAL);
         __block BOOL didFinish = NO;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), watchdogRecordQueue, ^{
             if (!didFinish) {
-                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable exceeded 8s budget, recording timeout (underlying call may still be running)");
+                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable (pid %d) exceeded 8s budget, recording timeout (underlying call may still be running)", selfPID);
                 recordHelperJITOutcome(@"timed_out", nil);
             }
         });
@@ -233,7 +243,6 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
         NSTimeInterval initialJitter = ((double)arc4random_uniform(300)) / 1000.0;
         [NSThread sleepForTimeInterval:initialJitter];
         
-        pid_t selfPID = getpid();
         BOOL hasTXM = selfHasTXMSupport();
         BOOL success = NO;
         NSString *lastErrorDescription = nil;
