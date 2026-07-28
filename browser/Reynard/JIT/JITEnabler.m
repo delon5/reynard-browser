@@ -118,13 +118,21 @@
         if (!connectDebugSession(provider, &session, @"10.7.0.1", error)) return NO;
         
         ProcessControlHandle *processControl = NULL;
+        CFAbsoluteTime processControlCallStart = CFAbsoluteTimeGetCurrent();
+        logger(@"enableJITForPID: starting process_control_new");
         ffiError = process_control_new(session.remoteServer, &processControl);
+        CFAbsoluteTime processControlCallEnd = CFAbsoluteTimeGetCurrent();
         if (ffiError) {
+            NSInteger realCode = ffiError->code;
+            NSInteger realSubCode = ffiError->sub_code;
+            NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+            logger([NSString stringWithFormat:@"enableJITForPID: process_control_new REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", (long)realCode, (long)realSubCode, realMessage, (processControlCallEnd - processControlCallStart) * 1000.0]);
             if (error) *error = MakeError(ProcessControlCreateFailed);
             idevice_error_free(ffiError);
             freeDebugSession(&session);
             return NO;
         }
+        logger([NSString stringWithFormat:@"enableJITForPID: process_control_new succeeded, call took %.0fms", (processControlCallEnd - processControlCallStart) * 1000.0]);
         
         ffiError = process_control_disable_memory_limit(processControl, (uint64_t)pid);
         process_control_free(processControl);
@@ -135,23 +143,33 @@
         
         NSError *commandError = nil;
         NSString *noAckResponse = nil;
-        if (!configureNoAckMode(session.debugProxy, &noAckResponse, &commandError)) {
+        CFAbsoluteTime noAckCallStart = CFAbsoluteTimeGetCurrent();
+        logger([NSString stringWithFormat:@"enableJITForPID: starting configureNoAckMode for pid %d", pid]);
+        BOOL noAckSucceeded = configureNoAckMode(session.debugProxy, &noAckResponse, &commandError);
+        CFAbsoluteTime noAckCallEnd = CFAbsoluteTimeGetCurrent();
+        if (!noAckSucceeded) {
+            logger([NSString stringWithFormat:@"enableJITForPID: configureNoAckMode FAILED for pid %d, call took %.0fms, error: %@", pid, (noAckCallEnd - noAckCallStart) * 1000.0, commandError.localizedDescription ?: @"(no error set)"]);
             if (error) *error = commandError ?: MakeError(NoAckConfigureFailed);
             freeDebugSession(&session);
             return NO;
         }
         
-        logger([NSString stringWithFormat:@"QStartNoAckMode result for pid %d: %@", pid, noAckResponse ?: @"<no response>"]);
+        logger([NSString stringWithFormat:@"QStartNoAckMode result for pid %d: %@ (call took %.0fms)", pid, noAckResponse ?: @"<no response>", (noAckCallEnd - noAckCallStart) * 1000.0]);
         
         NSString *attachCommand = [NSString stringWithFormat:@"vAttach;%X", pid];
         NSString *attachResponse = nil;
-        if (!sendDebugCommand(session.debugProxy, attachCommand, &attachResponse, &commandError)) {
+        CFAbsoluteTime attachCallStart = CFAbsoluteTimeGetCurrent();
+        logger([NSString stringWithFormat:@"enableJITForPID: starting attach command for pid %d", pid]);
+        BOOL attachSucceeded = sendDebugCommand(session.debugProxy, attachCommand, &attachResponse, &commandError);
+        CFAbsoluteTime attachCallEnd = CFAbsoluteTimeGetCurrent();
+        if (!attachSucceeded) {
+            logger([NSString stringWithFormat:@"enableJITForPID: attach command FAILED for pid %d, call took %.0fms, error: %@", pid, (attachCallEnd - attachCallStart) * 1000.0, commandError.localizedDescription ?: @"(no error set)"]);
             if (error) *error = commandError ?: MakeError(AttachDebugProxyFailed);
             freeDebugSession(&session);
             return NO;
         }
         
-        logger([NSString stringWithFormat:@"Attach response for pid %d: %@", pid, attachResponse.length > 0 ? @"<stop packet>" : @"<no response>"]);
+        logger([NSString stringWithFormat:@"Attach response for pid %d: %@ (call took %.0fms)", pid, attachResponse.length > 0 ? @"<stop packet>" : @"<no response>", (attachCallEnd - attachCallStart) * 1000.0]);
         
         if (hasTXMSupport) {
             registerJITEndpointForPID(pid, @"10.7.0.1", 49152);
