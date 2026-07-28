@@ -109,7 +109,7 @@ final class JITController {
     
     private func newJITRuntimeInfo() -> JITRuntimeInfo {
         return JITRuntimeInfo(
-            hasTXMSupport: hasTXMSupport() ? 1 : 0,
+            hasTXMSupport: Self.hasTXMSupport() ? 1 : 0,
             deviceOSVersion: newDeviceOSVersion()
         )
     }
@@ -146,7 +146,7 @@ final class JITController {
     
     private func attachToProcess(pid: Int32) {
         do {
-            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: hasTXMSupport())
+            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: Self.hasTXMSupport())
             cancelPreflightWatchdog(for: pid)
             ReportJITStatusForChild(pid, true, newJITRuntimeInfo())
         } catch {
