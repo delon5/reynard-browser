@@ -233,6 +233,15 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
     address.sin_port = htons(rppairingPort);
     inet_pton(AF_INET, targetAddress.UTF8String, &address.sin_addr);
     
+    // TIMING TEST - testing whether LOCAL_RUNTIME_GUARD contention
+    // (e.g. from heartbeat's own periodic run_sync_local calls on
+    // this same process's shared runtime) creates a long enough gap
+    // after tunnel creation for a freshly-created tunnel's own
+    // background service task to go unserviced and get closed by the
+    // device before this function ever gets to use it. Remove once
+    // the BrokenPipe/channel-closed pattern is understood.
+    CFAbsoluteTime tunnelCallStart = CFAbsoluteTimeGetCurrent();
+    
     ffiError = tunnel_create_rppairing(
                                        (const struct sockaddr *)&address,
                                        (socklen_t)sizeof(address),
@@ -242,6 +251,8 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
                                        &session->adapter, &session->handshake
                                        );
     rp_pairing_file_free(rpPairingFile);
+    
+    CFAbsoluteTime tunnelCallEnd = CFAbsoluteTimeGetCurrent();
     
     if (ffiError) {
         // TEST - surfacing the real, underlying error here too. This
@@ -256,7 +267,7 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
         NSInteger realCode = ffiError->code;
         NSInteger realSubCode = ffiError->sub_code;
         NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@", (long)realCode, (long)realSubCode, realMessage]);
+        logger([NSString stringWithFormat:@"connectDebugSession tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", (long)realCode, (long)realSubCode, realMessage, (tunnelCallEnd - tunnelCallStart) * 1000.0]);
         if (error) {
             *error = [NSError errorWithDomain:ErrorDomain code:TunnelCreateFailed userInfo:@{
                 NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to create RPPairing tunnel (real cause code %ld/%ld): %@", (long)realCode, (long)realSubCode, realMessage]
@@ -266,13 +277,24 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
         return NO;
     }
     
+    logger([NSString stringWithFormat:@"connectDebugSession tunnel_create_rppairing succeeded, call took %.0fms", (tunnelCallEnd - tunnelCallStart) * 1000.0]);
+    
+    CFAbsoluteTime remoteServerCallStart = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"connectDebugSession gap before remote_server_connect_rsd: %.0fms since tunnel ready", (remoteServerCallStart - tunnelCallEnd) * 1000.0]);
+    
     ffiError = remote_server_connect_rsd(session->adapter, session->handshake, &session->remoteServer);
+    
+    CFAbsoluteTime remoteServerCallEnd = CFAbsoluteTimeGetCurrent();
+    
     if (ffiError) {
+        logger([NSString stringWithFormat:@"connectDebugSession remote_server_connect_rsd FAILED, call took %.0fms, total elapsed since tunnel ready: %.0fms", (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
         if (error) *error = MakeError(RemoteServerConnectFailed);
         idevice_error_free(ffiError);
         freeDebugSession(session);
         return NO;
     }
+    
+    logger([NSString stringWithFormat:@"connectDebugSession remote_server_connect_rsd succeeded, call took %.0fms, total elapsed since tunnel ready: %.0fms", (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
     
     ffiError = debug_proxy_connect_rsd(session->adapter, session->handshake, &session->debugProxy);
     if (ffiError) {
