@@ -398,28 +398,69 @@ void runDebugService(int32_t pid, DebugSession *session) {
     
     registerDebugSessionPID(pid);
     
+    // DIAGNOSTIC TEST - this loop runs for the entire lifetime of the
+    // target process (self, on the Helper's self-enable path) and was
+    // previously completely unlogged beyond the two exit-condition
+    // lines below. "Helper JIT: Succeeded" in Settings only reflects
+    // that vAttach succeeded - this loop starting, and staying alive,
+    // was never actually confirmed by anything built tonight.
+    //
+    // Not logging every iteration unconditionally - this can run many
+    // times during active JIT use and would flood the log. First 3
+    // iterations log unconditionally (a hang here would most resemble
+    // every other hang found tonight - stuck at startup); iteration 4+
+    // only logs a "c" command if it takes over 1 second, catching a
+    // genuinely stuck later iteration without spamming normal
+    // operation. Breakpoint handling logs unconditionally regardless
+    // of iteration count.
+    CFAbsoluteTime debugServiceLoopStart = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"runDebugService: (pid %d) loop starting", pid]);
+    NSInteger debugServiceIteration = 0;
+    static const NSInteger kUnconditionalLogIterations = 3;
+    static const NSTimeInterval kSlowContinueThresholdSeconds = 1.0;
+    
     NSError *commandError = nil;
     BOOL exitPacketPresent = NO;
     BOOL detachedByCommand = NO;
     
     while (YES) {
         @autoreleasepool {
+            debugServiceIteration++;
+            BOOL verboseThisIteration = debugServiceIteration <= kUnconditionalLogIterations;
+            
             NSString *stopResponse = nil;
             commandError = nil;
             
             if (shouldDetachDebugSessionPID(pid)) {
                 detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
-                if (detachedByCommand) break;
+                if (detachedByCommand) {
+                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach requested and completed at iteration %ld", pid, (long)debugServiceIteration]);
+                    break;
+                }
             }
             
-            if (!sendDebugCommand(session->debugProxy, @"c", &stopResponse, &commandError)) {
-                if (!isNotConnectedError(commandError)) logger([NSString stringWithFormat:@"Debug loop ended for pid %d: %@", pid, commandError.localizedDescription ?: @"continue failed"]);
+            if (verboseThisIteration) {
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) starting continue command (iteration %ld)", pid, (long)debugServiceIteration]);
+            }
+            CFAbsoluteTime continueCallStart = CFAbsoluteTimeGetCurrent();
+            BOOL continueOK = sendDebugCommand(session->debugProxy, @"c", &stopResponse, &commandError);
+            CFAbsoluteTime continueCallEnd = CFAbsoluteTimeGetCurrent();
+            NSTimeInterval continueCallDuration = continueCallEnd - continueCallStart;
+            
+            if (!continueOK) {
+                if (!isNotConnectedError(commandError)) logger([NSString stringWithFormat:@"Debug loop ended for pid %d: %@ (iteration %ld, call took %.0fms)", pid, commandError.localizedDescription ?: @"continue failed", (long)debugServiceIteration, continueCallDuration * 1000.0]);
                 break;
+            }
+            
+            if (verboseThisIteration) {
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) continue command returned, call took %.0fms (iteration %ld)", pid, continueCallDuration * 1000.0, (long)debugServiceIteration]);
+            } else if (continueCallDuration > kSlowContinueThresholdSeconds) {
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) SLOW continue command, call took %.0fms (iteration %ld)", pid, continueCallDuration * 1000.0, (long)debugServiceIteration]);
             }
             
             if ([stopResponse hasPrefix:@"W"] || [stopResponse hasPrefix:@"X"]) {
                 exitPacketPresent = YES;
-                logger([NSString stringWithFormat:@"Target exited for pid %d with packet %@", pid, stopResponse]);
+                logger([NSString stringWithFormat:@"Target exited for pid %d with packet %@ (iteration %ld, loop ran %.0fms total)", pid, stopResponse, (long)debugServiceIteration, (continueCallEnd - debugServiceLoopStart) * 1000.0]);
                 break;
             }
             
@@ -450,6 +491,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
             uint16_t breakpointImmediate = (instruction >> 5) & 0xffff;
             
             if (breakpointImmediate == 0xf00d) {
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) 0xf00d breakpoint hit at iteration %ld - x0=0x%llx x1=0x%llx x16=%llu", pid, (long)debugServiceIteration, x0, x1, x16]);
                 if (!x0Field || !x1Field || !x16Field) break;
                 if (x16 != 1) continue;
                 
@@ -470,6 +512,8 @@ void runDebugService(int32_t pid, DebugSession *session) {
             }
         }
     }
+    
+    logger([NSString stringWithFormat:@"runDebugService: (pid %d) loop exiting after %ld iterations, %.0fms total, exitPacketPresent=%d, detachedByCommand=%d", pid, (long)debugServiceIteration, (CFAbsoluteTimeGetCurrent() - debugServiceLoopStart) * 1000.0, exitPacketPresent, detachedByCommand]);
     
     if (!exitPacketPresent && !detachedByCommand) {
         detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
