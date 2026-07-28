@@ -240,7 +240,21 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
             }
         });
         
-        NSTimeInterval initialJitter = ((double)arc4random_uniform(300)) / 1000.0;
+        // WIDENED - test33 confirmed multi-second hangs across FOUR
+        // different steps in the same burst window, not one specific
+        // function - the device itself is the shared bottleneck, not
+        // a bug in any single call. The original 0-300ms range
+        // predates that evidence and is nowhere near wide enough to
+        // spread apart the bursts actually observed (test26: four
+        // processes within ~10 microseconds of each other). No shared
+        // state or locking here deliberately - a cross-process mutex
+        // was considered and rejected, since a Helper holding a lock
+        // during a genuine hang would turn this into a guaranteed
+        // cascading failure for everyone waiting behind it instead of
+        // an intermittent one. This only reduces how often a whole
+        // burst lands in the same narrow window - it's probabilistic,
+        // not a guarantee.
+        NSTimeInterval initialJitter = ((double)arc4random_uniform(1500)) / 1000.0;
         [NSThread sleepForTimeInterval:initialJitter];
         
         BOOL hasTXM = selfHasTXMSupport();
@@ -264,7 +278,8 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
                 break;
             }
             
-            NSTimeInterval retryJitter = 0.3 + (((double)arc4random_uniform(400)) / 1000.0);
+            // WIDENED alongside initialJitter above, same reasoning.
+            NSTimeInterval retryJitter = 0.3 + (((double)arc4random_uniform(2000)) / 1000.0);
             [NSThread sleepForTimeInterval:retryJitter];
         }
         
