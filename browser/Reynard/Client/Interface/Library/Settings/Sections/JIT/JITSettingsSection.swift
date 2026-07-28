@@ -17,6 +17,7 @@ final class JITSettingsSection: NSObject {
     enum Row: CaseIterable {
         case enableJIT
         case importPairingFile
+        case txmStatus
     }
     
     weak var settingsController: SettingsViewController?
@@ -63,7 +64,31 @@ final class JITSettingsSection: NSObject {
             }
             
             return cell
+        case .txmStatus:
+            // Reflects whether THIS device + iOS version combination
+            // supports TXM - the same check
+            // JITController.hasTXMSupport() already performs before
+            // every real attach attempt. A hardware/OS capability
+            // indicator, not a live "did JIT just work" status - info
+            // only, matching the "Engine Version" style rows
+            // elsewhere in Settings. selectRow already ignores taps
+            // on anything but .importPairingFile, so no extra guard
+            // is needed there for this row.
+            return valueCell(
+                title: NSLocalizedString("TXM Enabled", comment: ""),
+                value: JITController.hasTXMSupport() ? NSLocalizedString("Yes", comment: "") : NSLocalizedString("No", comment: "")
+            )
         }
+    }
+    
+    private func valueCell(title: String, value: String) -> UITableViewCell {
+        let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+        cell.textLabel?.text = title
+        cell.detailTextLabel?.text = value
+        cell.detailTextLabel?.textColor = .secondaryLabel
+        cell.selectionStyle = .none
+        cell.accessoryType = .none
+        return cell
     }
     
     func footerView() -> UIView {

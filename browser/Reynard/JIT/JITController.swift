@@ -78,7 +78,7 @@ final class JITController {
     }
     
     // Adapted from StikDebug
-    private func hasTXMSupport() -> Bool {
+    static func hasTXMSupport() -> Bool {
         var systemInfo = utsname()
         uname(&systemInfo)
         let hardware = withUnsafePointer(to: &systemInfo.machine) {
