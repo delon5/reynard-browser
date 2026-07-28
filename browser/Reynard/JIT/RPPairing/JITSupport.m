@@ -246,12 +246,20 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
     
     NSString *resolvedPairingFilePath = pairingFilePath();
     RpPairingFileHandle *rpPairingFile = NULL;
+    CFAbsoluteTime pairingFileReadCallStart = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) starting rp_pairing_file_read", pid]);
     ffiError = rp_pairing_file_read(resolvedPairingFilePath.fileSystemRepresentation, &rpPairingFile);
+    CFAbsoluteTime pairingFileReadCallEnd = CFAbsoluteTimeGetCurrent();
     if (ffiError) {
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) rp_pairing_file_read REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (pairingFileReadCallEnd - pairingFileReadCallStart) * 1000.0]);
         if (error) *error = MakeError(PairingFileReadFailed);
         idevice_error_free(ffiError);
         return NO;
     }
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) rp_pairing_file_read succeeded, call took %.0fms", pid, (pairingFileReadCallEnd - pairingFileReadCallStart) * 1000.0]);
     
     struct sockaddr_in address;
     memset(&address, 0, sizeof(address));
