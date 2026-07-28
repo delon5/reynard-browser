@@ -125,22 +125,48 @@ static void startHeartbeat(DeviceProvider *provider) {
     
     dispatch_async(heartbeatQueue, ^{
         uint64_t currentInterval = 2;
+        int iteration = 0;
         while (provider->heartbeatRunning) {
+            iteration++;
             uint64_t newInterval = 0;
+            // TIMING TEST - heartbeat_get_marco/heartbeat_send_polo
+            // both go through the same LOCAL_RUNTIME_GUARD mutex as
+            // ensureDDIMounted's own FFI calls. This logging exists
+            // to test whether the intermittent lockdownd_connect_rsd
+            // stall correlates with heartbeat legitimately holding
+            // that guard for a long time - e.g. if the device
+            // negotiated a long currentInterval - rather than any
+            // call actually being stuck.
+            CFAbsoluteTime marcoStart = CFAbsoluteTimeGetCurrent();
+            logger([NSString stringWithFormat:@"heartbeat: iteration %d starting heartbeat_get_marco with currentInterval=%llu", iteration, (unsigned long long)currentInterval]);
             IdeviceFfiError *ffiError = heartbeat_get_marco(provider->heartbeatClient, currentInterval, &newInterval);
+            CFAbsoluteTime marcoEnd = CFAbsoluteTimeGetCurrent();
             
             if (!provider->heartbeatRunning) break;
             
             if (ffiError) {
+                logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_get_marco FAILED after %.0fms, dying permanently (minh-ton behavior)", iteration, (marcoEnd - marcoStart) * 1000.0]);
                 idevice_error_free(ffiError);
                 break;
             }
             
+            logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_get_marco succeeded after %.0fms, device returned newInterval=%llu", iteration, (marcoEnd - marcoStart) * 1000.0, (unsigned long long)newInterval]);
+            
+            CFAbsoluteTime poloStart = CFAbsoluteTimeGetCurrent();
             ffiError = heartbeat_send_polo(provider->heartbeatClient);
+            CFAbsoluteTime poloEnd = CFAbsoluteTimeGetCurrent();
             if (ffiError) {
+                logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_send_polo FAILED after %.0fms, dying permanently (minh-ton behavior)", iteration, (poloEnd - poloStart) * 1000.0]);
                 idevice_error_free(ffiError);
                 break;
             }
+            logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_send_polo succeeded after %.0fms", iteration, (poloEnd - poloStart) * 1000.0]);
+            
+            // currentInterval is deliberately NOT updated from
+            // newInterval here - matching the original code exactly,
+            // which always reuses the fixed value of 2 for every
+            // call. newInterval is logged above for diagnostic
+            // purposes only.
         }
     });
 }
