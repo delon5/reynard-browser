@@ -154,6 +154,38 @@ final class DDIManager: NSObject {
         }
     }
     
+    /// Deletes DDI storage from both possible locations — the shared
+    /// App Group container and the private-container fallback — rather
+    /// than just whichever ddiRootDirectoryURL() currently resolves to.
+    /// Exists specifically so files left over from before the group ID
+    /// fix (or from a session where the shared container silently fell
+    /// back) can be fully cleared, forcing a genuinely fresh
+    /// download+mount rather than reusing something possibly stale or
+    /// mismatched. Best-effort per location — a missing directory isn't
+    /// an error — but a real removal failure is surfaced rather than
+    /// swallowed, since this is a deliberate, user-initiated action
+    /// rather than incidental internal cleanup.
+    func resetAllDDIStorage(completion: @escaping (Result<Void, Error>) -> Void) {
+        stateQueue.async {
+            var firstError: Error?
+            let candidates: [URL?] = [ReynardDirectories.shared.sharedDDI, ReynardDirectories.shared.ddi]
+            for url in candidates.compactMap({ $0 }) {
+                guard self.fileManager.fileExists(atPath: url.path) else {
+                    continue
+                }
+                do {
+                    try self.fileManager.removeItem(at: url)
+                } catch {
+                    if firstError == nil {
+                        firstError = error
+                    }
+                }
+            }
+            
+            self.dispatchCompletion(firstError.map { .failure($0) } ?? .success(()), completion)
+        }
+    }
+    
     private func startNextDownloadLocked() {
         guard var active = activeDownload else {
             return
