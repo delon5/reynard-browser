@@ -150,17 +150,56 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
     }
 
     if (@available(iOS 17.4, *)) {
+        // RETRY + JITTER TEST - test26 found four separate Helper
+        // processes (no shared client-side state between them at
+        // all - different OS processes, different memory, different
+        // LOCAL_RUNTIME_GUARD instances) all starting
+        // process_control_new within ~10 microseconds of each other,
+        // none of which ever resolved. No client-side bug explains
+        // four unrelated processes stalling in that kind of sync -
+        // this points at device-side contention when several Helper
+        // instances launch in a tight burst and all race through the
+        // same sequence in near-lockstep, landing on the same
+        // contended step at close to the same moment. A small random
+        // jitter before the first attempt spreads out when each
+        // instance actually reaches the device.
+        //
+        // LIMITATION, not hidden: this cannot help a genuine,
+        // already-in-flight hang. enableJITForPID: is a single
+        // blocking call with no internal timeout - if it hangs (as
+        // process_control_new currently does under the burst pattern
+        // above), this function simply never returns far enough to
+        // attempt a retry at all. It only helps a fast-failing
+        // attempt, or cases where jitter alone avoids the contention
+        // in the first place. Safe to retry here specifically because
+        // this runs on dispatch_get_global_queue (concurrent), not a
+        // dedicated serial queue - unlike JITController's attachQueue,
+        // this can't get stuck queued behind other pending work.
+        NSTimeInterval initialJitter = ((double)arc4random_uniform(300)) / 1000.0;
+        [NSThread sleepForTimeInterval:initialJitter];
+        
         pid_t selfPID = getpid();
-        NSError *jitError = nil;
-        // Test complete: directly, empirically ruled out. Bypassing
-        // this call to a hardcoded value produced the exact same
-        // ConnectionReset result, confirming the sandbox-denied
-        // /private/preboot read is unrelated to the tunnel failure.
-        // Restoring the genuine, real check.
-        BOOL success = [JITEnabler.shared enableJITForPID:selfPID
-                                             hasTXMSupport:selfHasTXMSupport()
-                                                     error:&jitError];
-        os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing enableJIT for self (pid %d) success: %d, error: %{public}@", selfPID, success, jitError.localizedDescription ?: @"none");
+        BOOL hasTXM = selfHasTXMSupport();
+        
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            NSError *jitError = nil;
+            // Test complete: directly, empirically ruled out. Bypassing
+            // this call to a hardcoded value produced the exact same
+            // ConnectionReset result, confirming the sandbox-denied
+            // /private/preboot read is unrelated to the tunnel failure.
+            // Restoring the genuine, real check.
+            BOOL success = [JITEnabler.shared enableJITForPID:selfPID
+                                                 hasTXMSupport:hasTXM
+                                                         error:&jitError];
+            os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing enableJIT for self (pid %d) attempt %d/2 success: %d, error: %{public}@", selfPID, attempt, success, jitError.localizedDescription ?: @"none");
+            
+            if (success || attempt == 2) {
+                break;
+            }
+            
+            NSTimeInterval retryJitter = 0.3 + (((double)arc4random_uniform(400)) / 1000.0);
+            [NSThread sleepForTimeInterval:retryJitter];
+        }
     } else {
         os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing JIT requires iOS 17.4+, unavailable on this OS version");
     }
