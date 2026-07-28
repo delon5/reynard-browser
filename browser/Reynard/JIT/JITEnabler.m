@@ -134,11 +134,16 @@
         }
         logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) process_control_new succeeded, call took %.0fms", pid, (processControlCallEnd - processControlCallStart) * 1000.0]);
         
+        CFAbsoluteTime disableMemLimitCallStart = CFAbsoluteTimeGetCurrent();
+        logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) starting process_control_disable_memory_limit", pid]);
         ffiError = process_control_disable_memory_limit(processControl, (uint64_t)pid);
+        CFAbsoluteTime disableMemLimitCallEnd = CFAbsoluteTimeGetCurrent();
         process_control_free(processControl);
         if (ffiError) {
-            logger([NSString stringWithFormat:@"disable_memory_limit failed for pid %d: %s", pid, ffiError->message ?: "unknown error"]);
+            logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) disable_memory_limit REAL failure - %s, call took %.0fms (non-fatal, continuing)", pid, ffiError->message ?: "unknown error", (disableMemLimitCallEnd - disableMemLimitCallStart) * 1000.0]);
             idevice_error_free(ffiError);
+        } else {
+            logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) disable_memory_limit succeeded, call took %.0fms", pid, (disableMemLimitCallEnd - disableMemLimitCallStart) * 1000.0]);
         }
         
         NSError *commandError = nil;
