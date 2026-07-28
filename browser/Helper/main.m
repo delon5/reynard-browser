@@ -402,9 +402,17 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
         // permanent hang or just very slow.
         dispatch_queue_t watchdogRecordQueue = dispatch_queue_create("com.minh-ton.Reynard.HelperJIT.WatchdogRecordQueue", DISPATCH_QUEUE_SERIAL);
         __block BOOL didFinish = NO;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), watchdogRecordQueue, ^{
+        // WIDENED to 15s (was 8s) - a real idevicesyslog capture caught
+        // the actual resolution of what looked like a hang all night:
+        // a genuine ETIMEDOUT (os error 60) at 7832ms, a hair under the
+        // old 8s budget. The watchdog was very likely racing against
+        // the underlying library's own ~7.8s+ timeout and cutting off
+        // visibility into the real, explicit answer every single time.
+        // 15s gives comfortable margin so this should now actually
+        // resolve and be captured instead of just timing out here too.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), watchdogRecordQueue, ^{
             if (!didFinish) {
-                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable (pid %d) exceeded 8s budget, recording timeout (underlying call may still be running)", selfPID);
+                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable (pid %d) exceeded 15s budget, recording timeout (underlying call may still be running)", selfPID);
                 recordHelperJITOutcome(@"timed_out", nil);
             }
         });
