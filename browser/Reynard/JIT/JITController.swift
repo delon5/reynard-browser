@@ -16,6 +16,11 @@ final class JITController {
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
     private var attachedPIDs: Set<Int32> = []
     private var preflightWatchdogs: [Int32: DispatchWorkItem] = [:]
+    // Only ever touched from within the watchdog closure below, which
+    // always runs on watchdogQueue - single-queue access, no lock
+    // needed, consistent with how preflightWatchdogs/attachedPIDs are
+    // themselves always touched only from attachQueue.
+    private var retriedWatchdogPIDs: Set<Int32> = []
     private var hasHandledFailure = false
     private(set) var isJITLessModeActive = false
     private var pendingFailureAction: (() -> Void)?
@@ -180,6 +185,31 @@ final class JITController {
             }
             
             guard let watchdog, !watchdog.isCancelled else {
+                return
+            }
+            
+            // One retry before giving up - covers the confirmed,
+            // intermittent (~8-10% background rate) stall on
+            // lockdownd_connect_rsd inside ensureDDIMounted, which
+            // never returns an error at all, just never returns.
+            //
+            // LIMITATION, deliberately not hidden: attachToProcess
+            // runs on the serial attachQueue. If this specific
+            // attempt is genuinely, indefinitely stuck (not just
+            // slow), queuing a fresh attempt behind it on that same
+            // queue won't help - it'll simply wait behind the same
+            // stuck call, forever. This only recovers the
+            // slow-but-eventually-resolving case, or a different,
+            // faster-failing error. Given the measured ~90%
+            // single-attempt success rate, that's expected to help in
+            // practice - it is not a complete fix for a true
+            // indefinite hang.
+            guard self.retriedWatchdogPIDs.contains(pid) else {
+                self.retriedWatchdogPIDs.insert(pid)
+                self.attachQueue.async {
+                    self.schedulePreflightWatchdog(for: pid)
+                    self.attachToProcess(pid: pid)
+                }
                 return
             }
             
