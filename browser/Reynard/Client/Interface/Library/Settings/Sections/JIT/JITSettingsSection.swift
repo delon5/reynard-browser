@@ -18,6 +18,7 @@ final class JITSettingsSection: NSObject {
         case enableJIT
         case importPairingFile
         case txmStatus
+        case helperJITStatus
     }
     
     weak var settingsController: SettingsViewController?
@@ -78,6 +79,49 @@ final class JITSettingsSection: NSObject {
                 title: NSLocalizedString("TXM Enabled", comment: ""),
                 value: JITController.hasTXMSupport() ? NSLocalizedString("Yes", comment: "") : NSLocalizedString("No", comment: "")
             )
+        case .helperJITStatus:
+            // The Helper's own self-enable attempt (main.m,
+            // enableRPPairingJITForSelfIfNeeded) has no UI of its
+            // own - unlike the main app's JITController-driven
+            // attempts, which show a "Failed to enable JIT" screen on
+            // failure, a stuck or failed Helper attempt was
+            // previously completely invisible. The Helper now records
+            // its outcome (succeeded/failed/timed_out, the last case
+            // covering a genuine hang it couldn't itself recover
+            // from) to a small file in the shared App Group
+            // container; this just reads and displays it. Info only,
+            // same reasoning as .txmStatus above for not needing a
+            // selectRow guard.
+            return valueCell(
+                title: NSLocalizedString("Helper JIT", comment: ""),
+                value: helperJITStatusText()
+            )
+        }
+    }
+    
+    private struct HelperJITOutcome: Decodable {
+        let outcome: String
+        let date: Double
+        let errorDescription: String?
+    }
+    
+    private func helperJITStatusText() -> String {
+        guard let outcomeFileURL = ReynardDirectories.shared.sharedHelperJITOutcomeFile,
+              let data = try? Data(contentsOf: outcomeFileURL),
+              let result = try? JSONDecoder().decode(HelperJITOutcome.self, from: data) else {
+            return NSLocalizedString("Not Yet Attempted", comment: "")
+        }
+        
+        let relativeFormatter = RelativeDateTimeFormatter()
+        let relativeTime = relativeFormatter.localizedString(for: Date(timeIntervalSince1970: result.date), relativeTo: Date())
+        
+        switch result.outcome {
+        case "succeeded":
+            return String(format: NSLocalizedString("Succeeded (%@)", comment: ""), relativeTime)
+        case "timed_out":
+            return String(format: NSLocalizedString("Timed Out (%@)", comment: ""), relativeTime)
+        default:
+            return String(format: NSLocalizedString("Failed (%@)", comment: ""), relativeTime)
         }
     }
     

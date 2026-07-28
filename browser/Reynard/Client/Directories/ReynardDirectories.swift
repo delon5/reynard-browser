@@ -82,6 +82,14 @@ struct ReynardDirectories {
     var sharedDDI: URL? {
         sharedContainer?.appendingPathComponent("DDI", isDirectory: true)
     }
+    
+    /// Where the Helper records the outcome of its own JIT self-enable
+    /// attempts (helper-jit-visibility work) - a small JSON file, not
+    /// UserDefaults, matching the same shared-container mechanism
+    /// already proven for sharedPairingFile/sharedDDI above.
+    var sharedHelperJITOutcomeFile: URL? {
+        sharedContainer?.appendingPathComponent("helper-jit-last-outcome.json", isDirectory: false)
+    }
 
     var migrationRecovery: URL {
         applicationSupport

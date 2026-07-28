@@ -141,6 +141,37 @@ static BOOL selfHasTXMSupport(void) {
 // building a second, parallel implementation, since JITEnabler is
 // already compiled into GeckoView.framework, which this Helper target
 // already links against.
+// Records the outcome of a self-enable attempt into the shared App
+// Group container as a small JSON file, so the main app - which has
+// the only user-facing UI in this picture - can read and surface it.
+// Uses the same containerURLForSecurityApplicationGroupIdentifier:
+// mechanism already proven working for the pairing file and DDI
+// (logAppGroupDiagnostics above), not UserDefaults(suiteName:), since
+// there's no existing evidence the Swift-side Prefs abstraction is
+// backed by that same shared suite from this process.
+static void recordHelperJITOutcome(NSString *outcome, NSString *errorDescription) {
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
+    if (!containerURL) {
+        return;
+    }
+    
+    NSMutableDictionary *outcomeDict = [NSMutableDictionary dictionary];
+    outcomeDict[@"outcome"] = outcome;
+    outcomeDict[@"date"] = @([[NSDate date] timeIntervalSince1970]);
+    if (errorDescription) {
+        outcomeDict[@"errorDescription"] = errorDescription;
+    }
+    
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:outcomeDict options:0 error:nil];
+    if (!jsonData) {
+        return;
+    }
+    
+    NSURL *outcomeFileURL = [containerURL URLByAppendingPathComponent:@"helper-jit-last-outcome.json" isDirectory:NO];
+    [jsonData writeToURL:outcomeFileURL atomically:YES];
+}
+
 static void enableRPPairingJITForSelfIfNeeded(void) {
     if (getEntitlementValue(@"com.apple.private.security.no-sandbox")) {
         // TrollStore/jailbroken devices are handled entirely by
@@ -175,11 +206,37 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
         // this runs on dispatch_get_global_queue (concurrent), not a
         // dedicated serial queue - unlike JITController's attachQueue,
         // this can't get stuck queued behind other pending work.
+        // WATCHDOG - the retry above only helps a fast-failing attempt.
+        // If enableJITForPID: genuinely hangs (as process_control_new
+        // is currently confirmed to do intermittently), this whole
+        // function simply never returns, and nothing - not even
+        // os_log - ever runs again to record that anything went
+        // wrong. That left Helper-side failures completely invisible,
+        // unlike the main app's own JIT flow, which has JITController's
+        // watchdog to at least show a failure screen. This adds an
+        // INDEPENDENT timer, on its own queue, that does NOT wait for
+        // or try to cancel the underlying call - it only records, into
+        // the shared App Group container, that the budget was
+        // exceeded, so the main app can surface that regardless of
+        // whether the original call ever actually returns. If the
+        // retry loop below does eventually finish - fast or slow -
+        // it overwrites this with the real, final outcome.
+        dispatch_queue_t watchdogRecordQueue = dispatch_queue_create("com.minh-ton.Reynard.HelperJIT.WatchdogRecordQueue", DISPATCH_QUEUE_SERIAL);
+        __block BOOL didFinish = NO;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), watchdogRecordQueue, ^{
+            if (!didFinish) {
+                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable exceeded 8s budget, recording timeout (underlying call may still be running)");
+                recordHelperJITOutcome(@"timed_out", nil);
+            }
+        });
+        
         NSTimeInterval initialJitter = ((double)arc4random_uniform(300)) / 1000.0;
         [NSThread sleepForTimeInterval:initialJitter];
         
         pid_t selfPID = getpid();
         BOOL hasTXM = selfHasTXMSupport();
+        BOOL success = NO;
+        NSString *lastErrorDescription = nil;
         
         for (int attempt = 1; attempt <= 2; attempt++) {
             NSError *jitError = nil;
@@ -188,10 +245,11 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
             // ConnectionReset result, confirming the sandbox-denied
             // /private/preboot read is unrelated to the tunnel failure.
             // Restoring the genuine, real check.
-            BOOL success = [JITEnabler.shared enableJITForPID:selfPID
-                                                 hasTXMSupport:hasTXM
-                                                         error:&jitError];
+            success = [JITEnabler.shared enableJITForPID:selfPID
+                                           hasTXMSupport:hasTXM
+                                                   error:&jitError];
             os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing enableJIT for self (pid %d) attempt %d/2 success: %d, error: %{public}@", selfPID, attempt, success, jitError.localizedDescription ?: @"none");
+            lastErrorDescription = jitError.localizedDescription;
             
             if (success || attempt == 2) {
                 break;
@@ -200,6 +258,11 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
             NSTimeInterval retryJitter = 0.3 + (((double)arc4random_uniform(400)) / 1000.0);
             [NSThread sleepForTimeInterval:retryJitter];
         }
+        
+        dispatch_sync(watchdogRecordQueue, ^{
+            didFinish = YES;
+        });
+        recordHelperJITOutcome(success ? @"succeeded" : @"failed", success ? nil : lastErrorDescription);
     } else {
         os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing JIT requires iOS 17.4+, unavailable on this OS version");
     }
