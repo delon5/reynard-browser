@@ -241,7 +241,7 @@ BOOL configureNoAckMode(DebugProxyHandle *debugProxy, NSString **responseOut, NS
     return YES;
 }
 
-BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSString *targetAddress, NSError **error) {
+BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSString *targetAddress, int32_t pid, NSError **error) {
     IdeviceFfiError *ffiError = NULL;
     
     NSString *resolvedPairingFilePath = pairingFilePath();
@@ -293,7 +293,7 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
         NSInteger realCode = ffiError->code;
         NSInteger realSubCode = ffiError->sub_code;
         NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", (long)realCode, (long)realSubCode, realMessage, (tunnelCallEnd - tunnelCallStart) * 1000.0]);
+        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (tunnelCallEnd - tunnelCallStart) * 1000.0]);
         if (error) {
             *error = [NSError errorWithDomain:ErrorDomain code:TunnelCreateFailed userInfo:@{
                 NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to create RPPairing tunnel (real cause code %ld/%ld): %@", (long)realCode, (long)realSubCode, realMessage]
@@ -303,10 +303,10 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
         return NO;
     }
     
-    logger([NSString stringWithFormat:@"connectDebugSession tunnel_create_rppairing succeeded, call took %.0fms", (tunnelCallEnd - tunnelCallStart) * 1000.0]);
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) tunnel_create_rppairing succeeded, call took %.0fms", pid, (tunnelCallEnd - tunnelCallStart) * 1000.0]);
     
     CFAbsoluteTime remoteServerCallStart = CFAbsoluteTimeGetCurrent();
-    logger([NSString stringWithFormat:@"connectDebugSession gap before remote_server_connect_rsd: %.0fms since tunnel ready", (remoteServerCallStart - tunnelCallEnd) * 1000.0]);
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) gap before remote_server_connect_rsd: %.0fms since tunnel ready", pid, (remoteServerCallStart - tunnelCallEnd) * 1000.0]);
     
     ffiError = remote_server_connect_rsd(session->adapter, session->handshake, &session->remoteServer);
     
@@ -316,30 +316,30 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
         NSInteger realCode = ffiError->code;
         NSInteger realSubCode = ffiError->sub_code;
         NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession remote_server_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms, total elapsed since tunnel ready: %.0fms", (long)realCode, (long)realSubCode, realMessage, (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
+        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) remote_server_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms, total elapsed since tunnel ready: %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
         if (error) *error = MakeError(RemoteServerConnectFailed);
         idevice_error_free(ffiError);
         freeDebugSession(session);
         return NO;
     }
     
-    logger([NSString stringWithFormat:@"connectDebugSession remote_server_connect_rsd succeeded, call took %.0fms, total elapsed since tunnel ready: %.0fms", (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) remote_server_connect_rsd succeeded, call took %.0fms, total elapsed since tunnel ready: %.0fms", pid, (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
     
     CFAbsoluteTime debugProxyCallStart = CFAbsoluteTimeGetCurrent();
-    logger(@"connectDebugSession starting debug_proxy_connect_rsd");
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) starting debug_proxy_connect_rsd", pid]);
     ffiError = debug_proxy_connect_rsd(session->adapter, session->handshake, &session->debugProxy);
     CFAbsoluteTime debugProxyCallEnd = CFAbsoluteTimeGetCurrent();
     if (ffiError) {
         NSInteger realCode = ffiError->code;
         NSInteger realSubCode = ffiError->sub_code;
         NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession debug_proxy_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", (long)realCode, (long)realSubCode, realMessage, (debugProxyCallEnd - debugProxyCallStart) * 1000.0]);
+        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) debug_proxy_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (debugProxyCallEnd - debugProxyCallStart) * 1000.0]);
         if (error) *error = MakeError(DebugProxyConnectFailed);
         idevice_error_free(ffiError);
         freeDebugSession(session);
         return NO;
     }
-    logger([NSString stringWithFormat:@"connectDebugSession debug_proxy_connect_rsd succeeded, call took %.0fms", (debugProxyCallEnd - debugProxyCallStart) * 1000.0]);
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) debug_proxy_connect_rsd succeeded, call took %.0fms", pid, (debugProxyCallEnd - debugProxyCallStart) * 1000.0]);
     
     return YES;
 }

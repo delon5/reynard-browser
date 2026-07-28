@@ -38,7 +38,7 @@ BOOL configureNoAckMode(DebugProxyHandle *debugProxy,
                         NSString *_Nullable *_Nullable responseOut,
                         NSError *_Nullable *_Nullable error);
 BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session,
-                         NSString *targetAddress,
+                         NSString *targetAddress, int32_t pid,
                          NSError *_Nullable *_Nullable error);
 BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid);
 

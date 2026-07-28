@@ -115,24 +115,24 @@
         DebugSession session = {0};
         IdeviceFfiError *ffiError = NULL;
         
-        if (!connectDebugSession(provider, &session, @"10.7.0.1", error)) return NO;
+        if (!connectDebugSession(provider, &session, @"10.7.0.1", pid, error)) return NO;
         
         ProcessControlHandle *processControl = NULL;
         CFAbsoluteTime processControlCallStart = CFAbsoluteTimeGetCurrent();
-        logger(@"enableJITForPID: starting process_control_new");
+        logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) starting process_control_new", pid]);
         ffiError = process_control_new(session.remoteServer, &processControl);
         CFAbsoluteTime processControlCallEnd = CFAbsoluteTimeGetCurrent();
         if (ffiError) {
             NSInteger realCode = ffiError->code;
             NSInteger realSubCode = ffiError->sub_code;
             NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-            logger([NSString stringWithFormat:@"enableJITForPID: process_control_new REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", (long)realCode, (long)realSubCode, realMessage, (processControlCallEnd - processControlCallStart) * 1000.0]);
+            logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) process_control_new REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (processControlCallEnd - processControlCallStart) * 1000.0]);
             if (error) *error = MakeError(ProcessControlCreateFailed);
             idevice_error_free(ffiError);
             freeDebugSession(&session);
             return NO;
         }
-        logger([NSString stringWithFormat:@"enableJITForPID: process_control_new succeeded, call took %.0fms", (processControlCallEnd - processControlCallStart) * 1000.0]);
+        logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) process_control_new succeeded, call took %.0fms", pid, (processControlCallEnd - processControlCallStart) * 1000.0]);
         
         ffiError = process_control_disable_memory_limit(processControl, (uint64_t)pid);
         process_control_free(processControl);
