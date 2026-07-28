@@ -17,6 +17,8 @@
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <unistd.h>
+#include <sys/file.h>
+#include <signal.h>
 
 static const uint16_t rppairingPort = 49152;
 
@@ -76,6 +78,149 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void) {
     return requestedPIDs;
 }
 
+// Shared, cross-process JIT session visibility - see this script's
+// docstring for the full reasoning. Small file in the App Group
+// container, one "pid:timestamp" entry per line. The brief, bounded
+// flock() below is only ever held around this file's own
+// read-modify-write - never across anything else - matching the
+// pattern already proven in the Helper's concurrency-limiting fix
+// tonight.
+static NSURL *activeJITSessionsFileURL(void) {
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
+    if (!containerURL) {
+        return nil;
+    }
+    return [containerURL URLByAppendingPathComponent:@"active-jit-sessions.txt" isDirectory:NO];
+}
+
+// Reads the shared file, returns only entries whose PID is still
+// genuinely alive right now (kill(pid, 0) == 0 - no signal sent, just
+// checks whether a process with this PID currently exists). Not a
+// time-based expiry deliberately - a JIT session can legitimately run
+// for a tab's entire lifetime, so a fixed short window would
+// incorrectly age out a genuinely active one. This handles a crashed
+// or force-killed process's stale entry without needing that process
+// to have cooperated. PID reuse is a rare, brief-window edge case not
+// worth guarding against for an informational display row.
+static NSArray<NSNumber *> *readLiveJITSessionPIDs(int fd) {
+    NSMutableArray<NSNumber *> *live = [NSMutableArray array];
+    off_t fileSize = lseek(fd, 0, SEEK_END);
+    lseek(fd, 0, SEEK_SET);
+    if (fileSize > 0 && fileSize < (1024 * 1024)) {
+        NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)fileSize];
+        read(fd, data.mutableBytes, (size_t)fileSize);
+        NSString *contents = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        for (NSString *line in [contents componentsSeparatedByString:@"\n"]) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmed.length == 0) continue;
+            NSArray<NSString *> *parts = [trimmed componentsSeparatedByString:@":"];
+            if (parts.count < 1) continue;
+            int32_t pid = (int32_t)[parts[0] intValue];
+            if (pid <= 0) continue;
+            if (kill((pid_t)pid, 0) == 0) {
+                [live addObject:@(pid)];
+            }
+        }
+    }
+    return live;
+}
+
+static void writeJITSessionPIDs(int fd, NSArray<NSNumber *> *pids) {
+    NSMutableString *newContents = [NSMutableString string];
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    for (NSNumber *pid in pids) {
+        [newContents appendFormat:@"%d:%.0f\n", pid.intValue, now];
+    }
+    NSData *newData = [newContents dataUsingEncoding:NSUTF8StringEncoding];
+    lseek(fd, 0, SEEK_SET);
+    ftruncate(fd, 0);
+    write(fd, newData.bytes, newData.length);
+}
+
+static void addPIDToSharedActiveSessions(int32_t pid) {
+    NSURL *fileURL = activeJITSessionsFileURL();
+    if (!fileURL) return;
+    
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return;
+    
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return;
+        }
+        usleep(5000);
+    }
+    
+    NSMutableArray<NSNumber *> *live = [readLiveJITSessionPIDs(fd) mutableCopy];
+    if (![live containsObject:@(pid)]) {
+        [live addObject:@(pid)];
+    }
+    writeJITSessionPIDs(fd, live);
+    
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+static void removePIDFromSharedActiveSessions(int32_t pid) {
+    NSURL *fileURL = activeJITSessionsFileURL();
+    if (!fileURL) return;
+    
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR);
+    if (fd < 0) return;
+    
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return;
+        }
+        usleep(5000);
+    }
+    
+    NSArray<NSNumber *> *live = readLiveJITSessionPIDs(fd);
+    NSMutableArray<NSNumber *> *remaining = [NSMutableArray array];
+    for (NSNumber *existingPID in live) {
+        if (existingPID.intValue != pid) {
+            [remaining addObject:existingPID];
+        }
+    }
+    writeJITSessionPIDs(fd, remaining);
+    
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+BOOL hasAnyActiveJITSessionAcrossProcesses(void) {
+    NSURL *fileURL = activeJITSessionsFileURL();
+    if (!fileURL) return NO;
+    
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return NO;
+    
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return NO;
+        }
+        usleep(5000);
+    }
+    
+    // Read and write the pruned list back - every query also cleans
+    // up stale entries, same self-maintaining pattern as the
+    // concurrency-limiting mechanism tonight.
+    NSArray<NSNumber *> *live = readLiveJITSessionPIDs(fd);
+    writeJITSessionPIDs(fd, live);
+    
+    flock(fd, LOCK_UN);
+    close(fd);
+    
+    return live.count > 0;
+}
+
 static void registerDebugSessionPID(int32_t pid) {
     if (pid <= 0) return;
     
@@ -84,6 +229,8 @@ static void registerDebugSessionPID(int32_t pid) {
         [activeDebugSessionPIDs() addObject:key];
         [detachRequestedDebugSessionPIDs() removeObject:key];
     });
+    
+    addPIDToSharedActiveSessions(pid);
 }
 
 static void unregisterDebugSessionPID(int32_t pid) {
@@ -94,6 +241,8 @@ static void unregisterDebugSessionPID(int32_t pid) {
         [activeDebugSessionPIDs() removeObject:key];
         [detachRequestedDebugSessionPIDs() removeObject:key];
     });
+    
+    removePIDFromSharedActiveSessions(pid);
 }
 
 static BOOL shouldDetachDebugSessionPID(int32_t pid) {

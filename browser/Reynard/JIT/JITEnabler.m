@@ -219,6 +219,14 @@
     });
 }
 
++ (BOOL)hasActiveJITSession {
+    // Cross-process, not process-local - see JITSupport.m for why
+    // activeDebugSessionPIDs() alone can't answer this correctly from
+    // the main app (where this is called from) when the session in
+    // question is running in the separate Helper process.
+    return hasAnyActiveJITSessionAcrossProcesses();
+}
+
 - (DeviceProvider *)getProviderForPID:(int32_t)pid error:(NSError **)error {
     __block DeviceProvider *provider = NULL;
     __block NSError *providerError = nil;

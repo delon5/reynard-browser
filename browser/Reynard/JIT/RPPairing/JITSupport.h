@@ -49,6 +49,14 @@ void registerJITEndpointForPID(int32_t pid, NSString *targetAddress,
 void unregisterJITEndpointForPID(int32_t pid);
 void resetJITEndpointMonitor(void);
 
+// Whether any process - main app OR Helper, not just the calling one -
+// currently has a genuinely active JIT debug session. Backed by a
+// small shared file in the App Group container, not process-local
+// state, since activeDebugSessionPIDs() above is in-memory and
+// invisible across the process boundary between the main app (where
+// Settings lives) and the Helper (where self-enable runs).
+BOOL hasAnyActiveJITSessionAcrossProcesses(void);
+
 void freeDebugSession(DebugSession *session);
 void freeDeviceProvider(DeviceProvider *_Nullable provider);
 

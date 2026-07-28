@@ -66,18 +66,27 @@ final class JITSettingsSection: NSObject {
             
             return cell
         case .txmStatus:
-            // Reflects whether THIS device + iOS version combination
-            // supports TXM - the same check
-            // JITController.hasTXMSupport() already performs before
-            // every real attach attempt. A hardware/OS capability
-            // indicator, not a live "did JIT just work" status - info
-            // only, matching the "Engine Version" style rows
-            // elsewhere in Settings. selectRow already ignores taps
-            // on anything but .importPairingFile, so no extra guard
-            // is needed there for this row.
+            // Reflects live JIT status, matching DolphiniOS's own
+            // "JIT Acquisition" row - "Not Acquired" whenever JIT
+            // isn't currently active, "Acquired (TXM)" only once it
+            // genuinely is, regardless of whether the hardware could
+            // support it. JITEnabler.hasActiveJITSession() checks
+            // across BOTH the main app and the Helper process, not
+            // just whichever one this Settings screen happens to be
+            // running in. selectRow already ignores taps on anything
+            // but .importPairingFile, so no extra guard is needed
+            // there for this row.
+            let acquisitionValue: String
+            if !JITEnabler.hasActiveJITSession() {
+                acquisitionValue = NSLocalizedString("Not Acquired", comment: "")
+            } else if JITController.hasTXMSupport() {
+                acquisitionValue = NSLocalizedString("Acquired (TXM)", comment: "")
+            } else {
+                acquisitionValue = NSLocalizedString("Acquired", comment: "")
+            }
             return valueCell(
-                title: NSLocalizedString("TXM Enabled", comment: ""),
-                value: JITController.hasTXMSupport() ? NSLocalizedString("Yes", comment: "") : NSLocalizedString("No", comment: "")
+                title: NSLocalizedString("JIT Acquisition", comment: ""),
+                value: acquisitionValue
             )
         case .helperJITStatus:
             // The Helper's own self-enable attempt (main.m,

@@ -21,6 +21,14 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 
 - (void)detachAllJITSessions NS_SWIFT_NAME(detachAllJITSessions());
 
+// Whether ANY process - main app or Helper - currently has a
+// genuinely active, running JIT debug session. A live status, not a
+// hardware/OS capability check - matches DolphiniOS's own "JIT
+// Acquisition" row, confirmed against their own blog: they check
+// whether JIT is currently enabled each time before launching a game,
+// not a cached or static capability.
++ (BOOL)hasActiveJITSession NS_SWIFT_NAME(hasActiveJITSession());
+
 @end
 
 NS_ASSUME_NONNULL_END
