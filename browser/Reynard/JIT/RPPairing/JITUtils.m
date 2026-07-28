@@ -6,9 +6,22 @@
 //
 
 #import "JITUtils.h"
+#import <os/log.h>
 
+// Was NSLog(@"[Reynard] %@", message) — the ENTIRE composed string can
+// get redacted to "<private>" in an exported Console capture, not just
+// the interpolated part, unless the dynamic content is explicitly
+// marked public. Confirmed directly: a real device capture showed
+// "ensureDDIMounted: starting isDDIMounted check" (a plain literal)
+// clearly, immediately followed by "[Reynard] <private>" where the
+// actual success/failure resolution should have been — losing exactly
+// the information this logging exists to capture. main.m's own
+// [HelperJIT] logging already uses os_log with an explicit
+// "%{public}@" and comes through completely readable in the same
+// capture — matching that pattern here instead of guessing why NSLog
+// was getting redacted.
 void logger(NSString *message) {
-    NSLog(@"[Reynard] %@", message);
+    os_log(OS_LOG_DEFAULT, "[Reynard] %{public}@", message);
 }
 
 // MARK: - App Group Resolution
