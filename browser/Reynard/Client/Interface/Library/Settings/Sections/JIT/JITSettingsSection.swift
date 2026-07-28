@@ -17,7 +17,6 @@ final class JITSettingsSection: NSObject {
     enum Row: CaseIterable {
         case enableJIT
         case importPairingFile
-        case resetDDIStorage
     }
     
     weak var settingsController: SettingsViewController?
@@ -64,13 +63,6 @@ final class JITSettingsSection: NSObject {
             }
             
             return cell
-        case .resetDDIStorage:
-            // Destructive-red regardless of the passed-in tintColor —
-            // this deletes on-disk data (both the shared and private
-            // DDI storage locations), so it should read as destructive
-            // the same way "Erase All Content" style rows do elsewhere
-            // in Settings, not blend in with the ordinary action rows.
-            return SettingsViewUtils.actionCell(title: NSLocalizedString("Reset DDI Storage…", comment: ""), tintColor: .systemRed)
         }
     }
     
@@ -127,18 +119,10 @@ final class JITSettingsSection: NSObject {
     }
     
     func selectRow(at index: Int, from viewController: UIViewController) {
-        guard Row.allCases.indices.contains(index) else {
+        guard Row.allCases.indices.contains(index), Row.allCases[index] == .importPairingFile else {
             return
         }
-        
-        switch Row.allCases[index] {
-        case .importPairingFile:
-            choosePairingFile(from: viewController)
-        case .resetDDIStorage:
-            confirmResetDDIStorage(from: viewController)
-        case .enableJIT:
-            break
-        }
+        choosePairingFile(from: viewController)
     }
     
     private func choosePairingFile(from viewController: UIViewController) {
@@ -152,58 +136,6 @@ final class JITSettingsSection: NSObject {
         picker.delegate = settingsController
         picker.allowsMultipleSelection = false
         viewController.present(picker, animated: true)
-    }
-    
-    // MARK: - DDI Storage Reset
-    
-    // In-app alternative to deleting the DDI folders by hand via
-    // Filza/SSH — clears both possible storage locations (the shared
-    // App Group container and the private-container fallback) via
-    // DDIManager.resetAllDDIStorage(), so a stale or mismatched
-    // download (e.g. from before the group ID fix, or from a session
-    // where the shared container silently fell back) can be fully
-    // cleared without needing on-device file-manager access.
-    private func confirmResetDDIStorage(from viewController: UIViewController) {
-        let alert = UIAlertController(
-            title: NSLocalizedString("Reset DDI Storage?", comment: ""),
-            message: NSLocalizedString("This deletes the downloaded Developer Disk Image from both the shared and private storage locations. JIT will be disabled until you download it again from this screen.", comment: ""),
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
-        alert.addAction(UIAlertAction(title: NSLocalizedString("Reset", comment: ""), style: .destructive) { [weak self] _ in
-            self?.performResetDDIStorage()
-        })
-        viewController.present(alert, animated: true)
-    }
-    
-    private func performResetDDIStorage() {
-        // Cancel first — resetAllDDIStorage would otherwise be
-        // deleting out from under an in-progress download's own
-        // writes to the same directory.
-        DDIManager.shared.cancelActiveDownload()
-        
-        DDIManager.shared.resetAllDDIStorage { [weak self] result in
-            guard let self else {
-                return
-            }
-            
-            switch result {
-            case .success:
-                // The in-memory JITEnabler singleton (main app process)
-                // may already have didEnsureDDIMounted latched true
-                // from earlier this session — that flag isn't affected
-                // by deleting files on disk, so without a restart nothing
-                // downstream would actually notice the storage is now
-                // empty, and this reset would silently accomplish
-                // nothing until the app happens to relaunch on its own.
-                Prefs.JITSettings.isJITEnabled = false
-                self.refreshDisplayedState()
-                self.settingsController?.tableView.reloadData()
-                self.showRestartAlert()
-            case .failure(let error):
-                AlertPresenter.show(title: NSLocalizedString("Reset Failed", comment: ""), message: error.localizedDescription)
-            }
-        }
     }
     
     func savePairingFile(from url: URL) {
