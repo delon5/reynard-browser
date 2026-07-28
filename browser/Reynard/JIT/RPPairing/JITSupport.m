@@ -313,7 +313,10 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
     CFAbsoluteTime remoteServerCallEnd = CFAbsoluteTimeGetCurrent();
     
     if (ffiError) {
-        logger([NSString stringWithFormat:@"connectDebugSession remote_server_connect_rsd FAILED, call took %.0fms, total elapsed since tunnel ready: %.0fms", (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
+        NSInteger realCode = ffiError->code;
+        NSInteger realSubCode = ffiError->sub_code;
+        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
+        logger([NSString stringWithFormat:@"connectDebugSession remote_server_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms, total elapsed since tunnel ready: %.0fms", (long)realCode, (long)realSubCode, realMessage, (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
         if (error) *error = MakeError(RemoteServerConnectFailed);
         idevice_error_free(ffiError);
         freeDebugSession(session);
