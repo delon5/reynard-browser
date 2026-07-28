@@ -6,25 +6,22 @@
 import Foundation
 
 struct ReynardDirectories {
-    /// AltStore (and likely other sideloading tools) append a unique,
-    /// per-installation suffix to the App Group identifier itself, not
-    /// just the app's own bundle ID — confirmed directly from a real,
-    /// installed device's actual embedded provisioning profile, which
-    /// showed "group.com.minh-ton.Reynard.M3ULXVYRUP" rather than the
-    /// plain "group.com.minh-ton.Reynard" this code was previously
-    /// hardcoded to use. Deriving from the current process's own,
-    /// actual bundle identifier at runtime matches whatever's genuinely
-    /// in effect for this specific install instead. The Helper's own
-    /// bundle ID ends in ".Helper" — stripped here so both the main app
-    /// and the Helper derive the exact same, shared group identifier
-    /// despite having different bundle IDs themselves.
+    /// Thin wrapper around ReynardResolveAppGroupIdentifier() (JITUtils.m,
+    /// exposed here via Reynard-Bridging-Header.h) — that's now the
+    /// single source of truth for this identifier, reading it from this
+    /// process's own embedded provisioning profile at runtime rather
+    /// than assuming the plain "group.<bundleID>" form. Previously this
+    /// function and JITUtils.m/JITSupport.m each derived the identifier
+    /// independently, and all three got it wrong the same way: free/
+    /// personal Apple Developer team provisioning appends a unique,
+    /// per-team suffix to App Group identifiers (confirmed directly
+    /// from a real device's embedded provisioning profile, which showed
+    /// "group.com.minh-ton.Reynard.M3ULXVYRUP" rather than the plain
+    /// "group.com.minh-ton.Reynard" the old code assumed), so
+    /// containerURLForSecurityApplicationGroupIdentifier: was silently
+    /// returning nil for both the pairing file and the DDI.
     static func sharedAppGroupIdentifier() -> String {
-        var bundleID = Bundle.main.bundleIdentifier ?? "com.minh-ton.Reynard"
-        let helperSuffix = ".Helper"
-        if bundleID.hasSuffix(helperSuffix) {
-            bundleID = String(bundleID.dropLast(helperSuffix.count))
-        }
-        return "group.\(bundleID)"
+        ReynardResolveAppGroupIdentifier()
     }
 
     let applicationSupport: URL

@@ -144,9 +144,30 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
         let bundleID = Bundle.main.bundleIdentifier ?? "(nil)"
         let groupID = ReynardDirectories.sharedAppGroupIdentifier()
         let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)
+        NSLog("[AppGroup] bundleID=%@ groupID=%@ containerURL=%@", bundleID, groupID, container?.path ?? "(nil)")
+
+        // Write a marker the Helper (browser/Helper/main.m,
+        // logAppGroupDiagnostics) checks for on its next launch. If it
+        // finds and logs this file's contents, both processes are
+        // genuinely reading the same, real shared container — not just
+        // each independently resolving *a* non-nil containerURL, which
+        // alone doesn't prove they're the same one.
+        var markerStatus = "not attempted (no container)"
+        if let container {
+            let markerURL = container.appendingPathComponent("appgroup-healthcheck.txt", isDirectory: false)
+            let payload = "written by main app at \(Date()) — bundleID=\(bundleID)"
+            do {
+                try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+                try payload.write(to: markerURL, atomically: true, encoding: .utf8)
+                markerStatus = "wrote OK — open a tab (or otherwise trigger the Helper) and check Console.app for \"[HelperJIT AppGroup]\" to confirm it can read this back"
+            } catch {
+                markerStatus = "write failed: \(error.localizedDescription)"
+            }
+        }
+
         presentDiagnosticAlert(
             title: "Live App Group check",
-            message: "Bundle ID:\n\(bundleID)\n\nGroup ID used:\n\(groupID)\n\ncontainerURL result:\n\(String(describing: container))"
+            message: "Bundle ID:\n\(bundleID)\n\nGroup ID used:\n\(groupID)\n\ncontainerURL result:\n\(String(describing: container))\n\nMarker file:\n\(markerStatus)"
         )
         checkEmbeddedProvisioningProfile()
     }

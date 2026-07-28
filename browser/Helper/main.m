@@ -15,6 +15,7 @@
 #import <unistd.h>
 #import "Utils.h"
 #import "JITEnabler.h"
+#import "JITUtils.h"
 
 static void hook_do_nothing(void) {}
 
@@ -189,8 +190,46 @@ static void enableJITForSelfIfNeeded(void) {
   os_log(OS_LOG_DEFAULT, "[HelperJIT] spawnRoot(ptrace_jit) for self (pid %d) result: %d", selfPID, result);
 }
 
+// DIAGNOSTIC — logs whether this process (the Helper) resolves the same
+// shared App Group container the main app does, and whether it can
+// actually see a file the main app wrote there. containerURL resolving
+// non-nil on both sides only proves each process independently thinks
+// *some* group is granted — it doesn't prove they're the same group
+// unless the resolved identifier strings match, and it doesn't prove
+// the files are genuinely visible cross-process unless something
+// written by one side is actually read back by the other. This checks
+// both, not just the first.
+//
+// To use: trigger "Live App Group check" from AddonCoordinator's
+// diagnostic menu in the main app first (writes the marker), then open
+// any tab that spins up this Helper process and check Console.app for
+// "[HelperJIT AppGroup]" — the main app's own equivalent log line uses
+// the same resolved group ID and containerURL result, so the two can
+// be compared directly.
+static void logAppGroupDiagnostics(void) {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"(nil)";
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
+    os_log(OS_LOG_DEFAULT, "[HelperJIT AppGroup] bundleID=%{public}@ groupID=%{public}@ containerURL=%{public}@",
+           bundleID, groupID, containerURL ? containerURL.path : @"(nil)");
+
+    if (!containerURL) {
+        return;
+    }
+
+    NSURL *markerURL = [containerURL URLByAppendingPathComponent:@"appgroup-healthcheck.txt" isDirectory:NO];
+    NSError *readError = nil;
+    NSString *markerContents = [NSString stringWithContentsOfURL:markerURL encoding:NSUTF8StringEncoding error:&readError];
+    if (markerContents) {
+        os_log(OS_LOG_DEFAULT, "[HelperJIT AppGroup] found marker written by main app: %{public}@", markerContents);
+    } else {
+        os_log(OS_LOG_DEFAULT, "[HelperJIT AppGroup] no marker found at %{public}@ (%{public}@) — either the main app hasn't written one yet, or this process genuinely can't see what the main app wrote", markerURL.path, readError.localizedDescription ?: @"no error");
+    }
+}
+
 __attribute__((used, visibility("default"))) int NSExtensionMain(int argc,
                                                                  char *argv[]) {
+  logAppGroupDiagnostics();
   enableJITForSelfIfNeeded();
   // Was a direct, synchronous call here - a real, confirmed bug found
   // from an actual crash log tonight. This attempts a genuine network
@@ -205,17 +244,17 @@ __attribute__((used, visibility("default"))) int NSExtensionMain(int argc,
   // Moving this off the startup path entirely onto a background queue
   // means a hang here can genuinely, structurally never block the
   // Helper's own startup, or the main app's, ever again.
-  // TEMPORARY TEST - disabled entirely. Confirmed tonight: general web
-  // browsing becomes very slow specifically while JIT enablement is in
-  // progress, only on this fork's build, never on a clean build without
-  // this Helper-side RPPairing attempt. Testing directly whether the
-  // Helper independently establishing its own tunnel, alongside the
-  // main app's own, already-working one, is the actual cause -
-  // regardless of whether the Helper's own attempt ultimately succeeds
-  // or fails/times out afterward.
-  // dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-  //   enableRPPairingJITForSelfIfNeeded();
-  // });
+  // TEST - re-enabled. The earlier slowdown (confirmed real: two
+  // competing tunnels, main app + Helper, caused general web browsing
+  // to lag during JIT enablement) is a separate, already-understood
+  // issue from tonight's actual blocker - now testing the shared App
+  // Group fix (ReynardResolveAppGroupIdentifier, reading the real
+  // group ID from this process's own embedded provisioning profile
+  // instead of guessing "group.<bundleID>") specifically against the
+  // Helper's own, separate attempt at this same RPPairing flow.
+  dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    enableRPPairingJITForSelfIfNeeded();
+  });
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wundeclared-selector"

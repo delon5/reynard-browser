@@ -522,25 +522,29 @@ void freeDeviceProvider(DeviceProvider *provider) {
 // of the logic from there with only a few modifications here.
 
 static NSURL *ddiDirectoryURL(NSError **error) {
-    // Was ReynardDirectoriesBridge.ddiPath, then
-    // ReynardDirectoriesBridge.sharedDDIPath — same reasoning as
-    // pairingFilePath()'s own updated comment in JITUtils.m. Direct,
-    // standard NSFileManager App Group API, no Swift bridging needed.
-    // Same reasoning and derivation logic as JITUtils.m's own,
-    // identical comment on pairingFilePath().
-    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"com.minh-ton.Reynard";
-    NSString *helperSuffix = @".Helper";
-    if ([bundleID hasSuffix:helperSuffix]) {
-        bundleID = [bundleID substringToIndex:bundleID.length - helperSuffix.length];
-    }
-    NSString *groupID = [@"group." stringByAppendingString:bundleID];
+    // Same resolver JITUtils.m's pairingFilePath() uses — see that
+    // file for the full explanation of why the group ID can't just be
+    // assumed as "group.<bundleID>".
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
     NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
-    if (!containerURL) {
+    if (containerURL) {
+        return [containerURL URLByAppendingPathComponent:@"DDI" isDirectory:YES];
+    }
+
+    // Same reasoning as pairingFilePath()'s own fallback in JITUtils.m
+    // — logged loudly since whichever process hits this (main app or
+    // Helper) silently reading/writing DDI files from its own private
+    // container instead of the shared one is exactly the kind of thing
+    // that looks like success locally while quietly breaking the other
+    // process's own access to the same files.
+    logger([NSString stringWithFormat:@"[AppGroup] WARNING: shared container unavailable for groupID=%@ — ddiDirectoryURL() falling back to private Application Support directory. The other process (main app or Helper, whichever this isn't) will NOT see DDI files written or read here.", groupID]);
+    NSURL *applicationSupportDirectory = [[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!applicationSupportDirectory) {
         if (error) *error = MakeError(DDIMountPathResolveFailed);
         return nil;
     }
 
-    return [containerURL URLByAppendingPathComponent:@"DDI" isDirectory:YES];
+    return [applicationSupportDirectory URLByAppendingPathComponent:@"DDI" isDirectory:YES];
 }
 
 static NSData *ddiFileData(NSURL *ddiDirectory, NSString *fileName, NSError **error) {

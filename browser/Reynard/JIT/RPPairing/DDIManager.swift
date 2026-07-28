@@ -328,18 +328,26 @@ final class DDIManager: NSObject {
     }
     
     private func ddiRootDirectoryURL() throws -> URL {
-        // Was ReynardDirectories.shared.ddi (this app's own private
-        // container). Genuinely important this points at the same
-        // shared location the Helper's own RPPairing JIT
-        // self-enablement reads from (see JITSupport.m's
-        // ddiDirectoryURL) — otherwise any future download here would
-        // silently write back to the old, Helper-inaccessible location,
-        // undoing the one-time migration that moves an existing,
-        // already-downloaded DDI into this new location.
-        guard let sharedDDI = ReynardDirectories.shared.sharedDDI else {
-            throw DDIError.sharedContainerUnavailable
+        // Points at the shared App Group container so the Helper's own
+        // RPPairing JIT self-enablement (see JITSupport.m's
+        // ddiDirectoryURL, which now uses the same resolver) can reach
+        // the same, real DDI files. Falls back to this app's own
+        // private container if the shared one is genuinely unavailable
+        // — matches ddiDirectoryURL()'s equivalent fallback on the
+        // ObjC side, keeping the main app's own JIT working in that
+        // degraded case rather than failing outright (the Helper would
+        // still not be able to reach a DDI downloaded to the private
+        // fallback location, since it's a separate sandbox).
+        if let sharedDDI = ReynardDirectories.shared.sharedDDI {
+            return sharedDDI
         }
-        return sharedDDI
+        // Logged loudly rather than silently falling through — this
+        // succeeding for the main app's own downloads/reads can
+        // otherwise mask the Helper's own DDI access being broken,
+        // since the main app's JIT would keep working normally while
+        // the Helper silently never sees a usable DDI.
+        NSLog("[AppGroup] WARNING: shared DDI container unavailable — ddiRootDirectoryURL() falling back to private Application Support directory. The Helper extension will NOT be able to read DDI files from this location.")
+        return ReynardDirectories.shared.ddi
     }
 }
 
