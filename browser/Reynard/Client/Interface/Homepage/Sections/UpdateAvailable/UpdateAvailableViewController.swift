@@ -232,6 +232,19 @@ final class UpdateAvailableViewController: UIViewController, HomepageRecommendat
             name: .appUpdateAvailable,
             object: nil
         )
+        // Prefs.HomepageSettings.showsNewUpdates (toggled either from
+        // Settings > General > Homepage, or from the quicker entry
+        // point in Experimental Features) already correctly posts
+        // .homepageSettingsDidChange on every change - this view just
+        // wasn't listening for it, so the banner stayed visible until
+        // the next full app launch even after the preference had
+        // already changed.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appUpdateAvailable),
+            name: .homepageSettingsDidChange,
+            object: nil
+        )
     }
     
     // MARK: - Actions
