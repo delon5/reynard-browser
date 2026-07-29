@@ -60,6 +60,8 @@ final class JITController {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+        
+        startListeningForHelperAttachRequests()
     }
     
     private func isDDIMissing() -> Bool {
@@ -424,4 +426,160 @@ final class JITController {
             self.attachToProcess(pid: pid)
         }
     }
+}
+
+// MARK: - Helper Process Attach Delegation (App Group + Darwin Notifications)
+//
+// See fix_helper_delegates_jit_to_main_app_v4.py's docstring for the
+// full reasoning. Summary: the Helper no longer opens its own,
+// separate tunnel to self-enable JIT - it delegates to this process
+// instead, via a small App Group file + Darwin notification handshake,
+// so every attach attempt (tab-driven AND Helper-driven) funnels
+// through this one process's own attachQueue.
+//
+// Every file/notification name is keyed by a per-attempt UUID token,
+// not just the requesting PID - deliberately. The Helper's retry loop
+// can make two sequential requests for the same PID; keying by PID
+// alone let an old, late-arriving reply for attempt 1 collide with
+// attempt 2's own observer for the same PID. The token makes every
+// single attempt's coordination channel unique, regardless of how
+// many requests the same PID ever makes.
+extension JITController {
+    fileprivate static let jitAttachRequestPostedNotification = "com.minh-ton.Reynard.JITAttachRequestPosted" as CFString
+    fileprivate static let jitAttachRequestFilePrefix = "jit-attach-request-"
+    fileprivate static let jitAttachResultFilePrefix = "jit-attach-result-"
+    // Comfortably past the Helper's own 20s client-side timeout - any
+    // result file older than this can only be an abandoned one nobody
+    // is ever coming back to read.
+    fileprivate static let jitAttachResultStaleAgeSeconds: TimeInterval = 60
+    
+    fileprivate static func jitAttachReplyNotificationName(forToken token: String) -> CFString {
+        "com.minh-ton.Reynard.JITAttachReply.\(token)" as CFString
+    }
+    
+    fileprivate func appGroupContainerURL() -> URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ReynardDirectories.sharedAppGroupIdentifier())
+    }
+    
+    func startListeningForHelperAttachRequests() {
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            nil,
+            jitAttachRequestPostedCallback,
+            Self.jitAttachRequestPostedNotification,
+            nil,
+            .deliverImmediately
+        )
+    }
+    
+    // Called on the main thread (the run loop this observer was
+    // registered on) - immediately dispatches to attachQueue so the
+    // actual enableJIT call, which can take up to the full 20s
+    // watchdog budget, never blocks it. Processes every pending
+    // request file found, not just one - Darwin notifications can
+    // coalesce multiple posts under load, so this scans rather than
+    // assumes exactly one request is waiting. Also opportunistically
+    // prunes stale, abandoned result files every time it runs.
+    fileprivate func processPendingHelperAttachRequests() {
+        attachQueue.async { [weak self] in
+            guard let self, let containerURL = self.appGroupContainerURL() else {
+                return
+            }
+            
+            let fileManager = FileManager.default
+            guard let contents = try? fileManager.contentsOfDirectory(atPath: containerURL.path) else {
+                return
+            }
+            
+            self.pruneStaleResultFiles(contents: contents, containerURL: containerURL, fileManager: fileManager)
+            
+            // Filename format: jit-attach-request-{pid}_{token} - PID
+            // kept in the name for easy debugging/readability, token
+            // is what actually makes each attempt unique.
+            let pendingRequests = contents.filter { $0.hasPrefix(Self.jitAttachRequestFilePrefix) }
+            
+            for requestFileName in pendingRequests {
+                let remainder = requestFileName.dropFirst(Self.jitAttachRequestFilePrefix.count)
+                guard let underscoreIndex = remainder.firstIndex(of: "_") else {
+                    continue
+                }
+                let pidString = remainder[remainder.startIndex..<underscoreIndex]
+                let token = String(remainder[remainder.index(after: underscoreIndex)...])
+                guard let pid = Int32(pidString), !token.isEmpty else {
+                    continue
+                }
+                
+                // Removed first, before the attach attempt itself - if
+                // this process were to crash mid-attach, a stale
+                // request file would otherwise sit here forever,
+                // silently never retried and never cleaned up either.
+                let requestFileURL = containerURL.appendingPathComponent(requestFileName)
+                try? fileManager.removeItem(at: requestFileURL)
+                
+                let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
+                
+                let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
+                let resultContents = success ? "success" : "failed:\(errorDescription ?? "unknown error")"
+                try? resultContents.write(to: resultFileURL, atomically: true, encoding: .utf8)
+                
+                CFNotificationCenterPostNotification(
+                    CFNotificationCenterGetDarwinNotifyCenter(),
+                    Self.jitAttachReplyNotificationName(forToken: token),
+                    nil,
+                    nil,
+                    true
+                )
+            }
+        }
+    }
+    
+    fileprivate func pruneStaleResultFiles(contents: [String], containerURL: URL, fileManager: FileManager) {
+        let staleResultFiles = contents.filter { $0.hasPrefix(Self.jitAttachResultFilePrefix) }
+        guard !staleResultFiles.isEmpty else {
+            return
+        }
+        
+        let now = Date()
+        for resultFileName in staleResultFiles {
+            let resultFileURL = containerURL.appendingPathComponent(resultFileName)
+            guard let attributes = try? fileManager.attributesOfItem(atPath: resultFileURL.path),
+                  let modificationDate = attributes[.modificationDate] as? Date
+            else {
+                continue
+            }
+            if now.timeIntervalSince(modificationDate) > Self.jitAttachResultStaleAgeSeconds {
+                try? fileManager.removeItem(at: resultFileURL)
+            }
+        }
+    }
+    
+    // Deliberately isolated from attachToProcess(pid:) above - that
+    // method calls ReportJITStatusForChild (GeckoView-specific,
+    // informs Gecko's own child-process tracking - wrong for a PID
+    // Gecko never launched) and handleJITFailure (presents a
+    // full-screen failure UI - wrong here, a Helper's own JIT failure
+    // is meant to degrade silently, exactly as it already does today).
+    // Returns success/error directly to the caller instead.
+    fileprivate func attachToHelperProcess(pid: Int32) -> (Bool, String?) {
+        do {
+            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: hasTXMSupport())
+            return (true, nil)
+        } catch {
+            return (false, (error as NSError).localizedDescription)
+        }
+    }
+}
+
+// Top-level, matching CFNotificationCallback's C function pointer
+// signature exactly - a context-free closure could technically work
+// too, but a named top-level function removes any ambiguity about
+// Swift's capture rules in a C function pointer context.
+private func jitAttachRequestPostedCallback(
+    center: CFNotificationCenter?,
+    observer: UnsafeMutableRawPointer?,
+    name: CFNotificationName?,
+    object: UnsafeRawPointer?,
+    userInfo: CFDictionary?
+) {
+    JITController.shared.processPendingHelperAttachRequests()
 }

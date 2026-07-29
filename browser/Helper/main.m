@@ -175,157 +175,122 @@ static void recordHelperJITOutcome(NSString *outcome, NSString *errorDescription
     [jsonData writeToURL:outcomeFileURL atomically:YES];
 }
 
-// Limits how many Helper instances are actively attempting JIT
-// self-enable AT ONCE, device-wide - see the top-of-file-generating
-// script's docstring for the full reasoning (test36 motivated this:
-// spreading out attempt START times alone didn't meaningfully reduce
-// the watchdog hang rate). Every wait here is bounded and every
-// reservation self-expires, so a genuinely stuck attempt can only
-// ever delay others by a fixed, known amount - never block them
-// indefinitely.
-static const NSInteger kMaxConcurrentSlots = 2;
-static const NSTimeInterval kConcurrencySlotExpirySeconds = 9.0;
-static const NSTimeInterval kConcurrencySlotWaitBudgetSeconds = 8.0;
+// Delegates the actual JIT attach to the main app instead of this
+// Helper opening its own, separate tunnel - see
+// fix_helper_delegates_jit_to_main_app_v4.py's docstring for the full
+// reasoning. Only ever one such request in flight at a time within a
+// single Helper process (the existing retry loop below is sequential,
+// never concurrent), so this file-scope static is safe without
+// further synchronization.
+static dispatch_semaphore_t sJITAttachReplySemaphore = NULL;
 
-static NSURL *concurrencySlotsFileURL(void) {
+static void jitAttachReplyCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    if (sJITAttachReplySemaphore) {
+        dispatch_semaphore_signal(sJITAttachReplySemaphore);
+    }
+}
+
+// Every request gets its own unique token (a UUID), not just the PID -
+// deliberately. The retry loop below can make two sequential requests
+// for the same PID; keying by PID alone would let an old, late-
+// arriving reply for attempt 1 collide with attempt 2's own observer
+// for the same PID, since the main app can genuinely still be
+// processing attempt 1 after this Helper's own client-side timeout
+// already gave up on it. The token makes every attempt's coordination
+// channel unique regardless of how many requests the same PID makes.
+static BOOL requestJITAttachFromMainApp(int32_t pid, NSString **errorDescriptionOut) {
     NSString *groupID = ReynardResolveAppGroupIdentifier();
     NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
     if (!containerURL) {
-        return nil;
+        if (errorDescriptionOut) *errorDescriptionOut = @"No shared App Group container available";
+        return NO;
     }
-    return [containerURL URLByAppendingPathComponent:@"helper-jit-concurrency-slots.txt" isDirectory:NO];
-}
-
-static NSArray<NSNumber *> *readNonExpiredSlots(int fd, NSTimeInterval now) {
-    NSMutableArray<NSNumber *> *active = [NSMutableArray array];
-    off_t fileSize = lseek(fd, 0, SEEK_END);
-    lseek(fd, 0, SEEK_SET);
-    if (fileSize > 0 && fileSize < (1024 * 1024)) {
-        NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)fileSize];
-        read(fd, data.mutableBytes, (size_t)fileSize);
-        NSString *contents = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        for (NSString *line in [contents componentsSeparatedByString:@"\n"]) {
-            NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (trimmed.length == 0) {
-                continue;
-            }
-            NSTimeInterval ts = trimmed.doubleValue;
-            if ((now - ts) < kConcurrencySlotExpirySeconds) {
-                [active addObject:@(ts)];
-            }
-        }
+    
+    NSString *token = [[NSUUID UUID] UUIDString];
+    
+    sJITAttachReplySemaphore = dispatch_semaphore_create(0);
+    
+    NSString *replyNotificationName = [NSString stringWithFormat:@"com.minh-ton.Reynard.JITAttachReply.%@", token];
+    // Registered BEFORE the request is posted below, to avoid a race
+    // where the main app's reply could arrive before this Helper is
+    // actually listening for it.
+    CFNotificationCenterAddObserver(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        NULL,
+        jitAttachReplyCallback,
+        (__bridge CFStringRef)replyNotificationName,
+        NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately
+    );
+    
+    NSURL *requestFileURL = [containerURL URLByAppendingPathComponent:[NSString stringWithFormat:@"jit-attach-request-%d_%@", pid, token]];
+    BOOL requestFileWritten = [[NSData data] writeToURL:requestFileURL atomically:YES];
+    if (!requestFileWritten) {
+        // Fail fast instead of waiting the full 20s for a reply that
+        // can never arrive - the main app can never see a request that
+        // was never actually written (disk pressure, an unexpected
+        // permissions issue - rare, but a real, checkable failure mode
+        // this was previously silently ignoring).
+        CFNotificationCenterRemoveObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            (__bridge CFStringRef)replyNotificationName,
+            NULL
+        );
+        sJITAttachReplySemaphore = NULL;
+        if (errorDescriptionOut) *errorDescriptionOut = @"Failed to write JIT attach request file";
+        return NO;
     }
-    return active;
-}
-
-static void writeSlots(int fd, NSArray<NSNumber *> *slots) {
-    NSMutableString *newContents = [NSMutableString string];
-    for (NSNumber *ts in slots) {
-        [newContents appendFormat:@"%.6f\n", ts.doubleValue];
+    CFNotificationCenterPostNotification(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.minh-ton.Reynard.JITAttachRequestPosted"),
+        NULL,
+        NULL,
+        true
+    );
+    
+    // WIDENED to 20s (was 15s) - the delegation architecture means a
+    // request's total wait now includes time queued behind other
+    // requests on the main app's own serial queue, not just its own
+    // attach attempt's duration. See this script's docstring for the
+    // full reasoning and honest caveats on this figure.
+    long timedOut = dispatch_semaphore_wait(sJITAttachReplySemaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)));
+    
+    CFNotificationCenterRemoveObserver(
+        CFNotificationCenterGetDarwinNotifyCenter(),
+        NULL,
+        (__bridge CFStringRef)replyNotificationName,
+        NULL
+    );
+    sJITAttachReplySemaphore = NULL;
+    
+    if (timedOut != 0) {
+        if (errorDescriptionOut) *errorDescriptionOut = @"Timed out waiting for main app to process JIT attach request";
+        return NO;
     }
-    NSData *newData = [newContents dataUsingEncoding:NSUTF8StringEncoding];
-    lseek(fd, 0, SEEK_SET);
-    ftruncate(fd, 0);
-    write(fd, newData.bytes, newData.length);
-}
-
-// Brief, bounded internal lock (LOCK_NB with a short polling loop, up
-// to 0.5s) purely to make the read-prune-write of the shared slots
-// list atomic across processes - never held across the actual JIT
-// attempt itself. Fails open (returns YES, as if a slot were claimed)
-// if the shared container or the brief lock itself is unavailable,
-// so the concurrency-limiting mechanism's own machinery can never be
-// the thing that blocks JIT entirely.
-static BOOL tryClaimConcurrencySlot(NSTimeInterval *claimedAtOut) {
-    NSURL *fileURL = concurrencySlotsFileURL();
-    if (!fileURL) {
+    
+    NSURL *resultFileURL = [containerURL URLByAppendingPathComponent:[NSString stringWithFormat:@"jit-attach-result-%d_%@", pid, token]];
+    NSString *resultContents = [NSString stringWithContentsOfURL:resultFileURL encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] removeItemAtURL:resultFileURL error:nil];
+    
+    if (!resultContents) {
+        if (errorDescriptionOut) *errorDescriptionOut = @"No result file found after reply notification";
+        return NO;
+    }
+    
+    if ([resultContents isEqualToString:@"success"]) {
         return YES;
     }
     
-    int fd = open(fileURL.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
-    if (fd < 0) {
-        return YES;
-    }
-    
-    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
-    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
-            close(fd);
-            return YES;
-        }
-        usleep(5000);
-    }
-    
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    NSMutableArray<NSNumber *> *active = [readNonExpiredSlots(fd, now) mutableCopy];
-    
-    BOOL claimed = NO;
-    NSTimeInterval myClaim = now;
-    if (active.count < (NSUInteger)kMaxConcurrentSlots) {
-        [active addObject:@(myClaim)];
-        claimed = YES;
-    }
-    
-    writeSlots(fd, active);
-    flock(fd, LOCK_UN);
-    close(fd);
-    
-    if (claimed && claimedAtOut) {
-        *claimedAtOut = myClaim;
-    }
-    return claimed;
-}
-
-static void releaseConcurrencySlot(NSTimeInterval claimedAt) {
-    NSURL *fileURL = concurrencySlotsFileURL();
-    if (!fileURL) {
-        return;
-    }
-    
-    int fd = open(fileURL.fileSystemRepresentation, O_RDWR);
-    if (fd < 0) {
-        return;
-    }
-    
-    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
-    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
-            close(fd);
-            return;
-        }
-        usleep(5000);
-    }
-    
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-    NSArray<NSNumber *> *active = readNonExpiredSlots(fd, now);
-    NSMutableArray<NSNumber *> *remaining = [NSMutableArray array];
-    for (NSNumber *ts in active) {
-        if (fabs(ts.doubleValue - claimedAt) >= 0.000001) {
-            [remaining addObject:ts];
+    if (errorDescriptionOut) {
+        NSString *prefix = @"failed:";
+        if ([resultContents hasPrefix:prefix]) {
+            *errorDescriptionOut = [resultContents substringFromIndex:prefix.length];
+        } else {
+            *errorDescriptionOut = resultContents;
         }
     }
-    
-    writeSlots(fd, remaining);
-    flock(fd, LOCK_UN);
-    close(fd);
-}
-
-// Waits, with a bounded budget, for a concurrency slot to free up.
-// Returns YES with *claimedAtOut set if claimed within budget; NO if
-// the budget was exceeded - the caller proceeds without a slot rather
-// than waiting indefinitely, exactly as documented above.
-static BOOL waitForConcurrencySlot(NSTimeInterval *claimedAtOut) {
-    NSTimeInterval waitDeadline = [NSDate date].timeIntervalSince1970 + kConcurrencySlotWaitBudgetSeconds;
-    
-    while (YES) {
-        if (tryClaimConcurrencySlot(claimedAtOut)) {
-            return YES;
-        }
-        if ([NSDate date].timeIntervalSince1970 > waitDeadline) {
-            return NO;
-        }
-        usleep(200000);
-    }
+    return NO;
 }
 
 static void enableRPPairingJITForSelfIfNeeded(void) {
@@ -337,60 +302,41 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
     }
 
     if (@available(iOS 17.4, *)) {
-        // RETRY + JITTER TEST - test26 found four separate Helper
-        // processes (no shared client-side state between them at
-        // all - different OS processes, different memory, different
-        // LOCAL_RUNTIME_GUARD instances) all starting
-        // process_control_new within ~10 microseconds of each other,
-        // none of which ever resolved. No client-side bug explains
-        // four unrelated processes stalling in that kind of sync -
-        // this points at device-side contention when several Helper
-        // instances launch in a tight burst and all race through the
-        // same sequence in near-lockstep, landing on the same
-        // contended step at close to the same moment. A small random
-        // jitter before the first attempt spreads out when each
-        // instance actually reaches the device.
+        // RETRY TEST - test26 found four separate Helper processes (no
+        // shared client-side state between them at all - different OS
+        // processes, different memory) all starting process_control_new
+        // within ~10 microseconds of each other, none of which ever
+        // resolved. That was the original evidence for device-side
+        // contention under concurrent tunnel-opening - since resolved
+        // architecturally: the Helper no longer opens a tunnel at all,
+        // delegating instead to the main app's single, serial
+        // attachQueue (see fix_helper_delegates_jit_to_main_app_v4.py).
+        // Every attempt now genuinely does go through attachQueue, via
+        // that delegation - unlike the earlier, pre-delegation version
+        // of this comment claimed.
         //
-        // LIMITATION, not hidden: this cannot help a genuine,
-        // already-in-flight hang. enableJITForPID: is a single
-        // blocking call with no internal timeout - if it hangs (as
-        // process_control_new currently does under the burst pattern
-        // above), this function simply never returns far enough to
-        // attempt a retry at all. It only helps a fast-failing
-        // attempt, or cases where jitter alone avoids the contention
-        // in the first place. Safe to retry here specifically because
-        // this runs on dispatch_get_global_queue (concurrent), not a
-        // dedicated serial queue - unlike JITController's attachQueue,
-        // this can't get stuck queued behind other pending work.
-        // WATCHDOG - the retry above only helps a fast-failing attempt.
-        // If enableJITForPID: genuinely hangs (as process_control_new
-        // is currently confirmed to do intermittently), this whole
-        // function simply never returns, and nothing - not even
-        // os_log - ever runs again to record that anything went
-        // wrong. That left Helper-side failures completely invisible,
-        // unlike the main app's own JIT flow, which has JITController's
-        // watchdog to at least show a failure screen. This adds an
-        // INDEPENDENT timer, on its own queue, that does NOT wait for
-        // or try to cancel the underlying call - it only records, into
-        // the shared App Group container, that the budget was
-        // exceeded, so the main app can surface that regardless of
-        // whether the original call ever actually returns. If the
-        // retry loop below does eventually finish - fast or slow -
-        // it overwrites this with the real, final outcome.
+        // LIMITATION, not hidden: retrying here cannot help a genuine,
+        // already-in-flight hang on the main app's own side - if the
+        // delegated attach itself hangs, this only helps once
+        // requestJITAttachFromMainApp's own bounded wait (20s) gives up
+        // and returns, at which point attempt 2 gets a fresh token and
+        // a fresh shot, never colliding with attempt 1's coordination
+        // channel even if attempt 1 is technically still being
+        // processed somewhere on the main app's queue.
+        // WATCHDOG - unlike the old direct enableJITForPID: call this
+        // replaced, requestJITAttachFromMainApp always returns within
+        // its own bounded ~20s wait - success, explicit failure, or
+        // timeout - never blocks indefinitely. This independent timer
+        // remains valuable anyway: with two sequential attempts each
+        // possibly taking up to ~20s, the retry loop itself could still
+        // take up to ~40s worst case before this function's own final
+        // recordHelperJITOutcome call below runs. This timer surfaces
+        // "timed_out" to the UI at the 20s mark regardless, rather than
+        // making Settings wait for the full, worst-case retry sequence
+        // to finish before showing anything at all. If the retry loop
+        // does finish first - fast or slow - it overwrites this with
+        // the real, final outcome.
         pid_t selfPID = getpid();
-        
-        // CONCURRENCY LIMIT TEST - test36 found that spreading out
-        // attempt START times (the jitter below) did NOT meaningfully
-        // reduce the watchdog hang rate, pointing at overlapping
-        // in-flight session count as the real constraint rather than
-        // burst timing alone. Waits here, before the watchdog is even
-        // scheduled, so its 8s budget measures the actual attempt,
-        // not time spent waiting for a slot.
-        NSTimeInterval slotClaimedAt = 0;
-        BOOL hasConcurrencySlot = waitForConcurrencySlot(&slotClaimedAt);
-        if (!hasConcurrencySlot) {
-            os_log(OS_LOG_DEFAULT, "[HelperJIT] (pid %d) proceeding without a concurrency slot after %.0fs wait budget exceeded", selfPID, kConcurrencySlotWaitBudgetSeconds);
-        }
         
         // Includes selfPID (declared just above, so the block below
         // captures its already-set value) specifically so a single
@@ -402,72 +348,54 @@ static void enableRPPairingJITForSelfIfNeeded(void) {
         // permanent hang or just very slow.
         dispatch_queue_t watchdogRecordQueue = dispatch_queue_create("com.minh-ton.Reynard.HelperJIT.WatchdogRecordQueue", DISPATCH_QUEUE_SERIAL);
         __block BOOL didFinish = NO;
-        // WIDENED to 15s (was 8s) - a real idevicesyslog capture caught
-        // the actual resolution of what looked like a hang all night:
-        // a genuine ETIMEDOUT (os error 60) at 7832ms, a hair under the
-        // old 8s budget. The watchdog was very likely racing against
-        // the underlying library's own ~7.8s+ timeout and cutting off
-        // visibility into the real, explicit answer every single time.
-        // 15s gives comfortable margin so this should now actually
-        // resolve and be captured instead of just timing out here too.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), watchdogRecordQueue, ^{
+        // WIDENED to 20s (was 15s) - the delegation architecture means
+        // a request's total wait now includes time queued behind other
+        // requests on the main app's own serial queue, not just its
+        // own attach attempt's duration. See this script's docstring
+        // for the full reasoning and honest caveats on this figure.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)), watchdogRecordQueue, ^{
             if (!didFinish) {
-                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable (pid %d) exceeded 15s budget, recording timeout (underlying call may still be running)", selfPID);
+                os_log(OS_LOG_DEFAULT, "[HelperJIT] Watchdog: self-enable (pid %d) exceeded 20s budget, recording timeout (underlying call may still be running)", selfPID);
                 recordHelperJITOutcome(@"timed_out", nil);
             }
         });
         
-        // WIDENED - test33 confirmed multi-second hangs across FOUR
-        // different steps in the same burst window, not one specific
-        // function - the device itself is the shared bottleneck, not
-        // a bug in any single call. The original 0-300ms range
-        // predates that evidence and is nowhere near wide enough to
-        // spread apart the bursts actually observed (test26: four
-        // processes within ~10 microseconds of each other). No shared
-        // state or locking here deliberately - a cross-process mutex
-        // was considered and rejected, since a Helper holding a lock
-        // during a genuine hang would turn this into a guaranteed
-        // cascading failure for everyone waiting behind it instead of
-        // an intermittent one. This only reduces how often a whole
-        // burst lands in the same narrow window - it's probabilistic,
-        // not a guarantee.
-        NSTimeInterval initialJitter = ((double)arc4random_uniform(1500)) / 1000.0;
-        [NSThread sleepForTimeInterval:initialJitter];
-        
-        BOOL hasTXM = selfHasTXMSupport();
+        // hasTXM is no longer computed here - the main app computes its
+        // own hasTXMSupport() independently when it processes the
+        // delegated request below, since that's now where the actual
+        // attach happens. selfHasTXMSupport() itself is left in place,
+        // unused, rather than also removing its definition here -
+        // minimizing the size of an already large change.
         BOOL success = NO;
         NSString *lastErrorDescription = nil;
         
         for (int attempt = 1; attempt <= 2; attempt++) {
-            NSError *jitError = nil;
-            // Test complete: directly, empirically ruled out. Bypassing
-            // this call to a hardcoded value produced the exact same
-            // ConnectionReset result, confirming the sandbox-denied
-            // /private/preboot read is unrelated to the tunnel failure.
-            // Restoring the genuine, real check.
-            success = [JITEnabler.shared enableJITForPID:selfPID
-                                           hasTXMSupport:hasTXM
-                                                   error:&jitError];
-            os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing enableJIT for self (pid %d) attempt %d/2 success: %d, error: %{public}@", selfPID, attempt, success, jitError.localizedDescription ?: @"none");
-            lastErrorDescription = jitError.localizedDescription;
+            NSString *attemptErrorDescription = nil;
+            // Delegates to the main app instead of opening a separate
+            // tunnel from this process - see
+            // fix_helper_delegates_jit_to_main_app_v4.py's docstring.
+            // Each call generates its own unique token internally, so
+            // attempt 1 and attempt 2 here never share a coordination
+            // channel even though both target the same selfPID.
+            success = requestJITAttachFromMainApp(selfPID, &attemptErrorDescription);
+            os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing enableJIT for self (pid %d) attempt %d/2 success: %d, error: %{public}@", selfPID, attempt, success, attemptErrorDescription ?: @"none");
+            lastErrorDescription = attemptErrorDescription;
             
             if (success || attempt == 2) {
                 break;
             }
             
-            // WIDENED alongside initialJitter above, same reasoning.
-            NSTimeInterval retryJitter = 0.3 + (((double)arc4random_uniform(2000)) / 1000.0);
-            [NSThread sleepForTimeInterval:retryJitter];
+            // Small, FIXED (not random) pause - the wide random jitter
+            // this replaces existed to spread out concurrent tunnel
+            // opens, which no longer happens; this is just ordinary
+            // "do not immediately hammer a retry" practice.
+            [NSThread sleepForTimeInterval:0.5];
         }
         
         dispatch_sync(watchdogRecordQueue, ^{
             didFinish = YES;
         });
         recordHelperJITOutcome(success ? @"succeeded" : @"failed", success ? nil : lastErrorDescription);
-        
-        if (hasConcurrencySlot) {
-            releaseConcurrencySlot(slotClaimedAt);
-        }
     } else {
         os_log(OS_LOG_DEFAULT, "[HelperJIT] RPPairing JIT requires iOS 17.4+, unavailable on this OS version");
     }
