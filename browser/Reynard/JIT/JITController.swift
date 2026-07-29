@@ -493,8 +493,29 @@ extension JITController {
     // coalesce multiple posts under load, so this scans rather than
     // assumes exactly one request is waiting. Also opportunistically
     // prunes stale, abandoned result files every time it runs.
+    // Guards against redundant, already-queued work piling up during a
+    // genuine hang - see fix_helper_attach_queue_guard.py's docstring.
+    // Checked and set here, synchronously, on whichever thread called
+    // this - always the main thread in practice, since both the
+    // Darwin notification callback and the fallback Timer fire there.
+    // Cleared back on the main thread too, once the queued work
+    // actually finishes, so this flag is only ever touched from one
+    // thread - safe without needing an explicit lock.
+    private var isProcessingHelperAttachRequests = false
+    
     fileprivate func processPendingHelperAttachRequests() {
+        if isProcessingHelperAttachRequests {
+            return
+        }
+        isProcessingHelperAttachRequests = true
+        
         attachQueue.async { [weak self] in
+            defer {
+                DispatchQueue.main.async {
+                    self?.isProcessingHelperAttachRequests = false
+                }
+            }
+            
             guard let self, let containerURL = self.appGroupContainerURL() else {
                 return
             }
