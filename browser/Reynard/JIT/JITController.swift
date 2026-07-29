@@ -201,20 +201,40 @@ final class JITController {
     // delegation extension - both call the same underlying enableJIT,
     // and both need the same protection, since either one hanging can
     // otherwise jam attachQueue for everyone else queued behind it.
+    // CHANGED - global, whole-call guard replacing the narrower,
+    // vAttach-specific one, and a much longer wait replacing the
+    // previous 20s bound - see
+    // fix_global_enablejit_guard_and_extended_wait.py's docstring.
+    // Direct, ground-truth evidence from the underlying idevice
+    // library's own internal logging showed the real cause: the
+    // shared async runtime itself periodically stalls completely for
+    // ~19.5s at a time, repeatedly, then reliably resumes on its own -
+    // never observed as permanent. The previous 20s bound was
+    // abandoning calls right as the runtime was about to recover
+    // anyway, then starting a second call on top of the first,
+    // unabandoned one - manufacturing exactly the kind of overlap that
+    // starves the runtime further. 90s comfortably covers several full
+    // observed stall-and-recover cycles.
+    private static var enableJITInFlightSince: Date?
+    private static let enableJITInFlightLock = NSLock()
+    private static let enableJITMaxWaitSeconds: TimeInterval = 90.0
+    
     private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
-        // GUARD - see fix_guard_concurrent_vattach.py's docstring. If
-        // a previous vAttach call might still genuinely be running in
-        // the background (orphaned by an earlier timeout below, never
-        // cleared), don't pile a new, concurrent attempt on top of
-        // it. A generous 60s staleness window avoids ever blocking
-        // permanently if the orphaned call genuinely never returns.
-        if let inFlightSince = JITEnabler.vAttachInFlightSince() {
-            let age = CFAbsoluteTimeGetCurrent() - inFlightSince.timeIntervalSinceReferenceDate
-            if age < 60.0 {
-                logger(String(format: "boundedEnableJIT: skipping new attempt for pid %d - a previous vAttach call may still be in flight (started %.0fs ago)", pid, age))
-                return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: another vAttach call may still be in flight"]))
+        Self.enableJITInFlightLock.lock()
+        let existingInFlightSince = Self.enableJITInFlightSince
+        Self.enableJITInFlightLock.unlock()
+        
+        if let existingInFlightSince {
+            let age = CFAbsoluteTimeGetCurrent() - existingInFlightSince.timeIntervalSinceReferenceDate
+            if age < Self.enableJITMaxWaitSeconds {
+                logger(String(format: "boundedEnableJIT: skipping new attempt for pid %d - a previous enableJIT call may still be in flight (started %.0fs ago)", pid, age))
+                return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: another enableJIT call may still be in flight"]))
             }
         }
+        
+        Self.enableJITInFlightLock.lock()
+        Self.enableJITInFlightSince = Date()
+        Self.enableJITInFlightLock.unlock()
         
         let semaphore = DispatchSemaphore(value: 0)
         var result: (Bool, NSError?) = (false, NSError(domain: "Reynard.JIT", code: -1, userInfo: [NSLocalizedDescriptionKey: "Internal error: bounded wait result never set"]))
@@ -227,20 +247,25 @@ final class JITController {
             } catch {
                 result = (false, error as NSError)
             }
+            
+            Self.enableJITInFlightLock.lock()
+            Self.enableJITInFlightSince = nil
+            Self.enableJITInFlightLock.unlock()
+            
             // DIAGNOSTIC - see fix_log_orphaned_call_completion.py's
             // docstring. Purely additive: logs whenever this background
             // call actually finishes, including if that happens well
-            // after the outer 20s bound below already gave up and
+            // after the outer bound below already gave up and
             // returned to the caller - answering whether a hang here
             // is genuinely permanent (like process_control_new was,
             // confirmed by a direct ~3 minute wait) or just slower
-            // than 20s.
+            // than the bound.
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - boundedCallStart) * 1000.0
             logger(String(format: "boundedEnableJIT: background call for pid %d actually completed after %.0fms (success=%@)", pid, elapsedMs, result.0 ? "YES" : "NO"))
             semaphore.signal()
         }
         
-        if semaphore.wait(timeout: .now() + 20.0) == .timedOut {
+        if semaphore.wait(timeout: .now() + Self.enableJITMaxWaitSeconds) == .timedOut {
             // Orphaned - the background call above may still be
             // running and will eventually complete or fail on its
             // own, unobserved. A real, accepted trade-off: this
@@ -251,7 +276,12 @@ final class JITController {
             // gets to run in its place. Preferred over the
             // alternative directly observed in testing: total,
             // permanent gridlock for every attach queued behind a
-            // single hang.
+            // single hang. Deliberately does NOT clear
+            // enableJITInFlightSince here - the whole point of this
+            // fix is that the guard above must keep blocking new
+            // attempts from starting on top of this same,
+            // still-potentially-running one until it's genuinely
+            // stale, not just until this outer wait gives up.
             //
             // Also invalidates the cached DeviceProvider itself - real
             // capture evidence showed every attempt that reused the
@@ -260,7 +290,7 @@ final class JITController {
             // one. The next attempt gets a genuinely fresh connection
             // instead of inheriting a possibly-already-poisoned one.
             JITEnabler.shared.invalidateSharedProviderAfterTimeout()
-            return (false, NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: [NSLocalizedDescriptionKey: "Attach timed out after 20s (may still be running in the background)"]))
+            return (false, NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: [NSLocalizedDescriptionKey: "Attach timed out after 90s (may still be running in the background)"]))
         }
         
         return result
