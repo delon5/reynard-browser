@@ -27,7 +27,7 @@ index 264320aed775..6552f255e4cc 100644
  static id<SwiftGeckoViewRuntime> gRuntime;
  
  id<SwiftGeckoViewRuntime> mozilla::widget::GetSwiftRuntime() {
-@@ -22,11 +33,87 @@
+@@ -22,11 +33,85 @@
  }
  
  static id<GeckoProcessExtension> gCurrentProcessExtension;
@@ -40,15 +40,13 @@ index 264320aed775..6552f255e4cc 100644
 +// Wait for the parent process to finish the per-pid JIT attach path
 +// before allowing the content child to keep SpiderMonkey JIT enabled.
 +//
-+// CHANGED - was a hard-coded 5000ms - see
-+// fix_extend_child_jit_ready_signal_window.py's docstring. That
-+// window was never long enough for what a real attach attempt
-+// actually needs; a content process would always give up and
-+// permanently, irreversibly disable its own JIT (JS::DisableJitBackend
-+// below) long before the main app's own attach attempt could resolve,
-+// regardless of anything else working correctly there. 95000ms
-+// specifically exceeds the main app's own 90-second bound
-+// (boundedEnableJIT) by a small, safe margin.
++// REVERTED back to 5000ms - see
++// fix_revert_child_jit_ready_signal_window.py's docstring. Briefly
++// extended to 95000ms, but that only helps once a real attach attempt
++// can actually succeed within the window - the underlying attach hang
++// (still unresolved as of this revert) meant every content process
++// just waited a painful ~95s for a signal that was never going to
++// arrive, instead of the original 5s, with no corresponding benefit.
 +static bool WaitForJITReadySignal(mozilla::widget::ChildJITStatus* aStatus) {
 +  auto finish = [&](bool ok) {
 +    if (gJITReadySignalFd != -1) {
@@ -68,7 +66,7 @@ index 264320aed775..6552f255e4cc 100644
 +      .revents = 0,
 +  };
 +
-+  const int pollResult = poll(&descriptor, 1, 95000);
++  const int pollResult = poll(&descriptor, 1, 5000);
 +  if (pollResult <= 0) {
 +    return finish(false);
 +  }
