@@ -29,6 +29,15 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 // not a cached or static capability.
 + (BOOL)hasActiveJITSession NS_SWIFT_NAME(hasActiveJITSession());
 
+// Clears the cached DeviceProvider (getProviderForPID's own
+// sharedProvider) so the next call is forced to establish a fresh
+// connection instead of reusing one that may be poisoned by a timed-
+// out attempt. Deliberately does NOT free the old provider's memory -
+// see fix_invalidate_provider_on_timeout.py's docstring for the full,
+// important safety reasoning (a still-orphaned background call may
+// still be using it).
+- (void)invalidateSharedProviderAfterTimeout NS_SWIFT_NAME(invalidateSharedProviderAfterTimeout());
+
 @end
 
 NS_ASSUME_NONNULL_END

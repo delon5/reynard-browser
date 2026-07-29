@@ -227,6 +227,14 @@ final class JITController {
             // alternative directly observed in testing: total,
             // permanent gridlock for every attach queued behind a
             // single hang.
+            //
+            // Also invalidates the cached DeviceProvider itself - real
+            // capture evidence showed every attempt that reused the
+            // same cached provider hanging at the identical step
+            // (process_control_new), 100% of the time, not just this
+            // one. The next attempt gets a genuinely fresh connection
+            // instead of inheriting a possibly-already-poisoned one.
+            JITEnabler.shared.invalidateSharedProviderAfterTimeout()
             return (false, NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: [NSLocalizedDescriptionKey: "Attach timed out after 20s (may still be running in the background)"]))
         }
         

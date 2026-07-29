@@ -227,6 +227,27 @@
     return hasAnyActiveJITSessionAcrossProcesses();
 }
 
+// Deliberately does NOT call freeDeviceProvider on the current
+// sharedProvider before clearing it - see
+// fix_invalidate_provider_on_timeout.py's docstring for the full
+// reasoning. A timed-out, orphaned background call may still be
+// genuinely running and still actively using this exact pointer
+// inside its own, still-executing FFI call - freeing memory a
+// separate, still-live thread may be using is a real use-after-free
+// risk, and there is no reliable way to know from here whether or
+// when that orphaned call actually finishes. Accepted trade-off: a
+// small, bounded memory leak (one DeviceProvider struct) per timeout
+// event, in exchange for guaranteed safety - preferred over risking a
+// crash to save that memory. Runs inside the same providerQueue
+// getProviderForPID itself uses, so this can never race with a
+// concurrent call reading or writing sharedProvider.
+- (void)invalidateSharedProviderAfterTimeout {
+    dispatch_sync(self.providerQueue, ^{
+        self.sharedProvider = NULL;
+        self.didEnsureDDIMounted = NO;
+    });
+}
+
 - (DeviceProvider *)getProviderForPID:(int32_t)pid error:(NSError **)error {
     __block DeviceProvider *provider = NULL;
     __block NSError *providerError = nil;
