@@ -470,6 +470,19 @@ extension JITController {
             nil,
             .deliverImmediately
         )
+        
+        // Fallback safety net alongside the notification observer
+        // above - see fix_helper_attach_polling_fallback.py's
+        // docstring. Periodically scans for pending requests directly,
+        // independent of whether the "request posted" notification
+        // ever actually arrives - symmetric with the Helper's own
+        // polling fallback for the reply side. A relatively infrequent
+        // interval since this is purely a backstop for the app's
+        // entire lifetime, not bounded to one request's own window -
+        // the notification remains the fast path in the common case.
+        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.processPendingHelperAttachRequests()
+        }
     }
     
     // Called on the main thread (the run loop this observer was

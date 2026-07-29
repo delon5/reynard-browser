@@ -224,6 +224,7 @@ static BOOL requestJITAttachFromMainApp(int32_t pid, NSString **errorDescription
     );
     
     NSURL *requestFileURL = [containerURL URLByAppendingPathComponent:[NSString stringWithFormat:@"jit-attach-request-%d_%@", pid, token]];
+    NSURL *resultFileURL = [containerURL URLByAppendingPathComponent:[NSString stringWithFormat:@"jit-attach-result-%d_%@", pid, token]];
     BOOL requestFileWritten = [[NSData data] writeToURL:requestFileURL atomically:YES];
     if (!requestFileWritten) {
         // Fail fast instead of waiting the full 20s for a reply that
@@ -249,12 +250,29 @@ static BOOL requestJITAttachFromMainApp(int32_t pid, NSString **errorDescription
         true
     );
     
-    // WIDENED to 20s (was 15s) - the delegation architecture means a
-    // request's total wait now includes time queued behind other
-    // requests on the main app's own serial queue, not just its own
-    // attach attempt's duration. See this script's docstring for the
-    // full reasoning and honest caveats on this figure.
-    long timedOut = dispatch_semaphore_wait(sJITAttachReplySemaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)));
+    // Waits for a reply two ways at once, not just the notification -
+    // see fix_helper_attach_polling_fallback.py's docstring. Short
+    // (200ms) semaphore waits repeated up to the full 20s budget,
+    // checking the result file's own existence directly on every
+    // iteration the notification hasn't signaled yet. The notification
+    // remains the fast path (near-instant when it fires); the file
+    // check is a guaranteed-to-work fallback should it not - App Group
+    // file access has been directly, repeatedly confirmed working
+    // cross-process in this exact app tonight, unlike Darwin
+    // notification delivery for this specific extension type.
+    NSTimeInterval waitDeadline = [NSDate date].timeIntervalSince1970 + 20.0;
+    BOOL resultReady = NO;
+    while ([NSDate date].timeIntervalSince1970 < waitDeadline) {
+        long semResult = dispatch_semaphore_wait(sJITAttachReplySemaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)));
+        if (semResult == 0) {
+            resultReady = YES;
+            break;
+        }
+        if ([[NSFileManager defaultManager] fileExistsAtPath:resultFileURL.path]) {
+            resultReady = YES;
+            break;
+        }
+    }
     
     CFNotificationCenterRemoveObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
@@ -264,12 +282,11 @@ static BOOL requestJITAttachFromMainApp(int32_t pid, NSString **errorDescription
     );
     sJITAttachReplySemaphore = NULL;
     
-    if (timedOut != 0) {
+    if (!resultReady) {
         if (errorDescriptionOut) *errorDescriptionOut = @"Timed out waiting for main app to process JIT attach request";
         return NO;
     }
     
-    NSURL *resultFileURL = [containerURL URLByAppendingPathComponent:[NSString stringWithFormat:@"jit-attach-result-%d_%@", pid, token]];
     NSString *resultContents = [NSString stringWithContentsOfURL:resultFileURL encoding:NSUTF8StringEncoding error:nil];
     [[NSFileManager defaultManager] removeItemAtURL:resultFileURL error:nil];
     
