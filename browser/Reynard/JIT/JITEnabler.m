@@ -163,6 +163,13 @@ static NSDate *sVAttachInFlightSince = nil;
         DeviceProvider *provider = [self getProviderForPID:pid error:error];
         if (!provider) return NO;
         
+        // ADDED - @try/@finally wrapping from here through every exit
+        // point of this function below - see
+        // fix_free_orphaned_provider_safely.py's docstring. Ensures
+        // the specific provider THIS call obtained gets safely freed
+        // if (and only if) it's since been superseded by a newer one,
+        // regardless of which return statement below is actually hit.
+        @try {
         DebugSession session = {0};
         
         if (!connectDebugSession(provider, &session, @"10.7.0.1", pid, error)) return NO;
@@ -321,6 +328,26 @@ static NSDate *sVAttachInFlightSince = nil;
         }
         
         return YES;
+        } @finally {
+            // Safe to free THIS call's own, specific provider pointer
+            // if and only if it's no longer the current
+            // self.sharedProvider - meaning a newer attempt has
+            // already invalidated-and-replaced it since this call
+            // started, confirming nothing else still reaches for this
+            // exact, old pointer. Relies on the global, whole-call
+            // guard (fix_global_enablejit_guard_and_extended_wait.py)
+            // to guarantee only one enableJITForPID: call is ever
+            // genuinely in flight at a time - without that guarantee,
+            // a second, concurrent call could still be legitimately
+            // using this same provider even after a third one
+            // supersedes it, which this check alone couldn't detect.
+            dispatch_sync(self.providerQueue, ^{
+                if (self.sharedProvider != provider) {
+                    logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) freeing orphaned provider - superseded by a newer attempt since this call started", pid]);
+                    freeDeviceProvider(provider);
+                }
+            });
+        }
     }
     
     return NO;
