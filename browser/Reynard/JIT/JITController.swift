@@ -17,6 +17,17 @@ final class JITController {
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
     private var attachedPIDs: Set<Int32> = []
     private var preflightWatchdogs: [Int32: DispatchWorkItem] = [:]
+    // Moved here from the Helper Process Attach Delegation extension
+    // below - Swift extensions cannot contain stored properties, a
+    // real compiler error caught building this for the first time.
+    // Guards against redundant, already-queued work piling up during a
+    // genuine hang - see fix_helper_attach_queue_guard.py's docstring
+    // for the full reasoning. Checked and set synchronously on
+    // whichever thread calls processPendingHelperAttachRequests()
+    // (always the main thread in practice), cleared back on the main
+    // thread too once the queued work finishes, so this flag is only
+    // ever touched from one thread - safe without needing a lock.
+    private var isProcessingHelperAttachRequests = false
     // Only ever touched from within the watchdog closure below, which
     // always runs on watchdogQueue - single-queue access, no lock
     // needed, consistent with how preflightWatchdogs/attachedPIDs are
@@ -493,16 +504,6 @@ extension JITController {
     // coalesce multiple posts under load, so this scans rather than
     // assumes exactly one request is waiting. Also opportunistically
     // prunes stale, abandoned result files every time it runs.
-    // Guards against redundant, already-queued work piling up during a
-    // genuine hang - see fix_helper_attach_queue_guard.py's docstring.
-    // Checked and set here, synchronously, on whichever thread called
-    // this - always the main thread in practice, since both the
-    // Darwin notification callback and the fallback Timer fire there.
-    // Cleared back on the main thread too, once the queued work
-    // actually finishes, so this flag is only ever touched from one
-    // thread - safe without needing an explicit lock.
-    private var isProcessingHelperAttachRequests = false
-    
     fileprivate func processPendingHelperAttachRequests() {
         if isProcessingHelperAttachRequests {
             return
@@ -558,7 +559,7 @@ extension JITController {
                 
                 CFNotificationCenterPostNotification(
                     CFNotificationCenterGetDarwinNotifyCenter(),
-                    Self.jitAttachReplyNotificationName(forToken: token),
+                    CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
                     nil,
                     nil,
                     true
@@ -596,7 +597,7 @@ extension JITController {
     // Returns success/error directly to the caller instead.
     fileprivate func attachToHelperProcess(pid: Int32) -> (Bool, String?) {
         do {
-            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: hasTXMSupport())
+            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: Self.hasTXMSupport())
             return (true, nil)
         } catch {
             return (false, (error as NSError).localizedDescription)
