@@ -726,23 +726,16 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
         return NULL;
     }
     
-    HeartbeatClientHandle *heartbeatClient = NULL;
-    ffiError = heartbeat_connect_rsd(adapter, handshake, &heartbeatClient);
-    if (ffiError) {
-        if (error) *error = MakeError(HeartbeatConnectFailed);
-        idevice_error_free(ffiError);
-        rsd_handshake_free(handshake);
-        adapter_free(adapter);
-        return NULL;
-    }
-    
-    uint64_t nextInterval = 0;
-    ffiError = heartbeat_get_marco(heartbeatClient, 2, &nextInterval);
-    if (!ffiError) ffiError = heartbeat_send_polo(heartbeatClient);
+    // REMOVED the entire heartbeat_connect_rsd / heartbeat_get_marco /
+    // heartbeat_send_polo / startHeartbeat sequence here - see
+    // fix_remove_heartbeat_contention.py's docstring. provider's
+    // heartbeatClient field is simply never set now (stays NULL from
+    // calloc's own zero-init below); freeDeviceProvider's existing
+    // `if (provider->heartbeatClient)` cleanup check already safely
+    // no-ops on that, without needing any further changes.
     
     DeviceProvider *provider = calloc(1, sizeof(*provider));
     if (!provider) {
-        heartbeat_client_free(heartbeatClient);
         rsd_handshake_free(handshake);
         adapter_free(adapter);
         if (error) *error = MakeError(DeviceProviderAllocationFailed);
@@ -751,10 +744,6 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     
     provider->adapter = adapter;
     provider->handshake = handshake;
-    provider->heartbeatClient = heartbeatClient;
-    provider->heartbeatRunning = NO;
-    
-    startHeartbeat(provider);
     
     return provider;
 }
@@ -855,10 +844,9 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
         return NO;
     }
     
-    // (Earlier "stop heartbeat here" test removed - it set the flag
-    // too late to be a fair test, since the heartbeat could still have
-    // been mid-call at that exact moment. Testing the real retry-logic
-    // difference instead now, at its actual source in startHeartbeat.)
+    // (The heartbeat mechanism this comment used to reference has since
+    // been removed entirely - see
+    // fix_remove_heartbeat_contention.py's docstring.)
     LockdowndClientHandle *lockdownClient = NULL;
     ImageMounterHandle *mounterClient = NULL;
     IdeviceFfiError *ffiError = NULL;
