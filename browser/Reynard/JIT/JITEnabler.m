@@ -60,6 +60,26 @@ static NSDate *sVAttachInFlightSince = nil;
     static JITEnabler *sharedEnabler = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // DIAGNOSTIC - see
+        // fix_enable_idevice_native_logging.py's docstring. Purely
+        // additive: enables the underlying idevice Rust library's own
+        // internal logging, which this codebase has never once turned
+        // on - confirmed by grepping the entire codebase for
+        // idevice_init_logger before adding this. StikDebug's own
+        // source calls this exact function during its own
+        // initialization; this codebase simply never has. Trace
+        // (maximum verbosity) for the file output specifically, since
+        // the goal here is maximum diagnostic detail into what the
+        // library itself is doing internally during a confirmed hang -
+        // detail no amount of instrumentation wrapped around the
+        // outside of an FFI call can ever see.
+        NSArray<NSURL *> *documentDirs = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask];
+        NSURL *logURL = [documentDirs.firstObject URLByAppendingPathComponent:@"idevice_native_log.txt"];
+        if (logURL) {
+            const char *logPath = logURL.path.UTF8String;
+            enum IdeviceLoggerError loggerResult = idevice_init_logger(IdeviceLogInfo, IdeviceLogTrace, (char *)logPath);
+            logger([NSString stringWithFormat:@"idevice_init_logger result: %d, writing to: %@", loggerResult, logURL.path]);
+        }
         sharedEnabler = [[self alloc] init];
     });
     return sharedEnabler;

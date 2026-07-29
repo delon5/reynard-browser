@@ -114,4 +114,26 @@ void plist_free(plist_t plist);
 void plist_get_string_val(plist_t node, char **val);
 void plist_get_uint_val(plist_t node, uint64_t *val);
 
+// Copied directly from idevice.h (the underlying Rust library's own
+// header) - see fix_enable_idevice_native_logging.py's docstring.
+typedef enum IdeviceLoggerError {
+    IdeviceLoggerSuccess = 0,
+    IdeviceLoggerFileError = -1,
+    IdeviceLoggerAlreadyInitialized = -2,
+    IdeviceLoggerInvalidPathString = -3,
+} IdeviceLoggerError;
+
+typedef enum IdeviceLogLevel {
+    IdeviceLogDisabled = 0,
+    IdeviceLogError = 1,
+    IdeviceLogWarn = 2,
+    IdeviceLogInfo = 3,
+    IdeviceLogDebug = 4,
+    IdeviceLogTrace = 5,
+} IdeviceLogLevel;
+
+enum IdeviceLoggerError idevice_init_logger(enum IdeviceLogLevel console_level,
+                                            enum IdeviceLogLevel file_level,
+                                            char *file_path);
+
 #endif /* IdeviceFFI_h */
