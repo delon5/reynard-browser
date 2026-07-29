@@ -199,6 +199,29 @@ static NSDate *sVAttachInFlightSince = nil;
         // session.debugProxy with zero dependency on anything this
         // step did or set.
         
+        // RESTORED - two priming acks, specifically, not the rest of
+        // configureNoAckMode - see fix_restore_priming_acks.py's
+        // docstring for the full reasoning. The underlying Rust
+        // library's read_response function (used by every
+        // sendDebugCommand call, vAttach included) waits for a lone
+        // '+' ack byte before reading any response, unless noack_mode
+        // was explicitly disabled - which nothing in this codebase
+        // does anymore since configureNoAckMode's removal, and
+        // correctly so, since none of StikDebug's reference scripts
+        // ever send QStartNoAckMode either. But that removal also
+        // took these two send-side acks with it, as a side effect,
+        // without them being evaluated on their own. If the
+        // debugserver sends unsolicited initial state right after
+        // debug_proxy_connect_rsd completes, these may be what clears
+        // it - restoring them, specifically, tests that directly.
+        for (NSUInteger primingAckCount = 0; primingAckCount < 2; primingAckCount++) {
+            IdeviceFfiError *primingAckError = debug_proxy_send_ack(session.debugProxy);
+            if (primingAckError) {
+                logger([NSString stringWithFormat:@"enableJITForPID: priming ack %lu FAILED for pid %d, error: %s", (unsigned long)primingAckCount, pid, primingAckError->message ?: "unknown error"]);
+                idevice_error_free(primingAckError);
+            }
+        }
+        
         NSString *attachCommand = [NSString stringWithFormat:@"vAttach;%X", pid];
         NSString *attachResponse = nil;
         CFAbsoluteTime attachCallStart = CFAbsoluteTimeGetCurrent();
