@@ -25,6 +25,37 @@
 
 @implementation JITEnabler
 
+static dispatch_queue_t vAttachStateQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.minh-ton.Reynard.JITEnabler.VAttachStateQueue", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static NSDate *sVAttachInFlightSince = nil;
+
++ (void)markVAttachStarted {
+    dispatch_sync(vAttachStateQueue(), ^{
+        sVAttachInFlightSince = [NSDate date];
+    });
+}
+
++ (void)markVAttachFinished {
+    dispatch_sync(vAttachStateQueue(), ^{
+        sVAttachInFlightSince = nil;
+    });
+}
+
++ (nullable NSDate *)vAttachInFlightSince {
+    __block NSDate *result = nil;
+    dispatch_sync(vAttachStateQueue(), ^{
+        result = sVAttachInFlightSince;
+    });
+    return result;
+}
+
 + (JITEnabler *)shared {
     static JITEnabler *sharedEnabler = nil;
     static dispatch_once_t onceToken;
@@ -172,7 +203,9 @@
         NSString *attachResponse = nil;
         CFAbsoluteTime attachCallStart = CFAbsoluteTimeGetCurrent();
         logger([NSString stringWithFormat:@"enableJITForPID: starting attach command for pid %d", pid]);
+        [JITEnabler markVAttachStarted];
         BOOL attachSucceeded = sendDebugCommand(session.debugProxy, attachCommand, &attachResponse, &commandError);
+        [JITEnabler markVAttachFinished];
         CFAbsoluteTime attachCallEnd = CFAbsoluteTimeGetCurrent();
         if (!attachSucceeded) {
             logger([NSString stringWithFormat:@"enableJITForPID: attach command FAILED for pid %d, call took %.0fms, error: %@", pid, (attachCallEnd - attachCallStart) * 1000.0, commandError.localizedDescription ?: @"(no error set)"]);

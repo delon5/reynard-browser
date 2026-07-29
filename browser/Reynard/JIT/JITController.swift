@@ -202,6 +202,20 @@ final class JITController {
     // and both need the same protection, since either one hanging can
     // otherwise jam attachQueue for everyone else queued behind it.
     private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
+        // GUARD - see fix_guard_concurrent_vattach.py's docstring. If
+        // a previous vAttach call might still genuinely be running in
+        // the background (orphaned by an earlier timeout below, never
+        // cleared), don't pile a new, concurrent attempt on top of
+        // it. A generous 60s staleness window avoids ever blocking
+        // permanently if the orphaned call genuinely never returns.
+        if let inFlightSince = JITEnabler.vAttachInFlightSince() {
+            let age = CFAbsoluteTimeGetCurrent() - inFlightSince.timeIntervalSinceReferenceDate
+            if age < 60.0 {
+                logger(String(format: "boundedEnableJIT: skipping new attempt for pid %d - a previous vAttach call may still be in flight (started %.0fs ago)", pid, age))
+                return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: another vAttach call may still be in flight"]))
+            }
+        }
+        
         let semaphore = DispatchSemaphore(value: 0)
         var result: (Bool, NSError?) = (false, NSError(domain: "Reynard.JIT", code: -1, userInfo: [NSLocalizedDescriptionKey: "Internal error: bounded wait result never set"]))
         let boundedCallStart = CFAbsoluteTimeGetCurrent()

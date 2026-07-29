@@ -38,6 +38,16 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 // still be using it).
 - (void)invalidateSharedProviderAfterTimeout NS_SWIFT_NAME(invalidateSharedProviderAfterTimeout());
 
+// Timestamp of when the most recent vAttach FFI call started, if it
+// might still genuinely be running - nil if none is currently thought
+// to be in flight. Set immediately before the call, cleared
+// immediately after it returns via the normal, synchronous code path
+// (success or failure) - deliberately NOT cleared by
+// boundedEnableJIT's own 20s timeout, since the call may genuinely
+// still be running past that point. See
+// fix_guard_concurrent_vattach.py's docstring for the full reasoning.
++ (nullable NSDate *)vAttachInFlightSince NS_SWIFT_NAME(vAttachInFlightSince());
+
 @end
 
 NS_ASSUME_NONNULL_END
