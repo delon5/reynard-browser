@@ -113,38 +113,42 @@
         if (!provider) return NO;
         
         DebugSession session = {0};
-        IdeviceFfiError *ffiError = NULL;
         
         if (!connectDebugSession(provider, &session, @"10.7.0.1", pid, error)) return NO;
         
-        ProcessControlHandle *processControl = NULL;
-        CFAbsoluteTime processControlCallStart = CFAbsoluteTimeGetCurrent();
-        logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) starting process_control_new", pid]);
-        ffiError = process_control_new(session.remoteServer, &processControl);
-        CFAbsoluteTime processControlCallEnd = CFAbsoluteTimeGetCurrent();
-        if (ffiError) {
-            NSInteger realCode = ffiError->code;
-            NSInteger realSubCode = ffiError->sub_code;
-            NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-            logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) process_control_new REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (processControlCallEnd - processControlCallStart) * 1000.0]);
-            if (error) *error = MakeError(ProcessControlCreateFailed);
-            idevice_error_free(ffiError);
-            freeDebugSession(&session);
-            return NO;
-        }
-        logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) process_control_new succeeded, call took %.0fms", pid, (processControlCallEnd - processControlCallStart) * 1000.0]);
-        
-        CFAbsoluteTime disableMemLimitCallStart = CFAbsoluteTimeGetCurrent();
-        logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) starting process_control_disable_memory_limit", pid]);
-        ffiError = process_control_disable_memory_limit(processControl, (uint64_t)pid);
-        CFAbsoluteTime disableMemLimitCallEnd = CFAbsoluteTimeGetCurrent();
-        process_control_free(processControl);
-        if (ffiError) {
-            logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) disable_memory_limit REAL failure - %s, call took %.0fms (non-fatal, continuing)", pid, ffiError->message ?: "unknown error", (disableMemLimitCallEnd - disableMemLimitCallStart) * 1000.0]);
-            idevice_error_free(ffiError);
-        } else {
-            logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) disable_memory_limit succeeded, call took %.0fms", pid, (disableMemLimitCallEnd - disableMemLimitCallStart) * 1000.0]);
-        }
+        // REMOVED process_control_new / process_control_disable_memory_limit /
+        // process_control_free entirely - see
+        // fix_remove_process_control_new.py's docstring for the full
+        // reasoning. This was the exact, sole hang point in every single
+        // test tonight, 100% of the time, across every architectural fix
+        // built around it (delegation, bounded wait, provider
+        // invalidation) - none of which could ever have helped, since the
+        // call itself never returned regardless of how it was scheduled
+        // or how many times a fresh connection was given to it.
+        //
+        // Confirmed unnecessary by directly reading all four of
+        // StephenDev0/StikDebug's own bundled, proven-working JIT scripts
+        // (universal.js, legacy.js, Geode.js, maciOS.js) - every one
+        // attaches via vAttach on the debug proxy directly and never
+        // touches process_control_new, ProcessControlClient, or DVT/
+        // Instruments in any form. Confirmed safe to remove specifically
+        // in THIS codebase too, not just by analogy: processControl was
+        // used for exactly one thing - process_control_disable_memory_limit
+        // - then freed immediately after, before configureNoAckMode or
+        // the vAttach command ever ran; both of those already operated
+        // directly on session.debugProxy, with zero dependency on
+        // processControl at all. Even this code's own error handling
+        // already treated disable_memory_limit's own failure as
+        // non-fatal - "non-fatal, continuing" - meaning this codebase
+        // already considered it optional, not required, before tonight.
+        //
+        // Trade-off, honestly stated: this drops the memory-limit-disable
+        // behavior entirely (which prevents the OS from killing a target
+        // process under memory pressure) rather than finding a working
+        // replacement for it. Given every attempt to reach this line
+        // tonight has hung indefinitely, restoring a genuinely working
+        // JIT-enable path takes priority over preserving a best-effort,
+        // already-non-fatal memory optimization.
         
         NSError *commandError = nil;
         NSString *noAckResponse = nil;
