@@ -701,7 +701,18 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     
     AdapterHandle *adapter = NULL;
     RsdHandshakeHandle *handshake = NULL;
-    ffiError = tunnel_create_rppairing((const struct sockaddr *)&address, (socklen_t)sizeof(address), "Reynard", rpPairingFile, NULL, NULL, &adapter, &handshake);
+    
+    // CHANGED - unique per-call hostname instead of the single,
+    // static "Reynard" string every process and every attempt used to
+    // share - see fix_unique_tunnel_hostname.py's docstring. This
+    // hostname is sent to the device as part of the RPPairing
+    // handshake itself, not just a local label - StikDebug's own
+    // confirmed source uses distinct hostnames per purpose
+    // ("StikDebug", "StikDebugDebug", "StikDebugHeartbeat"), never
+    // reusing one across simultaneous connections the way every
+    // single tunnel this codebase has ever created did.
+    NSString *uniqueHostname = [NSString stringWithFormat:@"Reynard-%d-%llu", getpid(), (unsigned long long)(CFAbsoluteTimeGetCurrent() * 1000.0)];
+    ffiError = tunnel_create_rppairing((const struct sockaddr *)&address, (socklen_t)sizeof(address), uniqueHostname.UTF8String, rpPairingFile, NULL, NULL, &adapter, &handshake);
     rp_pairing_file_free(rpPairingFile);
     
     if (ffiError) {
