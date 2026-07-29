@@ -596,48 +596,69 @@ extension JITController {
             }
             
             let fileManager = FileManager.default
-            guard let contents = try? fileManager.contentsOfDirectory(atPath: containerURL.path) else {
-                return
-            }
             
-            self.pruneStaleResultFiles(contents: contents, containerURL: containerURL, fileManager: fileManager)
-            
-            // Filename format: jit-attach-request-{pid}_{token} - PID
-            // kept in the name for easy debugging/readability, token
-            // is what actually makes each attempt unique.
-            let pendingRequests = contents.filter { $0.hasPrefix(Self.jitAttachRequestFilePrefix) }
-            
-            for requestFileName in pendingRequests {
-                let remainder = requestFileName.dropFirst(Self.jitAttachRequestFilePrefix.count)
-                guard let underscoreIndex = remainder.firstIndex(of: "_") else {
-                    continue
-                }
-                let pidString = remainder[remainder.startIndex..<underscoreIndex]
-                let token = String(remainder[remainder.index(after: underscoreIndex)...])
-                guard let pid = Int32(pidString), !token.isEmpty else {
-                    continue
+            // CHANGED - loops until a full scan finds nothing pending,
+            // instead of processing one fixed snapshot and stopping -
+            // see fix_reprocess_requests_until_drained.py's docstring.
+            // isProcessingHelperAttachRequests stays true for this
+            // entire loop, exactly as before - the fix is that a
+            // request written WHILE this loop is still running now
+            // gets picked up on the loop's very next iteration,
+            // instead of being invisible to both the notification
+            // handler and the next timer tick until this whole pass
+            // finishes and something separately triggers another call.
+            // Defensive cap, not expected to ever actually matter in
+            // practice - rules out any pathological, runaway scenario
+            // rather than looping genuinely unbounded.
+            let maxPasses = 50
+            for _ in 0..<maxPasses {
+                guard let contents = try? fileManager.contentsOfDirectory(atPath: containerURL.path) else {
+                    return
                 }
                 
-                // Removed first, before the attach attempt itself - if
-                // this process were to crash mid-attach, a stale
-                // request file would otherwise sit here forever,
-                // silently never retried and never cleaned up either.
-                let requestFileURL = containerURL.appendingPathComponent(requestFileName)
-                try? fileManager.removeItem(at: requestFileURL)
+                self.pruneStaleResultFiles(contents: contents, containerURL: containerURL, fileManager: fileManager)
                 
-                let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
+                // Filename format: jit-attach-request-{pid}_{token} - PID
+                // kept in the name for easy debugging/readability, token
+                // is what actually makes each attempt unique.
+                let pendingRequests = contents.filter { $0.hasPrefix(Self.jitAttachRequestFilePrefix) }
                 
-                let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
-                let resultContents = success ? "success" : "failed:\(errorDescription ?? "unknown error")"
-                try? resultContents.write(to: resultFileURL, atomically: true, encoding: .utf8)
+                guard !pendingRequests.isEmpty else {
+                    return
+                }
                 
-                CFNotificationCenterPostNotification(
-                    CFNotificationCenterGetDarwinNotifyCenter(),
-                    CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
-                    nil,
-                    nil,
-                    true
-                )
+                for requestFileName in pendingRequests {
+                    let remainder = requestFileName.dropFirst(Self.jitAttachRequestFilePrefix.count)
+                    guard let underscoreIndex = remainder.firstIndex(of: "_") else {
+                        continue
+                    }
+                    let pidString = remainder[remainder.startIndex..<underscoreIndex]
+                    let token = String(remainder[remainder.index(after: underscoreIndex)...])
+                    guard let pid = Int32(pidString), !token.isEmpty else {
+                        continue
+                    }
+                    
+                    // Removed first, before the attach attempt itself - if
+                    // this process were to crash mid-attach, a stale
+                    // request file would otherwise sit here forever,
+                    // silently never retried and never cleaned up either.
+                    let requestFileURL = containerURL.appendingPathComponent(requestFileName)
+                    try? fileManager.removeItem(at: requestFileURL)
+                    
+                    let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
+                    
+                    let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
+                    let resultContents = success ? "success" : "failed:\(errorDescription ?? "unknown error")"
+                    try? resultContents.write(to: resultFileURL, atomically: true, encoding: .utf8)
+                    
+                    CFNotificationCenterPostNotification(
+                        CFNotificationCenterGetDarwinNotifyCenter(),
+                        CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
+                        nil,
+                        nil,
+                        true
+                    )
+                }
             }
         }
     }
