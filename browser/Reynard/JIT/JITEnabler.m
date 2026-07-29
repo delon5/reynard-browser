@@ -222,6 +222,29 @@ static NSDate *sVAttachInFlightSince = nil;
             }
         }
         
+        // RESTORED - QStartNoAckMode + disabling ack mode - see
+        // fix_complete_ack_mode_restoration.py's docstring. Confirmed
+        // directly against StikDebug's own actual source
+        // (JITEnableContext.swift's runDebugServerCommand) that this
+        // exact sequence - two priming acks, QStartNoAckMode, then
+        // disabling ack mode - runs in BOTH of StikDebug's own code
+        // paths before vAttach ever executes. The JS reference scripts
+        // never send QStartNoAckMode themselves because the native
+        // host already did it for them, before the script ever got
+        // control - not because it's unnecessary. Matching StikDebug's
+        // own confirmed behavior precisely: a QStartNoAckMode failure
+        // here is NOT treated as fatal, unlike this codebase's
+        // original version - log and proceed regardless, same as
+        // StikDebug's own code does.
+        NSString *noAckResponse = nil;
+        NSError *noAckError = nil;
+        if (sendDebugCommand(session.debugProxy, @"QStartNoAckMode", &noAckResponse, &noAckError)) {
+            logger([NSString stringWithFormat:@"enableJITForPID: QStartNoAckMode result for pid %d: %@", pid, noAckResponse ?: @"<no response>"]);
+        } else {
+            logger([NSString stringWithFormat:@"enableJITForPID: QStartNoAckMode FAILED for pid %d (non-fatal, continuing): %@", pid, noAckError.localizedDescription ?: @"(no error set)"]);
+        }
+        debug_proxy_set_ack_mode(session.debugProxy, 0);
+        
         NSString *attachCommand = [NSString stringWithFormat:@"vAttach;%X", pid];
         NSString *attachResponse = nil;
         CFAbsoluteTime attachCallStart = CFAbsoluteTimeGetCurrent();
