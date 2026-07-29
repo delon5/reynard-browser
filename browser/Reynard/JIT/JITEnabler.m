@@ -151,19 +151,22 @@
         // already-non-fatal memory optimization.
         
         NSError *commandError = nil;
-        NSString *noAckResponse = nil;
-        CFAbsoluteTime noAckCallStart = CFAbsoluteTimeGetCurrent();
-        logger([NSString stringWithFormat:@"enableJITForPID: starting configureNoAckMode for pid %d", pid]);
-        BOOL noAckSucceeded = configureNoAckMode(session.debugProxy, &noAckResponse, &commandError);
-        CFAbsoluteTime noAckCallEnd = CFAbsoluteTimeGetCurrent();
-        if (!noAckSucceeded) {
-            logger([NSString stringWithFormat:@"enableJITForPID: configureNoAckMode FAILED for pid %d, call took %.0fms, error: %@", pid, (noAckCallEnd - noAckCallStart) * 1000.0, commandError.localizedDescription ?: @"(no error set)"]);
-            if (error) *error = commandError ?: MakeError(NoAckConfigureFailed);
-            freeDebugSession(&session);
-            return NO;
-        }
         
-        logger([NSString stringWithFormat:@"QStartNoAckMode result for pid %d: %@ (call took %.0fms)", pid, noAckResponse ?: @"<no response>", (noAckCallEnd - noAckCallStart) * 1000.0]);
+        // REMOVED configureNoAckMode entirely - see
+        // fix_remove_noackmode.py's docstring for the full reasoning.
+        // After removing the heartbeat mechanism, this became the new,
+        // single, consistent hang point in every attempt - replacing
+        // the earlier, scattered pattern across different steps.
+        // QStartNoAckMode is a standard GDB remote protocol
+        // optimization (disables the ack handshake to reduce
+        // round-trip overhead) - optional by design, not required for
+        // the protocol to function. None of StikDebug's four proven-
+        // working reference scripts ever send it; all of them attach
+        // directly via vAttach with no intermediate step. Confirmed
+        // the only call site anywhere in this codebase was the one
+        // removed here - vAttach below already operates directly on
+        // session.debugProxy with zero dependency on anything this
+        // step did or set.
         
         NSString *attachCommand = [NSString stringWithFormat:@"vAttach;%X", pid];
         NSString *attachResponse = nil;
