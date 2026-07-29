@@ -204,6 +204,7 @@ final class JITController {
     private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
         let semaphore = DispatchSemaphore(value: 0)
         var result: (Bool, NSError?) = (false, NSError(domain: "Reynard.JIT", code: -1, userInfo: [NSLocalizedDescriptionKey: "Internal error: bounded wait result never set"]))
+        let boundedCallStart = CFAbsoluteTimeGetCurrent()
         
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -212,6 +213,16 @@ final class JITController {
             } catch {
                 result = (false, error as NSError)
             }
+            // DIAGNOSTIC - see fix_log_orphaned_call_completion.py's
+            // docstring. Purely additive: logs whenever this background
+            // call actually finishes, including if that happens well
+            // after the outer 20s bound below already gave up and
+            // returned to the caller - answering whether a hang here
+            // is genuinely permanent (like process_control_new was,
+            // confirmed by a direct ~3 minute wait) or just slower
+            // than 20s.
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - boundedCallStart) * 1000.0
+            logger(String(format: "boundedEnableJIT: background call for pid %d actually completed after %.0fms (success=%@)", pid, elapsedMs, result.0 ? "YES" : "NO"))
             semaphore.signal()
         }
         
