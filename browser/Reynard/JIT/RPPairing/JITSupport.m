@@ -675,13 +675,32 @@ void runDebugService(int32_t pid, DebugSession *session) {
 }
 
 DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *targetAddress, NSError **error) {
-    if (![[NSFileManager defaultManager] fileExistsAtPath:pairingFilePath]) {
+    // ADDED - granular, step-by-step logging throughout this entire
+    // function - see
+    // fix_instrument_create_device_provider_internals.py's docstring.
+    // This function never had any internal logging at all before -
+    // everything visible came from its caller, before and after,
+    // leaving everything in between (this exact function's own body)
+    // completely invisible. Confirmed as a real, direct gap: a
+    // genuinely isolated attempt (confirmed via idevice_init_logger's
+    // own timestamp as the true start-of-logging boundary) produced
+    // zero native-library output for its entire ~89s duration, with
+    // no way to tell which specific step inside this function that
+    // silence actually began at.
+    CFAbsoluteTime fileCheckStart = CFAbsoluteTimeGetCurrent();
+    logger(@"createDeviceProvider: starting fileExistsAtPath check");
+    BOOL pairingFileExists = [[NSFileManager defaultManager] fileExistsAtPath:pairingFilePath];
+    logger([NSString stringWithFormat:@"createDeviceProvider: fileExistsAtPath %@, call took %.0fms", pairingFileExists ? @"succeeded" : @"FAILED (file missing)", (CFAbsoluteTimeGetCurrent() - fileCheckStart) * 1000.0]);
+    if (!pairingFileExists) {
         if (error) *error = MakeError(PairingFileMissing);
         return NULL;
     }
     
     RpPairingFileHandle *rpPairingFile = NULL;
+    CFAbsoluteTime pairingReadStart = CFAbsoluteTimeGetCurrent();
+    logger(@"createDeviceProvider: starting rp_pairing_file_read");
     IdeviceFfiError *ffiError = rp_pairing_file_read(pairingFilePath.fileSystemRepresentation, &rpPairingFile);
+    logger([NSString stringWithFormat:@"createDeviceProvider: rp_pairing_file_read %@, call took %.0fms", ffiError ? @"FAILED" : @"succeeded", (CFAbsoluteTimeGetCurrent() - pairingReadStart) * 1000.0]);
     if (ffiError) {
         if (error) *error = MakeError(PairingFileReadFailed);
         idevice_error_free(ffiError);
@@ -693,11 +712,14 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     address.sin_family = AF_INET;
     address.sin_port = htons(rppairingPort);
     
+    logger(@"createDeviceProvider: starting inet_pton");
     if (inet_pton(AF_INET, targetAddress.UTF8String, &address.sin_addr) != 1) {
+        logger(@"createDeviceProvider: inet_pton FAILED");
         rp_pairing_file_free(rpPairingFile);
         if (error) *error = MakeError(InvalidTargetAddress);
         return NULL;
     }
+    logger(@"createDeviceProvider: inet_pton succeeded");
     
     AdapterHandle *adapter = NULL;
     RsdHandshakeHandle *handshake = NULL;
@@ -712,7 +734,10 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     // reusing one across simultaneous connections the way every
     // single tunnel this codebase has ever created did.
     NSString *uniqueHostname = [NSString stringWithFormat:@"Reynard-%d-%llu", getpid(), (unsigned long long)(CFAbsoluteTimeGetCurrent() * 1000.0)];
+    CFAbsoluteTime ownTunnelCallStart = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"createDeviceProvider: starting tunnel_create_rppairing (hostname=%@)", uniqueHostname]);
     ffiError = tunnel_create_rppairing((const struct sockaddr *)&address, (socklen_t)sizeof(address), uniqueHostname.UTF8String, rpPairingFile, NULL, NULL, &adapter, &handshake);
+    logger([NSString stringWithFormat:@"createDeviceProvider: tunnel_create_rppairing %@, call took %.0fms", ffiError ? @"FAILED" : @"succeeded", (CFAbsoluteTimeGetCurrent() - ownTunnelCallStart) * 1000.0]);
     rp_pairing_file_free(rpPairingFile);
     
     if (ffiError) {
