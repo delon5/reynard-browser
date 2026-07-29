@@ -190,16 +190,57 @@ final class JITController {
         }
     }
     
+    // Wraps the actual, synchronous JITEnabler.shared.enableJIT(...)
+    // call with a bounded wait - see
+    // fix_attach_queue_bounded_wait.py's docstring for the full
+    // reasoning. Dispatched to DispatchQueue.global - a separate,
+    // CONCURRENT queue, deliberately not attachQueue itself or any
+    // other serial queue, which would just relocate the same
+    // cascading-jam problem rather than fix it. Shared by
+    // attachToProcess below and attachToHelperProcess in the
+    // delegation extension - both call the same underlying enableJIT,
+    // and both need the same protection, since either one hanging can
+    // otherwise jam attachQueue for everyone else queued behind it.
+    private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: (Bool, NSError?) = (false, NSError(domain: "Reynard.JIT", code: -1, userInfo: [NSLocalizedDescriptionKey: "Internal error: bounded wait result never set"]))
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: Self.hasTXMSupport())
+                result = (true, nil)
+            } catch {
+                result = (false, error as NSError)
+            }
+            semaphore.signal()
+        }
+        
+        if semaphore.wait(timeout: .now() + 20.0) == .timedOut {
+            // Orphaned - the background call above may still be
+            // running and will eventually complete or fail on its
+            // own, unobserved. A real, accepted trade-off: this
+            // prevents an indefinite jam of attachQueue at the cost of
+            // a possible, bounded amount of continued background
+            // contention if the orphaned call is itself competing for
+            // the same device-side resources as a newer attempt that
+            // gets to run in its place. Preferred over the
+            // alternative directly observed in testing: total,
+            // permanent gridlock for every attach queued behind a
+            // single hang.
+            return (false, NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: [NSLocalizedDescriptionKey: "Attach timed out after 20s (may still be running in the background)"]))
+        }
+        
+        return result
+    }
+    
     private func attachToProcess(pid: Int32) {
-        do {
-            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: Self.hasTXMSupport())
-            cancelPreflightWatchdog(for: pid)
+        let (success, error) = boundedEnableJIT(forPID: pid)
+        cancelPreflightWatchdog(for: pid)
+        if success {
             ReportJITStatusForChild(pid, true, newJITRuntimeInfo())
-        } catch {
-            let nsError = error as NSError
-            cancelPreflightWatchdog(for: pid)
+        } else {
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
-            handleJITFailure(error: nsError)
+            handleJITFailure(error: error ?? NSError(domain: "Reynard.JIT", code: -1, userInfo: nil))
         }
     }
     
@@ -596,12 +637,8 @@ extension JITController {
     // is meant to degrade silently, exactly as it already does today).
     // Returns success/error directly to the caller instead.
     fileprivate func attachToHelperProcess(pid: Int32) -> (Bool, String?) {
-        do {
-            try JITEnabler.shared.enableJIT(forPID: pid, hasTXMSupport: Self.hasTXMSupport())
-            return (true, nil)
-        } catch {
-            return (false, (error as NSError).localizedDescription)
-        }
+        let (success, error) = boundedEnableJIT(forPID: pid)
+        return (success, error?.localizedDescription)
     }
 }
 
