@@ -26,7 +26,17 @@ class GeckoRuntimeImpl: NSObject, SwiftGeckoViewRuntime {
         // directly answers what each spawned child process actually
         // is (content/gpu/socket/rdd/utility/etc.), rather than
         // inferring it from patch code alone.
-        logger(String(format: "childProcessDidStart: pid %d, processType=%@", pid, processType))
+        //
+        // CORRECTED - see
+        // fix_gecko_runtime_log_linker_error.py's docstring. Uses
+        // NSLog, not logger() - this file compiles into the separate
+        // GeckoView framework target, where logger's own actual
+        // implementation (JITUtils.m) isn't linked in, confirmed
+        // directly from a real, actual build failure (undefined
+        // symbol "_logger" at link time). NSLog needs no cross-target
+        // dependency and is captured by idevicesyslog's own process-
+        // name filter the same way logger's output is.
+        NSLog("childProcessDidStart: pid %d, processType=%@", pid, processType)
         
         // Update jetsam limit for the child process
         updateJetsamControl(pid)
