@@ -235,10 +235,20 @@ static NSDate *sVAttachInFlightSince = nil;
         // debug_proxy_connect_rsd completes, these may be what clears
         // it - restoring them, specifically, tests that directly.
         for (NSUInteger primingAckCount = 0; primingAckCount < 2; primingAckCount++) {
+            // DIAGNOSTIC - see fix_log_priming_ack_progress.py's
+            // docstring. Previously only the failure path logged
+            // anything here, meaning a genuine hang inside
+            // debug_proxy_send_ack itself produced zero output -
+            // indistinguishable from this code never having run at
+            // all. Start/success logging now makes that directly
+            // visible either way.
+            logger([NSString stringWithFormat:@"enableJITForPID: starting priming ack %lu for pid %d", (unsigned long)primingAckCount, pid]);
             IdeviceFfiError *primingAckError = debug_proxy_send_ack(session.debugProxy);
             if (primingAckError) {
                 logger([NSString stringWithFormat:@"enableJITForPID: priming ack %lu FAILED for pid %d, error: %s", (unsigned long)primingAckCount, pid, primingAckError->message ?: "unknown error"]);
                 idevice_error_free(primingAckError);
+            } else {
+                logger([NSString stringWithFormat:@"enableJITForPID: priming ack %lu succeeded for pid %d", (unsigned long)primingAckCount, pid]);
             }
         }
         
