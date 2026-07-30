@@ -208,6 +208,30 @@ final class TabManagerImplementation: NSObject, TabManager {
             return
         }
         
+        // ADDED - see fix_helper_entitlements_and_emergency_flush_guard.py's
+        // docstring. The nil check above is not enough on its own:
+        // emergencySnapshot is written only by persistState(), which
+        // copies whatever the tab arrays hold at that instant, so if
+        // persistState() ever runs before restoreTabsIfNeeded() has
+        // populated them, the snapshot is non-nil but EMPTY and passes
+        // straight through. Writing that here - from a background
+        // thread, deliberately bypassing the normal async queue -
+        // overwrites a good persisted tab list with nothing, and
+        // restoreTabsIfNeeded() then finds an empty snapshot on the
+        // next launch and presents a single blank tab.
+        //
+        // Deliberately does not consult the store to compare against
+        // what is already persisted: this runs on the watchdog's
+        // background queue while the main thread is stuck, and
+        // reaching into the store from here would add exactly the
+        // cross-thread access this path exists to avoid. An emergency
+        // flush of "no tabs" carries no information worth writing
+        // under any circumstances.
+        guard !snapshot.regularTabs.isEmpty || !snapshot.privateTabs.isEmpty else {
+            NSLog("[HangWatchdog] Refusing to emergency-flush an EMPTY tab snapshot - this would have destroyed the persisted tab list")
+            return
+        }
+        
         store.emergencyPersistTabs(
             regularTabs: snapshot.regularTabs,
             privateTabs: snapshot.privateTabs,
