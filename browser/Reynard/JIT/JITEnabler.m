@@ -12,6 +12,13 @@
 #import "Utils.h"
 #include <sys/stat.h>
 #include <errno.h>
+#include <pthread.h>
+#include <mach/mach.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
 
 @interface JITEnabler ()
 
@@ -56,6 +63,26 @@ static NSDate *sVAttachInFlightSince = nil;
     return result;
 }
 
+// DIAGNOSTIC - hung-thread backtrace capture, see
+// fix_combined_tunnel_reuse_and_notify_instrumentation.py. Runs ON
+// the stuck thread when signalled, so the frames it walks are that
+// thread's own, including whatever the idevice library is parked in.
+// Only async-signal-safe calls: backtrace() and backtrace_symbols_fd()
+// do not allocate. backtrace_symbols() would, and is not used.
+static int gJITHangBacktraceFD = -1;
+
+static void jitHangBacktraceHandler(int signalNumber) {
+    (void)signalNumber;
+    if (gJITHangBacktraceFD == -1) {
+        return;
+    }
+    void *frames[64];
+    int frameCount = backtrace(frames, 64);
+    const char *header = "\n=== JIT hang backtrace (captured on the stuck thread) ===\n";
+    write(gJITHangBacktraceFD, header, strlen(header));
+    backtrace_symbols_fd(frames, frameCount, gJITHangBacktraceFD);
+}
+
 + (JITEnabler *)shared {
     static JITEnabler *sharedEnabler = nil;
     static dispatch_once_t onceToken;
@@ -80,6 +107,24 @@ static NSDate *sVAttachInFlightSince = nil;
             enum IdeviceLoggerError loggerResult = idevice_init_logger(IdeviceLogInfo, IdeviceLogTrace, (char *)logPath);
             logger([NSString stringWithFormat:@"idevice_init_logger result: %d, writing to: %@", loggerResult, logURL.path]);
         }
+        
+        // Open the backtrace file and install the handler once, here,
+        // outside any signal context - the handler itself must never
+        // do either.
+        NSURL *backtraceURL = [documentDirs.firstObject URLByAppendingPathComponent:@"jit_hang_backtrace.txt"];
+        if (backtraceURL) {
+            gJITHangBacktraceFD = open(backtraceURL.path.UTF8String, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            
+            struct sigaction backtraceAction;
+            memset(&backtraceAction, 0, sizeof(backtraceAction));
+            backtraceAction.sa_handler = jitHangBacktraceHandler;
+            sigemptyset(&backtraceAction.sa_mask);
+            backtraceAction.sa_flags = SA_RESTART;
+            sigaction(SIGUSR1, &backtraceAction, NULL);
+            
+            logger([NSString stringWithFormat:@"jit hang backtrace fd=%d, writing to: %@", gJITHangBacktraceFD, backtraceURL.path]);
+        }
+        
         sharedEnabler = [[self alloc] init];
     });
     return sharedEnabler;
@@ -241,6 +286,54 @@ static NSDate *sVAttachInFlightSince = nil;
         // debugserver sends unsolicited initial state right after
         // debug_proxy_connect_rsd completes, these may be what clears
         // it - restoring them, specifically, tests that directly.
+        // DIAGNOSTIC - thread-state probe, see
+        // fix_combined_tunnel_reuse_and_notify_instrumentation.py.
+        // Fires at +15s and +45s only if the ack phase below has not
+        // finished, and reports what the OS says this exact thread is
+        // doing while it is still stuck.
+        mach_port_t ackThreadPort = pthread_mach_thread_np(pthread_self());
+        pthread_t ackPthread = pthread_self();
+        __block BOOL ackPhaseComplete = NO;
+        dispatch_queue_t ackProbeQueue = dispatch_queue_create("com.minh-ton.Reynard.JITEnabler.AckProbe", DISPATCH_QUEUE_SERIAL);
+        
+        for (int probeDelaySeconds = 15; probeDelaySeconds <= 45; probeDelaySeconds += 30) {
+            int delaySeconds = probeDelaySeconds;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delaySeconds * NSEC_PER_SEC), ackProbeQueue, ^{
+                if (ackPhaseComplete) {
+                    return;
+                }
+                
+                struct thread_basic_info probeInfo;
+                mach_msg_type_number_t probeInfoCount = THREAD_BASIC_INFO_COUNT;
+                kern_return_t probeResult = thread_info(ackThreadPort, THREAD_BASIC_INFO, (thread_info_t)&probeInfo, &probeInfoCount);
+                if (probeResult != KERN_SUCCESS) {
+                    logger([NSString stringWithFormat:@"ackProbe: (pid %d) after %ds - thread_info failed, kr=%d", pid, delaySeconds, probeResult]);
+                    return;
+                }
+                
+                const char *runState = "UNKNOWN";
+                switch (probeInfo.run_state) {
+                    case TH_STATE_RUNNING: runState = "RUNNING"; break;
+                    case TH_STATE_STOPPED: runState = "STOPPED"; break;
+                    case TH_STATE_WAITING: runState = "WAITING"; break;
+                    case TH_STATE_UNINTERRUPTIBLE: runState = "UNINTERRUPTIBLE"; break;
+                    case TH_STATE_HALTED: runState = "HALTED"; break;
+                    default: break;
+                }
+                
+                logger([NSString stringWithFormat:@"ackProbe: (pid %d) after %ds - ack thread STILL IN FLIGHT, state=%s, cpu_usage=%d/1000, user=%d.%06ds, system=%d.%06ds, sleep_time=%d, suspend_count=%d",
+                        pid, delaySeconds, runState, probeInfo.cpu_usage,
+                        probeInfo.user_time.seconds, probeInfo.user_time.microseconds,
+                        probeInfo.system_time.seconds, probeInfo.system_time.microseconds,
+                        probeInfo.sleep_time, probeInfo.suspend_count]);
+                
+                if (gJITHangBacktraceFD != -1) {
+                    logger([NSString stringWithFormat:@"ackProbe: (pid %d) after %ds - signalling the stuck thread for a backtrace into Documents/jit_hang_backtrace.txt", pid, delaySeconds]);
+                    pthread_kill(ackPthread, SIGUSR1);
+                }
+            });
+        }
+        
         for (NSUInteger primingAckCount = 0; primingAckCount < 2; primingAckCount++) {
             // DIAGNOSTIC - see fix_log_priming_ack_progress.py's
             // docstring. Previously only the failure path logged
@@ -249,7 +342,7 @@ static NSDate *sVAttachInFlightSince = nil;
             // indistinguishable from this code never having run at
             // all. Start/success logging now makes that directly
             // visible either way.
-            logger([NSString stringWithFormat:@"enableJITForPID: starting priming ack %lu for pid %d", (unsigned long)primingAckCount, pid]);
+            logger([NSString stringWithFormat:@"enableJITForPID: starting priming ack %lu for pid %d on thread %@", (unsigned long)primingAckCount, pid, [NSThread currentThread]]);
             IdeviceFfiError *primingAckError = debug_proxy_send_ack(session.debugProxy);
             if (primingAckError) {
                 logger([NSString stringWithFormat:@"enableJITForPID: priming ack %lu FAILED for pid %d, error: %s", (unsigned long)primingAckCount, pid, primingAckError->message ?: "unknown error"]);
@@ -258,6 +351,12 @@ static NSDate *sVAttachInFlightSince = nil;
                 logger([NSString stringWithFormat:@"enableJITForPID: priming ack %lu succeeded for pid %d", (unsigned long)primingAckCount, pid]);
             }
         }
+        
+        // Serialised against the probes above on the same serial
+        // queue - safe, and correctly never reached if an ack hangs.
+        dispatch_sync(ackProbeQueue, ^{
+            ackPhaseComplete = YES;
+        });
         
         // RESTORED - QStartNoAckMode + disabling ack mode - see
         // fix_complete_ack_mode_restoration.py's docstring. Confirmed

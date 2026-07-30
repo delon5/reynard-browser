@@ -391,81 +391,49 @@ BOOL configureNoAckMode(DebugProxyHandle *debugProxy, NSString **responseOut, NS
 }
 
 BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSString *targetAddress, int32_t pid, NSError **error) {
+    // CHANGED - no longer creates its own, separate tunnel - see
+    // fix_reuse_provider_tunnel_in_connect_debug_session.py's
+    // docstring. This function ignored its own provider parameter
+    // entirely and stood up a second, completely independent
+    // RPPairing tunnel from scratch (its own rp_pairing_file_read +
+    // tunnel_create_rppairing, with a separate hardcoded
+    // "ReynardDebug" hostname) - meaning every attach attempt opened
+    // TWO simultaneous tunnels to the same device for what should be
+    // one logical connection, unlike StikDebug's own confirmed-working
+    // source, which creates exactly one tunnel per attempt and reuses
+    // it for everything. This now reuses provider->adapter and
+    // provider->handshake directly - the exact same pattern already
+    // used elsewhere in this file for the DDI-mount workflow
+    // (image_mounter_connect_rsd, lockdownd_connect_rsd both already
+    // take provider->adapter/provider->handshake directly).
+    //
+    // session->adapter and session->handshake are deliberately never
+    // assigned below, and stay NULL - freeDebugSession's own existing
+    // NULL-guards correctly skip them as a result, so the shared
+    // provider's tunnel can never be freed by a session-level cleanup
+    // call. This matches this codebase's own established convention
+    // for the same concern, seen in JITEnabler.m (a session handed off
+    // to persistentSession has its own adapter/handshake fields
+    // explicitly nulled out before freeDebugSession runs on the local
+    // copy).
+    //
+    // The rp_pairing_file_read/tunnel_create_rppairing instrumentation
+    // that used to live here is gone along with the calls it measured
+    // - that work now already happened once, earlier, inside
+    // createDeviceProvider, and is covered by that function's own
+    // logging (fix_instrument_create_device_provider_internals.py).
     IdeviceFfiError *ffiError = NULL;
     
-    NSString *resolvedPairingFilePath = pairingFilePath();
-    RpPairingFileHandle *rpPairingFile = NULL;
-    CFAbsoluteTime pairingFileReadCallStart = CFAbsoluteTimeGetCurrent();
-    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) starting rp_pairing_file_read", pid]);
-    ffiError = rp_pairing_file_read(resolvedPairingFilePath.fileSystemRepresentation, &rpPairingFile);
-    CFAbsoluteTime pairingFileReadCallEnd = CFAbsoluteTimeGetCurrent();
-    if (ffiError) {
-        NSInteger realCode = ffiError->code;
-        NSInteger realSubCode = ffiError->sub_code;
-        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) rp_pairing_file_read REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (pairingFileReadCallEnd - pairingFileReadCallStart) * 1000.0]);
-        if (error) *error = MakeError(PairingFileReadFailed);
-        idevice_error_free(ffiError);
+    if (!provider || !provider->adapter || !provider->handshake) {
+        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) called with no valid provider tunnel", pid]);
+        if (error) *error = MakeError(TunnelCreateFailed);
         return NO;
     }
-    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) rp_pairing_file_read succeeded, call took %.0fms", pid, (pairingFileReadCallEnd - pairingFileReadCallStart) * 1000.0]);
-    
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_port = htons(rppairingPort);
-    inet_pton(AF_INET, targetAddress.UTF8String, &address.sin_addr);
-    
-    // TIMING TEST - testing whether LOCAL_RUNTIME_GUARD contention
-    // (e.g. from heartbeat's own periodic run_sync_local calls on
-    // this same process's shared runtime) creates a long enough gap
-    // after tunnel creation for a freshly-created tunnel's own
-    // background service task to go unserviced and get closed by the
-    // device before this function ever gets to use it. Remove once
-    // the BrokenPipe/channel-closed pattern is understood.
-    CFAbsoluteTime tunnelCallStart = CFAbsoluteTimeGetCurrent();
-    
-    ffiError = tunnel_create_rppairing(
-                                       (const struct sockaddr *)&address,
-                                       (socklen_t)sizeof(address),
-                                       "ReynardDebug",
-                                       rpPairingFile,
-                                       NULL, NULL,
-                                       &session->adapter, &session->handshake
-                                       );
-    rp_pairing_file_free(rpPairingFile);
-    
-    CFAbsoluteTime tunnelCallEnd = CFAbsoluteTimeGetCurrent();
-    
-    if (ffiError) {
-        // TEST - surfacing the real, underlying error here too. This
-        // is the FIRST tunnel_create_rppairing call in the entire
-        // flow - called directly from JITEnabler.m's
-        // enableJITForPID:, before runDebugService() ever runs. The
-        // real-error logging added earlier today only covers
-        // runDebugService()'s own, separate, later call to this same
-        // underlying function - which this specific call site,
-        // reached first on every single attempt, was never covered
-        // by at all.
-        NSInteger realCode = ffiError->code;
-        NSInteger realSubCode = ffiError->sub_code;
-        NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) tunnel_create_rppairing REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (tunnelCallEnd - tunnelCallStart) * 1000.0]);
-        if (error) {
-            *error = [NSError errorWithDomain:ErrorDomain code:TunnelCreateFailed userInfo:@{
-                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to create RPPairing tunnel (real cause code %ld/%ld): %@", (long)realCode, (long)realSubCode, realMessage]
-            }];
-        }
-        idevice_error_free(ffiError);
-        return NO;
-    }
-    
-    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) tunnel_create_rppairing succeeded, call took %.0fms", pid, (tunnelCallEnd - tunnelCallStart) * 1000.0]);
     
     CFAbsoluteTime remoteServerCallStart = CFAbsoluteTimeGetCurrent();
-    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) gap before remote_server_connect_rsd: %.0fms since tunnel ready", pid, (remoteServerCallStart - tunnelCallEnd) * 1000.0]);
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) starting remote_server_connect_rsd (reusing provider's own tunnel)", pid]);
     
-    ffiError = remote_server_connect_rsd(session->adapter, session->handshake, &session->remoteServer);
+    ffiError = remote_server_connect_rsd(provider->adapter, provider->handshake, &session->remoteServer);
     
     CFAbsoluteTime remoteServerCallEnd = CFAbsoluteTimeGetCurrent();
     
@@ -473,18 +441,18 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
         NSInteger realCode = ffiError->code;
         NSInteger realSubCode = ffiError->sub_code;
         NSString *realMessage = ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)";
-        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) remote_server_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms, total elapsed since tunnel ready: %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
+        logger([NSString stringWithFormat:@"connectDebugSession (pid %d) remote_server_connect_rsd REAL failure - code: %ld, sub_code: %ld, message: %@, call took %.0fms", pid, (long)realCode, (long)realSubCode, realMessage, (remoteServerCallEnd - remoteServerCallStart) * 1000.0]);
         if (error) *error = MakeError(RemoteServerConnectFailed);
         idevice_error_free(ffiError);
         freeDebugSession(session);
         return NO;
     }
     
-    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) remote_server_connect_rsd succeeded, call took %.0fms, total elapsed since tunnel ready: %.0fms", pid, (remoteServerCallEnd - remoteServerCallStart) * 1000.0, (remoteServerCallEnd - tunnelCallEnd) * 1000.0]);
+    logger([NSString stringWithFormat:@"connectDebugSession (pid %d) remote_server_connect_rsd succeeded, call took %.0fms", pid, (remoteServerCallEnd - remoteServerCallStart) * 1000.0]);
     
     CFAbsoluteTime debugProxyCallStart = CFAbsoluteTimeGetCurrent();
     logger([NSString stringWithFormat:@"connectDebugSession (pid %d) starting debug_proxy_connect_rsd", pid]);
-    ffiError = debug_proxy_connect_rsd(session->adapter, session->handshake, &session->debugProxy);
+    ffiError = debug_proxy_connect_rsd(provider->adapter, provider->handshake, &session->debugProxy);
     CFAbsoluteTime debugProxyCallEnd = CFAbsoluteTimeGetCurrent();
     if (ffiError) {
         NSInteger realCode = ffiError->code;
@@ -563,7 +531,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // operation. Breakpoint handling logs unconditionally regardless
     // of iteration count.
     CFAbsoluteTime debugServiceLoopStart = CFAbsoluteTimeGetCurrent();
-    logger([NSString stringWithFormat:@"runDebugService: (pid %d) loop starting", pid]);
+    logger([NSString stringWithFormat:@"runDebugService: (pid %d) loop starting on thread %@", pid, [NSThread currentThread]]);
     NSInteger debugServiceIteration = 0;
     static const NSInteger kUnconditionalLogIterations = 3;
     static const NSTimeInterval kSlowContinueThresholdSeconds = 1.0;
@@ -735,7 +703,7 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     // single tunnel this codebase has ever created did.
     NSString *uniqueHostname = [NSString stringWithFormat:@"Reynard-%d-%llu", getpid(), (unsigned long long)(CFAbsoluteTimeGetCurrent() * 1000.0)];
     CFAbsoluteTime ownTunnelCallStart = CFAbsoluteTimeGetCurrent();
-    logger([NSString stringWithFormat:@"createDeviceProvider: starting tunnel_create_rppairing (hostname=%@)", uniqueHostname]);
+    logger([NSString stringWithFormat:@"createDeviceProvider: starting tunnel_create_rppairing (hostname=%@) on thread %@", uniqueHostname, [NSThread currentThread]]);
     ffiError = tunnel_create_rppairing((const struct sockaddr *)&address, (socklen_t)sizeof(address), uniqueHostname.UTF8String, rpPairingFile, NULL, NULL, &adapter, &handshake);
     logger([NSString stringWithFormat:@"createDeviceProvider: tunnel_create_rppairing %@, call took %.0fms", ffiError ? @"FAILED" : @"succeeded", (CFAbsoluteTimeGetCurrent() - ownTunnelCallStart) * 1000.0]);
     rp_pairing_file_free(rpPairingFile);

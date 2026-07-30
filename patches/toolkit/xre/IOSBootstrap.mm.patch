@@ -27,7 +27,7 @@ index 264320aed775..6552f255e4cc 100644
  static id<SwiftGeckoViewRuntime> gRuntime;
  
  id<SwiftGeckoViewRuntime> mozilla::widget::GetSwiftRuntime() {
-@@ -22,11 +33,85 @@
+@@ -22,11 +33,112 @@
  }
  
  static id<GeckoProcessExtension> gCurrentProcessExtension;
@@ -91,7 +91,27 @@ index 264320aed775..6552f255e4cc 100644
 +  // it can attach the JIT debugger path as soon as the pid is
 +  // known in the parent process, while still letting the app distinguish the
 +  // Gecko child process type.
++  //
++  // DIAGNOSTIC - NSLog at every branch point below. Both early exits
++  // in this function were previously silent, so when the Swift end of
++  // this chain (GeckoRuntimeImpl.childProcessDidStart) produced zero
++  // output across every capture, there was no way to tell which of
++  // three very different things had happened: this function was never
++  // reached at all, it bailed on a nil gRuntime, or it bailed on a
++  // failed respondsToSelector check. NSLog specifically because it is
++  // demonstrably the exact mechanism every other Reynard log line in
++  // those same captures already came through - logger() in JITUtils.m
++  // is literally NSLog(@"[Reynard] %@", message) - so its output is
++  // known to survive idevicesyslog capture, unlike the fprintf(stderr)
++  // REYNARD_DEBUG line at this function's own call site, which never
++  // appears in any capture and therefore proves nothing either way.
++  NSLog(@"[Reynard] NotifyChildProcessStarted: entered for pid %d, type=%s",
++        aPid, aProcessType ? aProcessType : "(null)");
++
 +  if (!gRuntime) {
++    NSLog(@"[Reynard] NotifyChildProcessStarted: gRuntime is nil - bailing "
++          @"for pid %d",
++          aPid);
 +    return;
 +  }
 +
@@ -106,7 +126,14 @@ index 264320aed775..6552f255e4cc 100644
 +  if ([gRuntime
 +          respondsToSelector:@selector(
 +                                 childProcessDidStartWithPID:processType:)]) {
++    NSLog(@"[Reynard] NotifyChildProcessStarted: dispatching to Swift for "
++          @"pid %d, type=%@",
++          aPid, processType);
 +    [gRuntime childProcessDidStartWithPID:aPid processType:processType];
++  } else {
++    NSLog(@"[Reynard] NotifyChildProcessStarted: gRuntime does NOT respond to "
++          @"childProcessDidStartWithPID:processType: - bailing for pid %d",
++          aPid);
 +  }
 +}
 +
