@@ -57,6 +57,13 @@ void resetJITEndpointMonitor(void);
 // Settings lives) and the Helper (where self-enable runs).
 BOOL hasAnyActiveJITSessionAcrossProcesses(void);
 
+/// Kernel ground truth for whether a process carries CS_DEBUGGED, the
+/// hard precondition for JIT. Mirrors DolphiniOS's
+/// checkIfProcessIsDebugged. Takes a pid rather than checking self,
+/// because Reynard's main app is the debugger and never attaches to
+/// itself - the Helper content processes are the ones that matter.
+BOOL processIsDebugged(int32_t pid);
+
 void freeDebugSession(DebugSession *session);
 void freeDeviceProvider(DeviceProvider *_Nullable provider);
 

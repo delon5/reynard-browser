@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <signal.h>
+#include <string.h>
 
 static const uint16_t rppairingPort = 49152;
 
@@ -194,6 +195,39 @@ static void removePIDFromSharedActiveSessions(int32_t pid) {
     close(fd);
 }
 
+// ADDED - see fix_jit_acquisition_csops_verification.py's docstring.
+// Kernel ground truth for whether a process is actually debugged,
+// which is the hard precondition for JIT. Mirrors DolphiniOS's
+// checkIfProcessIsDebugged (JitManager+Debugger.m), except that this
+// passes sizeof(flags) correctly - DolphiniOS writes
+// `sizeof(flags) != 0`, which evaluates to 1.
+//
+// Deliberately takes a pid rather than using getpid(): DolphiniOS can
+// check itself because it IS the debuggee, whereas Reynard's main app
+// is the DEBUGGER and never attaches to itself. The processes that
+// matter are the Helper content processes.
+#define REYNARD_CS_OPS_STATUS 0
+#define REYNARD_CS_DEBUGGED 0x10000000
+
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+BOOL processIsDebugged(int32_t pid) {
+    if (pid <= 0) return NO;
+
+    int flags = 0;
+    if (csops((pid_t)pid, REYNARD_CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
+        // Logged with errno so a permission refusal is
+        // distinguishable from a genuine "not debugged" - csops on
+        // another pid is permitted for a same-uid process, which same-app
+        // extensions are, but that is worth confirming rather than
+        // assuming.
+        logger([NSString stringWithFormat:@"processIsDebugged: csops failed for pid %d, errno=%d (%s)", pid, errno, strerror(errno)]);
+        return NO;
+    }
+
+    return (flags & REYNARD_CS_DEBUGGED) != 0;
+}
+
 BOOL hasAnyActiveJITSessionAcrossProcesses(void) {
     NSURL *fileURL = activeJITSessionsFileURL();
     if (!fileURL) return NO;
@@ -219,7 +253,24 @@ BOOL hasAnyActiveJITSessionAcrossProcesses(void) {
     flock(fd, LOCK_UN);
     close(fd);
     
-    return live.count > 0;
+    // CHANGED - was `return live.count > 0`, i.e. "is anything listed
+    // in our own bookkeeping file". That reports Reynard's records,
+    // not reality, and was observed reading "Not Acquired" while
+    // eleven runDebugService loops were live and servicing toggles.
+    // DolphiniOS's equivalent row reports csops/CS_DEBUGGED, so this
+    // now requires at least one tracked pid to actually be debugged
+    // according to the kernel.
+    for (NSNumber *sessionPID in live) {
+        if (processIsDebugged(sessionPID.intValue)) {
+            return YES;
+        }
+    }
+    
+    if (live.count > 0) {
+        logger([NSString stringWithFormat:@"hasAnyActiveJITSessionAcrossProcesses: %lu session(s) tracked but NONE report CS_DEBUGGED", (unsigned long)live.count]);
+    }
+    
+    return NO;
 }
 
 static void registerDebugSessionPID(int32_t pid) {
@@ -232,6 +283,12 @@ static void registerDebugSessionPID(int32_t pid) {
     });
     
     addPIDToSharedActiveSessions(pid);
+    
+    // DIAGNOSTIC - the single most informative unmeasured bit. Every
+    // other signal so far confirms Reynard's own side of the
+    // handshake; this confirms whether the KERNEL agrees the target is
+    // actually debugged, which is the hard precondition for JIT.
+    logger([NSString stringWithFormat:@"registerDebugSessionPID: pid %d CS_DEBUGGED=%@", pid, processIsDebugged(pid) ? @"YES" : @"NO"]);
 }
 
 static void unregisterDebugSessionPID(int32_t pid) {
