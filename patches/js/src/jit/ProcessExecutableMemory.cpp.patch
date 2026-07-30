@@ -23,7 +23,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +54,149 @@
+@@ -47,6 +54,159 @@
  using namespace js;
  using namespace js::jit;
  
@@ -90,7 +90,17 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +// comfortably in a 64-bit mask. Addresses outside the reserved range
 +// bypass the cache and prepare exactly what was asked for, and a chunk
 +// is only marked prepared AFTER the debugger call returns.
-+static constexpr size_t kPrepareChunkBytes = 1024 * 1024;
++// 4MB chunks across 64 mask bits gives 256MB of coverage. At the
++// previous 1MB the ceiling was 64MB, which Ion blew straight past:
++// 917 of its 1031 region requests bypassed the cache entirely and
++// were prepared uncoalesced at 64KB, an 8.6% coalescing rate. Ion
++// with JIT off used 57MB and so coalesced 100%.
++//
++// That also explains why raising javascript.options.ion.threshold
++// appeared to help - it was not improving Ion's compilation, it was
++// reducing Ion's allocation count so it stayed inside an undersized
++// cache. See fix_chunk_coverage_and_dead_connection_detach.py.
++static constexpr size_t kPrepareChunkBytes = 4 * 1024 * 1024;
 +static constexpr size_t kMaxPrepareChunks = 64;
 +static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPreparedChunkMask(0);
 +

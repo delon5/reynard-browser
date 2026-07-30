@@ -713,6 +713,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
     NSError *commandError = nil;
     BOOL exitPacketPresent = NO;
     BOOL detachedByCommand = NO;
+    // Set when the loop ends because sendDebugCommand failed - i.e.
+    // the transport died rather than the target exiting. See
+    // fix_chunk_coverage_and_dead_connection_detach.py.
+    BOOL connectionFailed = NO;
     
     while (YES) {
         @autoreleasepool {
@@ -739,6 +743,13 @@ void runDebugService(int32_t pid, DebugSession *session) {
             NSTimeInterval continueCallDuration = continueCallEnd - continueCallStart;
             
             if (!continueOK) {
+                // ADDED - see
+                // fix_chunk_coverage_and_dead_connection_detach.py's
+                // docstring. Records that this loop ended because the
+                // TRANSPORT failed, not because the target exited, so
+                // teardown below can skip a detach that cannot
+                // possibly succeed.
+                connectionFailed = YES;
                 if (!isNotConnectedError(commandError)) logger([NSString stringWithFormat:@"Debug loop ended for pid %d: %@ (iteration %ld, call took %.0fms)", pid, commandError.localizedDescription ?: @"continue failed", (long)debugServiceIteration, continueCallDuration * 1000.0]);
                 break;
             }
@@ -906,8 +917,18 @@ void runDebugService(int32_t pid, DebugSession *session) {
     
     logger([NSString stringWithFormat:@"runDebugService: (pid %d) loop exiting after %ld iterations, %.0fms total, exitPacketPresent=%d, detachedByCommand=%d", pid, (long)debugServiceIteration, (CFAbsoluteTimeGetCurrent() - debugServiceLoopStart) * 1000.0, exitPacketPresent, detachedByCommand]);
     
-    if (!exitPacketPresent && !detachedByCommand) {
+    // CHANGED - skips the detach when the connection has already died.
+    // After a long background, every loop fails at once on resume with
+    // exitPacketPresent=0, and each then attempted a detach over a
+    // dead transport that could only time out. Fifteen of those in
+    // sequence is the multi-second stall on resume, landing during the
+    // exact window tab restoration needs - the most likely trigger for
+    // the hang watchdog and the observed total tab loss. See
+    // fix_chunk_coverage_and_dead_connection_detach.py.
+    if (!exitPacketPresent && !detachedByCommand && !connectionFailed) {
         detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
+    } else if (connectionFailed) {
+        logger([NSString stringWithFormat:@"runDebugService: (pid %d) skipping detach - transport already dead", pid]);
     }
     
     unregisterDebugSessionPID(pid);
