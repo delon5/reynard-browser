@@ -466,7 +466,15 @@ static void jitHangBacktraceHandler(int signalNumber) {
     // activeDebugSessionPIDs() alone can't answer this correctly from
     // the main app (where this is called from) when the session in
     // question is running in the separate Helper process.
-    return hasAnyActiveJITSessionAcrossProcesses();
+    //
+    // CHANGED - see fix_debuggee_self_reports_cs_debugged.py's
+    // docstring. Now reports kernel ground truth: pids that the
+    // debuggee itself confirmed carry CS_DEBUGGED, via csops(getpid())
+    // from inside the Helper where that call is actually permitted.
+    // Previously reported hasAnyActiveJITSessionAcrossProcesses, which
+    // is the main app's own bookkeeping and was observed reading
+    // "Not Acquired" while eleven runDebugService loops were live.
+    return hasAnyDebuggedJITSessionAcrossProcesses();
 }
 
 // Deliberately does NOT call freeDeviceProvider on the current

@@ -228,6 +228,113 @@ BOOL processIsDebugged(int32_t pid) {
     return (flags & REYNARD_CS_DEBUGGED) != 0;
 }
 
+// ADDED - see fix_debuggee_self_reports_cs_debugged.py's docstring.
+// Separate from active-jit-sessions.txt on purpose: that file is
+// written by the main app on its own say-so and cannot verify
+// anything, whereas this one only ever contains pids the KERNEL has
+// confirmed carry CS_DEBUGGED.
+static NSURL *debuggedJITSessionsFileURL(void) {
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
+    if (!containerURL) {
+        return nil;
+    }
+    return [containerURL URLByAppendingPathComponent:@"debugged-jit-sessions.txt" isDirectory:NO];
+}
+
+// Records this process's own pid as kernel-confirmed debugged. Called
+// only from inside the debuggee, because csops() on another process is
+// refused with EPERM under the app sandbox.
+static void addSelfToDebuggedSessions(void) {
+    NSURL *fileURL = debuggedJITSessionsFileURL();
+    if (!fileURL) return;
+
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return;
+
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return;
+        }
+        usleep(5000);
+    }
+
+    NSMutableArray<NSNumber *> *live = [readLiveJITSessionPIDs(fd) mutableCopy];
+    NSNumber *selfPID = @(getpid());
+    if (![live containsObject:selfPID]) {
+        [live addObject:selfPID];
+    }
+    writeJITSessionPIDs(fd, live);
+
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+BOOL hasAnyDebuggedJITSessionAcrossProcesses(void) {
+    NSURL *fileURL = debuggedJITSessionsFileURL();
+    if (!fileURL) return NO;
+
+    int fd = open(fileURL.fileSystemRepresentation, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return NO;
+
+    NSTimeInterval lockDeadline = [NSDate date].timeIntervalSince1970 + 0.5;
+    while (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if ([NSDate date].timeIntervalSince1970 > lockDeadline) {
+            close(fd);
+            return NO;
+        }
+        usleep(5000);
+    }
+
+    // Reading also prunes: readLiveJITSessionPIDs drops any pid whose
+    // process no longer exists (kill(pid, 0)), so a Helper that has
+    // exited needs no explicit cleanup.
+    NSArray<NSNumber *> *live = readLiveJITSessionPIDs(fd);
+    writeJITSessionPIDs(fd, live);
+
+    flock(fd, LOCK_UN);
+    close(fd);
+
+    logger([NSString stringWithFormat:@"hasAnyDebuggedJITSessionAcrossProcesses: %lu kernel-confirmed debugged process(es)", (unsigned long)live.count]);
+
+    return live.count > 0;
+}
+
+// Polls rather than checking once: CS_DEBUGGED only appears after the
+// main app's attach completes, which device logs show landing 1-4
+// seconds after process start and later still under queue load. A
+// single check at load time would always read false.
+static void scheduleSelfDebuggedCheck(int attemptsRemaining) {
+    if (attemptsRemaining <= 0) {
+        logger([NSString stringWithFormat:@"selfDebuggedCheck: pid %d never became CS_DEBUGGED - giving up", getpid()]);
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (processIsDebugged(getpid())) {
+            addSelfToDebuggedSessions();
+            logger([NSString stringWithFormat:@"selfDebuggedCheck: pid %d IS CS_DEBUGGED - recorded in the App Group", getpid()]);
+            return;
+        }
+        scheduleSelfDebuggedCheck(attemptsRemaining - 1);
+    });
+}
+
+// Runs in every process that loads this translation unit. Gated to the
+// Helper extension, which is the debuggee - the main app is the
+// debugger and never carries CS_DEBUGGED, so checking there would
+// always and correctly read false.
+__attribute__((constructor))
+static void ReynardStartSelfDebuggedReporting(void) {
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (![bundleID hasSuffix:@".Helper"]) {
+        return;
+    }
+    scheduleSelfDebuggedCheck(40);
+}
+
 BOOL hasAnyActiveJITSessionAcrossProcesses(void) {
     NSURL *fileURL = activeJITSessionsFileURL();
     if (!fileURL) return NO;
@@ -253,24 +360,33 @@ BOOL hasAnyActiveJITSessionAcrossProcesses(void) {
     flock(fd, LOCK_UN);
     close(fd);
     
-    // CHANGED - was `return live.count > 0`, i.e. "is anything listed
-    // in our own bookkeeping file". That reports Reynard's records,
-    // not reality, and was observed reading "Not Acquired" while
-    // eleven runDebugService loops were live and servicing toggles.
-    // DolphiniOS's equivalent row reports csops/CS_DEBUGGED, so this
-    // now requires at least one tracked pid to actually be debugged
-    // according to the kernel.
-    for (NSNumber *sessionPID in live) {
-        if (processIsDebugged(sessionPID.intValue)) {
-            return YES;
-        }
-    }
+    // REVERTED - see
+    // fix_revert_csops_gate_on_acquisition_row.py's docstring. This
+    // briefly required at least one tracked pid to report CS_DEBUGGED,
+    // to match DolphiniOS. That cannot work from here: csops() with
+    // CS_OPS_STATUS on ANOTHER process is refused with EPERM under the
+    // app sandbox, confirmed on device 8 times out of 8
+    // ("csops failed for pid NNN, errno=1"). It only works on
+    // getpid(). DolphiniOS can use it because DolphiniOS IS the
+    // debuggee; Reynard's main app is the DEBUGGER, so every pid it
+    // asks about is someone else's. The gate could never pass, making
+    // the row read "Not Acquired" permanently.
+    //
+    // Truthful reporting needs the check to run inside the Helper on
+    // its own getpid() after its attach completes, with the result
+    // recorded in the App Group for the main app to read. Not done
+    // here - that is a new feature, not part of undoing a regression.
+    //
+    // The count is logged because the row ALSO read "Not Acquired"
+    // before the csops change, while eleven runDebugService loops were
+    // live - so the bookkeeping path has a separate problem. A count of
+    // 0 means registerDebugSessionPID is not running, or
+    // activeJITSessionsFileURL() is nil because the App Group
+    // container is unavailable to the asking process, so reads and
+    // writes both silently no-op.
+    logger([NSString stringWithFormat:@"hasAnyActiveJITSessionAcrossProcesses: %lu tracked session(s)", (unsigned long)live.count]);
     
-    if (live.count > 0) {
-        logger([NSString stringWithFormat:@"hasAnyActiveJITSessionAcrossProcesses: %lu session(s) tracked but NONE report CS_DEBUGGED", (unsigned long)live.count]);
-    }
-    
-    return NO;
+    return live.count > 0;
 }
 
 static void registerDebugSessionPID(int32_t pid) {

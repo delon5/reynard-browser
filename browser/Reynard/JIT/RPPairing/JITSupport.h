@@ -64,6 +64,14 @@ BOOL hasAnyActiveJITSessionAcrossProcesses(void);
 /// itself - the Helper content processes are the ones that matter.
 BOOL processIsDebugged(int32_t pid);
 
+/// Whether any content process has confirmed to the kernel that it
+/// carries CS_DEBUGGED, reported by the debuggee itself into the App
+/// Group. Unlike hasAnyActiveJITSessionAcrossProcesses this is kernel
+/// ground truth rather than the main app's own bookkeeping - see
+/// fix_debuggee_self_reports_cs_debugged.py for why the check cannot
+/// be performed from the main app.
+BOOL hasAnyDebuggedJITSessionAcrossProcesses(void);
+
 void freeDebugSession(DebugSession *session);
 void freeDeviceProvider(DeviceProvider *_Nullable provider);
 
