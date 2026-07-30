@@ -713,15 +713,34 @@ extension JITController {
         }
     }
     
-    // Deliberately isolated from attachToProcess(pid:) above - that
-    // method calls ReportJITStatusForChild (GeckoView-specific,
-    // informs Gecko's own child-process tracking - wrong for a PID
-    // Gecko never launched) and handleJITFailure (presents a
-    // full-screen failure UI - wrong here, a Helper's own JIT failure
-    // is meant to degrade silently, exactly as it already does today).
-    // Returns success/error directly to the caller instead.
+    // Still deliberately isolated from attachToProcess(pid:) above in
+    // one respect: this does NOT call handleJITFailure, which presents
+    // a full-screen failure UI. A Helper's own JIT failure is meant to
+    // degrade silently, exactly as it already does today.
+    //
+    // CORRECTED - see fix_report_jit_status_from_helper_path.py's
+    // docstring. This previously also withheld ReportJITStatusForChild,
+    // on the stated grounds that it is "wrong for a PID Gecko never
+    // launched". That premise is false: Reynard Helper.appex IS the
+    // Gecko content-process host, so these PIDs are Gecko-launched
+    // child processes - precisely the ones blocked in
+    // WaitForJITReadySignal waiting to be told whether JIT is
+    // available. Since childProcessDidStart never fires (confirmed
+    // empirically - NSLog at NotifyChildProcessStarted's entry point
+    // produced zero output in a freshly clobbered Gecko build),
+    // attachToProcess never runs, so this was the ONLY attach path in
+    // the app and NOTHING ever signalled any child. Every content
+    // process waited its 5 seconds, heard nothing, and called
+    // JS::DisableJitBackend() permanently - while the attach behind it
+    // had in fact succeeded.
+    //
+    // Reported on failure as well as success, deliberately: a child
+    // told "no JIT" stops waiting and renders immediately instead of
+    // blocking its main thread for the full timeout.
     fileprivate func attachToHelperProcess(pid: Int32) -> (Bool, String?) {
         let (success, error) = boundedEnableJIT(forPID: pid)
+        logger(String(format: "attachToHelperProcess: reporting JIT status to child pid %d (success=%@)", pid, success ? "YES" : "NO"))
+        ReportJITStatusForChild(pid, success, newJITRuntimeInfo())
         return (success, error?.localizedDescription)
     }
 }
