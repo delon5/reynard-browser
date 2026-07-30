@@ -767,10 +767,43 @@ void runDebugService(int32_t pid, DebugSession *session) {
             uint64_t x16 = x16Field ? parseLittleEndianHex64(x16Field) : 0;
             
             NSString *instructionResponse = nil;
-            NSString *readInstruction = [NSString stringWithFormat:@"m%llx,4", pc];
-            if (!sendDebugCommand(session->debugProxy, readInstruction, &instructionResponse, &commandError)) instructionResponse = nil;
+            // CHANGED - see fix_reduce_wx_mediation_cost.py's docstring.
+            // This read used to happen on EVERY trap, costing one of
+            // four round trips each time. Gecko emits exactly one brk
+            // site (the inline asm in RequestDebuggerToPrepareRegion,
+            // the only "brk #0xf00d" anywhere in patches/), so pc is
+            // identical on every trap and the four bytes read back
+            // never change. Cached by pc: first trap reads as before,
+            // subsequent traps at the same pc skip the round trip
+            // entirely. Falls back to reading on a miss, so a
+            // different pc simply produces a new entry.
+            static NSMutableDictionary<NSNumber *, NSNumber *> *cachedInstructionByPC = nil;
+            static dispatch_once_t instructionCacheOnce;
+            dispatch_once(&instructionCacheOnce, ^{
+                cachedInstructionByPC = [NSMutableDictionary dictionary];
+            });
             
-            uint32_t instruction = (uint32_t)parseLittleEndianHex64(instructionResponse ?: @"");
+            uint32_t instruction = 0;
+            NSNumber *cachedInstruction = nil;
+            @synchronized (cachedInstructionByPC) {
+                cachedInstruction = cachedInstructionByPC[@(pc)];
+            }
+            
+            if (cachedInstruction) {
+                instruction = cachedInstruction.unsignedIntValue;
+                instructionResponse = @"cached";
+            } else {
+                NSString *readInstruction = [NSString stringWithFormat:@"m%llx,4", pc];
+                if (!sendDebugCommand(session->debugProxy, readInstruction, &instructionResponse, &commandError)) instructionResponse = nil;
+                
+                instruction = (uint32_t)parseLittleEndianHex64(instructionResponse ?: @"");
+                
+                if (instructionResponse.length > 0) {
+                    @synchronized (cachedInstructionByPC) {
+                        cachedInstructionByPC[@(pc)] = @(instruction);
+                    }
+                }
+            }
             if (instructionResponse.length == 0 || !instructionIsBreakpoint(instruction)) {
                 NSString *signal = packetSignal(stopResponse);
                 

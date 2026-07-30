@@ -23,7 +23,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +54,99 @@
+@@ -47,6 +54,149 @@
  using namespace js;
  using namespace js::jit;
  
@@ -77,13 +77,63 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +  sys_cache_control(kCacheFunctionPrepareForExecution, aAddress, aSize);
 +}
 +
++// Coalesces region preparation - see
++// fix_reduce_wx_mediation_cost.py's docstring. Device logs showed
++// regions being prepared 64KB at a time, one debugger round trip
++// each, continuing for the life of the process. The trap is initiated
++// here in the target, so the debugger cannot skip it; the only way to
++// reduce the cost is to stop asking. One 1MB chunk covers what
++// previously took sixteen traps, and once a process's working set is
++// covered the traps stop entirely.
++//
++// 1MB chunks across a reserved region of at most a few hundred MB fit
++// comfortably in a 64-bit mask. Addresses outside the reserved range
++// bypass the cache and prepare exactly what was asked for, and a chunk
++// is only marked prepared AFTER the debugger call returns.
++static constexpr size_t kPrepareChunkBytes = 1024 * 1024;
++static constexpr size_t kMaxPrepareChunks = 64;
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPreparedChunkMask(0);
++
 +static void PrepareExecutableRegionForWriting(void* aAddress, size_t aSize) {
 +  if (!aAddress || !aSize) {
 +    return;
 +  }
 +
-+  if (sHasTXMSupport) {
++  if (!sHasTXMSupport) {
++    return;
++  }
++
++  if (!sExecutableMemoryBase) {
 +    RequestDebuggerToPrepareRegion(aAddress, aSize);
++    return;
++  }
++
++  auto* address = static_cast<uint8_t*>(aAddress);
++  if (address < sExecutableMemoryBase) {
++    RequestDebuggerToPrepareRegion(aAddress, aSize);
++    return;
++  }
++
++  size_t startOffset = static_cast<size_t>(address - sExecutableMemoryBase);
++  size_t endOffset = startOffset + aSize;
++
++  size_t firstChunk = startOffset / kPrepareChunkBytes;
++  size_t lastChunk = (endOffset - 1) / kPrepareChunkBytes;
++
++  if (lastChunk >= kMaxPrepareChunks) {
++    RequestDebuggerToPrepareRegion(aAddress, aSize);
++    return;
++  }
++
++  for (size_t chunk = firstChunk; chunk <= lastChunk; chunk++) {
++    uint64_t bit = uint64_t(1) << chunk;
++    if (sPreparedChunkMask & bit) {
++      continue;
++    }
++
++    uint8_t* chunkStart = sExecutableMemoryBase + (chunk * kPrepareChunkBytes);
++    RequestDebuggerToPrepareRegion(chunkStart, kPrepareChunkBytes);
++    sPreparedChunkMask = sPreparedChunkMask | bit;
 +  }
 +}
 +
