@@ -161,24 +161,39 @@ final class JITController {
     }
     
     func childProcessDidStart(pid: Int32, processType: String) {
+        // DIAGNOSTIC - see fix_log_all_jit_status_reporters.py. This
+        // whole function was silent on every path, including three
+        // ReportJITStatusForChild(false) exits. Since that pipe is
+        // single-use and consumed by the first caller, a silent false
+        // report here permanently disables JIT for a child that the
+        // Helper path then successfully attaches a moment later.
+        // Also the first time processType has ever been observed -
+        // shouldAttach compares it against "tab".
+        logger(String(format: "childProcessDidStart: ENTRY pid %d, processType=%@", pid, processType))
+        
         guard pid > 0 else {
             return
         }
         
         guard !isJITLessModeActive, !hasHandledFailure else {
+            logger(String(format: "childProcessDidStart: pid %d reporting FALSE - guard 1 (isJITLessModeActive=%@, hasHandledFailure=%@)", pid, isJITLessModeActive ? "YES" : "NO", hasHandledFailure ? "YES" : "NO"))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             return
         }
         
         guard usePtraceJIT() || Prefs.JITSettings.isJITEnabled else {
+            logger(String(format: "childProcessDidStart: pid %d reporting FALSE - guard 2 (JIT not enabled in prefs)", pid))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             return
         }
         
         guard shouldAttach(to: processType) else {
+            logger(String(format: "childProcessDidStart: pid %d reporting FALSE - guard 3 (shouldAttach rejected processType=%@)", pid, processType))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             return
         }
+        
+        logger(String(format: "childProcessDidStart: pid %d passed all guards, queueing native attach", pid))
         
         attachQueue.async {
             if self.attachedPIDs.contains(pid) {
@@ -300,8 +315,10 @@ final class JITController {
         let (success, error) = boundedEnableJIT(forPID: pid)
         cancelPreflightWatchdog(for: pid)
         if success {
+            logger(String(format: "attachToProcess: pid %d reporting TRUE (native path)", pid))
             ReportJITStatusForChild(pid, true, newJITRuntimeInfo())
         } else {
+            logger(String(format: "attachToProcess: pid %d reporting FALSE (native path, attach failed: %@)", pid, error?.localizedDescription ?? "unknown"))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             handleJITFailure(error: error ?? NSError(domain: "Reynard.JIT", code: -1, userInfo: nil))
         }
@@ -343,6 +360,13 @@ final class JITController {
                 return
             }
             
+            // DIAGNOSTIC - prime suspect. cancelPreflightWatchdog is
+            // called only from attachToProcess, never from
+            // attachToHelperProcess, so when the Helper path performs
+            // the attach this watchdog is never cancelled and fires
+            // anyway - consuming the single-use pipe with a FALSE
+            // report even though the attach itself succeeded.
+            logger(String(format: "preflightWatchdog: pid %d reporting FALSE - watchdog timed out and was never cancelled", pid))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             self.handleJITFailure(error: NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: nil))
         }
