@@ -12,6 +12,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -610,20 +611,87 @@ void runDebugService(int32_t pid, DebugSession *session) {
             if (breakpointImmediate == 0xf00d) {
                 logger([NSString stringWithFormat:@"runDebugService: (pid %d) 0xf00d breakpoint hit at iteration %ld - x0=0x%llx x1=0x%llx x16=%llu", pid, (long)debugServiceIteration, x0, x1, x16]);
                 if (!x0Field || !x1Field || !x16Field) break;
-                if (x16 != 1) continue;
                 
-                if (x0 == 0 && x1 == 0) {
-                    if (!writeRegisterValue(session->debugProxy, @"20", pc + 4, threadID, &commandError)) break;
+                // CHANGED - see
+                // fix_rundebugservice_allocate_and_dispatch.py's
+                // docstring. PC is now advanced past the brk BEFORE
+                // dispatching, unconditionally, exactly as
+                // universal.js does. Previously an unhandled x16 hit
+                // `continue` with PC still pointing at the brk, so the
+                // target re-trapped on the identical instruction
+                // forever.
+                if (!writeRegisterValue(session->debugProxy, @"20", pc + 4, threadID, &commandError)) break;
+                
+                // x16 is a COMMAND SELECTOR, not a flag:
+                //   0 = CMD_DETACH
+                //   1 = CMD_PREPARE_REGION
+                //   2 = CMD_NEW_BREAKPOINTS
+                if (x16 == 0) {
+                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) target requested DETACH (x16=0)", pid]);
+                    detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
+                    break;
+                }
+                
+                if (x16 == 2) {
+                    // universal.js reads a script out of target memory
+                    // and eval()s it. This loop is native Objective-C
+                    // with no JS engine, so that cannot be honoured.
+                    // Skipping is safe - PC has already been advanced,
+                    // so the target proceeds - and logging it shows
+                    // whether SpiderMonkey ever actually uses this.
+                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) target requested NEW_BREAKPOINTS (x16=2) - not supported by the native loop, skipping", pid]);
                     continue;
                 }
                 
-                if (x0 == 0) break;
+                if (x16 != 1) {
+                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) unknown x16 command %llu, skipping", pid, x16]);
+                    continue;
+                }
                 
-                if (!prepareMemoryRegion(session->debugProxy, x0, x1, &commandError)) break;
-                if (!writeRegisterValue(session->debugProxy, @"00", x0, threadID, &commandError)) break;
+                // CMD_PREPARE_REGION. x0 == 0 && x1 == 0 is a no-op
+                // probe; the target just wants to be resumed.
+                if (x0 == 0 && x1 == 0) {
+                    continue;
+                }
                 
-                // jump over breakpoint
-                if (!writeRegisterValue(session->debugProxy, @"20", pc + 4, threadID, &commandError)) break;
+                uint64_t jitPageAddress = x0;
+                
+                if (x0 == 0) {
+                    // x0 == 0 means ALLOCATE a new RX region of x1
+                    // bytes and return its address - it does NOT mean
+                    // failure. This previously did `break`, killing
+                    // W^X mediation permanently for this process the
+                    // first time its JIT arena needed to grow.
+                    //
+                    // The _M response is a plain big-endian hex
+                    // address per the GDB remote protocol, not
+                    // little-endian, so strtoull is correct here -
+                    // universal.js likewise uses BigInt("0x" + resp)
+                    // with no byte swap, unlike every register read.
+                    NSString *allocateCommand = [NSString stringWithFormat:@"_M%llx,rx", x1];
+                    NSString *allocateResponse = nil;
+                    if (!sendDebugCommand(session->debugProxy, allocateCommand, &allocateResponse, &commandError)) {
+                        logger([NSString stringWithFormat:@"runDebugService: (pid %d) RX allocation command failed", pid]);
+                        break;
+                    }
+                    if (allocateResponse.length == 0 || [allocateResponse hasPrefix:@"E"]) {
+                        logger([NSString stringWithFormat:@"runDebugService: (pid %d) RX allocation rejected by debugserver, response=%@", pid, allocateResponse ?: @"(empty)"]);
+                        break;
+                    }
+                    
+                    jitPageAddress = strtoull(allocateResponse.UTF8String, NULL, 16);
+                    if (jitPageAddress == 0) {
+                        logger([NSString stringWithFormat:@"runDebugService: (pid %d) RX allocation returned an unparseable address: %@", pid, allocateResponse]);
+                        break;
+                    }
+                    
+                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) allocating RX region of 0x%llx bytes -> 0x%llx", pid, x1, jitPageAddress]);
+                }
+                
+                if (!prepareMemoryRegion(session->debugProxy, jitPageAddress, x1, &commandError)) break;
+                
+                // Return the region address to the caller in x0.
+                if (!writeRegisterValue(session->debugProxy, @"00", jitPageAddress, threadID, &commandError)) break;
             } else {
                 continue;
             }
