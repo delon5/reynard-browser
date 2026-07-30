@@ -16,6 +16,15 @@ final class JITController {
     private let attachQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.AttachQueue", qos: .userInitiated)
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
     private var attachedPIDs: Set<Int32> = []
+    
+    // ADDED - see fix_dedupe_attach_paths.py's docstring. Processes
+    // shouldAttach(to:) has rejected by type - socket, gpu, rdd and so
+    // on, which never execute JavaScript. The Helper path has no idea
+    // what kind of process it is hosting and would otherwise
+    // self-enable for them anyway, burning a ~1012ms serialized attach
+    // each on processes that have no use for JIT. Only ever touched on
+    // attachQueue, same as attachedPIDs.
+    private var rejectedPIDs: Set<Int32> = []
     private var preflightWatchdogs: [Int32: DispatchWorkItem] = [:]
     // Moved here from the Helper Process Attach Delegation extension
     // below - Swift extensions cannot contain stored properties, a
@@ -189,6 +198,12 @@ final class JITController {
         
         guard shouldAttach(to: processType) else {
             logger(String(format: "childProcessDidStart: pid %d reporting FALSE - guard 3 (shouldAttach rejected processType=%@)", pid, processType))
+            // Remember the rejection so the Helper path does not
+            // wastefully attach this process a second later - see
+            // fix_dedupe_attach_paths.py's docstring.
+            attachQueue.async {
+                self.rejectedPIDs.insert(pid)
+            }
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             return
         }
@@ -709,6 +724,36 @@ extension JITController {
                     let requestFileURL = containerURL.appendingPathComponent(requestFileName)
                     try? fileManager.removeItem(at: requestFileURL)
                     
+                    // ADDED - see fix_dedupe_attach_paths.py's
+                    // docstring. Without these two checks the Helper
+                    // path and the native path cannot see each other,
+                    // so every tab process is attached twice and
+                    // non-tab processes are attached despite having
+                    // been correctly rejected. Measured: 21 attaches
+                    // for 12 processes, 12.2s of serialized queue time,
+                    // only 9 of them necessary.
+                    var skipReason: String? = nil
+                    if self.rejectedPIDs.contains(pid) {
+                        skipReason = "process type was rejected by shouldAttach - does not need JIT"
+                    } else if self.attachedPIDs.contains(pid) {
+                        skipReason = "already attached by the native path"
+                    }
+                    
+                    if let skipReason {
+                        logger(String(format: "processPendingHelperAttachRequests: skipping pid %d - %@", pid, skipReason))
+                        let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
+                        try? "success".write(to: resultFileURL, atomically: true, encoding: .utf8)
+                        CFNotificationCenterPostNotification(
+                            CFNotificationCenterGetDarwinNotifyCenter(),
+                            CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
+                            nil,
+                            nil,
+                            true
+                        )
+                        continue
+                    }
+                    
+                    self.attachedPIDs.insert(pid)
                     let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
                     
                     let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
