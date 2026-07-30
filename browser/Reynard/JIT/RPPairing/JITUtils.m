@@ -8,6 +8,13 @@
 #import "JITUtils.h"
 #import <os/log.h>
 
+// ADDED - see fix_logger_writes_to_documents_file_v2.py's docstring.
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/time.h>
+#include <time.h>
+
 // Was NSLog(@"[Reynard] %@", message) — the ENTIRE composed string can
 // get redacted to "<private>" in an exported Console capture, not just
 // the interpolated part, unless the dynamic content is explicitly
@@ -20,8 +27,91 @@
 // "%{public}@" and comes through completely readable in the same
 // capture — matching that pattern here instead of guessing why NSLog
 // was getting redacted.
+// ADDED - file mirror. idevicesyslog capture has been unreliable
+// throughout this investigation: grep block-buffers and drops chunks,
+// an open Console.app starves the os_trace_relay service, and several
+// captures silently missed cold launch, which at one point caused a
+// wrong conclusion to be asserted as established fact.
+// idevice_native_log.txt already proves file logging is reliable here.
+//
+// Documents rather than the App Group container: UIFileSharingEnabled
+// is already true, so Finder can both retrieve and clear this file.
+// The App Group container would let the Helper share one interleaved
+// file, but Finder cannot reach it.
+//
+// The os_log call below is deliberately left exactly as it was - it
+// was changed from NSLog because NSLog was being redacted to
+// "<private>" in exported Console captures.
+static int gReynardLogFileDescriptor = -1;
+
+static void ReynardOpenLogFileIfNeeded(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURL *documentsURL = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+        if (!documentsURL) {
+            // Deliberately silent - pairingFilePath() calls logger(),
+            // so logging from inside logger()'s own initialiser would
+            // recurse. File logging simply stays off; os_log is
+            // unaffected.
+            return;
+        }
+
+        NSURL *logURL = [documentsURL URLByAppendingPathComponent:@"reynard_jit_log.txt" isDirectory:NO];
+        gReynardLogFileDescriptor = open(logURL.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (gReynardLogFileDescriptor < 0) {
+            return;
+        }
+
+        // Session banner - proof that this process's logging began
+        // inside the file, which is exactly the question that
+        // invalidated several syslog captures.
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        struct tm brokenDown;
+        localtime_r(&now.tv_sec, &brokenDown);
+        char clockText[32];
+        strftime(clockText, sizeof(clockText), "%H:%M:%S", &brokenDown);
+
+        NSString *banner = [NSString stringWithFormat:@"\n===== SESSION START: %@[%d] %s.%06d =====\n",
+                            [NSProcessInfo processInfo].processName,
+                            getpid(),
+                            clockText,
+                            now.tv_usec];
+        const char *bannerBytes = banner.UTF8String;
+        if (bannerBytes) {
+            write(gReynardLogFileDescriptor, bannerBytes, strlen(bannerBytes));
+        }
+    });
+}
+
 void logger(NSString *message) {
     os_log(OS_LOG_DEFAULT, "[Reynard] %{public}@", message);
+
+    ReynardOpenLogFileIfNeeded();
+    if (gReynardLogFileDescriptor < 0) {
+        return;
+    }
+
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    struct tm brokenDown;
+    localtime_r(&now.tv_sec, &brokenDown);
+    char clockText[32];
+    strftime(clockText, sizeof(clockText), "%H:%M:%S", &brokenDown);
+
+    NSString *line = [NSString stringWithFormat:@"%s.%06d %@[%d] %@\n",
+                      clockText,
+                      now.tv_usec,
+                      [NSProcessInfo processInfo].processName,
+                      getpid(),
+                      message];
+
+    const char *lineBytes = line.UTF8String;
+    if (!lineBytes) {
+        return;
+    }
+
+    write(gReynardLogFileDescriptor, lineBytes, strlen(lineBytes));
 }
 
 // MARK: - App Group Resolution
