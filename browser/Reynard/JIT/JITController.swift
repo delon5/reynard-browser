@@ -620,6 +620,16 @@ extension JITController {
         // entire lifetime, not bounded to one request's own window -
         // the notification remains the fast path in the common case.
         Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            // DIAGNOSTIC - see
+            // fix_log_helper_request_delivery_path.py. Names this path
+            // so it can be told apart from the Darwin notification.
+            // If attach bursts consistently follow this line rather
+            // than the notification's, Darwin delivery is dead for
+            // this extension type and up to 3s of latency is being
+            // added to every request - directly relevant to the 5s
+            // WaitForJITReadySignal deadline and the 10s preflight
+            // watchdog.
+            logger("helperRequestDelivery: POLLING TIMER fired (3.0s fallback)")
             self?.processPendingHelperAttachRequests()
         }
     }
@@ -780,5 +790,11 @@ private func jitAttachRequestPostedCallback(
     object: UnsafeRawPointer?,
     userInfo: CFDictionary?
 ) {
+    // DIAGNOSTIC - see fix_log_helper_request_delivery_path.py. If
+    // this line never appears in a capture while attaches still
+    // happen, Darwin notification delivery is confirmed non-functional
+    // for this extension type and every request is waiting on the
+    // 3-second polling timer instead.
+    logger("helperRequestDelivery: DARWIN NOTIFICATION received")
     JITController.shared.processPendingHelperAttachRequests()
 }
