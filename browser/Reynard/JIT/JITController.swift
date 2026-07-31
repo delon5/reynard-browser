@@ -105,16 +105,25 @@ final class JITController {
     /// applies that to attaches.
     func reattachOrphanedProcesses() {
         attachQueue.async {
-            let orphaned = self.attachedPIDs.filter { pid in
-                // Still alive, but its debug loop has gone.
-                kill(pid, 0) == 0 && !JITEnabler.hasActiveDebugSession(forPID: pid)
+            // CHANGED - the three counts are computed and logged
+            // separately, unconditionally. See
+            // fix_unconditional_reattach_logging.py.
+            //
+            // Previously this returned early and silently when nothing
+            // was found, which made "attachedPIDs was cleared", "the
+            // processes died" and "they still hold sessions" all look
+            // identical - and only the middle one is benign.
+            let alive = self.attachedPIDs.filter { kill($0, 0) == 0 }
+            let orphaned = alive.filter { pid in
+                // Alive, but its debug loop has gone.
+                !JITEnabler.hasActiveDebugSession(forPID: pid)
             }
+            
+            logger(String(format: "reattachOrphanedProcesses: %d attached, %d alive, %d orphaned", self.attachedPIDs.count, alive.count, orphaned.count))
             
             guard !orphaned.isEmpty else {
                 return
             }
-            
-            logger(String(format: "reattachOrphanedProcesses: %d process(es) alive with no debug session, re-attaching", orphaned.count))
             
             for pid in orphaned {
                 // attachedPIDs is deliberately left alone. Its dedup
