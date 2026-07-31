@@ -1146,18 +1146,63 @@ extension TabManagerImplementation: ContentDelegate {
         delegate?.tabManager(self, didRequestContextMenuAt: CGPoint(x: screenX, y: screenY), for: element, in: session)
     }
     
+    // CHANGED - both used to call removeTab, deleting the tab outright.
+    // See fix_preserve_tabs_on_content_process_death.py's docstring.
+    //
+    // Caught directly in the log: twenty content processes died during
+    // a suspension and twenty tabs were deleted one at a time on
+    // resume, counting the persisted list down 18 -> 0 in under a
+    // second, with tabRemoval never firing because these were
+    // individual deletions rather than removeAllTabs.
+    //
+    // onKill in particular is iOS reclaiming a backgrounded content
+    // process under memory pressure - routine, not an error - and
+    // destroying the user's tab over it is plainly wrong.
     func onCrash(session: GeckoSession) {
-        guard let location = tabLocation(for: session) else {
-            return
-        }
-        removeTab(at: location.index, mode: location.mode)
+        recoverTabAfterSessionLoss(session: session, reason: "crash")
     }
     
     func onKill(session: GeckoSession) {
+        recoverTabAfterSessionLoss(session: session, reason: "kill")
+    }
+    
+    // Mirrors evictSessionIfNeeded, which already proves a tab can
+    // outlive its Gecko session: close it, make a fresh one, and mark
+    // the URL pending so it reloads on next use. The tab keeps its
+    // identity, position and history.
+    private func recoverTabAfterSessionLoss(session: GeckoSession, reason: String) {
         guard let location = tabLocation(for: session) else {
             return
         }
-        removeTab(at: location.index, mode: location.mode)
+        
+        let tab = tabs(for: location.mode)[location.index]
+        let isPrivate = location.mode == .private
+        
+        // Nothing to reload to - keeping it would leave a permanently
+        // blank entry, so removal is still right here.
+        guard let url = displayedURL(for: tab) else {
+            logger(String(format: "tabRecovery: content process %@ for tab %@ with no restorable URL - removing", reason, tab.id.uuidString))
+            removeTab(at: location.index, mode: location.mode)
+            return
+        }
+        
+        logger(String(format: "tabRecovery: content process %@ for tab %@ - preserving and marking for restore (%@)", reason, tab.id.uuidString, url))
+        
+        sessionManager.close(tab.session)
+        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
+        tab.state.restoreState = .pending(url)
+        tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
+        
+        notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+        
+        // Unlike eviction, which deliberately never touches the
+        // on-screen tab, a crash gives no choice - the session is
+        // already gone. Leaving the selected tab merely pending is what
+        // leaves a blank page staring back, so restore it now rather
+        // than waiting for it to be reselected.
+        if tab === selectedTab {
+            loadRestoredURLIfNeeded(for: location.index, mode: location.mode)
+        }
     }
     
     func onFirstComposite(session: GeckoSession) {
