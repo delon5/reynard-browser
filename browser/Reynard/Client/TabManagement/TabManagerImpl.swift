@@ -1519,6 +1519,25 @@ extension TabManagerImplementation: ProgressDelegate {
         }
         
         tab.state.loadingState = .idle
+        
+        // Ask the content process whether this page uses
+        // env(safe-area-inset-bottom), so the condensed pill knows
+        // whether to reserve space above itself. See
+        // fix_native_safe_area_detection.py.
+        //
+        // PageStop rather than an earlier hook deliberately: the
+        // previous WebExtension scanned at document_idle, which on a
+        // heavy site runs before the CSS it is looking for exists. By
+        // PageStop, loading is genuinely complete.
+        //
+        // The pill reads this lazily when it is about to condense, so
+        // no relayout is triggered here.
+        Task { @MainActor in
+            if let usesSafeAreaInset = await session.usesSafeAreaInsetCSS() {
+                tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
+            }
+        }
+        
         notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
         notifyUpdate(at: location.index, mode: location.mode, reason: .thumbnail)
         delegate?.tabManager(self, didFinishLoading: session)

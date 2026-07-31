@@ -410,6 +410,26 @@ public class GeckoSession {
         return PayloadValue.cgFloat(bottomRatioValue)
     }
     
+    /// Whether this page's CSS uses env(safe-area-inset-bottom),
+    /// asked directly of the content process. Mirrors
+    /// focusedInputBottomRatio above - see
+    /// fix_native_safe_area_detection.py for why this replaces the
+    /// SafeAreaDetector WebExtension, whose native messages dispatched
+    /// to a runtime dispatcher Reynard never registered a listener on
+    /// and so never arrived at all.
+    ///
+    /// nil means no answer - the query failed or the actor returned
+    /// null - and callers should treat that the same as false.
+    public func usesSafeAreaInsetCSS() async -> Bool? {
+        let response = try? await dispatcher.query(type: "GeckoView:GetSafeAreaInsetUsage")
+        guard let values = response as? [AnyHashable: Any],
+              let usesSafeAreaInset = values["usesSafeAreaInset"] as? Bool else {
+            return nil
+        }
+        
+        return usesSafeAreaInset
+    }
+    
     // MARK: - Selection Actions
     
     public func executeSelectionAction(actionId: String, commandId: String) {

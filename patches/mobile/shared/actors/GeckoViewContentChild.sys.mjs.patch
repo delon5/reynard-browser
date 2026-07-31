@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15bed3e..53549f22f8d5 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,107 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,148 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -42,6 +42,47 @@ index 9ca6e15bed3e..53549f22f8d5 100644
 +    }
 +
 +    return bounds;
++  }
++
++  // Detects whether this page's CSS uses env(safe-area-inset-bottom),
++  // so the condensed address pill can reserve a strip above itself
++  // rather than float over the page's own controls.
++  //
++  // Text-match rather than computed-style inspection: a page that
++  // never mentions the feature definitely is not using it, which is
++  // the distinction that actually matters here.
++  //
++  // Cross-origin sheets throw SecurityError on .cssRules even though
++  // they are genuinely applied - standard same-origin policy, not a
++  // bug - and are skipped. That risks a false negative for a page
++  // whose only safe-area CSS lives in an inaccessible sheet, which is
++  // preferred over guessing true and putting a reserved strip behind
++  // the pill on pages that do not want one.
++  getSafeAreaInsetUsage() {
++    const { contentWindow } = this;
++    const document = contentWindow?.document;
++    if (!document) {
++      return { usesSafeAreaInset: false };
++    }
++
++    for (const sheet of document.styleSheets) {
++      let rules;
++      try {
++        rules = sheet.cssRules;
++      } catch (e) {
++        continue;
++      }
++      if (!rules) {
++        continue;
++      }
++      for (const rule of rules) {
++        if (rule.cssText && rule.cssText.includes("safe-area-inset-bottom")) {
++          return { usesSafeAreaInset: true };
++        }
++      }
++    }
++
++    return { usesSafeAreaInset: false };
 +  }
 +
 +  async getFocusedInputMetrics() {
@@ -110,12 +151,15 @@ index 9ca6e15bed3e..53549f22f8d5 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +285,9 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +326,12 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
 +      case "GetFocusedInputMetrics": {
 +        return this.getFocusedInputMetrics();
++      }
++      case "GetSafeAreaInsetUsage": {
++        return this.getSafeAreaInsetUsage();
 +      }
      }
  
