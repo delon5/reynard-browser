@@ -711,30 +711,125 @@ BOOL connectDebugSession(DeviceProvider *provider, DebugSession *session, NSStri
     return YES;
 }
 
+// GDB remote framing: $<payload>#<checksum>, checksum being the sum of
+// the payload bytes modulo 256. sendDebugCommand gets this from
+// debugserver_command_new; raw sends have to do it here. With ack mode
+// disabled there is nothing else to negotiate.
+static NSString *gdbFramedPacket(NSString *payload) {
+    uint8_t checksum = 0;
+    const char *bytes = payload.UTF8String;
+    for (const char *cursor = bytes; *cursor; cursor++) {
+        checksum = (uint8_t)(checksum + (uint8_t)(*cursor));
+    }
+    return [NSString stringWithFormat:@"$%@#%02x", payload, checksum];
+}
+
+// Accepts both framed and bare responses. debug_proxy_send_command
+// appears to return bare payloads - existing code slices the first two
+// characters directly - but handling both costs nothing and avoids
+// relying on undocumented behaviour.
+static NSString *gdbUnframedResponse(NSString *response) {
+    if (response.length >= 4 && [response hasPrefix:@"$"]) {
+        NSRange hashRange = [response rangeOfString:@"#" options:NSBackwardsSearch];
+        if (hashRange.location != NSNotFound && hashRange.location > 0) {
+            return [response substringWithRange:NSMakeRange(1, hashRange.location - 1)];
+        }
+    }
+    return response;
+}
+
+static BOOL readOneDebugResponse(DebugProxyHandle *debugProxy, NSString **responseOut, NSError **error) {
+    char *raw = NULL;
+    IdeviceFfiError *ffiError = debug_proxy_read_response(debugProxy, &raw);
+    if (ffiError) {
+        if (error) *error = MakeError(DebugCommandSendFailed);
+        idevice_error_free(ffiError);
+        if (raw) idevice_string_free(raw);
+        return NO;
+    }
+
+    NSString *response = raw ? [NSString stringWithUTF8String:raw] : nil;
+    if (raw) idevice_string_free(raw);
+    if (responseOut) *responseOut = gdbUnframedResponse(response);
+    return YES;
+}
+
+// CHANGED - pipelined rather than one serialised round trip per packet.
+// See fix_batch_prepare_memory_region.py's docstring. This loop reads
+// and rewrites one byte per 16KB page, so a 4MB region is 256 pages and
+// 512 commands - previously all serialised through sendDebugCommand,
+// which is send-and-wait. That was the dominant cost in W^X mediation,
+// and it is also why raising the coalescing chunk 1MB -> 4MB cut trap
+// count ~37x without a proportional speedup: coalescing changes how
+// often this runs, not the per-page work inside it.
+//
+// The GDB remote protocol is a strictly ordered stream, so all the
+// reads can be written at once and their responses collected as a
+// stream, then the same for the writes. StikDebug's handleJITPageWrite
+// already does exactly this.
 static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddress, uint64_t regionSize, NSError **error) {
     uint64_t size = regionSize == 0 ? 0x4000 : regionSize;
-    
+
+    NSMutableArray<NSNumber *> *pageAddresses = [NSMutableArray array];
     for (uint64_t currentAddress = startAddress; currentAddress < startAddress + size; currentAddress += 0x4000) {
-        NSString *existingByte = nil;
-        NSString *readCommand = [NSString stringWithFormat:@"m%llx,1", currentAddress];
-        if (!sendDebugCommand(debugProxy, readCommand, &existingByte, error)) return NO;
-        
-        if (!existingByte || existingByte.length < 2) {
-            if (error && !*error)
-                *error = MakeError(MemoryPrepareReadFailed);
+        [pageAddresses addObject:@(currentAddress)];
+    }
+    if (pageAddresses.count == 0) {
+        return YES;
+    }
+
+    // Pass 1 - every read request in a single write.
+    NSMutableString *readBatch = [NSMutableString string];
+    for (NSNumber *pageAddress in pageAddresses) {
+        [readBatch appendString:gdbFramedPacket([NSString stringWithFormat:@"m%llx,1", pageAddress.unsignedLongLongValue])];
+    }
+
+    NSData *readBytes = [readBatch dataUsingEncoding:NSUTF8StringEncoding];
+    IdeviceFfiError *ffiError = debug_proxy_send_raw(debugProxy, readBytes.bytes, readBytes.length);
+    if (ffiError) {
+        if (error) *error = MakeError(DebugCommandSendFailed);
+        idevice_error_free(ffiError);
+        return NO;
+    }
+
+    NSMutableArray<NSString *> *existingBytes = [NSMutableArray array];
+    for (NSUInteger index = 0; index < pageAddresses.count; index++) {
+        NSString *response = nil;
+        if (!readOneDebugResponse(debugProxy, &response, error)) return NO;
+
+        if (response.length < 2) {
+            if (error && !*error) *error = MakeError(MemoryPrepareReadFailed);
             return NO;
         }
-        
-        NSString *command = [NSString stringWithFormat:@"M%llx,1:%@", currentAddress, [existingByte substringToIndex:2]];
+        [existingBytes addObject:[response substringToIndex:2]];
+    }
+
+    // Pass 2 - write each byte straight back, again in a single write.
+    NSMutableString *writeBatch = [NSMutableString string];
+    for (NSUInteger index = 0; index < pageAddresses.count; index++) {
+        [writeBatch appendString:gdbFramedPacket([NSString stringWithFormat:@"M%llx,1:%@",
+                                                  pageAddresses[index].unsignedLongLongValue,
+                                                  existingBytes[index]])];
+    }
+
+    NSData *writeBytes = [writeBatch dataUsingEncoding:NSUTF8StringEncoding];
+    ffiError = debug_proxy_send_raw(debugProxy, writeBytes.bytes, writeBytes.length);
+    if (ffiError) {
+        if (error) *error = MakeError(DebugCommandSendFailed);
+        idevice_error_free(ffiError);
+        return NO;
+    }
+
+    for (NSUInteger index = 0; index < pageAddresses.count; index++) {
         NSString *response = nil;
-        
-        if (!sendDebugCommand(debugProxy, command, &response, error)) return NO;
+        if (!readOneDebugResponse(debugProxy, &response, error)) return NO;
+
         if (response.length > 0 && ![response isEqualToString:@"OK"]) {
             if (error) *error = MakeError(UnexpectedPrepareRegionResponse);
             return NO;
         }
     }
-    
+
     return YES;
 }
 
