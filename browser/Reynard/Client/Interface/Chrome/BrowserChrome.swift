@@ -18,7 +18,25 @@ final class BrowserChrome: UIView {
     /// (bisecting between "too low, overlapping a page's own fixed bar"
     /// and "too far up, gap looked too large") rather than derived from
     /// a formula.
-    private static let condensedPillClearanceBuffer: CGFloat = 14
+    ///
+    /// RAISED 14 -> 32 to lower the pill - see
+    /// fix_lower_condensed_pill.py's docstring.
+    ///
+    /// This is the constant that actually moves it.
+    /// condensedPillBottomMargin does not: it appears both in the
+    /// pill's constraint against the safe area guide AND in the
+    /// artificial inset that inflates that same guide, so raising it
+    /// pushes the pill down and up simultaneously and largely cancels
+    /// out. This constant appears only in the inset, so raising it
+    /// shrinks the guide and the pill follows it down 1:1.
+    ///
+    /// Web content's env(safe-area-inset-bottom) shrinks by the same
+    /// amount, which is the intended coupling rather than a side
+    /// effect - the pill is moving into that space, so the strip
+    /// reserved above it should shrink to match. That matters more now
+    /// that safe-area detection works and pages actually position
+    /// against this value.
+    private static let condensedPillClearanceBuffer: CGFloat = 32
     
     /// The artificial safe-area boundary reported to web content's own
     /// CSS while condensed, via additionalSafeAreaInsets — computed from
