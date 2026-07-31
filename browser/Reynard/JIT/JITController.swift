@@ -383,7 +383,37 @@ final class JITController {
         } else {
             logger(String(format: "attachToProcess: pid %d reporting FALSE (native path, attach failed: %@)", pid, error?.localizedDescription ?? "unknown"))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
-            handleJITFailure(error: error ?? NSError(domain: "Reynard.JIT", code: -1, userInfo: nil))
+            
+            // CHANGED - see
+            // fix_recoverable_jit_failures_do_not_latch.py's docstring.
+            // handleJITFailure sets hasHandledFailure permanently, and
+            // guard 1 in childProcessDidStart then rejects every
+            // subsequent attach for the rest of the process lifetime.
+            //
+            // That is right for a genuinely unusable setup - missing
+            // DDI, bad pairing file - but wrong for a transport failure
+            // after the app has been suspended. Observed on device: ten
+            // minutes backgrounded, tunnel died with Socket(BrokenPipe),
+            // the next attach burned its full 90s bound discovering
+            // that, and JIT stayed off until relaunch.
+            //
+            // Nothing was actually broken. boundedEnableJIT already
+            // calls invalidateSharedProviderAfterTimeout() on that same
+            // timeout, so the cached provider is discarded and the next
+            // attach builds a fresh tunnel - which the following session
+            // in that capture did successfully.
+            //
+            // Reporting FALSE above is still correct: this particular
+            // process did not get JIT and must be told rather than left
+            // waiting. What changes is that the NEXT one may try.
+            let failureCode = Int32(error?.code ?? -1)
+            let isRecoverable = failureCode == ETIMEDOUT || failureCode == EBUSY
+            
+            if isRecoverable {
+                logger(String(format: "attachToProcess: pid %d failure is recoverable (code %d) - not latching, the next attach gets a fresh provider", pid, failureCode))
+            } else {
+                handleJITFailure(error: error ?? NSError(domain: "Reynard.JIT", code: -1, userInfo: nil))
+            }
         }
     }
     
