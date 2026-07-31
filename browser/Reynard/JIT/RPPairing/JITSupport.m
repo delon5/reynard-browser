@@ -245,6 +245,51 @@ static NSURL *debuggedJITSessionsFileURL(void) {
 // Records this process's own pid as kernel-confirmed debugged. Called
 // only from inside the debuggee, because csops() on another process is
 // refused with EPERM under the app sandbox.
+// ADDED - see fix_jit_acquisition_sticky_marker.py's docstring.
+// Captured in a constructor so it is set before any JIT work runs,
+// which is what makes the session comparison below sound.
+static NSTimeInterval gReynardProcessStartTime = 0;
+
+__attribute__((constructor))
+static void ReynardRecordProcessStartTime(void) {
+    gReynardProcessStartTime = [NSDate date].timeIntervalSince1970;
+}
+
+// A small marker recording WHEN some process last confirmed
+// CS_DEBUGGED. The pid list alone cannot answer "did acquisition
+// succeed" because content processes are transient and prune out of it
+// within seconds, which is why the row read "Not Acquired" while four
+// Helpers had just confirmed.
+static NSURL *debuggedAcquisitionMarkerURL(void) {
+    NSString *groupID = ReynardResolveAppGroupIdentifier();
+    NSURL *containerURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:groupID];
+    if (!containerURL) {
+        return nil;
+    }
+    return [containerURL URLByAppendingPathComponent:@"jit-acquired-at.txt" isDirectory:NO];
+}
+
+// Best-effort and deliberately unlocked: one small file, written
+// rarely, last-write-wins is correct, and a torn read just fails the
+// parse and falls back to the pid check.
+static void recordDebuggedAcquisitionTimestamp(void) {
+    NSURL *fileURL = debuggedAcquisitionMarkerURL();
+    if (!fileURL) return;
+
+    NSString *stamp = [NSString stringWithFormat:@"%f", [NSDate date].timeIntervalSince1970];
+    [stamp writeToURL:fileURL atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
+static NSTimeInterval debuggedAcquisitionTimestamp(void) {
+    NSURL *fileURL = debuggedAcquisitionMarkerURL();
+    if (!fileURL) return 0;
+
+    NSString *stamp = [NSString stringWithContentsOfURL:fileURL encoding:NSUTF8StringEncoding error:NULL];
+    if (stamp.length == 0) return 0;
+
+    return stamp.doubleValue;
+}
+
 static void addSelfToDebuggedSessions(void) {
     NSURL *fileURL = debuggedJITSessionsFileURL();
     if (!fileURL) return;
@@ -270,6 +315,9 @@ static void addSelfToDebuggedSessions(void) {
 
     flock(fd, LOCK_UN);
     close(fd);
+
+    // Survives this pid being reaped, which the list above does not.
+    recordDebuggedAcquisitionTimestamp();
 }
 
 BOOL hasAnyDebuggedJITSessionAcrossProcesses(void) {
@@ -297,9 +345,29 @@ BOOL hasAnyDebuggedJITSessionAcrossProcesses(void) {
     flock(fd, LOCK_UN);
     close(fd);
 
-    logger([NSString stringWithFormat:@"hasAnyDebuggedJITSessionAcrossProcesses: %lu kernel-confirmed debugged process(es)", (unsigned long)live.count]);
+    if (live.count > 0) {
+        logger([NSString stringWithFormat:@"hasAnyDebuggedJITSessionAcrossProcesses: %lu kernel-confirmed debugged process(es) currently alive", (unsigned long)live.count]);
+        return YES;
+    }
 
-    return live.count > 0;
+    // CHANGED - was `return live.count > 0`, which made the row mean
+    // "are there live debugged processes at this instant". Content
+    // processes are transient, so they prune out of the list within
+    // seconds and the row read "Not Acquired" while acquisition had in
+    // fact succeeded - four Helpers confirming CS_DEBUGGED moments
+    // earlier. DolphiniOS's equivalent row reports whether acquisition
+    // SUCCEEDED, which is what the label claims, so this falls back to
+    // the timestamp marker.
+    //
+    // Scoped to this app session rather than an arbitrary staleness
+    // window, so a previous launch can never report success - the same
+    // scoping DolphiniOS gets for free by checking its own getpid().
+    NSTimeInterval acquiredAt = debuggedAcquisitionTimestamp();
+    BOOL acquiredThisSession = acquiredAt > 0 && acquiredAt >= gReynardProcessStartTime;
+
+    logger([NSString stringWithFormat:@"hasAnyDebuggedJITSessionAcrossProcesses: no live debugged process; marker=%.0f, processStart=%.0f, acquiredThisSession=%@", acquiredAt, gReynardProcessStartTime, acquiredThisSession ? @"YES" : @"NO"]);
+
+    return acquiredThisSession;
 }
 
 // Polls rather than checking once: CS_DEBUGGED only appears after the
