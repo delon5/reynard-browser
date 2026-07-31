@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15bed3e..53549f22f8d5 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,148 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,177 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -76,9 +76,38 @@ index 9ca6e15bed3e..53549f22f8d5 100644
 +        continue;
 +      }
 +      for (const rule of rules) {
-+        if (rule.cssText && rule.cssText.includes("safe-area-inset-bottom")) {
-+          return { usesSafeAreaInset: true };
++        if (!rule.cssText || !rule.cssText.includes("safe-area-inset-bottom")) {
++          continue;
 +        }
++
++        // CHANGED - a mention is not use. See
++        // fix_safe_area_scan_requires_matching_rule.py. A rule
++        // targeting an element the page does not have previously
++        // counted the same as one in active use, which is why Google
++        // reported YES while visibly not needing the reserved strip.
++        //
++        // Rules with no selectorText - @media, @supports and other
++        // grouping rules - are still accepted on the text match alone.
++        // They have no selector to test, and rejecting them would swing
++        // the error the other way and break pages whose real
++        // safe-area CSS lives inside a media query.
++        if (rule.selectorText) {
++          let matchesSomething = true;
++          try {
++            matchesSomething = document.querySelector(rule.selectorText) !== null;
++          } catch (e) {
++            // selectorText can contain syntax querySelector rejects
++            // even though the CSS engine accepts it. Treat "cannot
++            // tell" as a match, the same conservative direction as
++            // grouping rules above.
++            matchesSomething = true;
++          }
++          if (!matchesSomething) {
++            continue;
++          }
++        }
++
++        return { usesSafeAreaInset: true };
 +      }
 +    }
 +
@@ -151,7 +180,7 @@ index 9ca6e15bed3e..53549f22f8d5 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +326,12 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +355,12 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
