@@ -10,7 +10,28 @@ import Foundation
 final class BrowserUpdates: NSObject {
     static let shared = BrowserUpdates()
     
-    private(set) var hasUpdate: Bool = false
+    // CHANGED - computed rather than stored, so the toggle takes effect
+    // immediately. See fix_gate_update_check_at_source.py.
+    //
+    // BrowserUpdates.shared is a singleton whose init runs
+    // fetchUpdates() once at startup, and the toggle deliberately does
+    // not prompt for a restart. Without this, turning it on after a
+    // check had already completed would leave the result in place and
+    // the badges would stay visible until the next launch.
+    //
+    // Every consumer reads this property or observes
+    // .appUpdateAvailable; none of them check a preference, which is
+    // why two red badge indicators survived the toggle previously.
+    // Reporting false here covers all of them at once, including any
+    // added later.
+    private(set) var hasUpdateInternal: Bool = false
+    
+    var hasUpdate: Bool {
+        guard !Prefs.ExperimentalSettings.hidesUpdateAvailableBanner else {
+            return false
+        }
+        return hasUpdateInternal
+    }
     private(set) var latestVersion: String = ""
     private(set) var sourceData: Data?
     var cachedReleaseNotes: NSAttributedString?
@@ -26,6 +47,15 @@ final class BrowserUpdates: NSObject {
     }
     
     private func fetchUpdates() {
+        // Gated at source rather than at each notification surface -
+        // see fix_gate_update_check_at_source.py. No request means no
+        // hasUpdate, no .appUpdateAvailable, and nothing for any
+        // surface to display. Also avoids a pointless network round
+        // trip on every launch.
+        guard !Prefs.ExperimentalSettings.hidesUpdateAvailableBanner else {
+            return
+        }
+        
         DispatchQueue.global(qos: .background).async {
             guard let url = URL(string: Self.sourceURL),
                   let data = try? Data(contentsOf: url) else { return }
@@ -55,7 +85,7 @@ final class BrowserUpdates: NSObject {
             }
             
             DispatchQueue.main.async {
-                self.hasUpdate = true
+                self.hasUpdateInternal = true
                 self.latestVersion = latestVersionStr
                 NotificationCenter.default.post(name: .appUpdateAvailable, object: nil)
             }
