@@ -1578,8 +1578,22 @@ extension TabManagerImplementation: ProgressDelegate {
         // The pill reads this lazily when it is about to condense, so
         // no relayout is triggered here.
         Task { @MainActor in
+            // DIAGNOSTIC - see
+            // fix_log_safe_area_detection_result.py. Without this the
+            // log is silent whether the query succeeds, returns false,
+            // or fails outright, since dispatcher.query is wrapped in
+            // try? and nil is treated as "no answer". That made a
+            // missing actor case indistinguishable from a page that
+            // simply does not use safe-area CSS.
             if let usesSafeAreaInset = await session.usesSafeAreaInsetCSS() {
+                logger(String(format: "safeArea: tab %@ usesSafeAreaInset=%@", tab.id.uuidString, usesSafeAreaInset ? "YES" : "NO"))
                 tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
+            } else {
+                // Only this case indicates something is actually wrong -
+                // the actor case missing from the build, or the query
+                // failing. The existing value is deliberately left
+                // alone rather than being overwritten with a guess.
+                logger(String(format: "safeArea: tab %@ - no answer from the content process", tab.id.uuidString))
             }
         }
         
