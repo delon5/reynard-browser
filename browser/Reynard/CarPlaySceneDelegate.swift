@@ -16,6 +16,7 @@ import UIKit
 /// - Gecko on mobile assumes one window per process - and there is no
 /// point building either the native or the screen-mirroring version
 /// until that is known.
+@available(iOS 14.0, *)
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private var interfaceController: CPInterfaceController?
     private var carWindow: CPWindow?
@@ -74,6 +75,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
 /// Shows the car display's geometry on the car screen itself, so it can
 /// be read without a log capture.
+@available(iOS 14.0, *)
 private final class CarPlayProbeViewController: UIViewController {
     weak var templateApplicationScene: CPTemplateApplicationScene?
     
