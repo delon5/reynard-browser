@@ -282,25 +282,36 @@ final class JITController {
     // unabandoned one - manufacturing exactly the kind of overlap that
     // starves the runtime further. 90s comfortably covers several full
     // observed stall-and-recover cycles.
-    private static var enableJITInFlightSince: Date?
+    // CHANGED - per-pid rather than a single global timestamp. See
+    // fix_per_pid_inflight_guard.py. The global version was written
+    // when attaches were strictly serial, so "a call is in flight"
+    // reliably meant "something is stuck". Once three attaches run
+    // concurrently it rejected two of every three on sight, surfacing
+    // as "Error 16: Skipped: another enableJIT call may still be in
+    // flight".
+    //
+    // Every access below is inside enableJITInFlightLock, which is what
+    // makes a dictionary safe here - concurrent mutation would
+    // otherwise be unsafe in a way a single optional assignment is not.
+    private static var enableJITInFlightByPID: [Int32: Date] = [:]
     private static let enableJITInFlightLock = NSLock()
     private static let enableJITMaxWaitSeconds: TimeInterval = 90.0
     
     private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
         Self.enableJITInFlightLock.lock()
-        let existingInFlightSince = Self.enableJITInFlightSince
+        let existingInFlightSince = Self.enableJITInFlightByPID[pid]
         Self.enableJITInFlightLock.unlock()
         
         if let existingInFlightSince {
             let age = CFAbsoluteTimeGetCurrent() - existingInFlightSince.timeIntervalSinceReferenceDate
             if age < Self.enableJITMaxWaitSeconds {
-                logger(String(format: "boundedEnableJIT: skipping new attempt for pid %d - a previous enableJIT call may still be in flight (started %.0fs ago)", pid, age))
-                return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: another enableJIT call may still be in flight"]))
+                logger(String(format: "boundedEnableJIT: skipping duplicate attempt for pid %d - an enableJIT call for THIS pid is already in flight (started %.0fs ago)", pid, age))
+                return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: an enableJIT call for this process is already in flight"]))
             }
         }
         
         Self.enableJITInFlightLock.lock()
-        Self.enableJITInFlightSince = Date()
+        Self.enableJITInFlightByPID[pid] = Date()
         Self.enableJITInFlightLock.unlock()
         
         let semaphore = DispatchSemaphore(value: 0)
@@ -316,7 +327,7 @@ final class JITController {
             }
             
             Self.enableJITInFlightLock.lock()
-            Self.enableJITInFlightSince = nil
+            Self.enableJITInFlightByPID.removeValue(forKey: pid)
             Self.enableJITInFlightLock.unlock()
             
             // DIAGNOSTIC - see fix_log_orphaned_call_completion.py's
