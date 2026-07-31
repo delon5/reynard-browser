@@ -185,6 +185,14 @@ final class TabManagerImplementation: NSObject, TabManager {
         )
         emergencySnapshotLock.unlock()
         
+        // DIAGNOSTIC - see fix_tab_lifecycle_logging_to_file.py.
+        // Written through logger() rather than NSLog so it reaches
+        // Documents/reynard_jit_log.txt, which survives the app being
+        // killed. The tab-loss bug appears spontaneously after
+        // backgrounding, so it cannot be caught with a live syslog
+        // capture - it has to be recorded and read afterwards.
+        logger(String(format: "tabPersist: writing %d regular, %d private tabs", regularTabs.count, privateTabs.count))
+        
         store.persistTabs(
             regularTabs: regularTabs,
             privateTabs: privateTabs,
@@ -204,7 +212,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         emergencySnapshotLock.unlock()
         
         guard let snapshot else {
-            NSLog("[HangWatchdog] No snapshot available yet to emergency-flush")
+            logger("tabFlush: HangWatchdog fired but NO snapshot available yet - nothing written")
             return
         }
         
@@ -228,9 +236,11 @@ final class TabManagerImplementation: NSObject, TabManager {
         // flush of "no tabs" carries no information worth writing
         // under any circumstances.
         guard !snapshot.regularTabs.isEmpty || !snapshot.privateTabs.isEmpty else {
-            NSLog("[HangWatchdog] Refusing to emergency-flush an EMPTY tab snapshot - this would have destroyed the persisted tab list")
+            logger("tabFlush: REFUSING to emergency-flush an EMPTY snapshot - this would have destroyed the persisted tab list")
             return
         }
+        
+        logger(String(format: "tabFlush: HangWatchdog emergency-writing %d regular, %d private tabs", snapshot.regularTabs.count, snapshot.privateTabs.count))
         
         store.emergencyPersistTabs(
             regularTabs: snapshot.regularTabs,
@@ -491,11 +501,22 @@ final class TabManagerImplementation: NSObject, TabManager {
     
     private func restoreTabsIfNeeded() -> Bool {
         guard regularTabs.isEmpty && privateTabs.isEmpty else {
+            logger(String(format: "tabRestore: already populated (%d regular, %d private) - nothing to restore", regularTabs.count, privateTabs.count))
             return true
         }
         
         let snapshot = store.currentSnapshot()
+        
+        // DIAGNOSTIC - the count found in the store on launch. Paired
+        // with tabPersist from the previous session this identifies
+        // exactly where tabs are lost: a persist of N followed by a
+        // restore of 0 means the store was overwritten or lost between
+        // the two, whereas a persist of 0 means they were already gone
+        // in memory and the store is innocent.
+        logger(String(format: "tabRestore: store holds %d regular, %d private tabs", snapshot.regularTabs.count, snapshot.privateTabs.count))
+        
         guard !snapshot.regularTabs.isEmpty || !snapshot.privateTabs.isEmpty else {
+            logger("tabRestore: store is EMPTY - no tabs will be restored, a blank tab will be created")
             return false
         }
         
@@ -846,7 +867,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         // made clear how dangerous an implicit fallback is for an
         // operation this destructive. Every caller must now say exactly
         // which mode it means to clear.
-        NSLog("[TabRemoval] removeAllTabs(mode: %@) called — about to remove %d tabs", String(describing: mode), tabs(for: mode).count)
+        logger(String(format: "tabRemoval: removeAllTabs(%@) called - about to remove %d tabs", String(describing: mode), tabs(for: mode).count))
         guard !tabs(for: mode).isEmpty else {
             return
         }
@@ -866,7 +887,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         removedTabs.forEach { saveClosedTabIfNeeded($0, mode: mode) }
         removedTabs.forEach { cancelFaviconTask(for: $0.id) }
         delegate?.tabManagerDidChangeTabs(self)
-        NSLog("[TabRemoval] removeAllTabs(mode: %@) completed — removed %d tabs", String(describing: mode), removedTabs.count)
+        logger(String(format: "tabRemoval: removeAllTabs(%@) completed - removed %d tabs", String(describing: mode), removedTabs.count))
         
         if mode == selectedTabMode {
             if mode == .private && !regularTabs.isEmpty {

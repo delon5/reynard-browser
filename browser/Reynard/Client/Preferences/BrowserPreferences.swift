@@ -1078,6 +1078,43 @@ final class BrowserPreferences {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "hidesUpdateAvailableBanner")
             }
         }
+        
+        // Diagnostic log files, all defaulting to true so behaviour is
+        // unchanged until deliberately switched off. Pushed down to the
+        // Objective-C layer at startup by JITController rather than
+        // read there directly - see
+        // fix_experimental_logging_toggles.py.
+        //
+        // isJITDebugLogEnabled gates the whole of
+        // Documents/reynard_jit_log.txt, which carries both the JIT
+        // pipeline and the tab lifecycle counts - hence the generic
+        // "Debug Log File" label rather than a JIT-specific one.
+        static var isJITDebugLogEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isJITDebugLogEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isJITDebugLogEnabled")
+            }
+        }
+        
+        static var isIdeviceNativeLogEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isIdeviceNativeLogEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isIdeviceNativeLogEnabled")
+            }
+        }
+        
+        static var isJITHangBacktraceEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isJITHangBacktraceEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isJITHangBacktraceEnabled")
+            }
+        }
     }
     
     // MARK: - Privacy

@@ -14,12 +14,23 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private enum Section: CaseIterable {
         case features
+        case diagnosticLogs
         case jitDiagnostics
         
         var text: SettingsSectionText {
             switch self {
             case .features:
                 return SettingsSectionText()
+            case .diagnosticLogs:
+                // Its own section rather than folded into
+                // jitDiagnostics, whose footer describes DDI deletion
+                // specifically and would read as applying to these
+                // toggles too. Placed before it so the destructive
+                // "Reset DDI Storage" action stays last.
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Diagnostic Logs", comment: ""),
+                    footerTitle: NSLocalizedString("Written to the app's Documents folder and retrievable over USB in Finder. Leave these enabled unless you need the disk space or want to reduce logging overhead.", comment: "")
+                )
             case .jitDiagnostics:
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("JIT Diagnostics", comment: ""),
@@ -33,12 +44,17 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case videoPictureInPicture
         case hideUpdateNotification
         case hideUpdateAvailableBanner
+        case debugLogFile
+        case ideviceNativeLog
+        case jitHangBacktrace
         case resetDDIStorage
         
         var section: Section {
             switch self {
             case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
+            case .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
+                return .diagnosticLogs
             case .resetDDIStorage:
                 return .jitDiagnostics
             }
@@ -48,6 +64,9 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let videoPictureInPictureSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
+    private let debugLogFileSwitch = UISwitch()
+    private let ideviceNativeLogSwitch = UISwitch()
+    private let jitHangBacktraceSwitch = UISwitch()
     
     init() {
         super.init(style: .insetGrouped)
@@ -129,6 +148,24 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("Hide Update Available Banner", comment: ""),
                 accessoryView: hideUpdateAvailableBannerSwitch
             )
+        case .debugLogFile:
+            // Gates everything written to
+            // Documents/reynard_jit_log.txt - the JIT pipeline and the
+            // tab lifecycle counts alike - hence the generic name.
+            return switchCell(
+                title: NSLocalizedString("Debug Log File", comment: ""),
+                accessoryView: debugLogFileSwitch
+            )
+        case .ideviceNativeLog:
+            return switchCell(
+                title: NSLocalizedString("idevice Native Log", comment: ""),
+                accessoryView: ideviceNativeLogSwitch
+            )
+        case .jitHangBacktrace:
+            return switchCell(
+                title: NSLocalizedString("JIT Hang Backtrace", comment: ""),
+                accessoryView: jitHangBacktraceSwitch
+            )
         case .resetDDIStorage:
             // Destructive-red — this deletes on-disk data, so it
             // should read as destructive like "Erase All Content"
@@ -152,7 +189,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         }
         
         switch sectionRows[indexPath.row] {
-        case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
+        case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner,
+             .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
             break
         case .resetDDIStorage:
             confirmResetDDIStorage()
@@ -167,12 +205,38 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
+        debugLogFileSwitch.addTarget(self, action: #selector(debugLogFileSwitchDidChange(_:)), for: .valueChanged)
+        ideviceNativeLogSwitch.addTarget(self, action: #selector(ideviceNativeLogSwitchDidChange(_:)), for: .valueChanged)
+        jitHangBacktraceSwitch.addTarget(self, action: #selector(jitHangBacktraceSwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
+        debugLogFileSwitch.isOn = Prefs.ExperimentalSettings.isJITDebugLogEnabled
+        ideviceNativeLogSwitch.isOn = Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled
+        jitHangBacktraceSwitch.isOn = Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
+    }
+    
+    // All three prompt for a restart, like the Picture-in-Picture
+    // toggle above. The values are read once at startup and pushed
+    // down into the Objective-C layer, and idevice_init_logger in
+    // particular is initialised under dispatch_once, so none of them
+    // can genuinely take effect mid-process.
+    @objc private func debugLogFileSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isJITDebugLogEnabled = sender.isOn
+        showRestartAlert()
+    }
+    
+    @objc private func ideviceNativeLogSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled = sender.isOn
+        showRestartAlert()
+    }
+    
+    @objc private func jitHangBacktraceSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isJITHangBacktraceEnabled = sender.isOn
+        showRestartAlert()
     }
     
     @objc private func videoPictureInPictureSwitchDidChange(_ sender: UISwitch) {
