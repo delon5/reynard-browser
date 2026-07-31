@@ -101,7 +101,24 @@ static void jitHangBacktraceHandler(int signalNumber) {
         // detail no amount of instrumentation wrapped around the
         // outside of an FFI call can ever see.
         NSArray<NSURL *> *documentDirs = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask];
-        NSURL *logURL = [documentDirs.firstObject URLByAppendingPathComponent:@"idevice_native_log.txt"];
+        
+        // ADDED - see fix_gate_native_log_and_backtrace.py's docstring.
+        // The flags default to YES and are overwritten when
+        // JITController pushes the preferences down at startup. If
+        // anything touched JITEnabler.shared before that call, this
+        // block would run with the defaults still in place and both
+        // files would be written despite their toggles being off. That
+        // failure is invisible without this line, and it distinguishes
+        // "the gate is wrong" from "the push happened too late".
+        logger([NSString stringWithFormat:@"diagnosticLogging: nativeLog=%@, hangBacktrace=%@ at JITEnabler init",
+                ReynardIsIdeviceNativeLogEnabled() ? @"ON" : @"OFF",
+                ReynardIsJITHangBacktraceEnabled() ? @"ON" : @"OFF"]);
+        
+        // nil when the toggle is off, so the existing guard below skips
+        // the whole block - no new control flow needed.
+        NSURL *logURL = ReynardIsIdeviceNativeLogEnabled()
+            ? [documentDirs.firstObject URLByAppendingPathComponent:@"idevice_native_log.txt"]
+            : nil;
         if (logURL) {
             const char *logPath = logURL.path.UTF8String;
             enum IdeviceLoggerError loggerResult = idevice_init_logger(IdeviceLogInfo, IdeviceLogTrace, (char *)logPath);
@@ -111,7 +128,13 @@ static void jitHangBacktraceHandler(int signalNumber) {
         // Open the backtrace file and install the handler once, here,
         // outside any signal context - the handler itself must never
         // do either.
-        NSURL *backtraceURL = [documentDirs.firstObject URLByAppendingPathComponent:@"jit_hang_backtrace.txt"];
+        // nil when the toggle is off. Note this also skips installing
+        // the SIGUSR1 handler, so nothing can be captured even if a
+        // probe fires - the toggle disables the mechanism, not just the
+        // file, which is the intended behaviour.
+        NSURL *backtraceURL = ReynardIsJITHangBacktraceEnabled()
+            ? [documentDirs.firstObject URLByAppendingPathComponent:@"jit_hang_backtrace.txt"]
+            : nil;
         if (backtraceURL) {
             gJITHangBacktraceFD = open(backtraceURL.path.UTF8String, O_WRONLY | O_CREAT | O_APPEND, 0644);
             
