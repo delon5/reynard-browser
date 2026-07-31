@@ -487,6 +487,33 @@ static void unregisterDebugSessionPID(int32_t pid) {
     removePIDFromSharedActiveSessions(pid);
 }
 
+// ADDED - see fix_detach_debug_sessions_on_background.py's docstring.
+// Marks every live session for detach so runDebugService drains them
+// rather than leaving content processes stopped by the debugger across
+// suspension.
+//
+// That state is fatal: a Helper stopped at a breakpoint cannot answer
+// the SYNCHRONOUS XPC that iOS sends every extension on foreground, so
+// the main thread blocks in
+// __NSXPCCONNECTION_IS_WAITING_FOR_A_SYNCHRONOUS_REPLY__ and the
+// watchdog kills the app with 0x8BADF00D. Confirmed from three hang
+// reports with lifetimes of 7, 19 and 33 seconds.
+//
+// Same dispatch_sync(debugSessionStateQueue()) pattern as
+// registerDebugSessionPID above, so the sets stay under the single
+// serialisation everything else uses.
+void requestDetachForAllDebugSessions(void) {
+    __block NSUInteger requestedCount = 0;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
+        [detachRequestedDebugSessionPIDs() unionSet:active];
+        requestedCount = active.count;
+    });
+
+    logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)requestedCount]);
+}
+
 static BOOL shouldDetachDebugSessionPID(int32_t pid) {
     if (pid <= 0) return NO;
     

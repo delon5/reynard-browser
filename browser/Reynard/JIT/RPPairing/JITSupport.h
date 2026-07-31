@@ -25,6 +25,15 @@ dispatch_queue_t debugSessionStateQueue(void);
 NSMutableSet<NSNumber *> *activeDebugSessionPIDs(void);
 NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void);
 
+/// Marks every active debug session for detach, so runDebugService
+/// drains them on its next iteration rather than leaving content
+/// processes stopped by the debugger across suspension - a state that
+/// makes them unable to answer the synchronous XPC iOS sends on
+/// foreground, which the watchdog then kills the app for. Call when
+/// entering the background. See
+/// fix_detach_debug_sessions_on_background.py.
+void requestDetachForAllDebugSessions(void);
+
 DeviceProvider *_Nullable createDeviceProvider(
                                                NSString *pairingFilePath, NSString *targetAddress,
                                                NSError *_Nullable *_Nullable error);

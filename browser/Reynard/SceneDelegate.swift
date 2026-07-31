@@ -82,6 +82,19 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.setApplicationForeground(false)
         browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
+        
+        // Release any content process the debugger is holding stopped,
+        // before iOS suspends us and the tunnel dies. A Helper left
+        // stopped cannot answer the synchronous XPC iOS sends every
+        // extension on the next foreground, and the watchdog kills the
+        // app for it - 0x8BADF00D, confirmed across three hang reports.
+        // See fix_detach_debug_sessions_on_background.py.
+        //
+        // Only sets flags, so it needs no background-task budget of its
+        // own; the debug loops do the actual detaching on their own
+        // threads.
+        requestDetachForAllDebugSessions()
+        
         sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
         flushNavigationHistoryInBackground()
     }
