@@ -502,16 +502,75 @@ static void unregisterDebugSessionPID(int32_t pid) {
 // Same dispatch_sync(debugSessionStateQueue()) pattern as
 // registerDebugSessionPID above, so the sets stay under the single
 // serialisation everything else uses.
+// ADDED - see fix_cancel_blocked_debug_loops.py's docstring. Maps a
+// live pid to its DebugProxyHandle so a blocked call can be cancelled
+// directly, rather than only setting a flag the loop cannot reach while
+// it is blocked.
+//
+// Guarded by debugSessionStateQueue, the same serial queue as the pid
+// sets, which is what makes cancellation safe against a loop that is
+// concurrently exiting and freeing its session.
+static NSMutableDictionary<NSNumber *, NSValue *> *debugSessionProxies(void) {
+    static NSMutableDictionary<NSNumber *, NSValue *> *proxies = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        proxies = [NSMutableDictionary dictionary];
+    });
+    return proxies;
+}
+
+static void registerDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy) {
+    if (pid <= 0 || !proxy) return;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        debugSessionProxies()[@(pid)] = [NSValue valueWithPointer:proxy];
+    });
+}
+
+static void unregisterDebugSessionProxy(int32_t pid) {
+    if (pid <= 0) return;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        [debugSessionProxies() removeObjectForKey:@(pid)];
+    });
+}
+
 void requestDetachForAllDebugSessions(void) {
     __block NSUInteger requestedCount = 0;
+
+    __block NSUInteger cancelledCount = 0;
 
     dispatch_sync(debugSessionStateQueue(), ^{
         NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
         [detachRequestedDebugSessionPIDs() unionSet:active];
         requestedCount = active.count;
+
+        // ADDED - the flag alone only reaches loops that are between
+        // iterations. On device, fourteen sessions were asked to detach
+        // and exactly one did; the rest were blocked inside a continue
+        // command and stayed that way for an eleven-minute suspension.
+        // Cancelling the in-flight call releases them directly.
+        //
+        // Done INSIDE this dispatch_sync deliberately.
+        // unregisterDebugSessionProxy uses the same serial queue and is
+        // called before freeDebugSession, so the two cannot interleave:
+        // a proxy that is still registered has not been freed, and one
+        // that has been freed is no longer registered. Cancelling
+        // outside the queue would race exactly that teardown.
+        for (NSValue *proxyValue in debugSessionProxies().allValues) {
+            DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
+            if (!proxy) continue;
+
+            IdeviceFfiError *cancelError = debug_proxy_cancel(proxy);
+            if (cancelError) {
+                idevice_error_free(cancelError);
+                continue;
+            }
+            cancelledCount++;
+        }
     });
 
-    logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)requestedCount]);
+    logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s), cancelled %lu in-flight call(s)", (unsigned long)requestedCount, (unsigned long)cancelledCount]);
 }
 
 static BOOL shouldDetachDebugSessionPID(int32_t pid) {
@@ -878,6 +937,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
     if (!session) return;
     
     registerDebugSessionPID(pid);
+    registerDebugSessionProxy(pid, session->debugProxy);
     
     // DIAGNOSTIC TEST - this loop runs for the entire lifetime of the
     // target process (self, on the Helper's self-enable path) and was
@@ -1121,6 +1181,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
         logger([NSString stringWithFormat:@"runDebugService: (pid %d) skipping detach - transport already dead", pid]);
     }
     
+    // Before freeDebugSession below, so a concurrent cancellation can
+    // never see a freed proxy - see
+    // fix_cancel_blocked_debug_loops.py.
+    unregisterDebugSessionProxy(pid);
     unregisterDebugSessionPID(pid);
     unregisterJITEndpointForPID(pid);
     freeDebugSession(session);

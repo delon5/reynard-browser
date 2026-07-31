@@ -102,6 +102,10 @@ IdeviceFfiError *debug_proxy_read_response(DebugProxyHandle *handle,
 // header - see fix_batch_prepare_memory_region.py. Needed to pipeline
 // region preparation instead of issuing one serialised round trip per
 // packet.
+// Aborts any in-flight call on this proxy, releasing the thread blocked
+// inside it. See fix_debug_proxy_cancellation.py.
+IdeviceFfiError *debug_proxy_cancel(DebugProxyHandle *handle);
+
 IdeviceFfiError *debug_proxy_send_raw(DebugProxyHandle *handle,
                                       const uint8_t *data,
                                       uintptr_t len);
