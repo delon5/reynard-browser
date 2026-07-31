@@ -14,6 +14,26 @@ final class JITController {
     static let shared = JITController()
     
     private let attachQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.AttachQueue", qos: .userInitiated)
+    
+    // ADDED - see fix_concurrent_attach_slots.py's docstring. Each
+    // vAttach costs ~1012ms of genuine device time, and running them
+    // one at a time meant sixteen processes cost sixteen seconds -
+    // long past the five seconds each content process waits before
+    // calling JS::DisableJitBackend() permanently.
+    //
+    // attachQueue stays SERIAL and keeps protecting attachedPIDs,
+    // rejectedPIDs, preflightWatchdogs and
+    // isProcessingHelperAttachRequests exactly as before. Only the slow
+    // enableJIT call moves here, so no locking is needed and no
+    // existing invariant changes.
+    private let attachWorkQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.AttachWorkQueue", qos: .userInitiated, attributes: .concurrent)
+    
+    // Capped rather than unbounded: the original serial design was
+    // deliberately guarding against a cascading jam when calls hung.
+    // Three keeps most of that - a stuck attach consumes one slot and
+    // two remain - while cutting the serialised cost by roughly a
+    // third.
+    private let attachSlots = DispatchSemaphore(value: 3)
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
     private var attachedPIDs: Set<Int32> = []
     
@@ -225,7 +245,15 @@ final class JITController {
             }
             self.attachedPIDs.insert(pid)
             self.schedulePreflightWatchdog(for: pid)
-            self.attachToProcess(pid: pid)
+            
+            // Bookkeeping above stays on the serial queue; only the
+            // ~1012ms attach itself runs concurrently. See
+            // fix_concurrent_attach_slots.py.
+            self.attachWorkQueue.async {
+                self.attachSlots.wait()
+                defer { self.attachSlots.signal() }
+                self.attachToProcess(pid: pid)
+            }
         }
     }
     
@@ -763,19 +791,32 @@ extension JITController {
                     }
                     
                     self.attachedPIDs.insert(pid)
-                    let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
                     
-                    let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
-                    let resultContents = success ? "success" : "failed:\(errorDescription ?? "unknown error")"
-                    try? resultContents.write(to: resultFileURL, atomically: true, encoding: .utf8)
-                    
-                    CFNotificationCenterPostNotification(
-                        CFNotificationCenterGetDarwinNotifyCenter(),
-                        CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
-                        nil,
-                        nil,
-                        true
-                    )
+                    // The insert above is the last shared-state access;
+                    // everything below is the ~1012ms attach plus file
+                    // I/O and a notification post, none of which touch
+                    // state protected by attachQueue. pid and token are
+                    // value types captured per iteration, so each
+                    // dispatched block writes its own result file. See
+                    // fix_concurrent_attach_slots.py.
+                    self.attachWorkQueue.async {
+                        self.attachSlots.wait()
+                        defer { self.attachSlots.signal() }
+                        
+                        let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
+                        
+                        let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
+                        let resultContents = success ? "success" : "failed:\(errorDescription ?? "unknown error")"
+                        try? resultContents.write(to: resultFileURL, atomically: true, encoding: .utf8)
+                        
+                        CFNotificationCenterPostNotification(
+                            CFNotificationCenterGetDarwinNotifyCenter(),
+                            CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
+                            nil,
+                            nil,
+                            true
+                        )
+                    }
                 }
             }
         }
