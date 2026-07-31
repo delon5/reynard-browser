@@ -11,7 +11,7 @@ final class BrowserChrome: UIView {
     /// The pill's own bottom margin from the safe area guide — named so
     /// it's referenced once, not duplicated as a bare "-4" wherever the
     /// pill is positioned.
-    static let condensedPillBottomMargin: CGFloat = 4
+    static let condensedPillBottomMargin: CGFloat = 20
     
     /// How far above the true bottom of the pill's own clearance the
     /// artificial safe-area boundary should sit. Reached empirically
