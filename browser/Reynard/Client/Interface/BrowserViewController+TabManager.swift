@@ -31,6 +31,14 @@ extension BrowserViewController: TabManagerDelegate {
     
     func tabManager(_ tabManager: TabManager, didFinishLoading session: GeckoSession) {
         contentView.didFinishLoading(session: session)
+        
+        // Safe-area detection runs at PageStop and can flip after a
+        // page settles - the device log shows one tab reporting NO and
+        // then YES as its content loaded. Applying only on selection
+        // would leave that stale until the next tab switch. See
+        // fix_per_tab_artificial_safe_area_inset.py.
+        updateArtificialSafeAreaInset()
+        applyBrowserLayout(animated: false)
     }
     
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?) {
@@ -39,6 +47,11 @@ extension BrowserViewController: TabManagerDelegate {
         guard let selectedTab = tabManager.activeTabs[safe: index] else {
             return
         }
+        
+        // The inset follows the SELECTED tab's own flag, so switching
+        // tabs has to re-evaluate it - see
+        // fix_per_tab_artificial_safe_area_inset.py.
+        updateArtificialSafeAreaInset()
         
         browserChrome.setAddressBarLoadingProgress(
             selectedTab.state.loadingState.progress,

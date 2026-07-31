@@ -214,7 +214,15 @@ final class BrowserViewController: UIViewController {
             // that CSS variable correctly positions its own
             // fixed-position elements above the pill rather than
             // underneath it.
-            self.additionalSafeAreaInsets.bottom = condensed ? BrowserChrome.condensedPillArtificialInset : 0
+            // CHANGED - was `condensed ? artificialInset : 0`, which
+            // inflated the safe area for EVERY page whenever the pill
+            // condensed, regardless of whether that page uses
+            // env(safe-area-inset-bottom). The content anchor in
+            // applyPhoneLayout already gated on the tab's own flag, so
+            // the two decided the same thing differently and every page
+            // ended up with the reserved strip. See
+            // fix_per_tab_artificial_safe_area_inset.py.
+            self.updateArtificialSafeAreaInset()
             // Deliberately not animated: content's resize is snapped
             // instantly, before the (separately animated) chrome fade
             // begins, so GeckoView gets its real final size immediately
@@ -541,6 +549,29 @@ final class BrowserViewController: UIViewController {
             : (isSearchFocused ? view.safeAreaLayoutGuide.bottomAnchor : browserChrome.bottomToolbarTopAnchor)
         )
         setTabBarVisible(false)
+    }
+    
+    // ADDED - see fix_per_tab_artificial_safe_area_inset.py.
+    //
+    // Deliberately carries the SAME condition as the content anchor in
+    // applyPhoneLayout and applyCompactLayout below, rather than
+    // inventing its own - the two having different conditions is what
+    // caused every page to get the reserved strip. A single computed
+    // property both read would be better still, but that is a wider
+    // refactor of code that otherwise works.
+    //
+    // Must be called whenever EITHER half can change: the pill
+    // condensing, a different tab being selected, or detection flipping
+    // after a page settles. That last one is real - the device log
+    // shows one tab reporting NO and then YES for the same tab as its
+    // content loaded.
+    func updateArtificialSafeAreaInset() {
+        let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
+        let shouldInflate = browserChrome.isScrollCondensed && pageReservesSpace
+
+        additionalSafeAreaInsets.bottom = shouldInflate
+            ? BrowserChrome.condensedPillArtificialInset
+            : 0
     }
     
     private func applyCompactLayout() {
