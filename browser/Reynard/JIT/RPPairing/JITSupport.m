@@ -1074,7 +1074,22 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // TRANSPORT failed, not because the target exited, so
                 // teardown below can skip a detach that cannot
                 // possibly succeed.
-                connectionFailed = YES;
+                // CHANGED - was unconditionally YES. See
+                // fix_cancelled_loop_still_detaches.py.
+                //
+                // An aborted call surfaces the same error as a genuine
+                // transport failure, so a deliberate cancellation was
+                // being read as a dead connection and the detach below
+                // skipped. On device that left twenty-two processes
+                // still CS_DEBUGGED with no loop servicing them, and
+                // the app was killed two seconds later.
+                //
+                // Cancellation and detach always happen together, in
+                // sceneDidEnterBackground. So a failure on a pid whose
+                // detach was requested is ours, the connection is fine,
+                // and the detach should still run. A genuine transport
+                // failure has no detach pending and still skips it.
+                connectionFailed = !shouldDetachDebugSessionPID(pid);
                 if (!isNotConnectedError(commandError)) logger([NSString stringWithFormat:@"Debug loop ended for pid %d: %@ (iteration %ld, call took %.0fms)", pid, commandError.localizedDescription ?: @"continue failed", (long)debugServiceIteration, continueCallDuration * 1000.0]);
                 break;
             }
