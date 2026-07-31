@@ -75,6 +75,49 @@ final class JITController {
         getEntitlementValue("com.apple.private.security.no-sandbox")
     }
     
+    /// Re-attaches content processes that lost their debug session
+    /// during suspension. See
+    /// fix_reattach_orphaned_sessions_on_foreground.py.
+    ///
+    /// An attach is otherwise only ever triggered by a process
+    /// STARTING, so a process that survives a suspension with a dead
+    /// session runs interpreted for the rest of its life. StikDebug
+    /// handles the same reality by expecting the tunnel to die and
+    /// reconnecting on return rather than trying to keep it alive; this
+    /// applies that to attaches.
+    func reattachOrphanedProcesses() {
+        attachQueue.async {
+            let orphaned = self.attachedPIDs.filter { pid in
+                // Still alive, but its debug loop has gone.
+                kill(pid, 0) == 0 && !JITEnabler.hasActiveDebugSession(forPID: pid)
+            }
+            
+            guard !orphaned.isEmpty else {
+                return
+            }
+            
+            logger(String(format: "reattachOrphanedProcesses: %d process(es) alive with no debug session, re-attaching", orphaned.count))
+            
+            for pid in orphaned {
+                // attachedPIDs is deliberately left alone. Its dedup
+                // check lives in childProcessDidStart and the Helper
+                // request loop, neither of which is involved here -
+                // attachToProcess is called directly - and the pid
+                // genuinely is still attached, so removing it would
+                // only misrepresent the state.
+                //
+                // The real guard against a duplicate is
+                // boundedEnableJIT's per-pid in-flight check, which
+                // still applies.
+                self.attachWorkQueue.async {
+                    self.attachSlots.wait()
+                    defer { self.attachSlots.signal() }
+                    self.attachToProcess(pid: pid)
+                }
+            }
+        }
+    }
+    
     func start() {
         guard usePtraceJIT() || !isDDIMissing() else {
             hasHandledFailure = true

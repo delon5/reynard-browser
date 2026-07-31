@@ -511,6 +511,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     cancelAllDebugSessionCalls();
 }
 
++ (BOOL)hasActiveDebugSessionForPID:(int32_t)pid {
+    return hasActiveDebugSessionForPID(pid);
+}
+
 // Deliberately does NOT call freeDeviceProvider on the current
 // sharedProvider before clearing it - see
 // fix_invalidate_provider_on_timeout.py's docstring for the full

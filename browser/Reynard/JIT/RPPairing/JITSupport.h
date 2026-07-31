@@ -39,6 +39,11 @@ void requestDetachForAllDebugSessions(void);
 /// see fix_split_cancel_from_detach.py.
 void cancelAllDebugSessionCalls(void);
 
+/// Whether this pid still has a live runDebugService loop. Used to
+/// find processes that lost their session during suspension - see
+/// fix_reattach_orphaned_sessions_on_foreground.py.
+BOOL hasActiveDebugSessionForPID(int32_t pid);
+
 DeviceProvider *_Nullable createDeviceProvider(
                                                NSString *pairingFilePath, NSString *targetAddress,
                                                NSError *_Nullable *_Nullable error);

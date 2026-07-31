@@ -44,6 +44,10 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// directly - that header is not in the bridging header.
 + (void)cancelAllDebugSessionCalls NS_SWIFT_NAME(cancelAllDebugSessionCalls());
 
+/// Whether this pid still has a live debug loop. Wraps the C function
+/// in JITSupport.h, which Swift cannot see directly.
++ (BOOL)hasActiveDebugSessionForPID:(int32_t)pid NS_SWIFT_NAME(hasActiveDebugSession(forPID:));
+
 // Clears the cached DeviceProvider (getProviderForPID's own
 // sharedProvider) so the next call is forced to establish a fresh
 // connection instead of reusing one that may be poisoned by a timed-

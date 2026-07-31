@@ -593,6 +593,23 @@ void requestDetachForAllDebugSessions(void) {
     logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)requestedCount]);
 }
 
+// ADDED - see fix_reattach_orphaned_sessions_on_foreground.py.
+// Whether this pid still has a live runDebugService loop.
+//
+// Deliberately not processIsDebugged: csops on another process returns
+// EPERM under the app sandbox, confirmed eight times out of eight on
+// device. Only a process can ask about itself, so this bookkeeping is
+// the available signal from the main app's side.
+BOOL hasActiveDebugSessionForPID(int32_t pid) {
+    if (pid <= 0) return NO;
+
+    __block BOOL isActive = NO;
+    dispatch_sync(debugSessionStateQueue(), ^{
+        isActive = [activeDebugSessionPIDs() containsObject:@(pid)];
+    });
+    return isActive;
+}
+
 static BOOL shouldDetachDebugSessionPID(int32_t pid) {
     if (pid <= 0) return NO;
     

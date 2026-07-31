@@ -91,6 +91,14 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneWillEnterForeground(_ scene: UIScene) {
         (window?.rootViewController as? BrowserViewController)?
             .sessionManager.setApplicationForeground(true)
+        
+        // The tunnel dies during suspension and every debug loop with
+        // it, but an attach is otherwise only triggered by a process
+        // STARTING - so a process that survives runs interpreted
+        // forever. This is the first point the device is reachable
+        // again. See
+        // fix_reattach_orphaned_sessions_on_foreground.py.
+        JITController.shared.reattachOrphanedProcesses()
     }
     
     func sceneDidEnterBackground(_ scene: UIScene) {
