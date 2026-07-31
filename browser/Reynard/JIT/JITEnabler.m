@@ -500,6 +500,13 @@ static void jitHangBacktraceHandler(int signalNumber) {
     return hasAnyDebuggedJITSessionAcrossProcesses();
 }
 
+// Thin forwarder so Swift can reach the C function in JITSupport.h,
+// which is not in the bridging header. See
+// fix_expose_detach_to_swift.py.
++ (void)requestDetachForAllDebugSessions {
+    requestDetachForAllDebugSessions();
+}
+
 // Deliberately does NOT call freeDeviceProvider on the current
 // sharedProvider before clearing it - see
 // fix_invalidate_provider_on_timeout.py's docstring for the full

@@ -93,7 +93,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // Only sets flags, so it needs no background-task budget of its
         // own; the debug loops do the actual detaching on their own
         // threads.
-        requestDetachForAllDebugSessions()
+        JITEnabler.requestDetachForAllDebugSessions()
         
         sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
         flushNavigationHistoryInBackground()

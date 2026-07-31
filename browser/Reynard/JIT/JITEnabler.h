@@ -29,6 +29,16 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 // not a cached or static capability.
 + (BOOL)hasActiveJITSession NS_SWIFT_NAME(hasActiveJITSession());
 
+/// Asks every active debug session to detach, so content processes are
+/// not left stopped by the debugger across suspension - a state in
+/// which they cannot answer the synchronous XPC iOS sends every
+/// extension on foreground, which the watchdog then kills the app for.
+///
+/// Wraps the C function of the same name in JITSupport.h, which Swift
+/// cannot see directly because that header is not in the bridging
+/// header. See fix_expose_detach_to_swift.py.
++ (void)requestDetachForAllDebugSessions NS_SWIFT_NAME(requestDetachForAllDebugSessions());
+
 // Clears the cached DeviceProvider (getProviderForPID's own
 // sharedProvider) so the next call is forced to establish a fresh
 // connection instead of reusing one that may be poisoned by a timed-
