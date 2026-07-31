@@ -559,9 +559,23 @@ static void unregisterDebugSessionProxy(int32_t pid) {
 // queue and runs before freeDebugSession, so a registered proxy has
 // not been freed and a freed one is no longer registered.
 void cancelAllDebugSessionCalls(void) {
-    __block NSUInteger cancelledCount = 0;
+    // CHANGED - dispatch_async, not dispatch_sync. See
+    // fix_lifecycle_calls_off_main_thread.py.
+    //
+    // This is called from sceneWillResignActive on the MAIN THREAD, and
+    // debugSessionStateQueue is busy - every runDebugService iteration
+    // touches it via shouldDetachDebugSessionPID, with fourteen loops
+    // running. Worse, debug_proxy_cancel below takes the Rust
+    // IN_FLIGHT_CALLS mutex, which run_sync_cancellable holds while
+    // registering each task. So the main thread could wait on the queue,
+    // which waited on a mutex held by a loop thread mid-registration -
+    // an unbounded stall, and the app froze with the screen on.
+    //
+    // Nothing here needs to be synchronous: no return value, and no
+    // caller depends on it having finished.
+    dispatch_async(debugSessionStateQueue(), ^{
+        NSUInteger cancelledCount = 0;
 
-    dispatch_sync(debugSessionStateQueue(), ^{
         for (NSValue *proxyValue in debugSessionProxies().allValues) {
             DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
             if (!proxy) continue;
@@ -573,24 +587,28 @@ void cancelAllDebugSessionCalls(void) {
             }
             cancelledCount++;
         }
-    });
 
-    logger([NSString stringWithFormat:@"cancelAllDebugSessionCalls: cancelled %lu in-flight call(s)", (unsigned long)cancelledCount]);
+        logger([NSString stringWithFormat:@"cancelAllDebugSessionCalls: cancelled %lu in-flight call(s)", (unsigned long)cancelledCount]);
+    });
 }
 
 // CHANGED - the cancellation loop moved to cancelAllDebugSessionCalls
 // above, which runs earlier. This is now the deliberate teardown only,
 // and still runs from sceneDidEnterBackground.
 void requestDetachForAllDebugSessions(void) {
-    __block NSUInteger requestedCount = 0;
-
-    dispatch_sync(debugSessionStateQueue(), ^{
+    // CHANGED - dispatch_async for the same reason as
+    // cancelAllDebugSessionCalls above. Called from
+    // sceneDidEnterBackground on the main thread, onto a queue fourteen
+    // debug loops are already using constantly.
+    //
+    // Blocking never guaranteed promptness anyway - only that the main
+    // thread waited, which is the thing that froze.
+    dispatch_async(debugSessionStateQueue(), ^{
         NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
         [detachRequestedDebugSessionPIDs() unionSet:active];
-        requestedCount = active.count;
-    });
 
-    logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)requestedCount]);
+        logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)active.count]);
+    });
 }
 
 // ADDED - see fix_reattach_orphaned_sessions_on_foreground.py.

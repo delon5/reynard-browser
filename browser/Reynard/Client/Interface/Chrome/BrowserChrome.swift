@@ -43,8 +43,24 @@ final class BrowserChrome: UIView {
     /// the pill's actual height and margin rather than an independent
     /// hardcoded number, so it can never silently drift out of sync with
     /// the pill's real size.
-    static var condensedPillArtificialInset: CGFloat {
-        CondensedAddressPill.height + condensedPillBottomMargin - condensedPillClearanceBuffer
+    /// Breathing room between the bottom of a page's own content and
+    /// the top of the pill, on pages that reserve space. Only affects
+    /// that gap - it does not move the pill.
+    static let condensedPillContentGap: CGFloat = 8
+    
+    /// How far above the physical screen bottom a page's content should
+    /// stop, on pages using env(safe-area-inset-bottom) - just above
+    /// the pill.
+    ///
+    /// CHANGED - see fix_repin_pill_to_screen_bottom.py. Previously
+    /// this was `height + margin - clearanceBuffer`, which assumed the
+    /// pill was positioned against the safe area guide. It is now
+    /// pinned to the view's real bottom, so the strip is measured from
+    /// there instead. This is a distance from the screen bottom, NOT an
+    /// inset to add directly - the caller subtracts whatever the device
+    /// already reports.
+    static var condensedPillContentBoundary: CGFloat {
+        condensedPillBottomMargin + CondensedAddressPill.height + condensedPillContentGap
     }
     private enum UX {
         static let overlayTopSpacing: CGFloat = 12
@@ -671,7 +687,15 @@ final class BrowserChrome: UIView {
             actionBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             
             condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor),
-            condensedPill.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -Self.condensedPillBottomMargin),
+            // CHANGED - bottomAnchor, not safeAreaLayoutGuide.bottomAnchor.
+            // See fix_repin_pill_to_screen_bottom.py. Against the guide
+            // the pill could never sit below the home indicator, and it
+            // MOVED depending on the page, because the guide is inflated
+            // for pages using safe-area CSS. Measured from the real
+            // bottom it has one fixed position everywhere, and
+            // condensedPillBottomMargin becomes the only knob that moves
+            // it.
+            condensedPill.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.condensedPillBottomMargin),
             condensedPill.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
             condensedPill.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
             condensedPill.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),

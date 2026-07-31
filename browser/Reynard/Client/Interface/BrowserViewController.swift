@@ -569,9 +569,23 @@ final class BrowserViewController: UIViewController {
         let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
         let shouldInflate = browserChrome.isScrollCondensed && pageReservesSpace
 
-        additionalSafeAreaInsets.bottom = shouldInflate
-            ? BrowserChrome.condensedPillArtificialInset
-            : 0
+        guard shouldInflate else {
+            additionalSafeAreaInsets.bottom = 0
+            return
+        }
+        
+        // CHANGED - computed from the pill's real position rather than
+        // a fixed constant. See fix_repin_pill_to_screen_bottom.py.
+        //
+        // The window's inset is used rather than the view's
+        // deliberately: additionalSafeAreaInsets feeds back into the
+        // view's own safeAreaInsets, so reading it here would be
+        // circular. The window reports the device's true inset and is
+        // unaffected by what we set below - which also makes this
+        // device-independent rather than assuming any particular
+        // home-indicator height.
+        let deviceBottomInset = view.window?.safeAreaInsets.bottom ?? 0
+        additionalSafeAreaInsets.bottom = max(0, BrowserChrome.condensedPillContentBoundary - deviceBottomInset)
     }
     
     private func applyCompactLayout() {
