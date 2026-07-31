@@ -14,6 +14,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private enum Section: CaseIterable {
         case features
+        case backgroundKeepAlive
         case diagnosticLogs
         case jitDiagnostics
         
@@ -21,6 +22,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             switch self {
             case .features:
                 return SettingsSectionText()
+            case .backgroundKeepAlive:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Background", comment: ""),
+                    footerTitle: NSLocalizedString("Plays inaudible audio so iOS keeps Reynard running in the background, which keeps JIT active for open tabs instead of losing it on every suspension. Uses noticeably more battery, and mixes with other audio rather than interrupting it.", comment: "")
+                )
             case .diagnosticLogs:
                 // Its own section rather than folded into
                 // jitDiagnostics, whose footer describes DDI deletion
@@ -44,6 +50,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case videoPictureInPicture
         case hideUpdateNotification
         case hideUpdateAvailableBanner
+        case backgroundAudioKeepAlive
         case debugLogFile
         case ideviceNativeLog
         case jitHangBacktrace
@@ -53,6 +60,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             switch self {
             case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
+            case .backgroundAudioKeepAlive:
+                return .backgroundKeepAlive
             case .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
                 return .diagnosticLogs
             case .resetDDIStorage:
@@ -64,6 +73,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let videoPictureInPictureSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
+    private let backgroundAudioKeepAliveSwitch = UISwitch()
     private let debugLogFileSwitch = UISwitch()
     private let ideviceNativeLogSwitch = UISwitch()
     private let jitHangBacktraceSwitch = UISwitch()
@@ -148,6 +158,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("Hide Update Available Banner", comment: ""),
                 accessoryView: hideUpdateAvailableBannerSwitch
             )
+        case .backgroundAudioKeepAlive:
+            return switchCell(
+                title: NSLocalizedString("Keep Running in Background", comment: ""),
+                accessoryView: backgroundAudioKeepAliveSwitch
+            )
         case .debugLogFile:
             // Gates everything written to
             // Documents/reynard_jit_log.txt - the JIT pipeline and the
@@ -190,6 +205,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         switch sectionRows[indexPath.row] {
         case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner,
+             .backgroundAudioKeepAlive,
              .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
             break
         case .resetDDIStorage:
@@ -205,6 +221,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
+        backgroundAudioKeepAliveSwitch.addTarget(self, action: #selector(backgroundAudioKeepAliveSwitchDidChange(_:)), for: .valueChanged)
         debugLogFileSwitch.addTarget(self, action: #selector(debugLogFileSwitchDidChange(_:)), for: .valueChanged)
         ideviceNativeLogSwitch.addTarget(self, action: #selector(ideviceNativeLogSwitchDidChange(_:)), for: .valueChanged)
         jitHangBacktraceSwitch.addTarget(self, action: #selector(jitHangBacktraceSwitchDidChange(_:)), for: .valueChanged)
@@ -214,6 +231,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
+        backgroundAudioKeepAliveSwitch.isOn = Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled
         debugLogFileSwitch.isOn = Prefs.ExperimentalSettings.isJITDebugLogEnabled
         ideviceNativeLogSwitch.isOn = Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled
         jitHangBacktraceSwitch.isOn = Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
@@ -224,6 +242,13 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     // down into the Objective-C layer, and idevice_init_logger in
     // particular is initialised under dispatch_once, so none of them
     // can genuinely take effect mid-process.
+    // No restart needed, unlike the logging toggles - the audio engine
+    // starts and stops live.
+    @objc private func backgroundAudioKeepAliveSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled = sender.isOn
+        BackgroundAudioKeepAlive.shared.applyPreference()
+    }
+    
     @objc private func debugLogFileSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.isJITDebugLogEnabled = sender.isOn
         showRestartAlert()

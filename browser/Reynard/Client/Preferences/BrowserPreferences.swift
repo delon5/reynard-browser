@@ -62,6 +62,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isJITDebugLogEnabled"): true,
             key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
+            key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
@@ -1107,6 +1108,19 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isIdeviceNativeLogEnabled")
+            }
+        }
+        
+        /// Plays inaudible audio so iOS does not suspend the app,
+        /// keeping the JIT debug tunnel and its sessions alive while
+        /// backgrounded. Off by default - it is real battery drain.
+        /// See fix_background_audio_keepalive.py.
+        static var isBackgroundAudioKeepAliveEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isBackgroundAudioKeepAliveEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isBackgroundAudioKeepAliveEnabled")
             }
         }
         
