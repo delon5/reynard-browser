@@ -10,16 +10,17 @@ index c850b03ad280..e7bd51a1dd09 100644
  
  export class GeckoViewContent extends GeckoViewModule {
    onInit() {
-@@ -14,6 +15,8 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -14,6 +15,9 @@ export class GeckoViewContent extends GeckoViewModule {
        "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
        "GeckoView:RestoreState",
        "GeckoView:ContainsFormData",
 +      "GeckoView:Autofill:FillOneTimeCode",
 +      "GeckoView:GetFocusedInputMetrics",
++      "GeckoView:GetSafeAreaInsetUsage",
        "GeckoView:ProcessBackPressed",
        "GeckoView:ScrollBy",
        "GeckoView:ScrollTo",
-@@ -279,6 +282,12 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -279,6 +283,15 @@ export class GeckoViewContent extends GeckoViewModule {
        case "GeckoView:ContainsFormData":
          this._containsFormData(aCallback);
          break;
@@ -29,10 +30,13 @@ index c850b03ad280..e7bd51a1dd09 100644
 +      case "GeckoView:GetFocusedInputMetrics":
 +        this._getFocusedInputMetrics(aCallback);
 +        break;
++      case "GeckoView:GetSafeAreaInsetUsage":
++        this._getSafeAreaInsetUsage(aCallback);
++        break;
        case "GeckoView:GetWebCompatInfo":
          this._getWebCompatInfo(aCallback);
          break;
-@@ -455,6 +464,39 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -455,6 +468,56 @@ export class GeckoViewContent extends GeckoViewModule {
      aCallback.onSuccess(await this.actor.containsFormData());
    }
  
@@ -66,6 +70,23 @@ index c850b03ad280..e7bd51a1dd09 100644
 +      aCallback.onSuccess(actor ? await actor.sendQuery("GetFocusedInputMetrics") : null);
 +    } catch (error) {
 +      aCallback.onError(`Cannot get focused input metrics, error: ${error}`);
++    }
++  }
++
++  // Modelled on _containsFormData rather than
++  // _getFocusedInputMetrics: that one resolves the actor through
++  // Services.focus.focusedContentBrowsingContext, which is right for a
++  // question about the focused input and wrong here. This is a
++  // question about THIS session's page, so this.actor is correct.
++  //
++  // sendQuery is available directly on the parent actor, so no wrapper
++  // method is needed. See
++  // fix_route_safe_area_query_through_module.py.
++  async _getSafeAreaInsetUsage(aCallback) {
++    try {
++      aCallback.onSuccess(await this.actor.sendQuery("GetSafeAreaInsetUsage"));
++    } catch (error) {
++      aCallback.onError(`Cannot get safe area inset usage, error: ${error}`);
 +    }
 +  }
 +
