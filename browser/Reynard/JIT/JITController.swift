@@ -81,6 +81,15 @@ final class JITController {
             object: nil
         )
         
+        // Push the diagnostic logging toggles down to the ObjC layer
+        // before anything can log - see
+        // fix_experimental_logging_toggles.py.
+        ReynardSetDiagnosticLoggingEnabled(
+            Prefs.ExperimentalSettings.isJITDebugLogEnabled,
+            Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled,
+            Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
+        )
+        
         startListeningForHelperAttachRequests()
     }
     

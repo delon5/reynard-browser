@@ -42,6 +42,30 @@
 // The os_log call below is deliberately left exactly as it was - it
 // was changed from NSLog because NSLog was being redacted to
 // "<private>" in exported Console captures.
+// Diagnostic logging toggles - see
+// fix_experimental_logging_toggles.py. Default YES so behaviour is
+// unchanged until Swift pushes down a different value at startup, and
+// so processes that never call the setter keep logging as before.
+static BOOL gReynardJITDebugLogEnabled = YES;
+static BOOL gReynardIdeviceNativeLogEnabled = YES;
+static BOOL gReynardJITHangBacktraceEnabled = YES;
+
+void ReynardSetDiagnosticLoggingEnabled(BOOL jitLog,
+                                        BOOL nativeLog,
+                                        BOOL hangBacktrace) {
+    gReynardJITDebugLogEnabled = jitLog;
+    gReynardIdeviceNativeLogEnabled = nativeLog;
+    gReynardJITHangBacktraceEnabled = hangBacktrace;
+}
+
+BOOL ReynardIsIdeviceNativeLogEnabled(void) {
+    return gReynardIdeviceNativeLogEnabled;
+}
+
+BOOL ReynardIsJITHangBacktraceEnabled(void) {
+    return gReynardJITHangBacktraceEnabled;
+}
+
 static int gReynardLogFileDescriptor = -1;
 
 static void ReynardOpenLogFileIfNeeded(void) {
@@ -86,6 +110,13 @@ static void ReynardOpenLogFileIfNeeded(void) {
 
 void logger(NSString *message) {
     os_log(OS_LOG_DEFAULT, "[Reynard] %{public}@", message);
+
+    // The os_log call above is deliberately NOT gated - system logging
+    // keeps working and idevicesyslog captures are unaffected. Only
+    // the file mirror below is optional.
+    if (!gReynardJITDebugLogEnabled) {
+        return;
+    }
 
     ReynardOpenLogFileIfNeeded();
     if (gReynardLogFileDescriptor < 0) {

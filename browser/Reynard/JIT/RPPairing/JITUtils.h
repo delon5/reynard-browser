@@ -10,6 +10,22 @@
 NS_ASSUME_NONNULL_BEGIN
 
 void logger(NSString *message);
+
+/// Enables or disables each diagnostic log file independently - see
+/// fix_experimental_logging_toggles.py. Pushed down from Swift at
+/// startup rather than having Objective-C read BrowserPreferences,
+/// which would couple it to the profile-prefixed UserDefaults key
+/// format. All three default to YES, so any process that never calls
+/// this - notably the Helper extension, which has its own separate
+/// UserDefaults and never registers defaults - keeps logging exactly
+/// as it does today.
+void ReynardSetDiagnosticLoggingEnabled(BOOL jitLog,
+                                        BOOL nativeLog,
+                                        BOOL hangBacktrace);
+
+/// Read back by the JIT layer to gate its own file writes.
+BOOL ReynardIsIdeviceNativeLogEnabled(void);
+BOOL ReynardIsJITHangBacktraceEnabled(void);
 NSString *pairingFilePath(void);
 
 /// Resolves the App Group identifier actually granted to this process by

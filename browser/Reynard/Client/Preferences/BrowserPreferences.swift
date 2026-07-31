@@ -59,6 +59,9 @@ final class BrowserPreferences {
             
             // Experimental
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
+            key("ExperimentalSettings", "isJITDebugLogEnabled"): true,
+            key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
+            key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
