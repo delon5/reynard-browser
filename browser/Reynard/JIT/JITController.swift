@@ -63,6 +63,24 @@ final class JITController {
     // themselves always touched only from attachQueue.
     private var retriedWatchdogPIDs: Set<Int32> = []
     private var hasHandledFailure = false
+    
+    // ADDED - see fix_defer_attaches_while_inactive.py's docstring.
+    //
+    // vAttach STOPS its target for the ~1012ms it takes, and a stopped
+    // extension cannot answer the synchronous XPC iOS sends every
+    // extension on a lifecycle transition. Three hang reports show the
+    // main thread blocked in
+    // __NSXPCCONNECTION_IS_WAITING_FOR_A_SYNCHRONOUS_REPLY__ - two at
+    // willResignActive, one at didEnterBackground - and the watchdog
+    // killing the app with 0x8BADF00D.
+    //
+    // So no attach is STARTED unless the app is active. Pids arriving
+    // meanwhile are held here and attached on return.
+    //
+    // Both are only ever touched on attachQueue, which is serial, so
+    // they need no locking - the same as attachedPIDs and rejectedPIDs.
+    private var isApplicationActive = true
+    private var pendingAttachPIDs = Set<Int32>()
     private(set) var isJITLessModeActive = false
     private var pendingFailureAction: (() -> Void)?
     private let preflightTimeoutSeconds: Int = 5
@@ -109,6 +127,47 @@ final class JITController {
                 // The real guard against a duplicate is
                 // boundedEnableJIT's per-pid in-flight check, which
                 // still applies.
+                self.attachWorkQueue.async {
+                    self.attachSlots.wait()
+                    defer { self.attachSlots.signal() }
+                    self.attachToProcess(pid: pid)
+                }
+            }
+        }
+    }
+    
+    /// No further attaches are started until the app is active again.
+    /// See fix_defer_attaches_while_inactive.py.
+    func applicationWillResignActive() {
+        attachQueue.async {
+            self.isApplicationActive = false
+        }
+    }
+    
+    /// Attaches anything that arrived while inactive.
+    func applicationDidBecomeActive() {
+        attachQueue.async {
+            self.isApplicationActive = true
+            
+            let deferred = self.pendingAttachPIDs
+            self.pendingAttachPIDs.removeAll()
+            
+            // Dead ones are dropped rather than attached - a pid can
+            // easily have gone during the interval.
+            let stillAlive = deferred.filter { kill($0, 0) == 0 }
+            guard !stillAlive.isEmpty else {
+                return
+            }
+            
+            logger(String(format: "applicationDidBecomeActive: attaching %d deferred process(es)", stillAlive.count))
+            
+            for pid in stillAlive {
+                guard !self.attachedPIDs.contains(pid) else {
+                    continue
+                }
+                self.attachedPIDs.insert(pid)
+                self.schedulePreflightWatchdog(for: pid)
+                
                 self.attachWorkQueue.async {
                     self.attachSlots.wait()
                     defer { self.attachSlots.signal() }
@@ -286,6 +345,19 @@ final class JITController {
             if self.attachedPIDs.contains(pid) {
                 return
             }
+            // Held rather than attached: starting one now would stop
+            // this process, and if a lifecycle transition follows it
+            // cannot answer the synchronous XPC iOS sends every
+            // extension. See fix_defer_attaches_while_inactive.py.
+            //
+            // Deliberately before inserting into attachedPIDs, so the
+            // drain on return is not skipped by the dedup check.
+            guard self.isApplicationActive else {
+                self.pendingAttachPIDs.insert(pid)
+                logger(String(format: "childProcessDidStart: pid %d deferred - app is not active, will attach on return", pid))
+                return
+            }
+            
             self.attachedPIDs.insert(pid)
             self.schedulePreflightWatchdog(for: pid)
             

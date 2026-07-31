@@ -45,6 +45,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneDidDisconnect(_ scene: UIScene) {}
     
     func sceneDidBecomeActive(_ scene: UIScene) {
+        // Attach anything that arrived while we were inactive - see
+        // fix_defer_attaches_while_inactive.py.
+        JITController.shared.applicationDidBecomeActive()
+        
         guard let browserViewController = window?.rootViewController as? BrowserViewController else {
             return
         }
@@ -57,6 +61,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return
         }
         browserViewController.sessionManager.applicationWillResignActive()
+        
+        // Stop starting attaches - a process stopped mid-vAttach cannot
+        // answer the synchronous XPC iOS is about to send it, and the
+        // watchdog kills the app for the hang. See
+        // fix_defer_attaches_while_inactive.py.
+        JITController.shared.applicationWillResignActive()
         
         // Release any thread parked in a debug proxy read before
         // ExtensionFoundation starts synchronously messaging extensions
