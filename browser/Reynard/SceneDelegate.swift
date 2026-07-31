@@ -68,22 +68,25 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // fix_defer_attaches_while_inactive.py.
         JITController.shared.applicationWillResignActive()
         
-        // Release any thread parked in a debug proxy read before
-        // ExtensionFoundation starts synchronously messaging extensions
-        // - a debugger-stopped extension cannot answer that, and the
-        // app is killed with 0x8BADF00D waiting for a reply. This fires
-        // before that cascade begins.
+        // REMOVED the cancelAllDebugSessionCalls() call that used to be
+        // here - see fix_cancel_only_on_real_teardown.py.
         //
-        // Cancellation only, not the full teardown: this also fires for
-        // Control Centre and notification pulls, where tearing sessions
-        // down would cost a re-attach per process for a moment's
-        // interruption. The deliberate teardown stays in
-        // sceneDidEnterBackground. See fix_split_cancel_from_detach.py.
+        // It was described as the cheap half of teardown. It is not:
+        // debug_proxy_cancel aborts whatever call is in flight, and for
+        // a healthy loop that is the continue it is waiting on. The
+        // abort surfaces as a failed command and the loop exits.
         //
-        // Safe to do here - unlike presenting a view controller, which
-        // the comment below rightly warns against, this touches no
-        // UIKit state at all.
-        JITEnabler.cancelAllDebugSessionCalls()
+        // On device it killed sixteen working sessions at once, at a
+        // moment when every one of them was servicing breakpoints
+        // normally. This transition fires for a swipe up, Control
+        // Centre, or a notification pull - the app need not even leave
+        // the foreground - so JIT was being destroyed for every content
+        // process on any momentary interruption.
+        //
+        // Teardown now happens only in sceneDidEnterBackground, where
+        // the app is genuinely going away. The XPC hang this was meant
+        // to avoid is handled by deferring new attaches instead, which
+        // touches no existing session.
         
         // Setting the lock flag here is safe — it's just a boolean.
         // Actually *presenting* a real view controller this early is
@@ -129,6 +132,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // own; the debug loops do the actual detaching on their own
         // threads.
         JITEnabler.requestDetachForAllDebugSessions()
+        JITEnabler.cancelAllDebugSessionCalls()
         
         sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
         flushNavigationHistoryInBackground()
