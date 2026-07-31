@@ -39,6 +39,11 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// header. See fix_expose_detach_to_swift.py.
 + (void)requestDetachForAllDebugSessions NS_SWIFT_NAME(requestDetachForAllDebugSessions());
 
+/// Cancels in-flight debug proxy calls without tearing sessions down.
+/// Wraps the C function in JITSupport.h, which Swift cannot see
+/// directly - that header is not in the bridging header.
++ (void)cancelAllDebugSessionCalls NS_SWIFT_NAME(cancelAllDebugSessionCalls());
+
 // Clears the cached DeviceProvider (getProviderForPID's own
 // sharedProvider) so the next call is forced to establish a fresh
 // connection instead of reusing one that may be poisoned by a timed-

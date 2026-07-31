@@ -34,6 +34,11 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void);
 /// fix_detach_debug_sessions_on_background.py.
 void requestDetachForAllDebugSessions(void);
 
+/// Cancels any in-flight debug proxy call, releasing threads parked in
+/// a read, WITHOUT tearing sessions down. Call at willResignActive -
+/// see fix_split_cancel_from_detach.py.
+void cancelAllDebugSessionCalls(void);
+
 DeviceProvider *_Nullable createDeviceProvider(
                                                NSString *pairingFilePath, NSString *targetAddress,
                                                NSError *_Nullable *_Nullable error);

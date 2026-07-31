@@ -535,28 +535,33 @@ static void unregisterDebugSessionProxy(int32_t pid) {
     });
 }
 
-void requestDetachForAllDebugSessions(void) {
-    __block NSUInteger requestedCount = 0;
-
+// SPLIT OUT - see fix_split_cancel_from_detach.py's docstring.
+//
+// Cancelling only. Unblocks any thread parked in a debug proxy read
+// without setting the detach flags, so a session is not deliberately
+// torn down and a quick return re-attaches naturally.
+//
+// Called from sceneWillResignActive rather than
+// sceneDidEnterBackground, because iOS sends every extension a
+// SYNCHRONOUS XPC message on backgrounding and a debugger-stopped
+// extension cannot answer it - the app was killed with 0x8BADF00D
+// blocked in __NSXPCCONNECTION_IS_WAITING_FOR_A_SYNCHRONOUS_REPLY__
+// inside EXConcreteExtension _hostDidEnterBackgroundNote:.
+// willResignActive fires before that cascade begins.
+//
+// Deliberately NOT the full teardown: willResignActive also fires for
+// Control Centre, notification pulls and incoming calls, and tearing
+// every session down for a two-second glance would cost a re-attach
+// per process on return.
+//
+// Kept inside dispatch_sync(debugSessionStateQueue()) for the same
+// reason as the detach below - unregisterDebugSessionProxy uses that
+// queue and runs before freeDebugSession, so a registered proxy has
+// not been freed and a freed one is no longer registered.
+void cancelAllDebugSessionCalls(void) {
     __block NSUInteger cancelledCount = 0;
 
     dispatch_sync(debugSessionStateQueue(), ^{
-        NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
-        [detachRequestedDebugSessionPIDs() unionSet:active];
-        requestedCount = active.count;
-
-        // ADDED - the flag alone only reaches loops that are between
-        // iterations. On device, fourteen sessions were asked to detach
-        // and exactly one did; the rest were blocked inside a continue
-        // command and stayed that way for an eleven-minute suspension.
-        // Cancelling the in-flight call releases them directly.
-        //
-        // Done INSIDE this dispatch_sync deliberately.
-        // unregisterDebugSessionProxy uses the same serial queue and is
-        // called before freeDebugSession, so the two cannot interleave:
-        // a proxy that is still registered has not been freed, and one
-        // that has been freed is no longer registered. Cancelling
-        // outside the queue would race exactly that teardown.
         for (NSValue *proxyValue in debugSessionProxies().allValues) {
             DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
             if (!proxy) continue;
@@ -570,7 +575,22 @@ void requestDetachForAllDebugSessions(void) {
         }
     });
 
-    logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s), cancelled %lu in-flight call(s)", (unsigned long)requestedCount, (unsigned long)cancelledCount]);
+    logger([NSString stringWithFormat:@"cancelAllDebugSessionCalls: cancelled %lu in-flight call(s)", (unsigned long)cancelledCount]);
+}
+
+// CHANGED - the cancellation loop moved to cancelAllDebugSessionCalls
+// above, which runs earlier. This is now the deliberate teardown only,
+// and still runs from sceneDidEnterBackground.
+void requestDetachForAllDebugSessions(void) {
+    __block NSUInteger requestedCount = 0;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
+        [detachRequestedDebugSessionPIDs() unionSet:active];
+        requestedCount = active.count;
+    });
+
+    logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)requestedCount]);
 }
 
 static BOOL shouldDetachDebugSessionPID(int32_t pid) {

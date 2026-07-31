@@ -58,6 +58,23 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.applicationWillResignActive()
         
+        // Release any thread parked in a debug proxy read before
+        // ExtensionFoundation starts synchronously messaging extensions
+        // - a debugger-stopped extension cannot answer that, and the
+        // app is killed with 0x8BADF00D waiting for a reply. This fires
+        // before that cascade begins.
+        //
+        // Cancellation only, not the full teardown: this also fires for
+        // Control Centre and notification pulls, where tearing sessions
+        // down would cost a re-attach per process for a moment's
+        // interruption. The deliberate teardown stays in
+        // sceneDidEnterBackground. See fix_split_cancel_from_detach.py.
+        //
+        // Safe to do here - unlike presenting a view controller, which
+        // the comment below rightly warns against, this touches no
+        // UIKit state at all.
+        JITEnabler.cancelAllDebugSessionCalls()
+        
         // Setting the lock flag here is safe — it's just a boolean.
         // Actually *presenting* a real view controller this early is
         // NOT safe: this moment is an unstable UIKit transition, and
