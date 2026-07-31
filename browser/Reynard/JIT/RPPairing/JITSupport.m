@@ -321,6 +321,26 @@ static void addSelfToDebuggedSessions(void) {
 }
 
 BOOL hasAnyDebuggedJITSessionAcrossProcesses(void) {
+    // ADDED - the cheap check first. See
+    // fix_jit_acquisition_avoids_main_thread_lock.py.
+    //
+    // This is called from JITSettingsSection on the MAIN THREAD while
+    // building a cell, and the PID path below spins on flock for up to
+    // half a second. Content processes take that same lock whenever
+    // they record themselves as CS_DEBUGGED, so several starting at
+    // once could stall the Settings screen for the full deadline.
+    //
+    // The marker is read without any lock - one small file,
+    // deliberately unlocked, last-write-wins - and it alone answers
+    // what this row asks: did acquisition succeed this session. So
+    // whenever JIT is working, which is also the only time the lock
+    // below is contended, this returns without opening the locked file
+    // at all.
+    NSTimeInterval markerTimestamp = debuggedAcquisitionTimestamp();
+    if (markerTimestamp > 0 && markerTimestamp >= gReynardProcessStartTime) {
+        return YES;
+    }
+
     NSURL *fileURL = debuggedJITSessionsFileURL();
     if (!fileURL) return NO;
 
