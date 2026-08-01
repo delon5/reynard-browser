@@ -113,9 +113,21 @@ private final class CarPlayBrowserViewController: UIViewController {
     ///
     /// A data: URL so there is no network dependency: a
     /// failed load would look identical to a rendering fault.
-    private static let homepage = "data:text/html," + """
-<html id='carplay-scale-test'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;overflow:hidden'><div style='position:fixed;inset:0;background:linear-gradient(135deg,#c0392b,#2980b9);font:700 14px -apple-system,sans-serif;color:#fff'><div style='position:absolute;top:4px;left:6px'>TOP LEFT</div><div style='position:absolute;top:4px;right:6px'>TOP RIGHT</div><div style='position:absolute;bottom:4px;left:6px'>BOTTOM LEFT</div><div style='position:absolute;bottom:4px;right:6px'>BOTTOM RIGHT</div><div id='d' style='position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:22px'></div></div><script>function u(){document.getElementById('d').textContent=innerWidth+' x '+innerHeight+'  dpr '+devicePixelRatio}u();addEventListener('resize',u)</script></body></html>
-"""
+    /// A full-bleed test page, base64-encoded - see
+    /// fix_carplay_test_homepage_base64.py.
+    ///
+    /// The previous version carried raw HTML in a data: URL
+    /// and rendered nothing: the # in a colour literal begins
+    /// a fragment identifier, so Gecko received only the URL
+    /// up to that point. base64 output has no characters with
+    /// URL meaning, so nothing can truncate it.
+    ///
+    /// Four labelled corners and a viewport readout: if a
+    /// corner is missing the surface is undersized, and the
+    /// readout is worth comparing against the CarPlay:
+    /// connected line since Gecko's layout still believes
+    /// there is a single 3x screen.
+    private static let homepage = "data:text/html;base64," + "PGh0bWw+PGhlYWQ+PG1ldGEgbmFtZT0ndmlld3BvcnQnIGNvbnRlbnQ9J3dpZHRoPWRldmljZS13aWR0aCxpbml0aWFsLXNjYWxlPTEnPjwvaGVhZD48Ym9keSBzdHlsZT0nbWFyZ2luOjA7b3ZlcmZsb3c6aGlkZGVuJz48ZGl2IHN0eWxlPSdwb3NpdGlvbjpmaXhlZDtpbnNldDowO2JhY2tncm91bmQ6bGluZWFyLWdyYWRpZW50KDEzNWRlZywjYzAzOTJiLCMyOTgwYjkpO2ZvbnQ6NzAwIDE0cHggLWFwcGxlLXN5c3RlbSxzYW5zLXNlcmlmO2NvbG9yOiNmZmYnPjxkaXYgc3R5bGU9J3Bvc2l0aW9uOmFic29sdXRlO3RvcDo0cHg7bGVmdDo2cHgnPlRPUCBMRUZUPC9kaXY+PGRpdiBzdHlsZT0ncG9zaXRpb246YWJzb2x1dGU7dG9wOjRweDtyaWdodDo2cHgnPlRPUCBSSUdIVDwvZGl2PjxkaXYgc3R5bGU9J3Bvc2l0aW9uOmFic29sdXRlO2JvdHRvbTo0cHg7bGVmdDo2cHgnPkJPVFRPTSBMRUZUPC9kaXY+PGRpdiBzdHlsZT0ncG9zaXRpb246YWJzb2x1dGU7Ym90dG9tOjRweDtyaWdodDo2cHgnPkJPVFRPTSBSSUdIVDwvZGl2PjxkaXYgaWQ9J2QnIHN0eWxlPSdwb3NpdGlvbjphYnNvbHV0ZTtpbnNldDowO2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OmNlbnRlcjtmb250LXNpemU6MjJweCc+PC9kaXY+PC9kaXY+PHNjcmlwdD5mdW5jdGlvbiB1KCl7ZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoJ2QnKS50ZXh0Q29udGVudD1pbm5lcldpZHRoKycgeCAnK2lubmVySGVpZ2h0KycgIGRwciAnK2RldmljZVBpeGVsUmF0aW99dSgpO2FkZEV2ZW50TGlzdGVuZXIoJ3Jlc2l6ZScsdSk8L3NjcmlwdD48L2JvZHk+PC9odG1sPg=="
 
     override func viewDidLoad() {
         super.viewDidLoad()
