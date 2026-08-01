@@ -131,7 +131,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 /// error pages. Loading and displaying a page needs none of them, and
 /// wiring them up is step three, once rendering is confirmed.
 @available(iOS 14.0, *)
-private final class CarPlayBrowserViewController: UIViewController, ProgressDelegate, PermissionEmbedderDelegate {
+private final class CarPlayBrowserViewController: UIViewController, ProgressDelegate, PermissionEmbedderDelegate, ContentDelegate {
     private let geckoView = GeckoView(frame: .zero)
     private var session: GeckoSession?
     weak var interfaceController: CPInterfaceController?
@@ -307,6 +307,12 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         // media.autoplay.default pref can stay blocking. See
         // fix_carplay_autoplay_permission.py.
         session.permissionDelegate = self
+        
+        // So scripts can report into Reynard's own log by setting
+        // document.title - console.log from a content process does not
+        // reach the system log on iOS. See
+        // fix_carplay_title_channel.py.
+        session.contentDelegate = self
         geckoView.session = session
         CarPlaySceneDelegate.currentSession = session
 
@@ -340,6 +346,26 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
     
+    // MARK: - ContentDelegate
+
+    /// Reports titles beginning with the script marker, and ignores
+    /// everything else. See fix_carplay_title_channel.py.
+    ///
+    /// This exists because a script on this session has no other way to
+    /// say anything: console.log from a Gecko content process does not
+    /// reach the system log on iOS, and the car display shows only the
+    /// page.
+    ///
+    /// Ordinary page titles are skipped rather than logged, so this
+    /// does not bury everything else under YouTube video names.
+    func onTitleChange(session: GeckoSession, title: String) {
+        guard title.hasPrefix("RY:") else {
+            return
+        }
+        
+        logger("CarPlay script: " + String(title.dropFirst(3)))
+    }
+
     // MARK: - PermissionEmbedderDelegate
 
     /// Allows autoplay, and only autoplay. See
