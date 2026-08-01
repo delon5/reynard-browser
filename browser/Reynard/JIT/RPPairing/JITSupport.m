@@ -1339,6 +1339,31 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // fix_chunk_coverage_and_dead_connection_detach.py.
     if (!exitPacketPresent && !detachedByCommand && !connectionFailed) {
         detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
+        
+        // ADDED - one retry. See fix_retry_detach_after_cancel.py.
+        //
+        // The device logs show 28 "Detach failed" against 0 "skipping
+        // detach", so this line is reached and the send itself fails.
+        // The likely reason is timing: cancelAllDebugSessionCalls
+        // aborts the in-flight read, and this D packet goes out
+        // microseconds later on a proxy still unwinding from that
+        // abort.
+        //
+        // A process whose detach fails stays CS_DEBUGGED with no live
+        // loop, which is exactly the state that leaves an extension
+        // unable to answer the synchronous XPC iOS sends on the next
+        // lifecycle transition - and the watchdog kills the app for it.
+        //
+        // If the connection was merely interrupted this should succeed.
+        // If the abort desynced the stream, it will fail identically
+        // and the log will say so - which is equally worth knowing,
+        // since it would mean cancellation and clean detach cannot
+        // coexist and the answer lies elsewhere.
+        if (!detachedByCommand) {
+            usleep(50000);
+            detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
+            logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach retry after 50ms %@", pid, detachedByCommand ? @"SUCCEEDED" : @"failed again"]);
+        }
     } else if (connectionFailed) {
         logger([NSString stringWithFormat:@"runDebugService: (pid %d) skipping detach - transport already dead", pid]);
     }
