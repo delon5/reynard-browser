@@ -45,6 +45,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // CHANGED - the browser replaces the geometry probe. See
         // fix_carplay_browser_view.py.
         let browser = CarPlayBrowserViewController()
+        browser.templateApplicationScene = templateApplicationScene
         window.rootViewController = browser
         window.makeKeyAndVisible()
         
@@ -90,6 +91,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 private final class CarPlayBrowserViewController: UIViewController {
     private let geckoView = GeckoView(frame: .zero)
     private var session: GeckoSession?
+    weak var templateApplicationScene: CPTemplateApplicationScene?
 
     /// Where the car browser starts. Deliberately something simple and
     /// obviously rendered, so a blank screen means a rendering problem
@@ -143,21 +145,22 @@ private final class CarPlayBrowserViewController: UIViewController {
         // Assigning the session is what embeds its window view.
         // GeckoView.layoutSubviews then calls updateViewportWidth, so
         // the page adapts to the car display without anything extra.
-        // The car display's scale, set BEFORE the session is
-        // assigned so it is in place when Gecko creates its
-        // surface. See fix_carplay_scale.py.
+        // The car display's scale, from carTraitCollection -
+        // which is what Apple's CarPlay Developer Guide
+        // specifies for exactly this. Set BEFORE the session is
+        // assigned, so it is in place when Gecko creates its
+        // surface. See fix_carplay_scale_v2.py.
         //
-        // UIScreen.main always reports the iPhone's display, so
-        // anything reaching for it while running on the car
-        // screen gets the wrong value - 3.0 on this hardware
-        // against CarPlay's 2.0, which is close to the ratio the
-        // page is being painted at.
-        if let carScreen = view.window?.screen {
-            geckoView.contentScaleFactor = carScreen.scale
-            geckoView.layer.contentsScale = carScreen.scale
+        // The guide warns to "be sure to get the scale for the
+        // car's screen (not the scale for the iPhone screen)" -
+        // UIScreen.main always reports the iPhone's, which is 3.0
+        // here against CarPlay's 2.0.
+        if let carScale = templateApplicationScene?.carTraitCollection.displayScale, carScale > 0 {
+            geckoView.contentScaleFactor = carScale
+            geckoView.layer.contentsScale = carScale
         }
 
-        logger(String(format: "CarPlay: scales - view %.1f, car screen %.1f, UIScreen.main %.1f", geckoView.contentScaleFactor, view.window?.screen.scale ?? 0, UIScreen.main.scale))
+        logger(String(format: "CarPlay: scales - carTraitCollection %.1f, window screen %.1f, UIScreen.main %.1f", templateApplicationScene?.carTraitCollection.displayScale ?? 0, view.window?.screen.scale ?? 0, UIScreen.main.scale))
 
         geckoView.session = session
         self.session = session
