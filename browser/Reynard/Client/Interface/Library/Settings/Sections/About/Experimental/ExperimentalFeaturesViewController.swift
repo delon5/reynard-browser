@@ -14,6 +14,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private enum Section: CaseIterable {
         case features
+        case carPlayScripts
         case backgroundKeepAlive
         case diagnosticLogs
         case jitDiagnostics
@@ -22,6 +23,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             switch self {
             case .features:
                 return SettingsSectionText()
+            case .carPlayScripts:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("CarPlay", comment: ""),
+                    footerTitle: NSLocalizedString("Runs scripts on pages shown on the CarPlay display, once each page has loaded. The display cannot be touched, so scripts are the only way to change what happens there - hiding page chrome so video fills the screen, for instance. Ordinary tabs are unaffected.", comment: "")
+                )
             case .backgroundKeepAlive:
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("Background", comment: ""),
@@ -50,6 +56,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case videoPictureInPicture
         case hideUpdateNotification
         case hideUpdateAvailableBanner
+        case carPlayScriptsEnabled
+        case manageCarPlayScripts
         case backgroundAudioKeepAlive
         case debugLogFile
         case ideviceNativeLog
@@ -60,6 +68,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             switch self {
             case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
+            case .carPlayScriptsEnabled, .manageCarPlayScripts:
+                return .carPlayScripts
             case .backgroundAudioKeepAlive:
                 return .backgroundKeepAlive
             case .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
@@ -73,6 +83,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let videoPictureInPictureSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
+    private let carPlayScriptsSwitch = UISwitch()
     private let backgroundAudioKeepAliveSwitch = UISwitch()
     private let debugLogFileSwitch = UISwitch()
     private let ideviceNativeLogSwitch = UISwitch()
@@ -158,6 +169,13 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("Hide Update Available Banner", comment: ""),
                 accessoryView: hideUpdateAvailableBannerSwitch
             )
+        case .carPlayScriptsEnabled:
+            return switchCell(
+                title: NSLocalizedString("Run Scripts on CarPlay", comment: ""),
+                accessoryView: carPlayScriptsSwitch
+            )
+        case .manageCarPlayScripts:
+            return SettingsViewUtils.disclosureCell(title: NSLocalizedString("Manage Scripts…", comment: ""))
         case .backgroundAudioKeepAlive:
             return switchCell(
                 title: NSLocalizedString("Keep Running in Background", comment: ""),
@@ -208,6 +226,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
              .backgroundAudioKeepAlive,
              .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
             break
+        case .manageCarPlayScripts:
+            navigationController?.pushViewController(CarPlayScriptsViewController(), animated: true)
         case .resetDDIStorage:
             confirmResetDDIStorage()
         }
@@ -221,6 +241,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
+        carPlayScriptsSwitch.addTarget(self, action: #selector(carPlayScriptsSwitchDidChange(_:)), for: .valueChanged)
         backgroundAudioKeepAliveSwitch.addTarget(self, action: #selector(backgroundAudioKeepAliveSwitchDidChange(_:)), for: .valueChanged)
         debugLogFileSwitch.addTarget(self, action: #selector(debugLogFileSwitchDidChange(_:)), for: .valueChanged)
         ideviceNativeLogSwitch.addTarget(self, action: #selector(ideviceNativeLogSwitchDidChange(_:)), for: .valueChanged)
@@ -231,6 +252,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
+        carPlayScriptsSwitch.isOn = Prefs.ExperimentalSettings.isCarPlayScriptsEnabled
         backgroundAudioKeepAliveSwitch.isOn = Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled
         debugLogFileSwitch.isOn = Prefs.ExperimentalSettings.isJITDebugLogEnabled
         ideviceNativeLogSwitch.isOn = Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled
@@ -244,6 +266,10 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     // can genuinely take effect mid-process.
     // No restart needed, unlike the logging toggles - the audio engine
     // starts and stops live.
+    @objc private func carPlayScriptsSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isCarPlayScriptsEnabled = sender.isOn
+    }
+    
     @objc private func backgroundAudioKeepAliveSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled = sender.isOn
         BackgroundAudioKeepAlive.shared.applyPreference()

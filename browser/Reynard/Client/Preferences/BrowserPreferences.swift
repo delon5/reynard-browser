@@ -63,6 +63,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
+            key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
@@ -1130,6 +1131,36 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "interruptsAttachingSessionsOnResign")
+            }
+        }
+        
+        /// Whether scripts run on pages shown on the CarPlay
+        /// display. Off by default - the display is glanced at while
+        /// driving, so nothing should run there until deliberately
+        /// enabled.
+        static var isCarPlayScriptsEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isCarPlayScriptsEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isCarPlayScriptsEnabled")
+            }
+        }
+        
+        /// Scripts run against CarPlay pages, in order, once each
+        /// page has loaded. Stored as JSON, the same way
+        /// perSiteUserAgentOverrides is.
+        static var carPlayScripts: [CarPlayScript] {
+            get {
+                guard let data = prefs.data(forSetting: "ExperimentalSettings", key: "carPlayScripts"),
+                      let scripts = try? JSONDecoder().decode([CarPlayScript].self, from: data) else {
+                    return []
+                }
+                return scripts
+            }
+            set {
+                let data = try? JSONEncoder().encode(newValue)
+                prefs.set(data, forSetting: "ExperimentalSettings", key: "carPlayScripts")
             }
         }
         

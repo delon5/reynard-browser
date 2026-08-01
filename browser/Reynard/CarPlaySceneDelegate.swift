@@ -97,7 +97,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 /// error pages. Loading and displaying a page needs none of them, and
 /// wiring them up is step three, once rendering is confirmed.
 @available(iOS 14.0, *)
-private final class CarPlayBrowserViewController: UIViewController {
+private final class CarPlayBrowserViewController: UIViewController, ProgressDelegate {
     private let geckoView = GeckoView(frame: .zero)
     private var session: GeckoSession?
     weak var interfaceController: CPInterfaceController?
@@ -237,6 +237,8 @@ private final class CarPlayBrowserViewController: UIViewController {
 
         logger(String(format: "CarPlay: scales - carTraitCollection %.1f, window screen %.1f, UIScreen.main %.1f", interfaceController?.carTraitCollection.displayScale ?? 0, view.window?.screen.scale ?? 0, UIScreen.main.scale))
 
+        // Before the view, so the first page load is not missed.
+        session.progressDelegate = self
         geckoView.session = session
         CarPlaySceneDelegate.currentSession = session
 
@@ -267,6 +269,42 @@ private final class CarPlayBrowserViewController: UIViewController {
         self.session = session
 
         session.load(Self.homepage)
+    }
+    
+    // MARK: - ProgressDelegate
+    
+    func onPageStart(session: GeckoSession, url: String) {}
+    
+    func onProgressChange(session: GeckoSession, progress: Int) {}
+    
+    func onSessionStateChange(session: GeckoSession, state: GeckoSessionState) {}
+    
+    /// Runs the enabled scripts once the page has loaded.
+    ///
+    /// Once per load rather than on a timer: the scripts install
+    /// their own MutationObserver, which handles sites rebuilding
+    /// their DOM far better than Swift-side polling could. See
+    /// fix_carplay_scripts_ui.py.
+    func onPageStop(session: GeckoSession, success: Bool) {
+        guard success, Prefs.ExperimentalSettings.isCarPlayScriptsEnabled else {
+            return
+        }
+        
+        let scripts = Prefs.ExperimentalSettings.carPlayScripts.filter { $0.isEnabled }
+        guard !scripts.isEmpty else {
+            return
+        }
+        
+        Task { @MainActor in
+            for script in scripts {
+                let failure = await session.runUserScript(script.body)
+                if let failure {
+                    logger(String(format: "CarPlay: script %@ failed - %@", script.name, failure))
+                } else {
+                    logger(String(format: "CarPlay: script %@ ran", script.name))
+                }
+            }
+        }
 
         installTouchProbe()
 
