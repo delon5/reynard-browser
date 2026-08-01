@@ -97,7 +97,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 /// error pages. Loading and displaying a page needs none of them, and
 /// wiring them up is step three, once rendering is confirmed.
 @available(iOS 14.0, *)
-private final class CarPlayBrowserViewController: UIViewController, ProgressDelegate {
+private final class CarPlayBrowserViewController: UIViewController, ProgressDelegate, PermissionEmbedderDelegate {
     private let geckoView = GeckoView(frame: .zero)
     private var session: GeckoSession?
     weak var interfaceController: CPInterfaceController?
@@ -262,6 +262,11 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         // tracks several sessions and gives the controls to whichever
         // played most recently. See fix_carplay_media_session.py.
         session.mediaSessionDelegate = SystemMediaSession.shared
+        
+        // Allows autoplay on this session only, so the profile-wide
+        // media.autoplay.default pref can stay blocking. See
+        // fix_carplay_autoplay_permission.py.
+        session.permissionDelegate = self
         geckoView.session = session
         CarPlaySceneDelegate.currentSession = session
 
@@ -295,6 +300,47 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
     
+    // MARK: - PermissionEmbedderDelegate
+
+    /// Allows autoplay, and only autoplay. See
+    /// fix_carplay_autoplay_permission.py.
+    ///
+    /// The car display is the one place autoplay is genuinely needed,
+    /// because it is the one place that cannot be tapped - so a video
+    /// that waits for a gesture waits forever.
+    ///
+    /// Everything else returns .prompt, the protocol's own default,
+    /// which on this display means it will not happen: a prompt cannot
+    /// be answered on a screen that receives no touch events. That is
+    /// the right outcome for camera, microphone, geolocation and
+    /// notifications in a car.
+    ///
+    /// media-key-system-access is deliberately not allowed either.
+    /// Granting the EME permission would not make DRM work - Gecko's
+    /// iOS build has no decryption module - so it would only move the
+    /// failure later.
+    func permissionDelegate(
+        decideContentPermission permission: ContentPermission,
+        session: GeckoSession
+    ) async -> ContentPermission.Value {
+        guard permission.permission == .autoplay else {
+            return .prompt
+        }
+        
+        logger("CarPlay: allowing autoplay for the car display")
+        return .allow
+    }
+
+    /// Camera and microphone, denied outright. Nothing on the car
+    /// display should be reaching for either, and a prompt could not be
+    /// answered there in any case.
+    func permissionDelegate(
+        decideMediaPermission request: MediaPermissionRequest,
+        session: GeckoSession
+    ) async -> Bool {
+        return false
+    }
+
     // MARK: - ProgressDelegate
     
     func onPageStart(session: GeckoSession, url: String) {}
