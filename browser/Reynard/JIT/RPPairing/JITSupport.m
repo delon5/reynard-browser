@@ -547,6 +547,78 @@ static void registerDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy) {
     });
 }
 
+// ADDED - see fix_interrupt_attaching_sessions.py.
+//
+// Proxies whose vAttach is still IN FLIGHT. Deliberately separate from
+// debugSessionProxies: registering a half-built session there would
+// expose it to cancelAllDebugSessionCalls and
+// requestDetachForAllDebugSessions, both of which assume a complete
+// session.
+static NSMutableDictionary<NSNumber *, NSValue *> *attachingDebugSessionProxies(void) {
+    static NSMutableDictionary<NSNumber *, NSValue *> *proxies = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        proxies = [NSMutableDictionary dictionary];
+    });
+    return proxies;
+}
+
+void registerAttachingDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy) {
+    if (pid <= 0 || !proxy) return;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        attachingDebugSessionProxies()[@(pid)] = [NSValue valueWithPointer:proxy];
+    });
+}
+
+void unregisterAttachingDebugSessionProxy(int32_t pid) {
+    if (pid <= 0) return;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        [attachingDebugSessionProxies() removeObjectForKey:@(pid)];
+    });
+}
+
+// Sends the GDB interrupt byte to every target whose vAttach has not
+// yet returned.
+//
+// vAttach stops its target for the ~1012ms the call takes, and iOS
+// messages every extension SYNCHRONOUSLY on a lifecycle transition. A
+// stopped extension cannot reply, so the main thread blocks and the
+// watchdog kills the app - confirmed from a log ending mid-attach with
+// two attaches in flight and neither reply ever arriving.
+//
+// 0x03 is out-of-band: handled outside the request/response sequence,
+// so unlike injecting a "$c#63" packet it cannot desync a connection
+// another thread is parked reading. StikDebug sends exactly this byte
+// to interrupt a running target.
+//
+// It may well do nothing here, since our target is already stopped
+// rather than running - hence the toggle.
+void interruptAttachingDebugSessions(void) {
+    __block NSUInteger interruptedCount = 0;
+    __block NSUInteger attachingCount = 0;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        attachingCount = attachingDebugSessionProxies().count;
+
+        for (NSValue *proxyValue in attachingDebugSessionProxies().allValues) {
+            DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
+            if (!proxy) continue;
+
+            uint8_t interruptByte = 0x03;
+            IdeviceFfiError *interruptError = debug_proxy_send_raw(proxy, &interruptByte, 1);
+            if (interruptError) {
+                idevice_error_free(interruptError);
+                continue;
+            }
+            interruptedCount++;
+        }
+    });
+
+    logger([NSString stringWithFormat:@"interruptAttachingDebugSessions: %lu attach(es) in flight, interrupted %lu", (unsigned long)attachingCount, (unsigned long)interruptedCount]);
+}
+
 static void unregisterDebugSessionProxy(int32_t pid) {
     if (pid <= 0) return;
 

@@ -63,6 +63,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
+            key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
@@ -1115,6 +1116,23 @@ final class BrowserPreferences {
         /// keeping the JIT debug tunnel and its sessions alive while
         /// backgrounded. Off by default - it is real battery drain.
         /// See fix_background_audio_keepalive.py.
+        /// Sends the GDB interrupt byte to any attach still in flight
+        /// when the app resigns active. A target stopped by vAttach
+        /// cannot answer the synchronous XPC iOS sends every extension,
+        /// and the watchdog kills the app for it.
+        ///
+        /// Experimental: it may do nothing, since the target is already
+        /// stopped rather than running. See
+        /// fix_interrupt_attaching_sessions.py.
+        static var interruptsAttachingSessionsOnResign: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "interruptsAttachingSessionsOnResign")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "interruptsAttachingSessionsOnResign")
+            }
+        }
+        
         static var isBackgroundAudioKeepAliveEnabled: Bool {
             get {
                 return prefs.bool(forSetting: "ExperimentalSettings", key: "isBackgroundAudioKeepAliveEnabled")

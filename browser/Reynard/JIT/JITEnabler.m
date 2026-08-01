@@ -409,7 +409,17 @@ static void jitHangBacktraceHandler(int signalNumber) {
         CFAbsoluteTime attachCallStart = CFAbsoluteTimeGetCurrent();
         logger([NSString stringWithFormat:@"enableJITForPID: starting attach command for pid %d", pid]);
         [JITEnabler markVAttachStarted];
+        
+        // Visible to interruptAttachingDebugSessions for exactly the
+        // duration of the call - see
+        // fix_interrupt_attaching_sessions.py. The target is stopped
+        // throughout, and that is the window in which a lifecycle
+        // transition kills the app.
+        registerAttachingDebugSessionProxy(pid, session.debugProxy);
+        
         BOOL attachSucceeded = sendDebugCommand(session.debugProxy, attachCommand, &attachResponse, &commandError);
+        
+        unregisterAttachingDebugSessionProxy(pid);
         [JITEnabler markVAttachFinished];
         CFAbsoluteTime attachCallEnd = CFAbsoluteTimeGetCurrent();
         if (!attachSucceeded) {
@@ -509,6 +519,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
 
 + (void)cancelAllDebugSessionCalls {
     cancelAllDebugSessionCalls();
+}
+
++ (void)interruptAttachingDebugSessions {
+    interruptAttachingDebugSessions();
 }
 
 + (BOOL)hasActiveDebugSessionForPID:(int32_t)pid {

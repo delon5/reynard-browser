@@ -68,6 +68,13 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // fix_defer_attaches_while_inactive.py.
         JITController.shared.applicationWillResignActive()
         
+        // Any attach still in flight has its target stopped, and iOS is
+        // about to message every extension synchronously. See
+        // fix_interrupt_attaching_sessions.py.
+        if Prefs.ExperimentalSettings.interruptsAttachingSessionsOnResign {
+            JITEnabler.interruptAttachingDebugSessions()
+        }
+        
         // REMOVED the cancelAllDebugSessionCalls() call that used to be
         // here - see fix_cancel_only_on_real_teardown.py.
         //

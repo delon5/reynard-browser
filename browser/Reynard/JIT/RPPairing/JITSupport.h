@@ -39,6 +39,18 @@ void requestDetachForAllDebugSessions(void);
 /// see fix_split_cancel_from_detach.py.
 void cancelAllDebugSessionCalls(void);
 
+/// Registers a proxy whose vAttach is still in flight, so it can be
+/// interrupted if the app resigns active mid-attach. See
+/// fix_interrupt_attaching_sessions.py.
+void registerAttachingDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy);
+void unregisterAttachingDebugSessionProxy(int32_t pid);
+
+/// Sends the GDB interrupt byte (0x03) to every in-flight attach. A
+/// target stopped by vAttach cannot answer the synchronous XPC iOS
+/// sends every extension on a lifecycle transition, and the watchdog
+/// kills the app for it.
+void interruptAttachingDebugSessions(void);
+
 /// Whether this pid still has a live runDebugService loop. Used to
 /// find processes that lost their session during suspension - see
 /// fix_reattach_orphaned_sessions_on_foreground.py.
