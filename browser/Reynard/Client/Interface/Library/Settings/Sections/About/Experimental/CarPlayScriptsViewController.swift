@@ -6,6 +6,7 @@
 //
 
 import UIKit
+import UniformTypeIdentifiers
 
 /// Manages the scripts run against pages on the CarPlay display.
 ///
@@ -13,7 +14,7 @@ import UIKit
 /// row at the bottom and swipe to delete. The difference is that
 /// editing pushes a screen rather than presenting an alert, because a
 /// UIAlertController text field cannot hold multi-line JavaScript.
-final class CarPlayScriptsViewController: SettingsTableViewController {
+final class CarPlayScriptsViewController: SettingsTableViewController, UIDocumentPickerDelegate {
     private enum Section: CaseIterable {
         case scripts
 
@@ -30,12 +31,13 @@ final class CarPlayScriptsViewController: SettingsTableViewController {
     private enum Row {
         case script(index: Int)
         case addScript
+        case importScript
     }
 
     private var scripts: [CarPlayScript] = []
 
     private var displayedRows: [Row] {
-        return scripts.indices.map { .script(index: $0) } + [.addScript]
+        return scripts.indices.map { .script(index: $0) } + [.addScript, .importScript]
     }
 
     init() {
@@ -93,6 +95,11 @@ final class CarPlayScriptsViewController: SettingsTableViewController {
         case .addScript:
             cell.textLabel?.text = NSLocalizedString("Add Script…", comment: "")
             cell.textLabel?.textColor = tableView.tintColor
+        case .importScript:
+            cell.textLabel?.text = NSLocalizedString("Import from Files…", comment: "")
+            cell.textLabel?.textColor = tableView.tintColor
+            cell.detailTextLabel?.text = NSLocalizedString("Reynard's Documents folder appears in Files", comment: "")
+            cell.detailTextLabel?.textColor = .secondaryLabel
         }
         return cell
     }
@@ -135,6 +142,8 @@ final class CarPlayScriptsViewController: SettingsTableViewController {
         case .addScript:
             let editor = CarPlayScriptEditorViewController(existingIndex: nil)
             navigationController?.pushViewController(editor, animated: true)
+        case .importScript:
+            presentScriptImporter()
         }
     }
 
@@ -143,5 +152,92 @@ final class CarPlayScriptsViewController: SettingsTableViewController {
             return SettingsSectionText()
         }
         return Section.allCases[section].text
+    }
+
+    // MARK: - Importing
+
+    /// See fix_carplay_script_import.py. Mirrors how the pairing file
+    /// is imported, so it behaves like the rest of the app.
+    private func presentScriptImporter() {
+        let picker: UIDocumentPickerViewController
+
+        if #available(iOS 14.0, *) {
+            // .plainText as well as .javaScript: a .js file written on a
+            // desktop and synced through iCloud is often typed as plain
+            // text, and would otherwise be unselectable.
+            var types: [UTType] = [.plainText, .text]
+            if let javaScript = UTType(filenameExtension: "js") {
+                types.insert(javaScript, at: 0)
+            }
+            picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
+        } else {
+            picker = UIDocumentPickerViewController(documentTypes: ["public.text"], in: .import)
+        }
+
+        picker.delegate = self
+        picker.allowsMultipleSelection = true
+        present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        var imported = 0
+
+        for url in urls {
+            // Needed for anything outside the sandbox - iCloud, another
+            // app's folder. Harmless for files already in Reynard's own
+            // Documents folder, so the same path handles both.
+            let needsScope = url.startAccessingSecurityScopedResource()
+            defer {
+                if needsScope {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            guard let body = try? String(contentsOf: url, encoding: .utf8),
+                  !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            let name = url.deletingPathExtension().lastPathComponent
+
+            // Matched on origin first, so re-importing an edited file
+            // updates the right entry even if it has since been renamed.
+            // See fix_carplay_script_origin.py.
+            //
+            // The name fallback catches entries created before origin
+            // existed. Scripts written in the editor have no origin and
+            // so are only ever matched by name - never silently replaced
+            // by an unrelated import.
+            let existing = scripts.firstIndex(where: { $0.origin == name })
+                ?? scripts.firstIndex(where: { $0.origin == nil && $0.name == name })
+
+            if let existing {
+                // The displayed name is left alone - renaming an
+                // imported script should survive re-importing it.
+                scripts[existing].body = body
+                scripts[existing].origin = name
+            } else {
+                scripts.append(CarPlayScript(name: name, body: body, isEnabled: true, origin: name))
+            }
+            imported += 1
+        }
+
+        guard imported > 0 else {
+            presentImportFailure()
+            return
+        }
+
+        Prefs.ExperimentalSettings.carPlayScripts = scripts
+        tableView.reloadData()
+    }
+
+    private func presentImportFailure() {
+        let alert = UIAlertController(
+            title: NSLocalizedString("Nothing Imported", comment: ""),
+            message: NSLocalizedString("The file could not be read, or was empty.", comment: ""),
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
+        present(alert, animated: true)
     }
 }

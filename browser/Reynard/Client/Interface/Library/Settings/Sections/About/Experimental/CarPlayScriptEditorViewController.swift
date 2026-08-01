@@ -39,11 +39,25 @@ final class CarPlayScriptEditorViewController: UIViewController {
 
         view.backgroundColor = .settingsBackground
 
+        // Done rather than Save - the script is committed in
+        // viewWillDisappear, so this just pops. See
+        // fix_carplay_script_editor_save.py.
         navigationItem.rightBarButtonItem = UIBarButtonItem(
-            barButtonSystemItem: .save,
+            barButtonSystemItem: .done,
             target: self,
-            action: #selector(save)
+            action: #selector(done)
         )
+
+        // A UITextView has no return-key dismissal - Return inserts a
+        // newline - and this one fills the screen to the bottom, so
+        // without this the keyboard cannot be put away.
+        let keyboardToolbar = UIToolbar()
+        keyboardToolbar.sizeToFit()
+        keyboardToolbar.items = [
+            UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
+            UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissKeyboard))
+        ]
+        bodyView.inputAccessoryView = keyboardToolbar
 
         nameField.placeholder = NSLocalizedString("Script name", comment: "")
         nameField.borderStyle = .roundedRect
@@ -103,17 +117,41 @@ final class CarPlayScriptEditorViewController: UIViewController {
         }
     }
 
-    @objc private func save() {
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+
+        // Saving on the way back rather than behind a button, so there
+        // is no save action to miss. See
+        // fix_carplay_script_editor_save.py.
+        save()
+    }
+
+    @objc private func done() {
+        navigationController?.popViewController(animated: true)
+    }
+
+    @objc private func dismissKeyboard() {
+        view.endEditing(true)
+    }
+
+    private func save() {
         let name = (nameField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let body = bodyView.text ?? ""
 
-        guard !name.isEmpty, !body.isEmpty else {
-            navigationController?.popViewController(animated: true)
+        // Only BOTH empty is an abandoned new script. An existing one
+        // with its body cleared is saved as cleared, which is what the
+        // action implies - discarding silently would keep the old text
+        // and look like the edit was ignored.
+        guard !name.isEmpty || !body.isEmpty else {
             return
         }
 
+        let resolvedName = name.isEmpty
+            ? NSLocalizedString("Untitled Script", comment: "")
+            : name
+
         var scripts = Prefs.ExperimentalSettings.carPlayScripts
-        let script = CarPlayScript(name: name, body: body, isEnabled: enabledSwitch.isOn)
+        let script = CarPlayScript(name: resolvedName, body: body, isEnabled: enabledSwitch.isOn)
 
         if let existingIndex, scripts.indices.contains(existingIndex) {
             scripts[existingIndex] = script
@@ -122,6 +160,5 @@ final class CarPlayScriptEditorViewController: UIViewController {
         }
 
         Prefs.ExperimentalSettings.carPlayScripts = scripts
-        navigationController?.popViewController(animated: true)
     }
 }

@@ -25,9 +25,40 @@ struct CarPlayScript: Codable, Equatable {
     var body: String
     var isEnabled: Bool
 
-    init(name: String, body: String, isEnabled: Bool) {
+    /// The filename an imported script came from, without its
+    /// extension. Never shown or edited - it exists so that
+    /// re-importing an edited file updates the right entry even after
+    /// the script has been renamed. See
+    /// fix_carplay_script_origin.py.
+    ///
+    /// nil for scripts written in the editor, which is deliberate: they
+    /// are then never silently overwritten by an import that happens to
+    /// share their name.
+    var origin: String?
+
+    init(name: String, body: String, isEnabled: Bool, origin: String? = nil) {
         self.name = name
         self.body = body
         self.isEnabled = isEnabled
+        self.origin = origin
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case body
+        case isEnabled
+        case origin
+    }
+
+    /// Explicit rather than synthesised, because Swift treats a missing
+    /// key as a decoding ERROR even for an optional. Without
+    /// decodeIfPresent here, every script saved before `origin` existed
+    /// would fail to decode and silently disappear on next launch.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        body = try container.decode(String.self, forKey: .body)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        origin = try container.decodeIfPresent(String.self, forKey: .origin)
     }
 }
