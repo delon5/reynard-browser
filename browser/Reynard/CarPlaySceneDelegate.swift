@@ -292,6 +292,7 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         self.session = session
 
         session.load(Self.homepage)
+        logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
     
     // MARK: - ProgressDelegate
@@ -331,6 +332,5 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
 
         installTouchProbe()
 
-        logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
 }
