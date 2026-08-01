@@ -10,17 +10,18 @@ index c850b03ad280..e7bd51a1dd09 100644
  
  export class GeckoViewContent extends GeckoViewModule {
    onInit() {
-@@ -14,6 +15,9 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -14,6 +15,10 @@ export class GeckoViewContent extends GeckoViewModule {
        "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
        "GeckoView:RestoreState",
        "GeckoView:ContainsFormData",
 +      "GeckoView:Autofill:FillOneTimeCode",
 +      "GeckoView:GetFocusedInputMetrics",
 +      "GeckoView:GetSafeAreaInsetUsage",
++      "GeckoView:RunUserScript",
        "GeckoView:ProcessBackPressed",
        "GeckoView:ScrollBy",
        "GeckoView:ScrollTo",
-@@ -279,6 +283,15 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -279,6 +284,18 @@ export class GeckoViewContent extends GeckoViewModule {
        case "GeckoView:ContainsFormData":
          this._containsFormData(aCallback);
          break;
@@ -33,10 +34,13 @@ index c850b03ad280..e7bd51a1dd09 100644
 +      case "GeckoView:GetSafeAreaInsetUsage":
 +        this._getSafeAreaInsetUsage(aCallback);
 +        break;
++      case "GeckoView:RunUserScript":
++        this._runUserScript(aData, aCallback);
++        break;
        case "GeckoView:GetWebCompatInfo":
          this._getWebCompatInfo(aCallback);
          break;
-@@ -455,6 +468,56 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -455,6 +472,68 @@ export class GeckoViewContent extends GeckoViewModule {
      aCallback.onSuccess(await this.actor.containsFormData());
    }
  
@@ -87,6 +91,18 @@ index c850b03ad280..e7bd51a1dd09 100644
 +      aCallback.onSuccess(await this.actor.sendQuery("GetSafeAreaInsetUsage"));
 +    } catch (error) {
 +      aCallback.onError(`Cannot get safe area inset usage, error: ${error}`);
++    }
++  }
++
++  // See fix_carplay_user_script.py. aData carries the script text, so
++  // what runs is decided by the caller rather than compiled in.
++  async _runUserScript(aData, aCallback) {
++    try {
++      aCallback.onSuccess(
++        await this.actor.sendQuery("RunUserScript", { script: aData?.script })
++      );
++    } catch (error) {
++      aCallback.onError(`Cannot run user script, error: ${error}`);
 +    }
 +  }
 +

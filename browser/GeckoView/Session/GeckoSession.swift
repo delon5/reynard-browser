@@ -430,6 +430,29 @@ public class GeckoSession {
         return usesSafeAreaInset
     }
     
+    /// Runs a script against this session's page, as page script.
+    /// Returns nil if the query failed, or an error string if the
+    /// script itself threw. See fix_carplay_user_script.py.
+    ///
+    /// Generic by design, but only the CarPlay session calls it -
+    /// ordinary tabs get no injection at all.
+    public func runUserScript(_ script: String) async -> String? {
+        let response = try? await dispatcher.query(
+            type: "GeckoView:RunUserScript",
+            message: ["script": script]
+        )
+        
+        guard let values = response as? [AnyHashable: Any] else {
+            return "no response"
+        }
+        
+        if let ok = values["ok"] as? Bool, ok {
+            return nil
+        }
+        
+        return (values["error"] as? String) ?? "unknown error"
+    }
+    
     // MARK: - Selection Actions
     
     public func executeSelectionAction(actionId: String, commandId: String) {

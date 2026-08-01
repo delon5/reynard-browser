@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15bed3e..53549f22f8d5 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,177 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,212 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -58,6 +58,41 @@ index 9ca6e15bed3e..53549f22f8d5 100644
 +  // whose only safe-area CSS lives in an inaccessible sheet, which is
 +  // preferred over guessing true and putting a reserved strip behind
 +  // the pill on pages that do not want one.
++  // Runs a script against the page, as page script rather than chrome
++  // code. See fix_carplay_user_script.py.
++  //
++  // Chrome code cannot eval directly into a content window, so this
++  // uses a sandbox with the content window as its principal - the same
++  // shape Gecko uses for WebExtension content scripts.
++  //
++  // sandboxPrototype means the script sees the page's own globals.
++  // wantXrays: false is required for that: with Xrays on it would see
++  // Gecko's privileged view of the DOM instead, and site-specific
++  // properties would be invisible.
++  runUserScript(script) {
++    const { contentWindow } = this;
++    if (!contentWindow) {
++      return { ok: false, error: "no content window" };
++    }
++
++    if (typeof script !== "string" || !script.length) {
++      return { ok: false, error: "empty script" };
++    }
++
++    try {
++      const sandbox = Cu.Sandbox(contentWindow, {
++        sandboxPrototype: contentWindow,
++        wantXrays: false,
++      });
++      Cu.evalInSandbox(script, sandbox);
++      return { ok: true };
++    } catch (e) {
++      // Returned rather than swallowed: a silent failure here would be
++      // indistinguishable from a script that ran and did nothing.
++      return { ok: false, error: String(e) };
++    }
++  }
++
 +  getSafeAreaInsetUsage() {
 +    const { contentWindow } = this;
 +    const document = contentWindow?.document;
@@ -180,7 +215,7 @@ index 9ca6e15bed3e..53549f22f8d5 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +355,12 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +390,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -189,6 +224,9 @@ index 9ca6e15bed3e..53549f22f8d5 100644
 +      }
 +      case "GetSafeAreaInsetUsage": {
 +        return this.getSafeAreaInsetUsage();
++      }
++      case "RunUserScript": {
++        return this.runUserScript(message.data?.script);
 +      }
      }
  
