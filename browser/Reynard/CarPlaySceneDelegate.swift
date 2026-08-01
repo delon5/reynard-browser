@@ -263,6 +263,12 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         // played most recently. See fix_carplay_media_session.py.
         session.mediaSessionDelegate = SystemMediaSession.shared
         
+        // Outranks the selected tab for the transport controls - the car
+        // display cannot be touched, so if its video does not own them
+        // there is no way to control it. See
+        // fix_carplay_media_priority.py.
+        SystemMediaSession.shared.prioritySession = session
+        
         // Allows autoplay on this session only, so the profile-wide
         // media.autoplay.default pref can stay blocking. See
         // fix_carplay_autoplay_permission.py.

@@ -47,6 +47,15 @@ final class SystemMediaSession: MediaSessionDelegate {
     
     private weak var activeSession: GeckoSession?
     private weak var selectedSession: GeckoSession?
+    
+    /// A session that outranks the selected tab for the transport
+    /// controls. The CarPlay session claims this. See
+    /// fix_carplay_media_priority.py.
+    ///
+    /// Weak, so a disconnected car display does not keep a Gecko
+    /// session and its content process alive - and the exemption stops
+    /// applying by itself once it is gone.
+    weak var prioritySession: GeckoSession?
     private let nowPlayingCenter = MPNowPlayingInfoCenter.default()
     private let commandCenter = MPRemoteCommandCenter.shared()
     private var sessionStates: [ObjectIdentifier: SessionState] = [:]
@@ -151,7 +160,12 @@ final class SystemMediaSession: MediaSessionDelegate {
         playbackHistory.removeAll { $0 == identifier }
         playbackHistory.append(identifier)
         
-        if let selectedSession,
+        // The priority session is exempt - it is not a tab, so it can
+        // never be the selected one and could otherwise never take the
+        // controls while anything played on the phone. See
+        // fix_carplay_media_priority.py.
+        if session !== prioritySession,
+           let selectedSession,
            selectedSession !== session,
            let selectedState = sessionStates[ObjectIdentifier(selectedSession)],
            selectedState.playbackState != .none {
@@ -191,6 +205,18 @@ final class SystemMediaSession: MediaSessionDelegate {
         selectedSession = session
         guard let state = sessionStates[ObjectIdentifier(session)],
               state.playbackState != .none else {
+            return
+        }
+        
+        // Choosing a tab does not take the controls back from a
+        // priority session that is playing - the car display would
+        // otherwise lose them the moment the phone was touched, and it
+        // has no other way to be controlled. See
+        // fix_carplay_media_priority.py.
+        if let prioritySession,
+           prioritySession !== session,
+           let priorityState = sessionStates[ObjectIdentifier(prioritySession)],
+           priorityState.playbackState == .playing {
             return
         }
         
