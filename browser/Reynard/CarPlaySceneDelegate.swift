@@ -143,6 +143,22 @@ private final class CarPlayBrowserViewController: UIViewController {
         // Assigning the session is what embeds its window view.
         // GeckoView.layoutSubviews then calls updateViewportWidth, so
         // the page adapts to the car display without anything extra.
+        // The car display's scale, set BEFORE the session is
+        // assigned so it is in place when Gecko creates its
+        // surface. See fix_carplay_scale.py.
+        //
+        // UIScreen.main always reports the iPhone's display, so
+        // anything reaching for it while running on the car
+        // screen gets the wrong value - 3.0 on this hardware
+        // against CarPlay's 2.0, which is close to the ratio the
+        // page is being painted at.
+        if let carScreen = view.window?.screen {
+            geckoView.contentScaleFactor = carScreen.scale
+            geckoView.layer.contentsScale = carScreen.scale
+        }
+
+        logger(String(format: "CarPlay: scales - view %.1f, car screen %.1f, UIScreen.main %.1f", geckoView.contentScaleFactor, view.window?.screen.scale ?? 0, UIScreen.main.scale))
+
         geckoView.session = session
         self.session = session
 
