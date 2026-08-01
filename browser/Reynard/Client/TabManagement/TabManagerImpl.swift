@@ -157,7 +157,7 @@ final class TabManagerImplementation: NSObject, TabManager {
             return
         }
         
-        NSLog("[TabSleepDebug] evictSessionIfNeeded: SLEEPING tab %@ (url=%@, suppressInitialNavigation was %@)", tab.id.uuidString, url, String(tab.state.suppressInitialNavigation))
+        logger(String(format: "tabSleep: sleeping tab %@ (url=%@, suppressInitialNavigation was %@)", tab.id.uuidString, url, String(tab.state.suppressInitialNavigation)))
         sessionManager.close(tab.session)
         tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
         tab.state.restoreState = .pending(url)
@@ -593,11 +593,11 @@ final class TabManagerImplementation: NSObject, TabManager {
         
         let tab = tabs(for: mode)[index]
         guard case let .pending(url) = tab.state.restoreState else {
-            NSLog("[TabSleepDebug] loadRestoredURLIfNeeded: tab at index %d has no pending restore (restoreState=%@) — nothing to do", index, String(describing: tab.state.restoreState))
+            logger(String(format: "tabRestore: tab at index %d has no pending restore (restoreState=%@) - nothing to do", index, String(describing: tab.state.restoreState)))
             return
         }
         
-        NSLog("[TabSleepDebug] loadRestoredURLIfNeeded: RESTORING tab %@ (url=%@) — calling loadURL now", tab.id.uuidString, url)
+        logger(String(format: "tabRestore: RESTORING tab %@ (url=%@) - calling loadURL now", tab.id.uuidString, url))
         tab.state.restoreState = .none
         tab.state.suppressInitialNavigation = false
         loadURL(url, in: tab)
@@ -1289,11 +1289,11 @@ extension TabManagerImplementation: NavigationDelegate {
         if let normalizedURL,
            normalizedURL.hasPrefix("about:blank"),
            (tab.state.suppressInitialNavigation || shouldPreserveDisplayedURL) {
-            NSLog("[TabSleepDebug] onLocationChange: SUPPRESSED about:blank for tab %@ (suppressInitialNavigation=%@, shouldPreserveDisplayedURL=%@)", tab.id.uuidString, String(tab.state.suppressInitialNavigation), String(shouldPreserveDisplayedURL))
+            logger(String(format: "tabLocation: suppressed about:blank for tab %@ (suppressInitialNavigation=%@, shouldPreserveDisplayedURL=%@)", tab.id.uuidString, String(tab.state.suppressInitialNavigation), String(shouldPreserveDisplayedURL)))
             return
         }
         if let normalizedURL {
-            NSLog("[TabSleepDebug] onLocationChange: tab %@ location changed to %@ (not suppressed)", tab.id.uuidString, normalizedURL)
+            logger(String(format: "tabLocation: tab %@ location changed to %@ (not suppressed)", tab.id.uuidString, normalizedURL))
         }
         
         if let normalizedURL, !normalizedURL.isEmpty {
