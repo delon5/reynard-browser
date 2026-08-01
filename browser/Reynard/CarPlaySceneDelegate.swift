@@ -19,6 +19,14 @@ import UIKit
 /// until that is known.
 @available(iOS 14.0, *)
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
+    /// The car browser's session, so the phone side can load URLs into
+    /// it. See fix_send_to_carplay.py.
+    ///
+    /// Weak deliberately - the session is owned by the view controller,
+    /// and a strong reference here would keep a Gecko session and its
+    /// content process alive after the car is disconnected.
+    static weak var currentSession: GeckoSession?
+
     private var interfaceController: CPInterfaceController?
     private var carWindow: CPWindow?
     
@@ -58,6 +66,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         from window: CPWindow
     ) {
         self.interfaceController = nil
+        CarPlaySceneDelegate.currentSession = nil
         self.carWindow = nil
         logger("CarPlay: disconnected")
     }
@@ -229,6 +238,7 @@ private final class CarPlayBrowserViewController: UIViewController {
         logger(String(format: "CarPlay: scales - carTraitCollection %.1f, window screen %.1f, UIScreen.main %.1f", interfaceController?.carTraitCollection.displayScale ?? 0, view.window?.screen.scale ?? 0, UIScreen.main.scale))
 
         geckoView.session = session
+        CarPlaySceneDelegate.currentSession = session
 
         // The scale has to go on the ENGINE VIEW, not the
         // GeckoView wrapper. See

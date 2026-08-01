@@ -43,7 +43,14 @@ extension BrowserViewController {
             return
         }
         
-        let activityController = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        // The activity hides itself when CarPlay is disconnected - see
+        // fix_send_to_carplay.py - so it is safe to offer always.
+        var applicationActivities: [UIActivity] = []
+        if #available(iOS 14.0, *) {
+            applicationActivities.append(CarPlaySendActivity())
+        }
+
+        let activityController = UIActivityViewController(activityItems: [url], applicationActivities: applicationActivities)
         if let popover = activityController.popoverPresentationController {
             let sourceView = browserChrome.sharePopoverSourceView()
             popover.sourceView = sourceView
