@@ -216,6 +216,22 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         if carScale > 0 {
             GeckoViewSetBackingScaleOverride(0)
         }
+        
+        // Without this the session is a background tab as far as Gecko
+        // is concerned - timers throttled, media suspended after a
+        // delay - which is why video stopped after 30-60 seconds. See
+        // fix_carplay_session_active.py.
+        //
+        // SessionManager does this for every session it owns, and the
+        // CarPlay session deliberately does not go through it, so it was
+        // never activated at all.
+        //
+        // Both signals: active governs throttling and media suspension,
+        // focused governs input and which document Gecko treats as
+        // frontmost. The car display shows this session and nothing
+        // else, so both are true.
+        session.setActive(true)
+        session.setFocused(true)
 
         // Assigning the session is what embeds its window view.
         // GeckoView.layoutSubviews then calls updateViewportWidth, so
