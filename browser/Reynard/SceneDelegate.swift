@@ -125,7 +125,36 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // forever. This is the first point the device is reachable
         // again. See
         // fix_reattach_orphaned_sessions_on_foreground.py.
-        JITController.shared.reattachOrphanedProcesses()
+        // CHANGED - delayed rather than immediate. See
+        // fix_defer_reattach_past_transition.py.
+        //
+        // This runs inside the foreground lifecycle cascade, during
+        // which iOS messages every extension SYNCHRONOUSLY. vAttach
+        // stops its target for ~1013ms, and a stopped extension cannot
+        // reply - so an attach started here blocks the main thread and
+        // the watchdog kills the app. Seen exactly that way: re-attach
+        // at 03:38:21.465, attach at .554, hang watchdog at 03:38:23.
+        //
+        // Two seconds puts the attaches past the cascade. A process
+        // that has run interpreted since the last suspension can wait
+        // two more seconds for JIT.
+        let reattachApplication = UIApplication.shared
+        var reattachTask = UIBackgroundTaskIdentifier.invalid
+        reattachTask = reattachApplication.beginBackgroundTask(withName: "JITReattachDelay") {
+            if reattachTask != .invalid {
+                reattachApplication.endBackgroundTask(reattachTask)
+                reattachTask = .invalid
+            }
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            JITController.shared.reattachOrphanedProcesses()
+            
+            if reattachTask != .invalid {
+                reattachApplication.endBackgroundTask(reattachTask)
+                reattachTask = .invalid
+            }
+        }
     }
     
     func sceneDidEnterBackground(_ scene: UIScene) {
