@@ -223,6 +223,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         switch sectionRows[indexPath.row] {
         case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner,
+             .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
              .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
             break
