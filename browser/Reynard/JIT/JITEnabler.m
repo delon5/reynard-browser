@@ -473,10 +473,25 @@ static void jitHangBacktraceHandler(int signalNumber) {
             // a second, concurrent call could still be legitimately
             // using this same provider even after a third one
             // supersedes it, which this check alone couldn't detect.
+            // CHANGED - no longer frees. See
+            // fix_provider_use_after_free.py.
+            //
+            // The comment above states the precondition: this free is
+            // only safe while a global in-flight guard guarantees one
+            // enableJITForPID: call at a time. That guard is now
+            // per-pid, so concurrent attaches share this provider and
+            // one could free a pointer another is still using -
+            // observed as EXC_BAD_ACCESS on ProviderQueue at address
+            // 0x7466654c, the ASCII bytes "Left".
+            //
+            // invalidateSharedProviderAfterTimeout below already makes
+            // exactly this trade for exactly this reason: "a small,
+            // bounded memory leak (one DeviceProvider struct) ... in
+            // exchange for guaranteed safety - preferred over risking a
+            // crash to save that memory."
             dispatch_sync(self.providerQueue, ^{
                 if (self.sharedProvider != provider) {
-                    logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) freeing orphaned provider - superseded by a newer attempt since this call started", pid]);
-                    freeDeviceProvider(provider);
+                    logger([NSString stringWithFormat:@"enableJITForPID: (pid %d) provider was superseded during this call - leaking it deliberately, another concurrent attach may still hold it", pid]);
                 }
             });
         }

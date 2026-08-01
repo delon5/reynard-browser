@@ -96,7 +96,26 @@ private final class CarPlayBrowserViewController: UIViewController {
     /// Where the car browser starts. Deliberately something simple and
     /// obviously rendered, so a blank screen means a rendering problem
     /// rather than a slow page.
-    private static let homepage = "https://example.com"
+    /// A full-bleed test page - see
+    /// fix_carplay_test_homepage.py.
+    ///
+    /// example.com is a small centred block, which cannot
+    /// distinguish a correctly sized surface from an
+    /// undersized one on a mostly-empty screen. This should
+    /// reach every edge: if a corner label is missing, the
+    /// surface is undersized.
+    ///
+    /// The centre readout shows what the PAGE believes the
+    /// viewport to be, which is worth comparing against the
+    /// CarPlay: connected line - ScreenHelperUIKit still
+    /// reports a single 3x screen to Gecko's layout, so they
+    /// may disagree even once rendering is correct.
+    ///
+    /// A data: URL so there is no network dependency: a
+    /// failed load would look identical to a rendering fault.
+    private static let homepage = "data:text/html," + """
+<html id='carplay-scale-test'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;overflow:hidden'><div style='position:fixed;inset:0;background:linear-gradient(135deg,#c0392b,#2980b9);font:700 14px -apple-system,sans-serif;color:#fff'><div style='position:absolute;top:4px;left:6px'>TOP LEFT</div><div style='position:absolute;top:4px;right:6px'>TOP RIGHT</div><div style='position:absolute;bottom:4px;left:6px'>BOTTOM LEFT</div><div style='position:absolute;bottom:4px;right:6px'>BOTTOM RIGHT</div><div id='d' style='position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:22px'></div></div><script>function u(){document.getElementById('d').textContent=innerWidth+' x '+innerHeight+'  dpr '+devicePixelRatio}u();addEventListener('resize',u)</script></body></html>
+"""
 
     override func viewDidLoad() {
         super.viewDidLoad()
