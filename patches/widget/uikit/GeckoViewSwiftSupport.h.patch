@@ -57,7 +57,7 @@ index e68fca9134c0..79b39c6a5ca3 100644
  - (void)close;
  @end
  
-@@ -62,7 +95,15 @@
+@@ -62,7 +95,18 @@
  MOZ_BEGIN_EXTERN_C
  
  MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(

@@ -808,7 +808,7 @@ index ffb8da937efa..31777e732af6 100644
      // TODO(m_kato):
      // It is unnecessary to call reloadInputViews with changingEnabledState if
      // virtual keyboard is disappeared.
-@@ -1050,6 +1277,25 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1050,6 +1277,41 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return mInputContext;
  }
  
@@ -850,7 +850,7 @@ index ffb8da937efa..31777e732af6 100644
  widget::TextEventDispatcherListener*
  nsWindow::GetNativeTextEventDispatcherListener() {
    return mTextInputHandler;
-@@ -1110,6 +1356,8 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1110,6 +1356,27 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
 -  return [UIScreen mainScreen].scale;
 +  // ADDED - see fix_carplay_backing_scale_override.py.
 +  //
