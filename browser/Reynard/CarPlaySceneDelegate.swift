@@ -5,6 +5,7 @@
 //  Added by fix_carplay_probe_scene.py.
 //
 
+import AVFoundation
 import CarPlay
 import GeckoView
 import UIKit
@@ -57,6 +58,8 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         window.rootViewController = browser
         window.makeKeyAndVisible()
         
+        configureAudioSessionForCarPlay()
+        
         logCarPlayGeometry(scene: templateApplicationScene, window: window)
     }
     
@@ -67,6 +70,11 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     ) {
         self.interfaceController = nil
         CarPlaySceneDelegate.currentSession = nil
+        
+        // Released with notifyOthersOnDeactivation, so whatever was
+        // playing before - Spotify, a podcast - resumes by itself rather
+        // than staying stopped. See fix_carplay_audio_route.py.
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         self.carWindow = nil
         logger("CarPlay: disconnected")
     }
@@ -74,6 +82,32 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// UIScreen.main always reports the iPhone's display - confirmed by
     /// an Apple engineer on the developer forums. The car screen comes
     /// from the scene's own carWindow.
+    /// Claims the output route so audio reaches the car.
+    ///
+    /// Reynard otherwise never configures an audio session - the only
+    /// setCategory call in the app is in BackgroundAudioKeepAlive, which
+    /// defaults off - so it runs with the system default of
+    /// .soloAmbient. That still produces sound from the phone speaker,
+    /// which is why playback appeared to work, but it does not claim the
+    /// route and so never reaches a connected car.
+    ///
+    /// Deliberately without .mixWithOthers: watching a video while music
+    /// continues underneath is not the intent, so other audio is
+    /// interrupted as a video app should. The keepalive mixes precisely
+    /// because its job is to be inaudible; this is the opposite case.
+    ///
+    /// See fix_carplay_audio_route.py.
+    private func configureAudioSessionForCarPlay() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+            logger("CarPlay: audio session claimed for playback")
+        } catch {
+            logger(String(format: "CarPlay: audio session failed - %@", error.localizedDescription))
+        }
+    }
+    
     private func logCarPlayGeometry(scene: CPTemplateApplicationScene, window: CPWindow) {
         let screen = scene.carWindow.screen
         let insets = window.safeAreaInsets
