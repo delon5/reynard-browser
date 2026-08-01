@@ -2,11 +2,24 @@ diff --git a/widget/uikit/nsWindow.mm b/widget/uikit/nsWindow.mm
 index ffb8da937efa..31777e732af6 100644
 --- a/widget/uikit/nsWindow.mm
 +++ b/widget/uikit/nsWindow.mm
-@@ -26,6 +26,7 @@
+@@ -26,6 +26,20 @@
  
  #include "nsWidgetsCID.h"
  #include "nsGfxCIID.h"
 +#include "nsLookAndFeel.h"
++
++// Supplies the backing scale for the NEXT window created. See
++// fix_carplay_compositor_scale.py.
++//
++// Declared at file scope, ahead of nsWindow::Create, because
++// Create sets the compositor's backing scale and needs this
++// value - a declaration further down would not compile.
++//
++// A global is safe because window creation is synchronous on
++// the main thread: the Swift side sets it immediately before
++// GeckoViewOpenWindow and clears it immediately after. Unset
++// by default, so the phone path is unchanged.
++static CGFloat sBackingScaleOverride = 0;
  
  #include "gfxPlatform.h"
  #include "gfxQuartzSurface.h"
@@ -632,6 +645,27 @@ index ffb8da937efa..31777e732af6 100644
    // Set defaults which can be overriden from aInitData in BaseCreate
    mWindowType = WindowType::TopLevel;
    mBorderStyle = BorderStyle::Default;
+@@ -804,6 +918,19 @@
+ 
+-  CGFloat scaleFactor = [UIScreen mainScreen].scale;
++  // CHANGED - the compositor's backing scale, and the reason
++  // every earlier fix failed. See
++  // fix_carplay_compositor_scale.py.
++  //
++  // This is a SEPARATE read from the one in
++  // BackingScaleFactor, and it is the one that matters: it
++  // sets the scale directly on the native layer root at window
++  // creation. Apple's CarPlay guide notes UIScreen.main always
++  // reports the iPhone's display, so a window created for a 2x
++  // car screen had its compositor told 3x and rendered at two
++  // thirds.
++  CGFloat scaleFactor = sBackingScaleOverride > 0
++                            ? sBackingScaleOverride
++                            : [UIScreen mainScreen].scale;
+ 
+   mNativeLayerRoot =
+       NativeLayerRootCA::CreateForCALayer([mNativeView rootCALayer]);
+   mNativeLayerRoot->SetBackingScale(scaleFactor);
 @@ -826,6 +940,8 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    }
    mTextInputHandler = nullptr;
@@ -808,7 +842,7 @@ index ffb8da937efa..31777e732af6 100644
      // TODO(m_kato):
      // It is unnecessary to call reloadInputViews with changingEnabledState if
      // virtual keyboard is disappeared.
-@@ -1050,6 +1277,41 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1050,6 +1277,39 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return mInputContext;
  }
  
@@ -822,8 +856,6 @@ index ffb8da937efa..31777e732af6 100644
 +//
 +// A global is safe because window creation is synchronous on the main
 +// thread: set, open, clear. Nothing else observes it in between.
-+static CGFloat sBackingScaleOverride = 0;
-+
 +void GeckoViewSetBackingScaleOverride(CGFloat aScale) {
 +  sBackingScaleOverride = aScale;
 +}
