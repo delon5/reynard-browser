@@ -72,7 +72,14 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // about to message every extension synchronously. See
         // fix_interrupt_attaching_sessions.py.
         if Prefs.ExperimentalSettings.interruptsAttachingSessionsOnResign {
-            JITEnabler.interruptAttachingDebugSessions()
+            // REMOVED - see fix_delay_cancel_after_detach.py.
+            //
+            // This logged "0 attach(es) in flight, interrupted 0" on
+            // every one of its twenty-odd invocations, so it never had
+            // anything to interrupt and has never done anything. The
+            // registry and the C function remain, unreferenced, so
+            // restoring the experiment is one line.
+            _ = ()
         }
         
         // REMOVED the cancelAllDebugSessionCalls() call that used to be
@@ -139,7 +146,46 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // own; the debug loops do the actual detaching on their own
         // threads.
         JITEnabler.requestDetachForAllDebugSessions()
-        JITEnabler.cancelAllDebugSessionCalls()
+        
+        // CHANGED - cancellation is delayed rather than immediate. See
+        // fix_delay_cancel_after_detach.py.
+        //
+        // These two used to be adjacent, and the log showed cancellation
+        // firing 286 MICROSECONDS after the detach request, followed
+        // immediately by twelve "Detach failed" lines and a watchdog
+        // kill two seconds later. No loop can notice a flag in that
+        // time, so cancellation always won and every detach went out
+        // over a connection whose reader had just been aborted.
+        //
+        // Delaying it inverts that: loops between iterations see the
+        // flag, send D, exit and unregister themselves, and only those
+        // genuinely stuck inside a blocking read are still registered
+        // when cancellation runs - which is the case cancellation
+        // exists for.
+        //
+        // Wrapped in a background task so iOS grants the runtime rather
+        // than suspending mid-wait, the same way
+        // sleepBackgroundedTabsWithTimeBudget does.
+        let application = UIApplication.shared
+        var cancelTaskIdentifier = UIBackgroundTaskIdentifier.invalid
+        cancelTaskIdentifier = application.beginBackgroundTask(withName: "JITDetachDrain") {
+            if cancelTaskIdentifier != .invalid {
+                application.endBackgroundTask(cancelTaskIdentifier)
+                cancelTaskIdentifier = .invalid
+            }
+        }
+        
+        // One second: continue iterations were taking 30-60ms in the
+        // captures, so this is ample for a loop between iterations and
+        // still well inside the background window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            JITEnabler.cancelAllDebugSessionCalls()
+            
+            if cancelTaskIdentifier != .invalid {
+                application.endBackgroundTask(cancelTaskIdentifier)
+                cancelTaskIdentifier = .invalid
+            }
+        }
         
         sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
         flushNavigationHistoryInBackground()
