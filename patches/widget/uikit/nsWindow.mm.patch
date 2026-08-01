@@ -812,6 +812,22 @@ index ffb8da937efa..31777e732af6 100644
    return mInputContext;
  }
  
++// The override consulted by BackingScaleFactor's fallback below, and
++// the exported setter Swift calls before creating a window on a
++// display whose scale differs from the phone's. See
++// fix_carplay_backing_scale_override.py.
++//
++// Declared HERE, above BackingScaleFactor, because C++ requires it -
++// placing it after would not compile.
++//
++// A global is safe because window creation is synchronous on the main
++// thread: set, open, clear. Nothing else observes it in between.
++static CGFloat sBackingScaleOverride = 0;
++
++void GeckoViewSetBackingScaleOverride(CGFloat aScale) {
++  sBackingScaleOverride = aScale;
++}
++
 +void nsWindow::SetCompositorWidgetDelegate(
 +    mozilla::widget::CompositorWidgetDelegate* aDelegate) {
 +  if (aDelegate) {
@@ -835,7 +851,27 @@ index ffb8da937efa..31777e732af6 100644
  nsWindow::GetNativeTextEventDispatcherListener() {
    return mTextInputHandler;
 @@ -1110,6 +1356,8 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
-   return [UIScreen mainScreen].scale;
+-  return [UIScreen mainScreen].scale;
++  // ADDED - see fix_carplay_backing_scale_override.py.
++  //
++  // This fallback runs when mNativeView is nil, which is exactly the
++  // window-creation moment: GeckoViewOpenWindow calls SetIOSView AFTER
++  // ww->OpenWindow, so the compositor is sized before any view exists.
++  //
++  // [UIScreen mainScreen] always reports the iPhone's display - Apple's
++  // CarPlay guide is explicit about that - so a window created for a 2x
++  // car screen was sized at the phone's 3x and painted roughly two
++  // thirds of it. Setting a scale on a view afterwards is too late;
++  // confirmed on device, the engine view read 2.0 and the page still
++  // rendered at two thirds.
++  //
++  // Only this fallback path is affected. The mNativeView branch above
++  // is untouched, and the override is unset by default, so the phone
++  // path is unchanged.
++  if (sBackingScaleOverride > 0) {
++    return sBackingScaleOverride;
++  }
++  return [UIScreen mainScreen].scale;
  }
  
 +uint32_t nsWindow::GetMaxTouchPoints() const { return 5; }

@@ -7,6 +7,7 @@ index e63e3e74426b..e88663e8a070 100644
  MainProcessInit
  ChildProcessInit
 +ReportJITStatusForChild
++GeckoViewSetBackingScaleOverride
  GeckoViewOpenWindow
  #endif
  #ifdef ANDROID

@@ -157,7 +157,25 @@ private final class CarPlayBrowserViewController: UIViewController {
 
     private func startSession() {
         let session = GeckoSession()
+
+        // The car display's scale must be supplied BEFORE the window is
+        // created - see fix_carplay_backing_scale_override.py. The
+        // compositor is sized inside ww->OpenWindow, before SetIOSView
+        // runs, so nsWindow::BackingScaleFactor falls back to
+        // [UIScreen mainScreen].scale, which always reports the
+        // iPhone's display.
+        //
+        // Cleared immediately afterwards so nothing else is affected.
+        let carScale = interfaceController?.carTraitCollection.displayScale ?? 0
+        if carScale > 0 {
+            GeckoViewSetBackingScaleOverride(carScale)
+        }
+
         session.open()
+
+        if carScale > 0 {
+            GeckoViewSetBackingScaleOverride(0)
+        }
 
         // Assigning the session is what embeds its window view.
         // GeckoView.layoutSubviews then calls updateViewportWidth, so
