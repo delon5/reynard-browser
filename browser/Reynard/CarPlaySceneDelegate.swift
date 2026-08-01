@@ -41,9 +41,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         let mapTemplate = CPMapTemplate()
         interfaceController.setRootTemplate(mapTemplate, animated: false, completion: nil)
         
-        let probe = CarPlayProbeViewController()
-        probe.templateApplicationScene = templateApplicationScene
-        window.rootViewController = probe
+        // CHANGED - the browser replaces the geometry probe. See
+        // fix_carplay_browser_view.py.
+        let browser = CarPlayBrowserViewController()
+        window.rootViewController = browser
         window.makeKeyAndVisible()
         
         logCarPlayGeometry(scene: templateApplicationScene, window: window)
@@ -72,56 +73,62 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                       insets.top, insets.left, insets.bottom, insets.right))
     }
 }
-
-/// Shows the car display's geometry on the car screen itself, so it can
-/// be read without a log capture.
+/// An independent browser on the car display.
+///
+/// Creates its OWN GeckoSession rather than going through
+/// SessionManager and the tab manager. That is deliberate: CarPlay can
+/// connect before the phone's window scene exists, and reaching through
+/// BrowserViewController for a SessionManager would be nil in that
+/// case. It also makes the car browser genuinely independent of the
+/// phone, which was the option chosen over mirroring.
+///
+/// The cost is no delegates - no title reporting, history, downloads or
+/// error pages. Loading and displaying a page needs none of them, and
+/// wiring them up is step three, once rendering is confirmed.
 @available(iOS 14.0, *)
-private final class CarPlayProbeViewController: UIViewController {
-    weak var templateApplicationScene: CPTemplateApplicationScene?
-    
-    private let label = UILabel()
-    
+private final class CarPlayBrowserViewController: UIViewController {
+    private let geckoView = GeckoView(frame: .zero)
+    private var session: GeckoSession?
+
+    /// Where the car browser starts. Deliberately something simple and
+    /// obviously rendered, so a blank screen means a rendering problem
+    /// rather than a slow page.
+    private static let homepage = "https://example.com"
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        
+
         view.backgroundColor = .black
-        
-        label.numberOfLines = 0
-        label.textColor = .white
-        label.textAlignment = .center
-        label.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(label)
-        
-        // Against the safe area rather than bounds: CarPlay chrome
-        // differs by head unit and the insets are how that is
-        // communicated.
+
+        geckoView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(geckoView)
+
+        // Against the safe area rather than bounds. The simulator
+        // reports zero insets, but real head units do not always, and a
+        // page drawn under CarPlay's own chrome would be partly
+        // unreadable.
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            label.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            label.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor)
+            geckoView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            geckoView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            geckoView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            geckoView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)
         ])
+
+        startSession()
     }
-    
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        refreshText()
-    }
-    
-    private func refreshText() {
-        let insets = view.safeAreaInsets
-        var lines = ["Reynard CarPlay probe", ""]
-        
-        if let screen = templateApplicationScene?.carWindow.screen {
-            lines.append(String(format: "screen  %.0f x %.0f @%.1fx",
-                                screen.bounds.width, screen.bounds.height, screen.scale))
-        }
-        
-        lines.append(String(format: "view    %.0f x %.0f", view.bounds.width, view.bounds.height))
-        lines.append(String(format: "insets  t%.0f l%.0f b%.0f r%.0f",
-                            insets.top, insets.left, insets.bottom, insets.right))
-        lines.append(String(format: "idiom   %d", traitCollection.userInterfaceIdiom.rawValue))
-        
-        label.text = lines.joined(separator: "\n")
+
+    private func startSession() {
+        let session = GeckoSession()
+        session.open()
+
+        // Assigning the session is what embeds its window view.
+        // GeckoView.layoutSubviews then calls updateViewportWidth, so
+        // the page adapts to the car display without anything extra.
+        geckoView.session = session
+        self.session = session
+
+        session.load(Self.homepage)
+
+        logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
 }
