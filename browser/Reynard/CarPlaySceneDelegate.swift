@@ -6,6 +6,7 @@
 //
 
 import CarPlay
+import GeckoView
 import UIKit
 
 /// Step one of CarPlay support: proves the car window connects and
