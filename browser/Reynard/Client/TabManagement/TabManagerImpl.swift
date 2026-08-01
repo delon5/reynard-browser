@@ -37,7 +37,10 @@ final class TabManagerImplementation: NSObject, TabManager {
         isAutomaticRoutingEnabled: { Prefs.BrowsingSettings.openLinksInApps },
         open: Self.openExternalApplication
     )
-    private let systemMediaSession = SystemMediaSession()
+    // The shared instance rather than a private one, so the CarPlay
+    // session can register with the same media session. Same object,
+    // same behaviour here. See fix_carplay_media_session.py.
+    private let systemMediaSession = SystemMediaSession.shared
     private lazy var pictureInPictureCoordinator: PictureInPictureCoordinating? = {
         guard Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled,
               #available(iOS 15.0, *) else {

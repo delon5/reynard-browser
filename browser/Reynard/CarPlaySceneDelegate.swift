@@ -239,6 +239,13 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
 
         // Before the view, so the first page load is not missed.
         session.progressDelegate = self
+        
+        // Registers with the media session, so the car's transport
+        // controls act on the car's video rather than whatever is
+        // playing in a tab on the phone. SystemMediaSession already
+        // tracks several sessions and gives the controls to whichever
+        // played most recently. See fix_carplay_media_session.py.
+        session.mediaSessionDelegate = SystemMediaSession.shared
         geckoView.session = session
         CarPlaySceneDelegate.currentSession = session
 

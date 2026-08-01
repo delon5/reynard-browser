@@ -14,6 +14,18 @@ protocol SystemMediaSessionObserver: AnyObject {
 }
 
 final class SystemMediaSession: MediaSessionDelegate {
+    /// The one instance. See fix_carplay_media_session.py.
+    ///
+    /// Shared rather than owned by TabManagerImpl because the CarPlay
+    /// session needs it too, and cannot rely on the phone's scene
+    /// existing - CarPlay can connect first.
+    ///
+    /// A second instance would be actively harmful:
+    /// MPNowPlayingInfoCenter.default() and
+    /// MPRemoteCommandCenter.shared() are process-wide, so two owners
+    /// would fight over the same command targets.
+    static let shared = SystemMediaSession()
+    
     enum PlaybackState {
         case none
         case paused
