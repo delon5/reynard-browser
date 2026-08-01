@@ -115,6 +115,24 @@ private final class CarPlayBrowserViewController: UIViewController {
             geckoView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)
         ])
 
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        // Gecko sizes its surface from the engine view's bounds
+        // when the window is created, and in viewDidLoad those
+        // are zero - which painted the page into the top-left
+        // corner with unpainted background around it. This is
+        // the first pass with real bounds.
+        //
+        // The phone browser gets this ordering by accident:
+        // ContentView.setSession runs after the hierarchy has
+        // laid out, so it never had to be explicit.
+        guard session == nil, view.bounds.width > 0, view.bounds.height > 0 else {
+            return
+        }
+
         startSession()
     }
 
