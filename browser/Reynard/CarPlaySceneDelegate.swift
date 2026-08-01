@@ -45,7 +45,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // CHANGED - the browser replaces the geometry probe. See
         // fix_carplay_browser_view.py.
         let browser = CarPlayBrowserViewController()
-        browser.templateApplicationScene = templateApplicationScene
+        browser.interfaceController = interfaceController
         window.rootViewController = browser
         window.makeKeyAndVisible()
         
@@ -91,7 +91,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 private final class CarPlayBrowserViewController: UIViewController {
     private let geckoView = GeckoView(frame: .zero)
     private var session: GeckoSession?
-    weak var templateApplicationScene: CPTemplateApplicationScene?
+    weak var interfaceController: CPInterfaceController?
 
     /// Where the car browser starts. Deliberately something simple and
     /// obviously rendered, so a blank screen means a rendering problem
@@ -117,6 +117,23 @@ private final class CarPlayBrowserViewController: UIViewController {
             geckoView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)
         ])
 
+    }
+
+    // Whether the base view receives touches at all is an
+    // open question. Apple's guide says it does not, but
+    // that is written as design guidance, and CarPlay
+    // clearly delivers touches to the TEMPLATE layer -
+    // CPMapTemplate has pan mode and, since iOS 26, pinch,
+    // pitch and rotate. This settles it rather than
+    // assuming. See fix_carplay_scale_v3.py.
+    private func installTouchProbe() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleProbeTap(_:)))
+        view.addGestureRecognizer(tap)
+    }
+
+    @objc private func handleProbeTap(_ sender: UITapGestureRecognizer) {
+        let point = sender.location(in: view)
+        logger(String(format: "CarPlay: tap received at %.0f,%.0f", point.x, point.y))
     }
 
     override func viewDidLayoutSubviews() {
@@ -155,17 +172,19 @@ private final class CarPlayBrowserViewController: UIViewController {
         // car's screen (not the scale for the iPhone screen)" -
         // UIScreen.main always reports the iPhone's, which is 3.0
         // here against CarPlay's 2.0.
-        if let carScale = templateApplicationScene?.carTraitCollection.displayScale, carScale > 0 {
+        if let carScale = interfaceController?.carTraitCollection.displayScale, carScale > 0 {
             geckoView.contentScaleFactor = carScale
             geckoView.layer.contentsScale = carScale
         }
 
-        logger(String(format: "CarPlay: scales - carTraitCollection %.1f, window screen %.1f, UIScreen.main %.1f", templateApplicationScene?.carTraitCollection.displayScale ?? 0, view.window?.screen.scale ?? 0, UIScreen.main.scale))
+        logger(String(format: "CarPlay: scales - carTraitCollection %.1f, window screen %.1f, UIScreen.main %.1f", interfaceController?.carTraitCollection.displayScale ?? 0, view.window?.screen.scale ?? 0, UIScreen.main.scale))
 
         geckoView.session = session
         self.session = session
 
         session.load(Self.homepage)
+
+        installTouchProbe()
 
         logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
