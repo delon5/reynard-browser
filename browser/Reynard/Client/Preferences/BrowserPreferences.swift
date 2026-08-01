@@ -64,6 +64,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
+            key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
             key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
@@ -1138,6 +1139,29 @@ final class BrowserPreferences {
         /// display. Off by default - the display is glanced at while
         /// driving, so nothing should run there until deliberately
         /// enabled.
+        /// Whether in-flight debug calls are cancelled when the app
+        /// backgrounds. OFF by default - see
+        /// fix_no_cancel_experiment.py.
+        ///
+        /// Cancelling aborts the in-flight read and desyncs the
+        /// connection permanently: a retry 50ms later succeeded once
+        /// in ten attempts. The detach that follows then fails, and
+        /// the process is left attached with a dead debugger
+        /// connection.
+        ///
+        /// A loop parked in a continue command has a RUNNING target,
+        /// and a running extension can answer the synchronous XPC iOS
+        /// sends on a lifecycle transition. So leaving it alone may
+        /// be strictly better than cancelling it.
+        static var cancelsDebugSessionsOnBackground: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "cancelsDebugSessionsOnBackground")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "cancelsDebugSessionsOnBackground")
+            }
+        }
+        
         static var isCarPlayScriptsEnabled: Bool {
             get {
                 return prefs.bool(forSetting: "ExperimentalSettings", key: "isCarPlayScriptsEnabled")

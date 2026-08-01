@@ -179,7 +179,20 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // captures, so this is ample for a loop between iterations and
         // still well inside the background window.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            JITEnabler.cancelAllDebugSessionCalls()
+            // Gated OFF by default - see fix_no_cancel_experiment.py.
+            //
+            // Cancelling desyncs the connection permanently rather than
+            // briefly disturbing it: a retry 50ms later succeeded once
+            // in ten. The detach that follows then fails, leaving the
+            // process attached with a dead debugger connection - which
+            // is the state that hangs the app on the next transition.
+            //
+            // Loops still parked here have RUNNING targets, and a
+            // running extension can answer XPC. Leaving them alone may
+            // simply be better.
+            if Prefs.ExperimentalSettings.cancelsDebugSessionsOnBackground {
+                JITEnabler.cancelAllDebugSessionCalls()
+            }
             
             if cancelTaskIdentifier != .invalid {
                 application.endBackgroundTask(cancelTaskIdentifier)
