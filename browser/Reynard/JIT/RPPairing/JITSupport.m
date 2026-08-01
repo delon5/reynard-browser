@@ -11,6 +11,7 @@
 #import "IdeviceFFI.h"
 
 #include <arpa/inet.h>
+#include <notify.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -1080,11 +1081,44 @@ BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     return NO;
 }
 
+// Tells content processes whether a debugger is actually listening, as
+// opposed to CS_DEBUGGED merely being set on them. See
+// fix_debugger_listening_guard.py.
+//
+// One flag rather than one per process: every session shares a single
+// tunnel and they fail together - the logs show six loops ending within
+// the same millisecond when it dies.
+static void setDebuggerListeningState(uint64_t listening) {
+    static int token = NOTIFY_TOKEN_INVALID;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (notify_register_check("com.minh-ton.Reynard.JITDebuggerListening", &token) != NOTIFY_STATUS_OK) {
+            token = NOTIFY_TOKEN_INVALID;
+            logger(@"jitListening: notify_register_check FAILED - content processes will not trap, so JIT is degraded");
+        }
+    });
+
+    if (token == NOTIFY_TOKEN_INVALID) {
+        return;
+    }
+
+    uint64_t current = 0;
+    if (notify_get_state(token, &current) == NOTIFY_STATUS_OK && current == listening) {
+        return;
+    }
+
+    notify_set_state(token, listening);
+    logger([NSString stringWithFormat:@"jitListening: %@", listening ? @"debugger is listening" : @"debugger is GONE - content processes will not trap"]);
+}
+
 void runDebugService(int32_t pid, DebugSession *session) {
     if (!session) return;
     
     registerDebugSessionPID(pid);
     registerDebugSessionProxy(pid, session->debugProxy);
+    
+    // A loop is running, so traps will be serviced.
+    setDebuggerListeningState(1);
     
     // DIAGNOSTIC TEST - this loop runs for the entire lifetime of the
     // target process (self, on the Helper's self-enable path) and was
@@ -1162,6 +1196,14 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // and the detach should still run. A genuine transport
                 // failure has no detach pending and still skips it.
                 connectionFailed = !shouldDetachDebugSessionPID(pid);
+                
+                // The transport died, and since every session shares one
+                // tunnel they all have. Stop content processes trapping
+                // before one of them freezes waiting for an answer that
+                // is not coming.
+                if (connectionFailed) {
+                    setDebuggerListeningState(0);
+                }
                 if (!isNotConnectedError(commandError)) logger([NSString stringWithFormat:@"Debug loop ended for pid %d: %@ (iteration %ld, call took %.0fms)", pid, commandError.localizedDescription ?: @"continue failed", (long)debugServiceIteration, continueCallDuration * 1000.0]);
                 break;
             }

@@ -23,7 +23,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +54,199 @@
+@@ -47,6 +54,258 @@
  using namespace js;
  using namespace js::jit;
  
@@ -126,8 +126,60 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +#define REYNARD_CS_OPS_STATUS 0
 +#define REYNARD_CS_DEBUGGED 0x10000000
 +
++#include <notify.h>
++
 +extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr,
 +                     size_t usersize);
++
++// Whether a debugger is LISTENING, as opposed to CS_DEBUGGED merely
++// being set. See fix_debugger_listening_guard.py.
++//
++// The two diverge exactly when it matters: the tunnel dies during a
++// suspension, every debug loop fails together, the detaches fail with
++// it, and the process is left CS_DEBUGGED with nobody on the other end.
++// A trap then stops it forever, and because content processes are app
++// extensions, iOS's next synchronous lifecycle message goes unanswered
++// and the watchdog kills the whole app.
++//
++// notify_get_state reads a 64-bit value from a shared page - no IPC, no
++// filesystem - so this is cheap enough to do per region without
++// caching, which matters because the point is noticing a change.
++//
++// Chosen over an App Group file because this translation unit is plain
++// C++ with no Foundation, and the container path is UUID-based so it
++// cannot be derived without it. notify.h is plain C.
++static bool DebuggerIsListening() {
++  static int sToken = NOTIFY_TOKEN_INVALID;
++  static bool sRegistered = false;
++  static bool sReportedFailure = false;
++
++  if (!sRegistered) {
++    sRegistered = true;
++    if (notify_register_check("com.minh-ton.Reynard.JITDebuggerListening", &sToken) !=
++        NOTIFY_STATUS_OK) {
++      sToken = NOTIFY_TOKEN_INVALID;
++    }
++  }
++
++  if (sToken == NOTIFY_TOKEN_INVALID) {
++    // Registration failed. Do NOT trap - a process that skips the trap
++    // runs interpreted, which is slow but alive; one that traps with
++    // nobody listening freezes and takes the app with it.
++    //
++    // Announced once so the degradation is visible rather than silent.
++    if (!sReportedFailure) {
++      sReportedFailure = true;
++      notify_post("com.minh-ton.Reynard.JITNotifyRegisterFailed");
++    }
++    return false;
++  }
++
++  uint64_t state = 0;
++  if (notify_get_state(sToken, &state) != NOTIFY_STATUS_OK) {
++    return false;
++  }
++  return state != 0;
++}
 +
 +static bool ProcessHasDebuggerAttached() {
 +  int flags = 0;
@@ -150,6 +202,13 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +  // the point is noticing when the debugger goes away, and this runs
 +  // once per region rather than per write.
 +  if (!ProcessHasDebuggerAttached()) {
++    return;
++  }
++
++  // CS_DEBUGGED stays set after the connection dies, so it says a
++  // debugger attached at some point rather than that one is listening
++  // now. This closes that gap - see fix_debugger_listening_guard.py.
++  if (!DebuggerIsListening()) {
 +    return;
 +  }
 +
@@ -223,7 +282,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +663,20 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +722,20 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -244,7 +303,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +721,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +780,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -272,7 +331,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +776,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +835,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -304,7 +363,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +807,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +866,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -322,7 +381,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +824,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +883,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -378,7 +437,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +982,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1041,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -421,7 +480,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1037,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1096,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -442,7 +501,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1209,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1268,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -460,7 +519,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1239,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1298,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -480,7 +539,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1301,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1360,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  

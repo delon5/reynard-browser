@@ -255,7 +255,22 @@ final class SessionManager {
     // MARK: - Website Settings
     
     func updateSettings(of session: GeckoSession, for url: String, tabID: UUID?) {
-        session.updateSettings(sessionSettings.settings(for: url, tabID: tabID))
+        let settings = sessionSettings.settings(for: url, tabID: tabID)
+        
+        // See fix_log_user_agent_resolution.py. The user agent is
+        // resolved from the URL being applied, so a session that has not
+        // navigated yet resolves against about:blank - which no per-site
+        // override can match.
+        //
+        // NATIVE means no override was chosen and Gecko sends its own
+        // string, which on iOS has no mobile identifier and reads as a
+        // desktop browser.
+        logger(String(format: "userAgent: %@ -> %@ (mode=%@)",
+                      url,
+                      settings.userAgentOverride ?? "NATIVE",
+                      String(describing: settings.userAgentMode)))
+        
+        session.updateSettings(settings)
     }
     
     func setPageZoom(_ level: Int, of session: GeckoSession, for url: String, tabID: UUID?) {

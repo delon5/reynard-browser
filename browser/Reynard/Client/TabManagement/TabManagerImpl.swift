@@ -1367,7 +1367,21 @@ extension TabManagerImplementation: NavigationDelegate {
             hasUserGesture: request.hasUserGesture,
             isRedirect: request.isRedirect
         ))
-        return disposition == .opened ? .deny : .allow
+        
+        let decision: AllowOrDeny = disposition == .opened ? .deny : .allow
+        
+        // A .deny means Gecko never loads the page and nothing else
+        // records that it happened - from outside it looks like the
+        // navigation simply did nothing. See
+        // fix_log_navigation_decisions.py.
+        logger(String(format: "navDecision: %@ %@ (source=navigation, gesture=%@, redirect=%@, disposition=%@)",
+                      decision == .deny ? "DENY" : "ALLOW",
+                      request.uri,
+                      String(request.hasUserGesture),
+                      String(request.isRedirect),
+                      String(describing: disposition)))
+        
+        return decision
     }
     
     func onSubframeLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny {
