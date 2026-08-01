@@ -180,6 +180,31 @@ private final class CarPlayBrowserViewController: UIViewController {
         logger(String(format: "CarPlay: scales - carTraitCollection %.1f, window screen %.1f, UIScreen.main %.1f", interfaceController?.carTraitCollection.displayScale ?? 0, view.window?.screen.scale ?? 0, UIScreen.main.scale))
 
         geckoView.session = session
+
+        // The scale has to go on the ENGINE VIEW, not the
+        // GeckoView wrapper. See
+        // fix_carplay_engine_view_scale.py.
+        //
+        // nsWindow::BackingScaleFactor prefers
+        // [mNativeView contentScaleFactor] and only falls back to
+        // UIScreen.mainScreen when mNativeView is nil - which is
+        // the window-creation moment. mNativeView is the engine
+        // view embedSessionView adds as a subview here, not the
+        // wrapper the earlier fix was setting.
+        if let carScale = interfaceController?.carTraitCollection.displayScale, carScale > 0 {
+            for engineView in geckoView.subviews {
+                engineView.contentScaleFactor = carScale
+                engineView.layer.contentsScale = carScale
+            }
+        
+            // Nudge Gecko to re-read its settings, in the hope
+            // that BackingScaleFactor is consulted again rather
+            // than cached at open().
+            session.updateViewportWidth(geckoView.bounds.width)
+        }
+
+        logger(String(format: "CarPlay: engine views %d, scale now %.1f", geckoView.subviews.count, geckoView.subviews.first?.contentScaleFactor ?? 0))
+
         self.session = session
 
         session.load(Self.homepage)
