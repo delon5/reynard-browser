@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.mm b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
 new file mode 100644
-index 000000000000..ecccd97c6fb0
+index 000000000000..735db2e0c810
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,569 @@
+@@ -0,0 +1,577 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -115,8 +115,9 @@ index 000000000000..ecccd97c6fb0
 +  // server. Without it there is no SPC to make, so fail loudly rather
 +  // than issuing a request that cannot be satisfied.
 +  if (mProxy->mAppCertificate.IsEmpty()) {
++    const char* sid = [sessionId UTF8String];
 +    mProxy->OnKeyRequestFailed(
-+        nsDependentCString([sessionId UTF8String]),
++        nsDependentCString(sid),
 +        "setServerCertificate must be called before generateRequest for FairPlay"_ns);
 +    return;
 +  }
@@ -133,7 +134,10 @@ index 000000000000..ecccd97c6fb0
 +  }
 +
 +  RefPtr<FairPlayCDMProxy> proxy = mProxy;
-+  nsCString sessionIdCopy(nsDependentCString([sessionId UTF8String]));
++  // Via a local: a message send nested inside a constructor argument
++  // reads as a message to the constructor itself in Objective-C++.
++  const char* sessionIdUTF8 = [sessionId UTF8String];
++  nsCString sessionIdCopy(sessionIdUTF8);
 +
 +  [keyRequest
 +      makeStreamingContentKeyRequestDataForApp:appCert
@@ -177,7 +181,8 @@ index 000000000000..ecccd97c6fb0
 +    msg.Append(": ");
 +    msg.Append([[err localizedDescription] UTF8String]);
 +  }
-+  mProxy->OnKeyRequestFailed(nsDependentCString([sessionId UTF8String]), msg);
++  const char* sid = [sessionId UTF8String];
++  mProxy->OnKeyRequestFailed(nsDependentCString(sid), msg);
 +}
 +
 +@end
@@ -252,7 +257,8 @@ index 000000000000..ecccd97c6fb0
 +  // NSUUID rather than nsID::GenerateUUID - one less Gecko header to
 +  // depend on, and we are in Objective-C++ already.
 +  NSString* sessionIdNS = [[NSUUID UUID] UUIDString];
-+  nsAutoCString sessionId([sessionIdNS UTF8String]);
++  const char* sessionIdUTF8 = [sessionIdNS UTF8String];
++  nsAutoCString sessionId(sessionIdUTF8);
 +
 +  nsCString initDataType = NS_ConvertUTF16toUTF8(aInitDataType);
 +
@@ -568,8 +574,10 @@ index 000000000000..ecccd97c6fb0
 +      aPromiseId, "FairPlay getStatusForPolicy is not implemented"_ns);
 +}
 +
++#ifdef DEBUG
 +bool FairPlayCDMProxy::IsOnOwnerThread() {
 +  return mOwnerThread ? mOwnerThread->IsOnCurrentThread() : NS_IsMainThread();
 +}
++#endif
 +
 +}  // namespace mozilla

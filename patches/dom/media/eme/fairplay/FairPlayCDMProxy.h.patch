@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.h b/dom/media/eme/fairplay/FairPlayCDMProxy.h
 new file mode 100644
-index 000000000000..41bfe7b4dd56
+index 000000000000..b645920014e9
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,141 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -112,7 +112,12 @@ index 000000000000..41bfe7b4dd56
 +  void OnKeyStatusesChange(const nsAString& aSessionId) override;
 +  void GetStatusForPolicy(PromiseId aPromiseId,
 +                          const dom::HDCPVersion& aMinHdcpVersion) override;
++#ifdef DEBUG
++  // Only virtual in debug builds, so declaring it unconditionally makes
++  // release builds fail with "only virtual member functions can be
++  // marked 'override'".
 +  bool IsOnOwnerThread() override;
++#endif
 +
 +  // Called from the delegate, on the delegate queue. Both marshal to
 +  // main before touching MediaKeys.
