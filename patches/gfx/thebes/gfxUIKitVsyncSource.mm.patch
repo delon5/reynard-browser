@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6494ff02528f
 --- /dev/null
 +++ b/gfx/thebes/gfxUIKitVsyncSource.mm
-@@ -0,0 +1,334 @@
+@@ -0,0 +0,360 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -84,6 +84,28 @@ index 000000000000..6494ff02528f
 +    Shutdown();
 +  }
 +
++  // The screen the display link should follow.
++  //
++  // A CADisplayLink stops firing when ITS screen sleeps, so a link on
++  // the phone's display stops the moment the phone locks - taking
++  // compositing for a connected CarPlay screen down with it, even
++  // though that screen is still awake. Measured directly: vsync
++  // stopped for seven seconds across a lock while the video's
++  // currentTime kept advancing.
++  //
++  // While an external screen is connected it drives vsync for
++  // everything. That is slightly wrong for the phone's own rendering,
++  // but the phone's screen is the one that sleeps.
++  static UIScreen* ChooseVsyncScreen() {
++    UIScreen* mainScreen = [UIScreen mainScreen];
++    for (UIScreen* screen in [UIScreen screens]) {
++      if (screen != mainScreen) {
++        return screen;
++      }
++    }
++    return mainScreen;
++  }
++
 +  void EnableVsync() override {
 +    MOZ_ASSERT(NS_IsMainThread());
 +    if (IsVsyncEnabled()) {
@@ -92,7 +114,7 @@ index 000000000000..6494ff02528f
 +
 +    NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 +
-+    UIScreen* screen = [UIScreen mainScreen];
++    UIScreen* screen = ChooseVsyncScreen();
 +    CADisplayLink* displayLink =
 +        [screen displayLinkWithTarget:mTarget
 +                             selector:@selector(displayLinkFired:)];
@@ -233,7 +255,11 @@ index 000000000000..6494ff02528f
 +
 + private:
 +  void ConfigureFrameRate() {
-+    UIScreen* screen = [UIScreen mainScreen];
++    // The same screen the display link is on - a CarPlay display is
++    // typically 60Hz where the phone is 120Hz, and configuring the rate
++    // from the wrong one would drive vsync at a rate the link cannot
++    // deliver. See fix_vsync_follows_carplay_screen.py.
++    UIScreen* screen = ChooseVsyncScreen();
 +    SetVsyncRateForScreen(screen);
 +
 +    mMaxFPS = MaxFPS(screen);
