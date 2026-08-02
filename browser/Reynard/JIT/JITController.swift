@@ -34,6 +34,17 @@ final class JITController {
     // two remain - while cutting the serialised cost by roughly a
     // third.
     private let attachSlots = DispatchSemaphore(value: 3)
+    
+    // Attaches whose bounded wait expired while the underlying call
+    // kept running. See fix_log_orphaned_attaches.py.
+    //
+    // enableJITMaxWaitSeconds bounds the wait, not the call, and the
+    // timer is wall-clock - so a suspension expires it immediately on
+    // resume while the FFI call carries on unobserved. One such orphan
+    // is a documented trade-off; several accumulating and all resuming
+    // together is worth being able to see.
+    private static var orphanedAttachPIDs: Set<Int32> = []
+    private static let orphanedAttachLock = NSLock()
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
     private var attachedPIDs: Set<Int32> = []
     
@@ -422,21 +433,43 @@ final class JITController {
     private static let enableJITMaxWaitSeconds: TimeInterval = 90.0
     
     private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
-        Self.enableJITInFlightLock.lock()
-        let existingInFlightSince = Self.enableJITInFlightByPID[pid]
-        Self.enableJITInFlightLock.unlock()
+        // CHANGED - the check and the set are now one critical section.
+        // See fix_atomic_inflight_guard.py.
+        //
+        // The lock used to be released between reading the map and
+        // writing to it, so two threads arriving together both read nil,
+        // both concluded nothing was in flight, and both attached the
+        // same process. reattachOrphanedProcesses and
+        // childProcessDidStart are exactly the pair that would do that,
+        // and both appear in the stack of a segfault on the attach queue
+        // dereferencing 0x8000000000000010.
+        //
+        // Nothing slow happens under the lock: the decision is made
+        // inside, and its logging after.
+        var skipAge: Double?
         
-        if let existingInFlightSince {
+        Self.enableJITInFlightLock.lock()
+        if let existingInFlightSince = Self.enableJITInFlightByPID[pid] {
             let age = CFAbsoluteTimeGetCurrent() - existingInFlightSince.timeIntervalSinceReferenceDate
             if age < Self.enableJITMaxWaitSeconds {
-                logger(String(format: "boundedEnableJIT: skipping duplicate attempt for pid %d - an enableJIT call for THIS pid is already in flight (started %.0fs ago)", pid, age))
-                return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: an enableJIT call for this process is already in flight"]))
+                skipAge = age
             }
         }
-        
-        Self.enableJITInFlightLock.lock()
-        Self.enableJITInFlightByPID[pid] = Date()
+        if skipAge == nil {
+            // Claimed in the same critical section that found it free,
+            // which is the whole point.
+            //
+            // An entry older than enableJITMaxWaitSeconds is treated as
+            // abandoned and overwritten here, so one hung attach cannot
+            // block a process forever.
+            Self.enableJITInFlightByPID[pid] = Date()
+        }
         Self.enableJITInFlightLock.unlock()
+        
+        if let skipAge {
+            logger(String(format: "boundedEnableJIT: skipping duplicate attempt for pid %d - an enableJIT call for THIS pid is already in flight (started %.0fs ago)", pid, skipAge))
+            return (false, NSError(domain: "Reynard.JIT", code: Int(EBUSY), userInfo: [NSLocalizedDescriptionKey: "Skipped: an enableJIT call for this process is already in flight"]))
+        }
         
         let semaphore = DispatchSemaphore(value: 0)
         var result: (Bool, NSError?) = (false, NSError(domain: "Reynard.JIT", code: -1, userInfo: [NSLocalizedDescriptionKey: "Internal error: bounded wait result never set"]))
@@ -463,11 +496,35 @@ final class JITController {
             // confirmed by a direct ~3 minute wait) or just slower
             // than the bound.
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - boundedCallStart) * 1000.0
-            logger(String(format: "boundedEnableJIT: background call for pid %d actually completed after %.0fms (success=%@)", pid, elapsedMs, result.0 ? "YES" : "NO"))
+            
+            // Reported separately when the wait had already given up on
+            // this call, so an orphan's eventual completion is not
+            // mistaken for an ordinary one arriving late. See
+            // fix_log_orphaned_attaches.py.
+            Self.orphanedAttachLock.lock()
+            let wasOrphaned = Self.orphanedAttachPIDs.remove(pid) != nil
+            let stillOutstanding = Self.orphanedAttachPIDs.count
+            Self.orphanedAttachLock.unlock()
+            
+            if wasOrphaned {
+                let orphanedForMs = elapsedMs - (Self.enableJITMaxWaitSeconds * 1000.0)
+                logger(String(format: "boundedEnableJIT: ORPHANED call for pid %d finally completed after %.0fms (orphaned for %.0fms, success=%@) - %d still outstanding", pid, elapsedMs, orphanedForMs, result.0 ? "YES" : "NO", stillOutstanding))
+            } else {
+                logger(String(format: "boundedEnableJIT: background call for pid %d actually completed after %.0fms (success=%@)", pid, elapsedMs, result.0 ? "YES" : "NO"))
+            }
             semaphore.signal()
         }
         
         if semaphore.wait(timeout: .now() + Self.enableJITMaxWaitSeconds) == .timedOut {
+            // Recorded at the moment of the decision, so the completion
+            // line that eventually appears can be tied back to it. See
+            // fix_log_orphaned_attaches.py.
+            Self.orphanedAttachLock.lock()
+            Self.orphanedAttachPIDs.insert(pid)
+            let orphanCount = Self.orphanedAttachPIDs.count
+            Self.orphanedAttachLock.unlock()
+            
+            logger(String(format: "boundedEnableJIT: ABANDONING pid %d after %.0fs - %d call(s) now orphaned", pid, Self.enableJITMaxWaitSeconds, orphanCount))
             // Orphaned - the background call above may still be
             // running and will eventually complete or fail on its
             // own, unobserved. A real, accepted trade-off: this
