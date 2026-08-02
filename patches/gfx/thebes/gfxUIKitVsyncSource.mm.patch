@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6494ff02528f
 --- /dev/null
 +++ b/gfx/thebes/gfxUIKitVsyncSource.mm
-@@ -0,0 +0,377 @@
+@@ -0,0 +0,432 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -44,6 +44,7 @@ index 000000000000..6494ff02528f
 +}
 +- (id)initWithVsyncSource:(mozilla::gfx::UIKitVsyncSource*)aVsyncSource;
 +- (void)displayLinkFired:(CADisplayLink*)aDisplayLink;
++- (void)applicationDidBecomeActive:(NSNotification*)aNotification;
 +- (void)runDisplayLinkThread:(CADisplayLink*)aDisplayLink;
 +- (void)stopDisplayLinkThread:(CADisplayLink*)aDisplayLink;
 +@end
@@ -104,6 +105,34 @@ index 000000000000..6494ff02528f
 +      }
 +    }
 +    return mainScreen;
++  }
++
++  // Rebuilds the link if it has stopped firing.
++  //
++  // EnableVsync cannot notice this itself: it returns early when
++  // mDisplayLink is non-nil, and a suspended link stays non-nil. So a
++  // page loads, completes, and is never painted - which is what a
++  // restored tab going blank looks like, and probably what needing to
++  // press Go twice looks like too.
++  //
++  // Two seconds is far longer than any real frame interval - sixty
++  // missed frames even at the 30Hz a CarPlay display runs at - while
++  // short enough to rebuild before the first paint after returning.
++  //
++  // Process-global, so this covers the phone and the car display
++  // together. See fix_rebuild_stale_display_link.py.
++  void RebuildDisplayLinkIfStale() {
++    MOZ_ASSERT(NS_IsMainThread());
++    if (!mDisplayLink) {
++      return;
++    }
++    if (mLastFiredAt &&
++        (TimeStamp::Now() - mLastFiredAt).ToSeconds() < 2.0) {
++      return;
++    }
++
++    DisableVsync();
++    EnableVsync();
 +  }
 +
 +  void EnableVsync() override {
@@ -219,6 +248,7 @@ index 000000000000..6494ff02528f
 +  }
 +
 +  void OnDisplayLinkFired(CADisplayLink* aDisplayLink) {
++    mLastFiredAt = TimeStamp::Now();
 +    TimeStamp vsyncTime = TimeStampFromCASeconds([aDisplayLink timestamp]);
 +    TimeStamp outputTime =
 +        TimeStampFromCASeconds([aDisplayLink targetTimestamp]);
@@ -336,6 +366,11 @@ index 000000000000..6494ff02528f
 +  // EnableVsync to notice a screen change; never messaged, so it is
 +  // deliberately not retained.
 +  UIScreen* mLinkScreen = nil;
++  // When the link last fired. A CADisplayLink killed by a suspension
++  // is still a non-nil object, so existence proves nothing - this is
++  // how a dead one is told from a live one. See
++  // fix_rebuild_stale_display_link.py.
++  TimeStamp mLastFiredAt;
 +  CADisplayLink* mDisplayLink = nil;
 +  NSThread* mThread = nil;
 +  Monitor mThreadMonitor;
@@ -364,8 +399,28 @@ index 000000000000..6494ff02528f
 +  self = [super init];
 +  if (self) {
 +    mVsyncSource = aVsyncSource;
++
++    // Foreground is when a link killed by a suspension has to be
++    // noticed - it is both when it matters and when the stale frame
++    // becomes visible. See fix_rebuild_stale_display_link.py.
++    [[NSNotificationCenter defaultCenter]
++        addObserver:self
++           selector:@selector(applicationDidBecomeActive:)
++               name:UIApplicationDidBecomeActiveNotification
++             object:nil];
 +  }
 +  return self;
++}
++
++- (void)dealloc {
++  [[NSNotificationCenter defaultCenter] removeObserver:self];
++  [super dealloc];
++}
++
++- (void)applicationDidBecomeActive:(NSNotification*)aNotification {
++  if (mVsyncSource) {
++    mVsyncSource->RebuildDisplayLinkIfStale();
++  }
 +}
 +
 +- (void)displayLinkFired:(CADisplayLink*)aDisplayLink {
