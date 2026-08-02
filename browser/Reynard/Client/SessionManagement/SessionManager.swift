@@ -265,10 +265,11 @@ final class SessionManager {
         // NATIVE means no override was chosen and Gecko sends its own
         // string, which on iOS has no mobile identifier and reads as a
         // desktop browser.
-        logger(String(format: "userAgent: %@ -> %@ (mode=%@)",
+        logger(String(format: "userAgent: %@ -> %@ (uaMode=%d, viewport=%d)",
                       url,
-                      settings.userAgentOverride ?? "NATIVE",
-                      String(describing: settings.userAgentMode)))
+                      settings.websiteMode.userAgentOverride ?? "NATIVE",
+                      settings.websiteMode.userAgentMode,
+                      settings.websiteMode.viewportMode))
         
         session.updateSettings(settings)
     }
