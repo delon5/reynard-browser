@@ -44,6 +44,15 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// directly - that header is not in the bridging header.
 + (void)cancelAllDebugSessionCalls NS_SWIFT_NAME(cancelAllDebugSessionCalls());
 
+/// Tells content processes whether trapping into the debugger is safe.
+///
+/// Cleared before a suspension rather than after one has gone wrong: a
+/// process that traps while the tunnel is dying stops with nothing able
+/// to continue it, and cannot then answer the synchronous XPC iOS sends
+/// on the next lifecycle transition. See
+/// fix_stop_trapping_on_background.py.
++ (void)setDebuggerListening:(BOOL)listening NS_SWIFT_NAME(setDebuggerListening(_:));
+
 /// Sends the GDB interrupt byte to every in-flight attach. Gated on
 /// the Experimental toggle by the caller.
 + (void)interruptAttachingDebugSessions NS_SWIFT_NAME(interruptAttachingDebugSessions());

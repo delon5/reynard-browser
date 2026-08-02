@@ -34,6 +34,11 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void);
 /// fix_detach_debug_sessions_on_background.py.
 void requestDetachForAllDebugSessions(void);
 
+/// Tells content processes whether a debugger is listening, so they
+/// know whether trapping into one is safe. See
+/// fix_stop_trapping_on_background.py.
+void setDebuggerListeningState(uint64_t listening);
+
 /// Cancels any in-flight debug proxy call, releasing threads parked in
 /// a read, WITHOUT tearing sessions down. Call at willResignActive -
 /// see fix_split_cancel_from_detach.py.

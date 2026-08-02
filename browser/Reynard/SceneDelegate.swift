@@ -153,6 +153,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            // Restored alongside the re-attach, not before it: the
+            // sessions it creates are what make trapping safe again.
+            // See fix_stop_trapping_on_background.py.
+            JITEnabler.setDebuggerListening(true)
+            
             JITController.shared.reattachOrphanedProcesses()
             
             if reattachTask != .invalid {
@@ -192,6 +197,20 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // live and answer promptly. It also leaves less to detach, since
         // a process whose session has closed is on its way out anyway.
         sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
+        
+        // Before the detach, so no process can trap during the
+        // teardown. See fix_stop_trapping_on_background.py.
+        //
+        // Clearing this reactively - when a command or detach fails -
+        // happens once the transport is already dead, by which time a
+        // process may be stopped at a brk with nothing able to continue
+        // it. That process then cannot answer the synchronous XPC iOS
+        // sends on the next transition, and the watchdog takes the app.
+        //
+        // The cost is that background JavaScript runs interpreted, which
+        // is the same trade already made for the registration-failure
+        // fallback and matters little in an app whose tabs are asleep.
+        JITEnabler.setDebuggerListening(false)
         
         JITEnabler.requestDetachForAllDebugSessions()
         

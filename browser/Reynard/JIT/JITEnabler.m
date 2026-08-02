@@ -566,6 +566,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     cancelAllDebugSessionCalls();
 }
 
++ (void)setDebuggerListening:(BOOL)listening {
+    setDebuggerListeningState(listening ? 1 : 0);
+}
+
 + (void)interruptAttachingDebugSessions {
     interruptAttachingDebugSessions();
 }

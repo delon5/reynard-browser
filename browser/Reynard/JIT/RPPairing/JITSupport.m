@@ -1070,7 +1070,9 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
 // Forward declaration - the definition sits below, after the session
 // registry it belongs with, but detachDebuggerSession needs it first.
 // See fix_listening_cleared_on_detach_failure.py.
-static void setDebuggerListeningState(uint64_t listening);
+// Declared in JITSupport.h now, so the app side can clear it before a
+// suspension rather than only reacting to a failure. See
+// fix_stop_trapping_on_background.py.
 
 BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     NSString *detachResponse = nil;
@@ -1108,7 +1110,7 @@ BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
 // One flag rather than one per process: every session shares a single
 // tunnel and they fail together - the logs show six loops ending within
 // the same millisecond when it dies.
-static void setDebuggerListeningState(uint64_t listening) {
+void setDebuggerListeningState(uint64_t listening) {
     static int token = NOTIFY_TOKEN_INVALID;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
