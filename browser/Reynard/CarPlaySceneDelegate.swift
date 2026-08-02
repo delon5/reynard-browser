@@ -26,6 +26,30 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// Weak deliberately - the session is owned by the view controller,
     /// and a strong reference here would keep a Gecko session and its
     /// content process alive after the car is disconnected.
+    /// Loads a URL onto the car display with the right settings.
+    ///
+    /// The phone side must go through this rather than calling
+    /// session.load directly - a raw load skips the website mode
+    /// settings and the request goes out with Gecko's native user
+    /// agent, which reads as a desktop browser. See
+    /// fix_carplay_session_settings.py.
+    static func load(_ url: String) -> Bool {
+        guard let session = currentSession else {
+            return false
+        }
+        
+        let settings = GeckoSessionSettings(
+            websiteMode: WebsiteModeSettingManager().setting(for: url, tabID: nil),
+            pageZoom: .default,
+            language: .default
+        )
+        session.updateSettings(settings)
+        session.load(url)
+        
+        logger(String(format: "CarPlay: loading %@ with %@", url, settings.websiteMode.userAgentOverride ?? "the native user agent"))
+        return true
+    }
+    
     static weak var currentSession: GeckoSession?
 
     private var interfaceController: CPInterfaceController?
@@ -133,6 +157,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 @available(iOS 14.0, *)
 private final class CarPlayBrowserViewController: UIViewController, ProgressDelegate, PermissionEmbedderDelegate, ContentDelegate {
     private let geckoView = GeckoView(frame: .zero)
+    private let websiteModeSettingManager = WebsiteModeSettingManager()
     private var session: GeckoSession?
     weak var interfaceController: CPInterfaceController?
 
@@ -229,6 +254,35 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         startSession()
     }
 
+    /// The settings a tab would get for this URL.
+    ///
+    /// The CarPlay session is created directly rather than through
+    /// SessionManager - deliberately, so it does not depend on the
+    /// phone's scene existing - and that skipped settings entirely. It
+    /// ran with no user agent override, meaning Gecko's own string,
+    /// which on iOS reads as a desktop browser. See
+    /// fix_carplay_session_settings.py.
+    ///
+    /// nil tabID falls back to the global and per-site preferences,
+    /// which is right here: this is not a tab and has no per-tab desktop
+    /// mode of its own.
+    private func settings(for url: String) -> GeckoSessionSettings {
+        return GeckoSessionSettings(
+            websiteMode: websiteModeSettingManager.setting(for: url, tabID: nil),
+            pageZoom: .default,
+            language: .default
+        )
+    }
+    
+    /// Applied before every load, not once at creation - the setting is
+    /// per URL, and a per-site override cannot match while the session
+    /// is still on about:blank.
+    private func load(_ url: String, in session: GeckoSession) {
+        session.updateSettings(settings(for: url))
+        session.load(url)
+        logger(String(format: "CarPlay: loading %@ with %@", url, settings(for: url).websiteMode.userAgentOverride ?? "the native user agent"))
+    }
+    
     private func startSession() {
         let session = GeckoSession()
 
@@ -342,7 +396,7 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
 
         self.session = session
 
-        session.load(Self.homepage)
+        load(Self.homepage, in: session)
         logger(String(format: "CarPlay: browser session opened, loading %@", Self.homepage))
     }
     

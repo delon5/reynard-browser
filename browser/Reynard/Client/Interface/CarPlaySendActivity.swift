@@ -56,8 +56,14 @@ final class CarPlaySendActivity: UIActivity {
             return
         }
 
-        session.load(url.absoluteString)
-        logger(String(format: "CarPlay: sent %@ to the car display", url.absoluteString))
-        activityDidFinish(true)
+        // Through the scene delegate rather than session.load, so the
+        // website mode settings are applied - a raw load sends Gecko's
+        // native user agent, which reads as a desktop browser and gets
+        // the desktop streaming path. See
+        // fix_carplay_session_settings.py.
+        _ = session
+        let loaded = CarPlaySceneDelegate.load(url.absoluteString)
+        logger(String(format: "CarPlay: sent %@ to the car display (%@)", url.absoluteString, loaded ? "ok" : "no session"))
+        activityDidFinish(loaded)
     }
 }
