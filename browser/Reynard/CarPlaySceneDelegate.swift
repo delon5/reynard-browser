@@ -390,7 +390,24 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         session: GeckoSession
     ) async -> ContentPermission.Value {
         guard permission.permission == .autoplay else {
-            return .prompt
+            // DENIED, not prompted - see fix_carplay_deny_prompts.py.
+            //
+            // A prompt on this display can never be answered: the window
+            // shows only the page, and the base view receives no touch
+            // events. So .prompt does not mean "ask", it means "wait
+            // forever", and whatever the page was doing behind the
+            // request stops with it.
+            //
+            // That is what stalled playback: fetching stopped while a
+            // request waited, the video ran on for as long as it was
+            // buffered, and then died - which looked like a 40-50 second
+            // timer but was really the buffer depth.
+            //
+            // Denying is also right on its own merits here. Camera,
+            // microphone, geolocation and notifications should not be
+            // granted to a screen the driver cannot supervise.
+            logger(String(format: "CarPlay: denying %@ - a prompt cannot be answered on the car display", String(describing: permission.permission)))
+            return .deny
         }
         
         logger("CarPlay: allowing autoplay for the car display")
