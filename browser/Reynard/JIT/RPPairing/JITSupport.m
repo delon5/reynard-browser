@@ -1067,6 +1067,11 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
     return YES;
 }
 
+// Forward declaration - the definition sits below, after the session
+// registry it belongs with, but detachDebuggerSession needs it first.
+// See fix_listening_cleared_on_detach_failure.py.
+static void setDebuggerListeningState(uint64_t listening);
+
 BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     NSString *detachResponse = nil;
     NSError *detachError = nil;
@@ -1078,6 +1083,21 @@ BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     if (!isNotConnectedError(detachError)) {
         logger([NSString stringWithFormat:@"Detach failed for pid %d: %@", pid, detachError.localizedDescription ?: @"detach failed"]);
     }
+    
+    // A failed D packet means the transport is gone, whatever the
+    // detach was for. See fix_listening_cleared_on_detach_failure.py.
+    //
+    // The loop's own connectionFailed check cannot see this: it is
+    // !shouldDetachDebugSessionPID(pid), so during a requested teardown
+    // it is false by definition and the flag stays set - which is how a
+    // session logged thirty-five failed detaches and never once said
+    // the debugger had gone.
+    //
+    // isNotConnectedError is not excluded. That governs whether to log,
+    // on the basis that a dead transport is unremarkable during
+    // teardown; here it is exactly the thing worth acting on.
+    setDebuggerListeningState(0);
+    
     return NO;
 }
 
