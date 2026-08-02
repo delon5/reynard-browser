@@ -74,7 +74,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    mirror: always
  
  # Whether to expose the MockExtensionAPI test interface in tests.
-@@ -7149,6 +7151,21 @@
+@@ -7147,6 +7149,21 @@
  # Nb: we ignore this pref on release and beta.
  - name: gfx.blocklist.all
    type: int32_t
