@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..a29cd27a2cc3
 --- /dev/null
 +++ b/gfx/layers/NativeLayerCAPictureInPicture.mm
-@@ -0,0 +1,121 @@
+@@ -0,0 +0,128 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,6 +15,7 @@ index 000000000000..a29cd27a2cc3
 +
 +#import <AVFoundation/AVFoundation.h>
 +
++#include "mozilla/StaticPrefs_gfx.h"
 +#include "nsThreadUtils.h"
 +
 +namespace mozilla::layers {
@@ -45,7 +46,13 @@ index 000000000000..a29cd27a2cc3
 +
 +CALayer* NativeLayerRootCA::FindPictureInPictureSource(
 +    const MutexAutoLock& aProofOfLock) {
-+  if (!mWindowIsFullscreen) {
++  // mWindowIsFullscreen is set from nsWindow::EnteredFullScreen, so it
++  // means the page called requestFullscreen - not that the window fills
++  // the screen, which on a phone it always does. Without the pref,
++  // picture-in-picture only works after tapping a video's fullscreen
++  // button. See fix_pip_allow_windowed_video.py.
++  if (!mWindowIsFullscreen &&
++      !StaticPrefs::gfx_pip_allow_windowed_video()) {
 +    return nil;
 +  }
 +  CALayer* source = nil;

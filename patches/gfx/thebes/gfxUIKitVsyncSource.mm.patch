@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6494ff02528f
 --- /dev/null
 +++ b/gfx/thebes/gfxUIKitVsyncSource.mm
-@@ -0,0 +0,432 @@
+@@ -0,0 +0,448 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -138,17 +138,33 @@ index 000000000000..6494ff02528f
 +  void EnableVsync() override {
 +    MOZ_ASSERT(NS_IsMainThread());
 +    if (IsVsyncEnabled()) {
-+      // Already running on the right screen - nothing to do.
 +      if (mLinkScreen == ChooseVsyncScreen()) {
-+        return;
-+      }
++        // Right screen - but a CADisplayLink killed by a suspension is
++        // still a non-nil object, so also check it is actually firing.
++        // See fix_vsync_stale_check_on_enable.py.
++        //
++        // The foreground observer alone was not enough: a link that
++        // dies while the app stays foregrounded is never checked, and
++        // reloading cannot help because a reload is not a lifecycle
++        // transition. Observed as five completed page loads in sixteen
++        // seconds with nothing drawn.
++        //
++        // EnableVsync runs whenever an observer registers, so this
++        // catches a dead link within a frame or two of any activity.
++        if (!mLastFiredAt ||
++            (TimeStamp::Now() - mLastFiredAt).ToSeconds() < 2.0) {
++          return;
++        }
++        DisableVsync();
++      } else {
 +
-+      // A screen appeared or went away since the link was made. Tear it
-+      // down and fall through to build it on the current one, so
-+      // connecting CarPlay mid-session does not leave vsync bound to a
-+      // phone display that is about to sleep. See
-+      // fix_vsync_follows_carplay_screen.py.
-+      DisableVsync();
++        // A screen appeared or went away since the link was made. Tear
++        // it down and fall through to build it on the current one, so
++        // connecting CarPlay mid-session does not leave vsync bound to
++        // a phone display that is about to sleep. See
++        // fix_vsync_follows_carplay_screen.py.
++        DisableVsync();
++      }
 +    }
 +
 +    NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;

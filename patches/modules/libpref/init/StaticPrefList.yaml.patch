@@ -74,7 +74,29 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    mirror: always
  
  # Whether to expose the MockExtensionAPI test interface in tests.
-@@ -7162,6 +7164,8 @@
+@@ -7149,6 +7151,21 @@
+ # Nb: we ignore this pref on release and beta.
+ - name: gfx.blocklist.all
+   type: int32_t
+   value: 0
+   mirror: once
++
++# Allows picture-in-picture to start from a video that is not in
++# fullscreen. See fix_pip_allow_windowed_video.py.
++#
++# NativeLayerRootCA::FindPictureInPictureSource returns nil unless the
++# window is fullscreen, and on iOS that flag is set from
++# nsWindow::EnteredFullScreen - so it means the page called
++# requestFullscreen, not that the window fills the screen.
++#
++# mirror: always because the check runs under the compositor's mutex,
++# where an ordinary pref read would not be thread-safe.
++- name: gfx.pip.allow_windowed_video
++  type: bool
++  value: false
++  mirror: always
+ 
+@@ -7162,6 +7179,8 @@
    type: bool
  #if defined(XP_MACOSX) || defined(XP_LINUX) && !defined(ANDROID)
    value: true
@@ -83,7 +105,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(MOZ_WIDGET_ANDROID)
    value: true
  #elif defined(XP_WIN)
-@@ -7173,7 +7177,7 @@
+@@ -7173,7 +7192,7 @@
  
  - name: gfx.canvas.accelerated.allow-in-parent
    type: bool
@@ -92,7 +114,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: false
  #else
    value: true
-@@ -7478,6 +7482,8 @@
+@@ -7478,6 +7497,8 @@
      type: RelaxedAtomicBool
  #if defined(MOZ_AARCH64) && defined(XP_MACOSX)
      value: true
@@ -101,7 +123,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #else
      value: false
  #endif
-@@ -7723,7 +7729,13 @@
+@@ -7723,7 +7744,13 @@
    # backend.
  -   name: gfx.font_rendering.coretext.enabled
      type: RelaxedAtomicBool
@@ -115,7 +137,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
      mirror: always
  #endif
  
-@@ -10013,7 +10025,7 @@
+@@ -10013,7 +10040,7 @@
  # or executable but never both at the same time. OpenBSD defaults to W^X.
  - name: javascript.options.content_process_write_protect_code
    type: bool
@@ -124,7 +146,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #else
    value: false
-@@ -10188,7 +10200,9 @@
+@@ -10188,7 +10215,9 @@
  
  - name: layers.gpu-process.enabled
    type: bool
@@ -135,7 +157,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #elif defined(MOZ_X11)
    value: false  # we'd like this to be @IS_NIGHTLY_BUILD@, see Bug 1927058
-@@ -10411,7 +10425,7 @@
+@@ -10411,7 +10440,7 @@
  
  - name: layout.accessiblecaret.margin-left
    type: float
@@ -144,7 +166,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    mirror: always
  
  - name: layout.accessiblecaret.transition-duration
-@@ -11958,7 +11972,7 @@
+@@ -11958,7 +11987,7 @@
  - name: media.cubeb.sandbox
    type: bool
    mirror: always
@@ -153,7 +175,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #else
    value: false
-@@ -12363,6 +12377,8 @@
+@@ -12363,6 +12392,8 @@
    value: true
  #elif defined(XP_MACOSX)
    value: true
@@ -162,7 +184,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(XP_LINUX) && !defined(ANDROID)
    value: true
  #elif defined(XP_FREEBSD)
-@@ -12407,6 +12423,8 @@
+@@ -12407,6 +12438,8 @@
    value: true
  #elif defined(XP_MACOSX)
    value: true
@@ -171,7 +193,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(XP_LINUX) && !defined(ANDROID)
    value: true
  #elif defined(XP_FREEBSD)
-@@ -12440,6 +12458,8 @@
+@@ -12440,6 +12473,8 @@
    value: true
  #elif defined(XP_MACOSX)
    value: true
@@ -180,7 +202,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(XP_LINUX) && !defined(ANDROID)
    value: true
  #elif defined(XP_FREEBSD)
-@@ -12459,6 +12479,8 @@
+@@ -12459,6 +12494,8 @@
    value: true
  #elif defined(XP_MACOSX)
    value: true
@@ -189,7 +211,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(XP_LINUX) && !defined(ANDROID)
    value: true
  #elif defined(XP_FREEBSD)
-@@ -12478,6 +12500,8 @@
+@@ -12478,6 +12515,8 @@
    value: true
  #elif defined(XP_MACOSX)
    value: true
@@ -198,7 +220,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(XP_LINUX) && !defined(ANDROID)
    value: true
  #elif defined(XP_FREEBSD)
-@@ -12497,6 +12521,8 @@
+@@ -12497,6 +12536,8 @@
    value: true
  #elif defined(XP_MACOSX)
    value: true
@@ -207,7 +229,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  #elif defined(XP_LINUX) && !defined(ANDROID)
    value: true
  #elif defined(XP_FREEBSD)
-@@ -12523,7 +12549,7 @@
+@@ -12523,7 +12564,7 @@
    type: RelaxedAtomicBool
  #if defined(XP_WIN)
    value: true
@@ -216,7 +238,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #elif defined(XP_LINUX) || defined(ANDROID)
    value: true
-@@ -12588,7 +12614,7 @@
+@@ -12588,7 +12629,7 @@
  #ifdef MOZ_FFMPEG
  -   name: media.ffmpeg.enabled
      type: RelaxedAtomicBool
@@ -225,7 +247,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
      value: false
    #else
      value: true
-@@ -15074,7 +15100,10 @@
+@@ -15074,7 +15115,10 @@
  - name: network.process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -237,7 +259,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: false # see bug 1641427
  #else
    value: true
-@@ -15123,7 +15152,13 @@
+@@ -15123,7 +15167,13 @@
  - name: network.http.network_access_on_socket_process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -251,7 +273,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  
  # Telemetry of traffic categories. Whether or not to enable HttpTrafficAnalyzer.
  - name: network.traffic_analyzer.enabled
-@@ -19129,7 +19164,7 @@
+@@ -19129,7 +19179,7 @@
  # If the service is available, set threads to low-power mode when in the background.
  - name: threads.use_low_power.enabled
    type: RelaxedAtomicBool
@@ -260,7 +282,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19138,10 +19173,10 @@
+@@ -19138,10 +19188,10 @@
  
  
  # If the process priority is set to background, put the main thread in the background.
@@ -273,7 +295,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19938,7 +19973,7 @@
+@@ -19938,7 +19988,7 @@
  # on a platform that supports the GPU process, else true.
  - name: webgl.allow-in-parent
    type: bool

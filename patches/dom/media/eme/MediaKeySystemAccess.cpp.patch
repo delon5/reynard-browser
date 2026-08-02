@@ -1,11 +1,10 @@
 diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySystemAccess.cpp
 --- a/dom/media/eme/MediaKeySystemAccess.cpp
 +++ b/dom/media/eme/MediaKeySystemAccess.cpp
-@@ -139,6 +139,17 @@
-   if (IsClearkeyKeySystem(keySystem)) {
+@@ -140,6 +140,17 @@
      return EnsureCDMInstalled(keySystem, SecureLevel::Software, aOutMessage);
    }
-+
+ 
 +#ifdef MOZ_WIDGET_UIKIT
 +  // FairPlay is part of the OS. There is no CDM to install or download,
 +  // so the installation checks below do not apply - availability is
@@ -16,6 +15,32 @@ diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySyst
 +               : MediaKeySystemStatus::Cdm_not_supported;
 +  }
 +#endif
- 
++
    // This is used to determine if we need to download Widevine L1.
    bool shouldCheckL1Installation = false;
+ #ifdef MOZ_WMF_CDM
+@@ -349,7 +360,23 @@
+   nsTArray<KeySystemConfigRequest> requests;
+ 
+   // Software Widevine and Clearkey
+-  if (IsWidevineKeySystem(aKeySystem) || IsClearkeyKeySystem(aKeySystem)) {
++  if (IsWidevineKeySystem(aKeySystem) || IsClearkeyKeySystem(aKeySystem)
++#ifdef MOZ_WIDGET_UIKIT
++      // Without this no request is ever built for FairPlay, so
++      // CreateKeySystemConfigs receives an empty list, produces no
++      // configs, and even a bare {} has nothing to match against.
++      //
++      // This is the fourth gate the key system has to pass, after the
++      // allowlist in MediaKeySystemAccessManager, KeySystemConfig
++      // ::Supports, and GetKeySystemStatus. Each looked like the last
++      // one.
++      //
++      // DecryptionInfo::Software is right despite FairPlay decrypting in
++      // hardware: the flag marks a hardware CDM pipeline that Gecko
++      // drives, and AVFoundation owns this one entirely.
++      || IsFairPlayKeySystem(aKeySystem)
++#endif
++  ) {
+     requests.AppendElement(KeySystemConfigRequest{
+         aKeySystem, DecryptionInfo::Software, aIsPrivateBrowsing});
+   }
