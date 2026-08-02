@@ -49,6 +49,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // fix_defer_attaches_while_inactive.py.
         JITController.shared.applicationDidBecomeActive()
         
+        // Clears a now playing entry left behind by a session that died
+        // without reporting - see fix_media_session_leak.py. Foreground
+        // is when a stale one would be noticed anyway.
+        SystemMediaSession.shared.revalidate()
+        
         guard let browserViewController = window?.rootViewController as? BrowserViewController else {
             return
         }

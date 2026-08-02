@@ -153,6 +153,7 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     func onPlaybackPlaying(session: GeckoSession) {
+        revalidate()
         let identifier = ObjectIdentifier(session)
         let state = state(for: session)
         state.playbackState = .playing
@@ -176,6 +177,7 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     func onPlaybackPaused(session: GeckoSession) {
+        revalidate()
         let identifier = ObjectIdentifier(session)
         let state = state(for: session)
         state.playbackState = .paused
@@ -190,6 +192,7 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     func onPlaybackNone(session: GeckoSession) {
+        revalidate()
         let identifier = ObjectIdentifier(session)
         let state = state(for: session)
         state.playbackState = .none
@@ -202,6 +205,7 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     func select(session: GeckoSession) {
+        revalidate()
         selectedSession = session
         guard let state = sessionStates[ObjectIdentifier(session)],
               state.playbackState != .none else {
@@ -284,6 +288,32 @@ final class SystemMediaSession: MediaSessionDelegate {
         activeSession = session
         nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
         apply(state.features)
+    }
+    
+    /// Drops sessions that died without reporting, and clears the now
+    /// playing entry if the active one was among them. See
+    /// fix_media_session_leak.py.
+    ///
+    /// onDeactivated handles an orderly close, but a session that is
+    /// simply deallocated never calls it. activeSession is weak so it
+    /// silently becomes nil, while its state stays marked .playing and
+    /// nowPlayingInfo stays populated - describing something that no
+    /// longer exists, with nothing left to notice.
+    func revalidate() {
+        let dead = sessionStates.filter { $0.value.session == nil }
+        
+        for (identifier, state) in dead {
+            state.artworkTask?.cancel()
+            sessionStates.removeValue(forKey: identifier)
+            playbackHistory.removeAll { $0 == identifier }
+        }
+        
+        // The active session going while now playing is still populated
+        // is the case the user actually sees. Reactivating either
+        // promotes whatever else was playing or clears the entry.
+        if activeSession == nil, !(nowPlayingCenter.nowPlayingInfo?.isEmpty ?? true) {
+            activateMostRecentPlayingSession()
+        }
     }
     
     private func activateMostRecentPlayingSession() {
