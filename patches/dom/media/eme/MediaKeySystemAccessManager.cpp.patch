@@ -1,0 +1,22 @@
+diff --git a/dom/media/eme/MediaKeySystemAccessManager.cpp b/dom/media/eme/MediaKeySystemAccessManager.cpp
+--- a/dom/media/eme/MediaKeySystemAccessManager.cpp
++++ b/dom/media/eme/MediaKeySystemAccessManager.cpp
+@@ -5,6 +5,7 @@
+ #include "MediaKeySystemAccessManager.h"
+ 
+ #include "DecoderDoctorDiagnostics.h"
++#include "KeySystemConfig.h"
+ #include "MediaKeySystemAccessPermissionRequest.h"
+ #include "VideoUtils.h"
+ #include "mozilla/DetailedPromise.h"
+@@ -410,6 +411,10 @@
+ #ifdef MOZ_WMF_CDM
+       !IsPlayReadyKeySystemAndSupported(aRequest->mKeySystem) &&
+       !IsWidevineExperimentKeySystemAndSupported(aRequest->mKeySystem) &&
++#endif
++#ifdef MOZ_WIDGET_UIKIT
++      !(IsFairPlayKeySystem(aRequest->mKeySystem) &&
++        KeySystemConfig::Supports(aRequest->mKeySystem)) &&
+ #endif
+       !IsClearkeyKeySystem(aRequest->mKeySystem)) {
+     // Not to inform user, because nothing to do if the keySystem is not
