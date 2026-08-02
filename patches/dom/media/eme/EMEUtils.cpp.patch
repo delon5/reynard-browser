@@ -1,0 +1,14 @@
+diff --git a/dom/media/eme/EMEUtils.cpp b/dom/media/eme/EMEUtils.cpp
+--- a/dom/media/eme/EMEUtils.cpp
++++ b/dom/media/eme/EMEUtils.cpp
+@@ -49,6 +49,10 @@
+   return aKeySystem.EqualsLiteral(kWidevineKeySystemName);
+ }
+ 
++bool IsFairPlayKeySystem(const nsAString& aKeySystem) {
++  return aKeySystem.EqualsLiteral(kFairPlayKeySystemName);
++}
++
+ #ifdef MOZ_WMF_CDM
+ bool IsMediaFoundationCDMPlaybackEnabled() {
+   // 1=enabled encrypted and clear, 2=enabled encrypted.

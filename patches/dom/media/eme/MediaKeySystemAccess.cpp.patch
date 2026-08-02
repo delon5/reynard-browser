@@ -1,0 +1,21 @@
+diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySystemAccess.cpp
+--- a/dom/media/eme/MediaKeySystemAccess.cpp
++++ b/dom/media/eme/MediaKeySystemAccess.cpp
+@@ -139,6 +139,17 @@
+   if (IsClearkeyKeySystem(keySystem)) {
+     return EnsureCDMInstalled(keySystem, SecureLevel::Software, aOutMessage);
+   }
++
++#ifdef MOZ_WIDGET_UIKIT
++  // FairPlay is part of the OS. There is no CDM to install or download,
++  // so the installation checks below do not apply - availability is
++  // decided entirely by KeySystemConfig::Supports.
++  if (IsFairPlayKeySystem(keySystem)) {
++    return KeySystemConfig::Supports(keySystem)
++               ? MediaKeySystemStatus::Available
++               : MediaKeySystemStatus::Cdm_not_supported;
++  }
++#endif
+ 
+   // This is used to determine if we need to download Widevine L1.
+   bool shouldCheckL1Installation = false;

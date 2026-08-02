@@ -1,0 +1,12 @@
+diff --git a/dom/media/eme/EMEUtils.h b/dom/media/eme/EMEUtils.h
+--- a/dom/media/eme/EMEUtils.h
++++ b/dom/media/eme/EMEUtils.h
+@@ -58,6 +58,8 @@
+ 
+ bool IsWidevineKeySystem(const nsAString& aKeySystem);
+ 
++bool IsFairPlayKeySystem(const nsAString& aKeySystem);
++
+ #ifdef MOZ_WMF_CDM
+ bool IsMediaFoundationCDMPlaybackEnabled();
+ 

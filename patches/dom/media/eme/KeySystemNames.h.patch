@@ -1,0 +1,15 @@
+diff --git a/dom/media/eme/KeySystemNames.h b/dom/media/eme/KeySystemNames.h
+--- a/dom/media/eme/KeySystemNames.h
++++ b/dom/media/eme/KeySystemNames.h
+@@ -19,6 +19,11 @@
+ inline constexpr char kClearKeyWithProtectionQueryKeySystemName[] =
+     "org.mozilla.clearkey_with_protection_query";
+ inline constexpr char kWidevineKeySystemName[] = "com.widevine.alpha";
++// Apple FairPlay Streaming. Only meaningful on Apple platforms, where
++// decryption happens inside AVFoundation rather than in a downloadable
++// CDM - so unlike Widevine there is nothing to install, and support is
++// a property of the OS.
++inline constexpr char kFairPlayKeySystemName[] = "com.apple.fps";
+ #ifdef MOZ_WMF_CDM
+ // A sub key system of `kWidevineKeySystem` only used in experiments.
+ inline constexpr char kWidevineExperimentKeySystemName[] =

@@ -1,0 +1,75 @@
+diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.cpp
+--- a/dom/media/eme/KeySystemConfig.cpp
++++ b/dom/media/eme/KeySystemConfig.cpp
+@@ -30,6 +30,14 @@
+ 
+ /* static */
+ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
++#ifdef MOZ_WIDGET_UIKIT
++  // FairPlay is part of the OS rather than a downloadable CDM, so there
++  // is nothing to check for having been installed - unlike Widevine and
++  // Clearkey, which are fetched by the GMP downloader.
++  if (IsFairPlayKeySystem(aKeySystem)) {
++    return true;
++  }
++#endif
+ #ifdef MOZ_WIDGET_ANDROID
+   // Check if we can use MediaDrm for this keysystem.
+   if (mozilla::java::MediaDrmProxy::IsSchemeSupported(
+@@ -119,6 +127,44 @@
+   }
+ }
+ 
++#ifdef MOZ_WIDGET_UIKIT
++/* static */ void KeySystemConfig::CreateFairPlayKeySystemConfigs(
++    const KeySystemConfigRequest& aRequest,
++    nsTArray<KeySystemConfig>& aOutConfigs) {
++  KeySystemConfig* config = aOutConfigs.AppendElement();
++  config->mKeySystem = aRequest.mKeySystem;
++
++  // FairPlay carries its key ids in the sinf box for fragmented MP4 and
++  // in the playlist for HLS, so cenc and keyids are the meaningful init
++  // data types. webm is not applicable - FairPlay only protects MP4 and
++  // HLS.
++  config->mInitDataTypes.AppendElement(u"cenc"_ns);
++  config->mInitDataTypes.AppendElement(u"sinf"_ns);
++  config->mInitDataTypes.AppendElement(u"skd"_ns);
++
++  // Persistent state is required for offline keys, which are the main
++  // reason to use AVContentKeySession over the older resource loader
++  // path. Distinctive identifier is NotAllowed: FairPlay identifies the
++  // device to the key server itself, so the page never needs one.
++  config->mPersistentState = Requirement::Optional;
++  config->mDistinctiveIdentifier = Requirement::NotAllowed;
++  config->mSessionTypes.AppendElement(SessionType::Temporary);
++
++  // HW_SECURE_ALL is honest here in a way it is not for software CDMs:
++  // FairPlay decrypts inside the secure enclave and clear frames never
++  // reach the app.
++  config->mAudioRobustness.AppendElement(u""_ns);
++  config->mVideoRobustness.AppendElement(u""_ns);
++
++  // Declared as decrypt-only rather than decrypt-and-decode. Decode
++  // happens in VideoToolbox, but the samples are only usable through
++  // AVFoundation's own path - so until that path exists this advertises
++  // what the platform can decrypt, not what Gecko can currently draw.
++  config->mMP4.SetCanDecrypt(EME_CODEC_H264);
++  config->mMP4.SetCanDecrypt(EME_CODEC_AAC);
++}
++#endif
++
+ /* static */ void KeySystemConfig::CreateWivineL3KeySystemConfigs(
+     const KeySystemConfigRequest& aRequest,
+     nsTArray<KeySystemConfig>& aOutConfigs) {
+@@ -232,6 +278,11 @@
+     } else if (IsWidevineKeySystem(keySystem)) {
+       CreateWivineL3KeySystemConfigs(request, outConfigs);
+     }
++#ifdef MOZ_WIDGET_UIKIT
++    else if (IsFairPlayKeySystem(keySystem)) {
++      CreateFairPlayKeySystemConfigs(request, outConfigs);
++    }
++#endif
+ #ifdef MOZ_WMF_CDM
+     else if (IsPlayReadyKeySystemAndSupported(keySystem) ||
+              IsWidevineExperimentKeySystemAndSupported(keySystem)) {

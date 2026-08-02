@@ -1,0 +1,15 @@
+diff --git a/dom/media/eme/KeySystemConfig.h b/dom/media/eme/KeySystemConfig.h
+--- a/dom/media/eme/KeySystemConfig.h
++++ b/dom/media/eme/KeySystemConfig.h
+@@ -242,6 +242,11 @@
+   static void CreateWivineL3KeySystemConfigs(
+       const KeySystemConfigRequest& aRequest,
+       nsTArray<KeySystemConfig>& aOutConfigs);
++#ifdef MOZ_WIDGET_UIKIT
++  static void CreateFairPlayKeySystemConfigs(
++      const KeySystemConfigRequest& aRequest,
++      nsTArray<KeySystemConfig>& aOutConfigs);
++#endif
+ };
+ 
+ struct KeySystemConfigRequest final {
