@@ -1,0 +1,32 @@
+diff --git a/dom/media/eme/MediaKeys.cpp b/dom/media/eme/MediaKeys.cpp
+--- a/dom/media/eme/MediaKeys.cpp
++++ b/dom/media/eme/MediaKeys.cpp
+@@ -27,6 +27,9 @@
+ #include "nsPrintfCString.h"
+ #include "nsServiceManagerUtils.h"
+ 
++#ifdef MOZ_WIDGET_UIKIT
++#  include "mozilla/FairPlayCDMProxy.h"
++#endif
+ #ifdef MOZ_WIDGET_ANDROID
+ #  include "AndroidDecoderModule.h"
+ #  include "mozilla/MediaDrmCDMProxy.h"
+@@ -439,6 +442,18 @@
+   EME_LOG("MediaKeys[{}]::CreateCDMProxy(), isHardwareDecryptionSupported={}",
+           fmt::ptr(this), isHardwareDecryptionSupported);
+   RefPtr<CDMProxy> proxy;
++#ifdef MOZ_WIDGET_UIKIT
++  // FairPlay decrypts inside AVFoundation, so this handles licence
++  // negotiation only - the same division as Android. Without it the
++  // fallthrough below constructs a ChromiumCDMProxy and hunts for a GMP
++  // named com.apple.fps, failing confusingly rather than clearly.
++  if (IsFairPlayKeySystem(mKeySystem)) {
++    proxy = new FairPlayCDMProxy(
++        this, mKeySystem,
++        mConfig.mDistinctiveIdentifier == MediaKeysRequirement::Required,
++        mConfig.mPersistentState == MediaKeysRequirement::Required);
++  } else
++#endif
+ #ifdef MOZ_WIDGET_ANDROID
+   if (IsWidevineKeySystem(mKeySystem)) {
+     if (AndroidDecoderModule::IsJavaDecoderModuleAllowed()) {

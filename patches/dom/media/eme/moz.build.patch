@@ -1,0 +1,13 @@
+diff --git a/dom/media/eme/moz.build b/dom/media/eme/moz.build
+--- a/dom/media/eme/moz.build
++++ b/dom/media/eme/moz.build
+@@ -45,6 +45,9 @@
+     DIRS += ["mediadrm"]
+     LOCAL_INCLUDES += ["/dom/media/platforms/android"]
+ 
++if CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":
++    DIRS += ["fairplay"]
++
+ if CONFIG["MOZ_WMF_CDM"]:
+     DIRS += ["mediafoundation"]
+ 

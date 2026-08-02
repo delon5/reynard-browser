@@ -1,0 +1,575 @@
+diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.mm b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
+new file mode 100644
+index 000000000000..ecccd97c6fb0
+--- /dev/null
++++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
+@@ -0,0 +1,569 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "FairPlayCDMProxy.h"
++
++#include "mozilla/EMEUtils.h"
++#include "mozilla/dom/MediaKeyMessageEventBinding.h"
++#include "mozilla/dom/MediaKeySession.h"
++#include "nsThreadUtils.h"
++
++#import <AVFoundation/AVFoundation.h>
++
++using namespace mozilla;
++
++// The delegate AVContentKeySession calls back on. Owns a strong
++// reference to the proxy, cleared on shutdown so the two do not keep
++// each other alive.
++@interface FairPlayKeyDelegate : NSObject <AVContentKeySessionDelegate> {
++ @private
++  RefPtr<FairPlayCDMProxy> mProxy;
++  // Correlates a key request back to the EME session that asked for it.
++  // AVContentKeySession hands back the request, not our session id.
++  NSMutableDictionary<NSString*, AVContentKeyRequest*>* mRequestsBySession;
++  NSMutableDictionary<NSString*, NSString*>* mSessionsByIdentifier;
++}
++- (instancetype)initWithProxy:(FairPlayCDMProxy*)aProxy;
++- (void)detach;
++- (void)rememberSession:(NSString*)aSessionId
++          forIdentifier:(NSString*)aIdentifier;
++- (AVContentKeyRequest*)requestForSession:(NSString*)aSessionId;
++- (void)forgetSession:(NSString*)aSessionId;
++@end
++
++@implementation FairPlayKeyDelegate
++
++- (instancetype)initWithProxy:(FairPlayCDMProxy*)aProxy {
++  self = [super init];
++  if (self) {
++    mProxy = aProxy;
++    mRequestsBySession = [[NSMutableDictionary alloc] init];
++    mSessionsByIdentifier = [[NSMutableDictionary alloc] init];
++  }
++  return self;
++}
++
++- (void)detach {
++  mProxy = nullptr;
++  [mRequestsBySession removeAllObjects];
++  [mSessionsByIdentifier removeAllObjects];
++}
++
++- (void)rememberSession:(NSString*)aSessionId
++          forIdentifier:(NSString*)aIdentifier {
++  @synchronized(self) {
++    if (aIdentifier) {
++      mSessionsByIdentifier[aIdentifier] = aSessionId;
++    }
++  }
++}
++
++- (AVContentKeyRequest*)requestForSession:(NSString*)aSessionId {
++  @synchronized(self) {
++    return mRequestsBySession[aSessionId];
++  }
++}
++
++- (void)forgetSession:(NSString*)aSessionId {
++  @synchronized(self) {
++    [mRequestsBySession removeObjectForKey:aSessionId];
++  }
++}
++
++// Resolves the EME session id for a request, by the identifier it was
++// issued with.
++- (NSString*)sessionIdForRequest:(AVContentKeyRequest*)aRequest {
++  id identifier = aRequest.identifier;
++  NSString* key = nil;
++  if ([identifier isKindOfClass:[NSString class]]) {
++    key = (NSString*)identifier;
++  } else if ([identifier isKindOfClass:[NSData class]]) {
++    key = [[NSString alloc] initWithData:(NSData*)identifier
++                                encoding:NSUTF8StringEncoding];
++  }
++  if (!key) {
++    return nil;
++  }
++  @synchronized(self) {
++    return mSessionsByIdentifier[key];
++  }
++}
++
++- (void)contentKeySession:(AVContentKeySession*)session
++    didProvideContentKeyRequest:(AVContentKeyRequest*)keyRequest {
++  if (!mProxy) {
++    return;
++  }
++
++  NSString* sessionId = [self sessionIdForRequest:keyRequest];
++  if (!sessionId) {
++    return;
++  }
++
++  @synchronized(self) {
++    mRequestsBySession[sessionId] = keyRequest;
++  }
++
++  // The application certificate is what identifies this app to the key
++  // server. Without it there is no SPC to make, so fail loudly rather
++  // than issuing a request that cannot be satisfied.
++  if (mProxy->mAppCertificate.IsEmpty()) {
++    mProxy->OnKeyRequestFailed(
++        nsDependentCString([sessionId UTF8String]),
++        "setServerCertificate must be called before generateRequest for FairPlay"_ns);
++    return;
++  }
++
++  NSData* appCert = [NSData dataWithBytes:mProxy->mAppCertificate.Elements()
++                                   length:mProxy->mAppCertificate.Length()];
++
++  id identifier = keyRequest.identifier;
++  NSData* contentId = nil;
++  if ([identifier isKindOfClass:[NSString class]]) {
++    contentId = [(NSString*)identifier dataUsingEncoding:NSUTF8StringEncoding];
++  } else if ([identifier isKindOfClass:[NSData class]]) {
++    contentId = (NSData*)identifier;
++  }
++
++  RefPtr<FairPlayCDMProxy> proxy = mProxy;
++  nsCString sessionIdCopy(nsDependentCString([sessionId UTF8String]));
++
++  [keyRequest
++      makeStreamingContentKeyRequestDataForApp:appCert
++                             contentIdentifier:contentId
++                                       options:nil
++                             completionHandler:^(NSData* _Nullable requestData,
++                                                 NSError* _Nullable error) {
++                               if (error || !requestData) {
++                                 nsCString msg("FairPlay key request failed"_ns);
++                                 if (error) {
++                                   msg.Append(": ");
++                                   msg.Append([[error localizedDescription]
++                                       UTF8String]);
++                                 }
++                                 proxy->OnKeyRequestFailed(sessionIdCopy, msg);
++                                 return;
++                               }
++
++                               nsTArray<uint8_t> spc;
++                               spc.AppendElements(
++                                   static_cast<const uint8_t*>(
++                                       [requestData bytes]),
++                                   [requestData length]);
++                               proxy->OnKeyRequestReady(sessionIdCopy,
++                                                        std::move(spc));
++                             }];
++}
++
++- (void)contentKeySession:(AVContentKeySession*)session
++        contentKeyRequest:(AVContentKeyRequest*)keyRequest
++         didFailWithError:(NSError*)err {
++  if (!mProxy) {
++    return;
++  }
++  NSString* sessionId = [self sessionIdForRequest:keyRequest];
++  if (!sessionId) {
++    return;
++  }
++  nsCString msg("FairPlay key request failed"_ns);
++  if (err) {
++    msg.Append(": ");
++    msg.Append([[err localizedDescription] UTF8String]);
++  }
++  mProxy->OnKeyRequestFailed(nsDependentCString([sessionId UTF8String]), msg);
++}
++
++@end
++
++namespace mozilla {
++
++FairPlayCDMProxy::FairPlayCDMProxy(dom::MediaKeys* aKeys,
++                                   const nsAString& aKeySystem,
++                                   bool aDistinctiveIdentifierRequired,
++                                   bool aPersistentStateRequired)
++    : CDMProxy(aKeys, aKeySystem, aDistinctiveIdentifierRequired,
++               aPersistentStateRequired) {
++  MOZ_ASSERT(NS_IsMainThread());
++  EME_LOG("FairPlayCDMProxy::FairPlayCDMProxy({})", fmt::ptr(this));
++}
++
++FairPlayCDMProxy::~FairPlayCDMProxy() {
++  EME_LOG("FairPlayCDMProxy::~FairPlayCDMProxy({})", fmt::ptr(this));
++}
++
++void FairPlayCDMProxy::Init(PromiseId aPromiseId, const nsAString& aOrigin,
++                            const nsAString& aTopLevelOrigin,
++                            const nsAString& aName) {
++  MOZ_ASSERT(NS_IsMainThread());
++  EME_LOG("FairPlayCDMProxy::Init({})", fmt::ptr(this));
++
++  if (@available(iOS 11.0, macOS 10.13, *)) {
++    AVContentKeySession* session = [AVContentKeySession
++        contentKeySessionWithKeySystem:AVContentKeySystemFairPlayStreaming];
++    if (!session) {
++      RejectPromiseWithStateError(
++          aPromiseId, "Could not create an AVContentKeySession"_ns);
++      return;
++    }
++
++    mKeySession = [session retain];
++    mDelegate = [[FairPlayKeyDelegate alloc] initWithProxy:this];
++
++    // A serial queue, so requests and their completions cannot
++    // interleave. Everything is marshalled to main before touching
++    // MediaKeys.
++    // Not released: dispatch objects are ARC-managed by default, so
++    // dispatch_release would not compile. The session holds it for its
++    // lifetime, which is what we want anyway.
++    dispatch_queue_t queue = dispatch_queue_create(
++        "com.minh-ton.Reynard.FairPlayKeys", DISPATCH_QUEUE_SERIAL);
++    [mKeySession setDelegate:mDelegate queue:queue];
++
++    ResolvePromise(aPromiseId);
++    return;
++  }
++
++  RejectPromiseWithStateError(
++      aPromiseId, "FairPlay requires iOS 11 or later"_ns);
++}
++
++void FairPlayCDMProxy::CreateSession(uint32_t aCreateSessionToken,
++                                     dom::MediaKeySessionType aSessionType,
++                                     PromiseId aPromiseId,
++                                     const nsAString& aInitDataType,
++                                     nsTArray<uint8_t>& aInitData) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!mKeySession || !mDelegate) {
++    RejectPromiseWithStateError(aPromiseId,
++                                "FairPlay session is not initialised"_ns);
++    return;
++  }
++
++  // Our own id: AVContentKeySession has no notion of one, and EME needs
++  // a stable handle before any key request comes back.
++  // NSUUID rather than nsID::GenerateUUID - one less Gecko header to
++  // depend on, and we are in Objective-C++ already.
++  NSString* sessionIdNS = [[NSUUID UUID] UUIDString];
++  nsAutoCString sessionId([sessionIdNS UTF8String]);
++
++  nsCString initDataType = NS_ConvertUTF16toUTF8(aInitDataType);
++
++  // The identifier FairPlay expects differs by container. HLS carries an
++  // skd:// URI, which must be passed as a string; fragmented MP4 carries
++  // the key id as bytes.
++  id identifier = nil;
++  NSString* identifierKey = nil;
++  if (initDataType.EqualsLiteral("skd")) {
++    NSString* skd =
++        [[NSString alloc] initWithBytes:aInitData.Elements()
++                                 length:aInitData.Length()
++                               encoding:NSUTF8StringEncoding];
++    identifier = skd;
++    identifierKey = skd;
++  } else {
++    NSData* keyId = [NSData dataWithBytes:aInitData.Elements()
++                                   length:aInitData.Length()];
++    identifier = keyId;
++    identifierKey = [[NSString alloc] initWithData:keyId
++                                          encoding:NSUTF8StringEncoding];
++  }
++
++  [mDelegate rememberSession:sessionIdNS forIdentifier:identifierKey];
++
++  NSData* initData = [NSData dataWithBytes:aInitData.Elements()
++                                    length:aInitData.Length()];
++
++  // Resolved before the key request arrives - EME expects the session to
++  // exist immediately, with the licence request following as a message.
++  OnSetSessionId(aCreateSessionToken, NS_ConvertUTF8toUTF16(sessionId));
++  ResolvePromise(aPromiseId);
++
++  [mKeySession processContentKeyRequestWithIdentifier:identifier
++                                   initializationData:initData
++                                              options:nil];
++}
++
++void FairPlayCDMProxy::LoadSession(PromiseId aPromiseId,
++                                   dom::MediaKeySessionType aSessionType,
++                                   const nsAString& aSessionId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Persistent sessions need AVPersistableContentKeyRequest and on-disk
++  // key storage, which is its own piece of work.
++  RejectPromiseWithStateError(
++      aPromiseId, "FairPlay persistent sessions are not supported"_ns);
++}
++
++void FairPlayCDMProxy::SetServerCertificate(PromiseId aPromiseId,
++                                            nsTArray<uint8_t>& aCert) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  // For FairPlay this is the FPS application certificate, and
++  // makeStreamingContentKeyRequestDataForApp cannot produce an SPC
++  // without it. Stored rather than handed to AVFoundation, which takes
++  // it per request.
++  mAppCertificate = aCert.Clone();
++  EME_LOG("FairPlayCDMProxy::SetServerCertificate({}) {} bytes",
++          fmt::ptr(this), mAppCertificate.Length());
++  ResolvePromise(aPromiseId);
++}
++
++void FairPlayCDMProxy::UpdateSession(const nsAString& aSessionId,
++                                     PromiseId aPromiseId,
++                                     nsTArray<uint8_t>& aResponse) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  if (!mDelegate) {
++    RejectPromiseWithStateError(aPromiseId,
++                                "FairPlay session is not initialised"_ns);
++    return;
++  }
++
++  NSString* sessionId =
++      [NSString stringWithUTF8String:NS_ConvertUTF16toUTF8(aSessionId).get()];
++  AVContentKeyRequest* request = [mDelegate requestForSession:sessionId];
++  if (!request) {
++    RejectPromiseWithStateError(
++        aPromiseId, "No pending FairPlay key request for this session"_ns);
++    return;
++  }
++
++  NSData* ckc = [NSData dataWithBytes:aResponse.Elements()
++                               length:aResponse.Length()];
++  AVContentKeyResponse* response = [AVContentKeyResponse
++      contentKeyResponseWithFairPlayStreamingKeyResponseData:ckc];
++  [request processContentKeyResponse:response];
++
++  ResolvePromise(aPromiseId);
++}
++
++void FairPlayCDMProxy::CloseSession(const nsAString& aSessionId,
++                                    PromiseId aPromiseId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mDelegate) {
++    NSString* sessionId =
++        [NSString stringWithUTF8String:NS_ConvertUTF16toUTF8(aSessionId).get()];
++    [mDelegate forgetSession:sessionId];
++  }
++  OnSessionClosed(aSessionId, dom::MediaKeySessionClosedReason::Closed_by_application);
++  ResolvePromise(aPromiseId);
++}
++
++void FairPlayCDMProxy::RemoveSession(const nsAString& aSessionId,
++                                     PromiseId aPromiseId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Nothing persisted, so there is nothing to remove.
++  RejectPromiseWithStateError(
++      aPromiseId, "FairPlay does not store persistent sessions"_ns);
++}
++
++void FairPlayCDMProxy::OnKeyRequestReady(const nsACString& aSessionId,
++                                         nsTArray<uint8_t>&& aRequestData) {
++  // Arrives on the delegate queue.
++  nsCString sessionId(aSessionId);
++  nsTArray<uint8_t> data = std::move(aRequestData);
++
++  nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
++      "FairPlayCDMProxy::OnKeyRequestReady",
++      [self = RefPtr{this}, sessionId, data = std::move(data)]() {
++        self->OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
++                               dom::MediaKeyMessageType::License_request,
++                               data);
++      });
++  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++}
++
++void FairPlayCDMProxy::OnKeyRequestFailed(const nsACString& aSessionId,
++                                          const nsACString& aMessage) {
++  nsCString sessionId(aSessionId);
++  nsCString message(aMessage);
++
++  nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
++      "FairPlayCDMProxy::OnKeyRequestFailed",
++      [self = RefPtr{this}, sessionId, message]() {
++        self->OnSessionError(NS_ConvertUTF8toUTF16(sessionId),
++                             NS_ERROR_DOM_INVALID_STATE_ERR, 0,
++                             NS_ConvertUTF8toUTF16(message));
++      });
++  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++}
++
++void FairPlayCDMProxy::QueryOutputProtectionStatus() {
++  MOZ_ASSERT(NS_IsMainThread());
++  // FairPlay enforces output protection inside the platform, so there is
++  // nothing for Gecko to query.
++  NotifyOutputProtectionStatus(OutputProtectionCheckStatus::CheckFailed,
++                               OutputProtectionCaptureStatus::Unused);
++}
++
++void FairPlayCDMProxy::NotifyOutputProtectionStatus(
++    OutputProtectionCheckStatus aCheckStatus,
++    OutputProtectionCaptureStatus aCaptureStatus) {
++  MOZ_ASSERT(NS_IsMainThread());
++}
++
++void FairPlayCDMProxy::Shutdown() {
++  MOZ_ASSERT(NS_IsMainThread());
++  EME_LOG("FairPlayCDMProxy::Shutdown({})", fmt::ptr(this));
++
++  if (mDelegate) {
++    [mDelegate detach];
++    [mDelegate release];
++    mDelegate = nullptr;
++  }
++  if (mKeySession) {
++    [mKeySession release];
++    mKeySession = nullptr;
++  }
++  mKeys.Clear();
++}
++
++void FairPlayCDMProxy::Terminated() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!mKeys.IsNull()) {
++    mKeys->Terminated();
++  }
++}
++
++void FairPlayCDMProxy::OnSetSessionId(uint32_t aCreateSessionToken,
++                                      const nsAString& aSessionId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mKeys.IsNull()) {
++    return;
++  }
++  RefPtr<dom::MediaKeySession> session =
++      mKeys->GetPendingSession(aCreateSessionToken);
++  if (session) {
++    session->SetSessionId(aSessionId);
++  }
++}
++
++void FairPlayCDMProxy::OnResolveLoadSessionPromise(uint32_t aPromiseId,
++                                                   bool aSuccess) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!mKeys.IsNull()) {
++    mKeys->OnSessionLoaded(aPromiseId, aSuccess);
++  }
++}
++
++void FairPlayCDMProxy::OnSessionMessage(const nsAString& aSessionId,
++                                        dom::MediaKeyMessageType aMessageType,
++                                        const nsTArray<uint8_t>& aMessage) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mKeys.IsNull()) {
++    return;
++  }
++  RefPtr<dom::MediaKeySession> session = mKeys->GetSession(aSessionId);
++  if (session) {
++    session->DispatchKeyMessage(aMessageType, aMessage);
++  }
++}
++
++void FairPlayCDMProxy::OnExpirationChange(const nsAString& aSessionId,
++                                          UnixTime aExpiryTime) {
++  MOZ_ASSERT(NS_IsMainThread());
++}
++
++void FairPlayCDMProxy::OnSessionClosed(
++    const nsAString& aSessionId, dom::MediaKeySessionClosedReason aReason) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mKeys.IsNull()) {
++    return;
++  }
++  RefPtr<dom::MediaKeySession> session = mKeys->GetSession(aSessionId);
++  if (session) {
++    session->OnClosed(aReason);
++  }
++}
++
++void FairPlayCDMProxy::OnSessionError(const nsAString& aSessionId,
++                                      nsresult aException, uint32_t aSystemCode,
++                                      const nsAString& aMsg) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mKeys.IsNull()) {
++    return;
++  }
++  RefPtr<dom::MediaKeySession> session = mKeys->GetSession(aSessionId);
++  if (session) {
++    session->DispatchKeyError(aSystemCode);
++  }
++}
++
++void FairPlayCDMProxy::OnRejectPromise(uint32_t aPromiseId,
++                                       ErrorResult&& aException,
++                                       const nsCString& aMsg) {
++  MOZ_ASSERT(NS_IsMainThread());
++  RejectPromise(aPromiseId, std::move(aException), aMsg);
++}
++
++RefPtr<DecryptPromise> FairPlayCDMProxy::Decrypt(MediaRawData* aSample) {
++  MOZ_ASSERT_UNREACHABLE("FairPlay decrypts inside AVFoundation");
++  return nullptr;
++}
++
++void FairPlayCDMProxy::OnDecrypted(uint32_t aId, DecryptStatus aResult,
++                                   const nsTArray<uint8_t>& aDecryptedData) {
++  MOZ_ASSERT_UNREACHABLE("FairPlay decrypts inside AVFoundation");
++}
++
++void FairPlayCDMProxy::RejectPromise(PromiseId aId, ErrorResult&& aException,
++                                     const nsCString& aReason) {
++  if (NS_IsMainThread()) {
++    if (!mKeys.IsNull()) {
++      mKeys->RejectPromise(aId, std::move(aException), aReason);
++    }
++    return;
++  }
++
++  nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
++      "FairPlayCDMProxy::RejectPromise",
++      [self = RefPtr{this}, aId, exception = std::move(aException),
++       aReason]() mutable {
++        if (!self->mKeys.IsNull()) {
++          self->mKeys->RejectPromise(aId, std::move(exception), aReason);
++        }
++      });
++  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++}
++
++void FairPlayCDMProxy::RejectPromiseWithStateError(PromiseId aId,
++                                                   const nsCString& aReason) {
++  ErrorResult rv;
++  rv.ThrowInvalidStateError(aReason);
++  RejectPromise(aId, std::move(rv), aReason);
++}
++
++void FairPlayCDMProxy::ResolvePromise(PromiseId aId) {
++  if (NS_IsMainThread()) {
++    if (!mKeys.IsNull()) {
++      mKeys->ResolvePromise(aId);
++    }
++    return;
++  }
++
++  nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
++      "FairPlayCDMProxy::ResolvePromise", [self = RefPtr{this}, aId]() {
++        if (!self->mKeys.IsNull()) {
++          self->mKeys->ResolvePromise(aId);
++        }
++      });
++  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++}
++
++void FairPlayCDMProxy::OnKeyStatusesChange(const nsAString& aSessionId) {
++  MOZ_ASSERT(NS_IsMainThread());
++}
++
++void FairPlayCDMProxy::GetStatusForPolicy(
++    PromiseId aPromiseId, const dom::HDCPVersion& aMinHdcpVersion) {
++  MOZ_ASSERT(NS_IsMainThread());
++  RejectPromiseWithStateError(
++      aPromiseId, "FairPlay getStatusForPolicy is not implemented"_ns);
++}
++
++bool FairPlayCDMProxy::IsOnOwnerThread() {
++  return mOwnerThread ? mOwnerThread->IsOnCurrentThread() : NS_IsMainThread();
++}
++
++}  // namespace mozilla

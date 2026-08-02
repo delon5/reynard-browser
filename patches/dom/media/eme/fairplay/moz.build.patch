@@ -1,0 +1,27 @@
+diff --git a/dom/media/eme/fairplay/moz.build b/dom/media/eme/fairplay/moz.build
+new file mode 100644
+index 000000000000..0464c87ed4f9
+--- /dev/null
++++ b/dom/media/eme/fairplay/moz.build
+@@ -0,0 +1,21 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++EXPORTS.mozilla += [
++    "FairPlayCDMProxy.h",
++]
++
++# SOURCES rather than UNIFIED_SOURCES: this is Objective-C++, and
++# unifying it with plain C++ translation units is asking for trouble.
++SOURCES += [
++    "FairPlayCDMProxy.mm",
++]
++
++OS_LIBS += [
++    "-framework AVFoundation",
++]
++
++include("/ipc/chromium/chromium-config.mozbuild")
++
++FINAL_LIBRARY = "xul"

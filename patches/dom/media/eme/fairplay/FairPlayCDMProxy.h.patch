@@ -1,0 +1,142 @@
+diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.h b/dom/media/eme/fairplay/FairPlayCDMProxy.h
+new file mode 100644
+index 000000000000..41bfe7b4dd56
+--- /dev/null
++++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
+@@ -0,0 +1,136 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef FairPlayCDMProxy_h_
++#define FairPlayCDMProxy_h_
++
++#include "mozilla/CDMProxy.h"
++#include "mozilla/dom/MediaKeys.h"
++#include "nsTHashMap.h"
++
++#ifdef __OBJC__
++@class AVContentKeySession;
++@class FairPlayKeyDelegate;
++#else
++using AVContentKeySession = struct objc_object;
++using FairPlayKeyDelegate = struct objc_object;
++#endif
++
++namespace mozilla {
++
++// FairPlay Streaming, backed by AVContentKeySession.
++//
++// Structurally this follows MediaDrmCDMProxy rather than
++// ChromiumCDMProxy, because Android has the same division of labour:
++// the platform owns decryption, Gecko never sees clear samples, and the
++// proxy handles licence negotiation only.
++//
++// The licence round trip:
++//
++//   CreateSession   -> processContentKeyRequestWithIdentifier:
++//                      initializationData:options:
++//   didProvide      -> makeStreamingContentKeyRequestDataForApp:
++//                      produces the SPC, delivered as a message event
++//   UpdateSession   -> processContentKeyResponse: with the CKC
++//
++// Decrypt is unreachable for the same reason it is on Android, and
++// FairPlay is stricter still: AVSampleBufferAttachContentKey on a
++// buffer the app decodes itself returns "this app is not authorized to
++// play this file", by design rather than by accident.
++class FairPlayCDMProxy final : public CDMProxy {
++ public:
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(FairPlayCDMProxy, override)
++
++  FairPlayCDMProxy(dom::MediaKeys* aKeys, const nsAString& aKeySystem,
++                   bool aDistinctiveIdentifierRequired,
++                   bool aPersistentStateRequired);
++
++  void Init(PromiseId aPromiseId, const nsAString& aOrigin,
++            const nsAString& aTopLevelOrigin,
++            const nsAString& aName) override;
++
++  void CreateSession(uint32_t aCreateSessionToken,
++                     dom::MediaKeySessionType aSessionType,
++                     PromiseId aPromiseId, const nsAString& aInitDataType,
++                     nsTArray<uint8_t>& aInitData) override;
++
++  void LoadSession(PromiseId aPromiseId,
++                   dom::MediaKeySessionType aSessionType,
++                   const nsAString& aSessionId) override;
++
++  void SetServerCertificate(PromiseId aPromiseId,
++                            nsTArray<uint8_t>& aCert) override;
++
++  void UpdateSession(const nsAString& aSessionId, PromiseId aPromiseId,
++                     nsTArray<uint8_t>& aResponse) override;
++
++  void CloseSession(const nsAString& aSessionId,
++                    PromiseId aPromiseId) override;
++
++  void RemoveSession(const nsAString& aSessionId,
++                     PromiseId aPromiseId) override;
++
++  void QueryOutputProtectionStatus() override;
++
++  void NotifyOutputProtectionStatus(
++      OutputProtectionCheckStatus aCheckStatus,
++      OutputProtectionCaptureStatus aCaptureStatus) override;
++
++  void Shutdown() override;
++  void Terminated() override;
++
++  void OnSetSessionId(uint32_t aCreateSessionToken,
++                      const nsAString& aSessionId) override;
++  void OnResolveLoadSessionPromise(uint32_t aPromiseId,
++                                   bool aSuccess) override;
++  void OnSessionMessage(const nsAString& aSessionId,
++                        dom::MediaKeyMessageType aMessageType,
++                        const nsTArray<uint8_t>& aMessage) override;
++  void OnExpirationChange(const nsAString& aSessionId,
++                          UnixTime aExpiryTime) override;
++  void OnSessionClosed(const nsAString& aSessionId,
++                       dom::MediaKeySessionClosedReason aReason) override;
++  void OnSessionError(const nsAString& aSessionId, nsresult aException,
++                      uint32_t aSystemCode, const nsAString& aMsg) override;
++  void OnRejectPromise(uint32_t aPromiseId, ErrorResult&& aException,
++                       const nsCString& aMsg) override;
++
++  RefPtr<DecryptPromise> Decrypt(MediaRawData* aSample) override;
++  void OnDecrypted(uint32_t aId, DecryptStatus aResult,
++                   const nsTArray<uint8_t>& aDecryptedData) override;
++
++  void RejectPromise(PromiseId aId, ErrorResult&& aException,
++                     const nsCString& aReason) override;
++  void ResolvePromise(PromiseId aId) override;
++  void OnKeyStatusesChange(const nsAString& aSessionId) override;
++  void GetStatusForPolicy(PromiseId aPromiseId,
++                          const dom::HDCPVersion& aMinHdcpVersion) override;
++  bool IsOnOwnerThread() override;
++
++  // Called from the delegate, on the delegate queue. Both marshal to
++  // main before touching MediaKeys.
++  void OnKeyRequestReady(const nsACString& aSessionId,
++                         nsTArray<uint8_t>&& aRequestData);
++  void OnKeyRequestFailed(const nsACString& aSessionId,
++                          const nsACString& aMessage);
++
++  // The application certificate, supplied by the page through
++  // setServerCertificate. makeStreamingContentKeyRequestDataForApp
++  // cannot produce an SPC without it, so a generateRequest before one
++  // arrives is rejected rather than left hanging.
++  nsTArray<uint8_t> mAppCertificate;
++
++ private:
++  ~FairPlayCDMProxy();
++
++  void RejectPromiseWithStateError(PromiseId aId, const nsCString& aReason);
++
++  AVContentKeySession* mKeySession = nullptr;
++  FairPlayKeyDelegate* mDelegate = nullptr;
++  nsCOMPtr<nsISerialEventTarget> mOwnerThread;
++};
++
++}  // namespace mozilla
++
++#endif  // FairPlayCDMProxy_h_
