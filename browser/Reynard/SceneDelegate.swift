@@ -179,6 +179,20 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // Only sets flags, so it needs no background-task budget of its
         // own; the debug loops do the actual detaching on their own
         // threads.
+        // Tabs are slept FIRST - see fix_sleep_tabs_before_detach.py.
+        //
+        // Closing a Gecko session waits for its content process to
+        // acknowledge, and once the detach flags are set the debug loops
+        // stop servicing traps. A process that hits brk #0xf00d during
+        // teardown then stays stopped, and closing its session waits for
+        // a reply that never comes - nine seconds of blocked main thread
+        // in the capture that found this, with nine tabs to close.
+        //
+        // Doing this before the flags are set means the loops are still
+        // live and answer promptly. It also leaves less to detach, since
+        // a process whose session has closed is on its way out anyway.
+        sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
+        
         JITEnabler.requestDetachForAllDebugSessions()
         
         // CHANGED - cancellation is delayed rather than immediate. See
@@ -234,7 +248,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
         
-        sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
         flushNavigationHistoryInBackground()
     }
     
