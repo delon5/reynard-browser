@@ -502,6 +502,31 @@ static NSLock *debugLoopTickLock(void) {
     return lock;
 }
 
+// Whether each loop is currently blocked in the continue.
+//
+// This is the state that discriminates. A healthy loop sits in
+// sendDebugCommand(@"c") waiting for its target to trap, however long
+// that takes - so time since the last iteration says nothing, which
+// three earlier versions of this measurement learned the hard way.
+//
+// A loop NOT in that wait, whose target is stopped, is the one with
+// nobody to continue it. See fix_track_loop_waiting_state.py.
+static NSMutableDictionary<NSNumber *, NSNumber *> *debugLoopWaiting(void) {
+    static NSMutableDictionary<NSNumber *, NSNumber *> *waiting;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        waiting = [NSMutableDictionary dictionary];
+    });
+    return waiting;
+}
+
+void recordDebugLoopWaiting(int32_t pid, BOOL waiting) {
+    NSLock *lock = debugLoopTickLock();
+    [lock lock];
+    debugLoopWaiting()[@(pid)] = @(waiting);
+    [lock unlock];
+}
+
 void recordDebugLoopTick(int32_t pid) {
     NSLock *lock = debugLoopTickLock();
     [lock lock];
@@ -513,6 +538,7 @@ void forgetDebugLoopTick(int32_t pid) {
     NSLock *lock = debugLoopTickLock();
     [lock lock];
     [debugLoopLastTick() removeObjectForKey:@(pid)];
+    [debugLoopWaiting() removeObjectForKey:@(pid)];
     [lock unlock];
 }
 
@@ -524,6 +550,7 @@ void dumpDebugLoopStateLabelled(const char *label) {
     NSLock *lock = debugLoopTickLock();
     [lock lock];
     NSDictionary<NSNumber *, NSNumber *> *snapshot = [debugLoopLastTick() copy];
+    NSDictionary<NSNumber *, NSNumber *> *waitingSnapshot = [debugLoopWaiting() copy];
     [lock unlock];
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -544,8 +571,19 @@ void dumpDebugLoopStateLabelled(const char *label) {
         // normal, and at backgrounding - where every healthy loop is
         // still running - that makes a stopped one obvious. See
         // fix_dump_loops_at_background.py.
-        logger([NSString stringWithFormat:@"%@:   pid %d ticked %.0fms ago%@",
-                tag, pid, ageMs, ageMs > 1000.0 ? @"  <<< STALE" : @""]);
+        // WAITING is the healthy resting state, whatever its duration -
+        // the loop is blocked waiting for its target to trap. NOT
+        // WAITING means the loop has left that wait and not returned,
+        // which is what a stopped target with nobody to continue it
+        // looks like. See fix_track_loop_waiting_state.py.
+        NSNumber *isWaiting = waitingSnapshot[key];
+        BOOL waiting = isWaiting != nil && isWaiting.boolValue;
+
+        logger([NSString stringWithFormat:@"%@:   pid %d %@ (%.0fms)%@",
+                tag, pid,
+                isWaiting == nil ? @"UNKNOWN    " : (waiting ? @"WAITING    " : @"NOT WAITING"),
+                ageMs,
+                (isWaiting != nil && !waiting) ? @"  <<< SUSPECT" : @""]);
     }
 }
 
@@ -1266,7 +1304,12 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 logger([NSString stringWithFormat:@"runDebugService: (pid %d) starting continue command (iteration %ld)", pid, (long)debugServiceIteration]);
             }
             CFAbsoluteTime continueCallStart = CFAbsoluteTimeGetCurrent();
+            // Bracketed, so the dump can tell a loop resting in the wait
+            // from one that has left it. See
+            // fix_track_loop_waiting_state.py.
+            recordDebugLoopWaiting(pid, YES);
             BOOL continueOK = sendDebugCommand(session->debugProxy, @"c", &stopResponse, &commandError);
+            recordDebugLoopWaiting(pid, NO);
             CFAbsoluteTime continueCallEnd = CFAbsoluteTimeGetCurrent();
             NSTimeInterval continueCallDuration = continueCallEnd - continueCallStart;
             

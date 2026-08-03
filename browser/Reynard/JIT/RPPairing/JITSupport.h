@@ -44,6 +44,11 @@ void dumpDebugLoopState(void);
 /// fix_dump_loops_at_background.py.
 void dumpDebugLoopStateLabelled(const char *label);
 
+/// Records whether a loop is blocked in its continue - the state that
+/// tells a healthy loop from one whose target is stopped. See
+/// fix_track_loop_waiting_state.py.
+void recordDebugLoopWaiting(int32_t pid, BOOL waiting);
+
 /// Tells content processes whether a debugger is listening, so they
 /// know whether trapping into one is safe. See
 /// fix_stop_trapping_on_background.py.

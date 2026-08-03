@@ -2,7 +2,7 @@ diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutab
 index cea7d764ca96..c9ef61b53f7d 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
-@@ -14,6 +14,16 @@
+@@ -14,6 +14,15 @@
  
  #include <errno.h>
  
@@ -13,13 +13,12 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +#  include <errno.h>
 +#  include <sys/mman.h>
 +#  include <unistd.h>
-+#  include "mozilla/StaticPrefs_javascript.h"
 +#endif
 +
  #include "jsfriendapi.h"
  
  #include "gc/Memory.h"
-@@ -26,6 +36,7 @@
+@@ -26,6 +35,7 @@
  #include "util/RandomSeed.h"
  #include "util/WindowsWrapper.h"
  #include "vm/MutexIDs.h"
@@ -27,7 +26,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +58,304 @@
+@@ -47,6 +57,321 @@
  using namespace js;
  using namespace js::jit;
  
@@ -232,7 +231,24 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +  //
 +  // Falls through to the trap on failure, so the worst case is one
 +  // wasted syscall per region.
-+  if (StaticPrefs::javascript_jit_ios_try_mprotect_first()) {
++  // getenv rather than a pref: js/src builds outside libxul, so
++  // StaticPrefs_javascript.h pulls in Preferences.h and fails with
++  // "This header is only usable from within libxul". SpiderMonkey reads
++  // its own JIT options the same way. See fix_mprotect_use_getenv.py.
++  //
++  // An installed app has no shell to set this from, so the device test
++  // means flipping kDefaultTryMprotect below and rebuilding. Worse than
++  // a pref, and the only thing available here.
++  // ON deliberately: an installed app has no shell to set
++  // REYNARD_TRY_MPROTECT from, so a build with it off answers
++  // nothing. Set false and rebuild to turn the experiment off.
++  static const bool kDefaultTryMprotect = true;
++  static bool sTryMprotect = [] {
++    const char* env = getenv("REYNARD_TRY_MPROTECT");
++    return env ? (env[0] == '1') : kDefaultTryMprotect;
++  }();
++
++  if (sTryMprotect) {
 +    uintptr_t pageSize = static_cast<uintptr_t>(getpagesize());
 +    uintptr_t start = reinterpret_cast<uintptr_t>(aAddress) & ~(pageSize - 1);
 +    uintptr_t end = (reinterpret_cast<uintptr_t>(aAddress) + aSize +
@@ -332,7 +348,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +772,20 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +788,20 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -353,7 +369,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +830,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +846,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -381,7 +397,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +885,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +901,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -413,7 +429,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +916,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +932,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -431,7 +447,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +933,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +949,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -487,7 +503,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +1091,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1107,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -530,7 +546,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1146,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1162,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -551,7 +567,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1318,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1334,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -569,7 +585,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1348,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1364,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -589,7 +605,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1410,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1426,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
