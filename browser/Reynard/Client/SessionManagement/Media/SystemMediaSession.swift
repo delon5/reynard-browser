@@ -134,6 +134,11 @@ final class SystemMediaSession: MediaSessionDelegate {
         
         if activeSession === session {
             nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
+        } else if state.playbackState == .playing {
+            // Playing already, and a title has only now arrived - so this
+            // is the activation that activate() declined earlier for want
+            // of metadata. See fix_no_lockscreen_without_metadata.py.
+            activate(session, state: state)
         }
         
         state.artworkTask?.cancel()
@@ -291,6 +296,19 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     private func activate(_ session: GeckoSession, state: SessionState) {
+        // Nothing to show means nothing worth showing. A restored tab
+        // reports playback before any metadata arrives, and activating on
+        // that put empty controls on the lock screen that never went
+        // away - see fix_no_lockscreen_without_metadata.py.
+        //
+        // onMetadata activates instead once a title turns up, so a real
+        // video is unaffected whichever order the two arrive in.
+        let title = (state.nowPlayingInfo[MPMediaItemPropertyTitle] as? String) ?? ""
+        guard !title.isEmpty else {
+            logger("mediaSession: not activating - no metadata yet")
+            return
+        }
+        
         activeSession = session
         nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
         apply(state.features)
