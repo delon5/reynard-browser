@@ -303,8 +303,8 @@ final class SystemMediaSession: MediaSessionDelegate {
         //
         // onMetadata activates instead once a title turns up, so a real
         // video is unaffected whichever order the two arrive in.
-        let title = (state.nowPlayingInfo[MPMediaItemPropertyTitle] as? String) ?? ""
-        guard !title.isEmpty else {
+        let pendingTitle = (state.nowPlayingInfo[MPMediaItemPropertyTitle] as? String) ?? ""
+        guard !pendingTitle.isEmpty else {
             logger("mediaSession: not activating - no metadata yet")
             return
         }
