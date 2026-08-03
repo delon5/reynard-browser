@@ -27,7 +27,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +58,341 @@
+@@ -47,6 +58,356 @@
  using namespace js;
  using namespace js::jit;
  
@@ -280,17 +280,32 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +
 +    // Logged once. Every region would drown everything else, and the
 +    // first answer is the only one that matters.
++    // To a file, because printf_stderr reaches nothing readable on
++    // device and js/src cannot use Reynard's own logger. See
++    // fix_mprotect_result_to_file.py.
++    //
++    // Appended, so each content process leaves its own line - one
++    // succeeding and others failing would itself be informative.
 +    static bool sReported = false;
 +    if (!sReported) {
 +      sReported = true;
-+      if (rv == 0) {
-+        printf_stderr(
-+            "mprotectProbe: mprotect SUCCEEDED - the debugger trap may be "
-+            "unnecessary\n");
-+      } else {
-+        printf_stderr(
-+            "mprotectProbe: mprotect failed (errno %d) - the trap is "
-+            "required\n", errno);
++      const char* reportHome = getenv("HOME");
++      if (reportHome) {
++        char reportPath[1024];
++        snprintf(reportPath, sizeof(reportPath),
++                 "%s/Documents/mprotect-result.txt", reportHome);
++        FILE* f = fopen(reportPath, "a");
++        if (f) {
++          if (rv == 0) {
++            fprintf(f, "pid %d: mprotect SUCCEEDED (addr %p len %zu)\n",
++                    getpid(), aAddress, aSize);
++          } else {
++            fprintf(f,
++                    "pid %d: mprotect FAILED errno=%d (addr %p len %zu)\n",
++                    getpid(), errno, aAddress, aSize);
++          }
++          fclose(f);
++        }
 +      }
 +    }
 +
@@ -369,7 +384,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +809,20 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +824,20 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -390,7 +405,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +867,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +882,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -418,7 +433,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +922,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +937,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -450,7 +465,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +953,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +968,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -468,7 +483,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +970,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +985,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -524,7 +539,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +1128,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1143,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -567,7 +582,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1183,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1198,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -588,7 +603,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1355,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1370,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -606,7 +621,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1385,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1400,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -626,7 +641,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1447,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1462,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
