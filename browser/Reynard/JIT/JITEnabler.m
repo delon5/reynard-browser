@@ -404,36 +404,6 @@ static void jitHangBacktraceHandler(int signalNumber) {
         }
         debug_proxy_set_ack_mode(session.debugProxy, 0);
         
-        // PROBE ONLY - see fix_probe_qnonstop.py. Asks whether
-        // debugserver supports non-stop mode, and does nothing with the
-        // answer.
-        //
-        // In non-stop mode a stop event halts only the triggering
-        // thread rather than the whole process. If vAttach under
-        // non-stop left sibling threads running, a debugger-held
-        // extension could still answer the synchronous XPC iOS sends on
-        // lifecycle transitions - which is the thing killing the app
-        // with 0x8BADF00D across four crash reports.
-        //
-        // Deliberately not enabled. Non-stop changes the protocol
-        // contract - stop replies become asynchronous notifications and
-        // vCont takes different arguments - so runDebugService would
-        // need rewriting around it. Switching speculatively would break
-        // JIT outright.
-        NSString *nonStopResponse = nil;
-        NSError *nonStopError = nil;
-        if (sendDebugCommand(session.debugProxy, @"QNonStop:1", &nonStopResponse, &nonStopError)) {
-            logger([NSString stringWithFormat:@"enableJITForPID: QNonStop probe for pid %d: %@", pid, nonStopResponse ?: @"<empty - ignored>"]);
-        } else {
-            logger([NSString stringWithFormat:@"enableJITForPID: QNonStop probe FAILED for pid %d: %@", pid, nonStopError.localizedDescription ?: @"(no error set)"]);
-        }
-        
-        // Back to all-stop regardless of the answer, so nothing below
-        // sees a half-negotiated session.
-        NSString *nonStopOffResponse = nil;
-        NSError *nonStopOffError = nil;
-        sendDebugCommand(session.debugProxy, @"QNonStop:0", &nonStopOffResponse, &nonStopOffError);
-        
         NSString *attachCommand = [NSString stringWithFormat:@"vAttach;%X", pid];
         NSString *attachResponse = nil;
         CFAbsoluteTime attachCallStart = CFAbsoluteTimeGetCurrent();
@@ -564,6 +534,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
 
 + (void)cancelAllDebugSessionCalls {
     cancelAllDebugSessionCalls();
+}
+
++ (void)dumpDebugLoopState {
+    dumpDebugLoopState();
 }
 
 + (void)setDebuggerListening:(BOOL)listening {

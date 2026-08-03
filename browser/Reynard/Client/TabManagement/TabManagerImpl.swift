@@ -245,6 +245,12 @@ final class TabManagerImplementation: NSObject, TabManager {
         
         logger(String(format: "tabFlush: HangWatchdog emergency-writing %d regular, %d private tabs", snapshot.regularTabs.count, snapshot.privateTabs.count))
         
+        // The watchdog firing means the main thread has already been
+        // blocked for a while, and a stopped content process is the
+        // likeliest reason. This says which one. See
+        // fix_dump_loop_state_on_hang.py.
+        JITEnabler.dumpDebugLoopState()
+        
         store.emergencyPersistTabs(
             regularTabs: snapshot.regularTabs,
             privateTabs: snapshot.privateTabs,

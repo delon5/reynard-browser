@@ -167,6 +167,55 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
     
+    /// Holds the app awake briefly while attaches finish.
+    ///
+    /// Polled rather than signalled: completion happens on another queue
+    /// inside an FFI call, with nothing to hook. 200ms for at most 8
+    /// seconds - enough for an attach that is nearly done, and short
+    /// enough to leave the rest of the background budget for flushing
+    /// tabs.
+    ///
+    /// See fix_hold_background_for_inflight_attach.py.
+    private func waitForInFlightAttachesBeforeSuspending() {
+        guard JITController.attachesInFlight > 0 else {
+            return
+        }
+        
+        let application = UIApplication.shared
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = application.beginBackgroundTask(withName: "JITAttachDrain") {
+            if task != .invalid {
+                application.endBackgroundTask(task)
+                task = .invalid
+            }
+        }
+        
+        let started = CFAbsoluteTimeGetCurrent()
+        logger(String(format: "attachDrain: holding for %d attach(es) still in flight", JITController.attachesInFlight))
+        
+        func poll() {
+            let remaining = JITController.attachesInFlight
+            let elapsed = CFAbsoluteTimeGetCurrent() - started
+            
+            if remaining == 0 || elapsed > 8.0 {
+                logger(String(format: "attachDrain: %@ after %.1fs, %d still in flight", remaining == 0 ? "drained" : "GAVE UP", elapsed, remaining))
+                if task != .invalid {
+                    application.endBackgroundTask(task)
+                    task = .invalid
+                }
+                return
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                poll()
+            }
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            poll()
+        }
+    }
+    
     func sceneDidEnterBackground(_ scene: UIScene) {
         guard let browserViewController = window?.rootViewController as? BrowserViewController else {
             return
@@ -213,6 +262,19 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         JITEnabler.setDebuggerListening(false)
         
         JITEnabler.requestDetachForAllDebugSessions()
+        
+        // An attach in flight has left its target STOPPED, and it stays
+        // that way until the debug loop starts and sends continue. If
+        // iOS suspends us first, that process is stranded - measured at
+        // 260 seconds in one capture, ending in a watchdog kill because
+        // a stopped extension cannot answer the synchronous XPC iOS
+        // sends on the next transition.
+        //
+        // An attach normally takes about a second, so asking for a
+        // little more time is usually enough for it to finish and the
+        // target to resume. See
+        // fix_hold_background_for_inflight_attach.py.
+        waitForInFlightAttachesBeforeSuspending()
         
         // CHANGED - cancellation is delayed rather than immediate. See
         // fix_delay_cancel_after_detach.py.

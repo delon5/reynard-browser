@@ -109,6 +109,12 @@ final class SystemMediaSession: MediaSessionDelegate {
     func onDeactivated(session: GeckoSession) {
         let identifier = ObjectIdentifier(session)
         let wasActive = activeSession === session
+        
+        // Whether this fires at all is the first thing worth knowing: a
+        // slept tab should reach here, and a deallocated one never does.
+        // See fix_log_media_session_activity.py.
+        let deactivatingTitle = (sessionStates[identifier]?.nowPlayingInfo[MPMediaItemPropertyTitle] as? String) ?? "(untitled)"
+        logger(String(format: "mediaSession: onDeactivated %@ (wasActive=%@)", deactivatingTitle, wasActive ? "YES" : "NO"))
         sessionStates.removeValue(forKey: identifier)?.artworkTask?.cancel()
         playbackHistory.removeAll { $0 == identifier }
         
@@ -288,6 +294,12 @@ final class SystemMediaSession: MediaSessionDelegate {
         activeSession = session
         nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
         apply(state.features)
+        
+        // See fix_log_media_session_activity.py. Every path that
+        // populates now playing comes through here, so this is where a
+        // handover becomes visible.
+        let title = (state.nowPlayingInfo[MPMediaItemPropertyTitle] as? String) ?? "(untitled)"
+        logger(String(format: "mediaSession: ACTIVATED %@ (%d in history, %d states)", title, playbackHistory.count, sessionStates.count))
     }
     
     /// Drops sessions that died without reporting, and clears the now
@@ -317,6 +329,11 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     private func activateMostRecentPlayingSession() {
+        // Logged on entry as well as at the ends, because a promotion is
+        // the likeliest way a now playing entry outlives the tab that
+        // created it. See fix_log_media_session_activity.py.
+        logger(String(format: "mediaSession: looking for a session to promote (%d in history)", playbackHistory.count))
+        
         while let identifier = playbackHistory.last {
             guard let state = sessionStates[identifier],
                   state.playbackState == .playing,
@@ -332,6 +349,8 @@ final class SystemMediaSession: MediaSessionDelegate {
         activeSession = nil
         nowPlayingCenter.nowPlayingInfo = nil
         apply(MediaSessionFeatures())
+        
+        logger(String(format: "mediaSession: CLEARED - nothing left playing (%d states remain)", sessionStates.count))
     }
     
     private func apply(_ features: MediaSessionFeatures) {

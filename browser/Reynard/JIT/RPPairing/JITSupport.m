@@ -478,6 +478,66 @@ BOOL hasAnyActiveJITSessionAcrossProcesses(void) {
     return live.count > 0;
 }
 
+// When each loop last completed an iteration.
+//
+// A healthy loop ticks every 30-60ms. A stale stamp means the target is
+// stopped and nothing is servicing it - which is the process the main
+// thread is waiting on when the watchdog fires. See
+// fix_dump_loop_state_on_hang.py.
+static NSMutableDictionary<NSNumber *, NSNumber *> *debugLoopLastTick(void) {
+    static NSMutableDictionary<NSNumber *, NSNumber *> *ticks;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ticks = [NSMutableDictionary dictionary];
+    });
+    return ticks;
+}
+
+static NSLock *debugLoopTickLock(void) {
+    static NSLock *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lock = [[NSLock alloc] init];
+    });
+    return lock;
+}
+
+void recordDebugLoopTick(int32_t pid) {
+    NSLock *lock = debugLoopTickLock();
+    [lock lock];
+    debugLoopLastTick()[@(pid)] = @(CFAbsoluteTimeGetCurrent());
+    [lock unlock];
+}
+
+void forgetDebugLoopTick(int32_t pid) {
+    NSLock *lock = debugLoopTickLock();
+    [lock lock];
+    [debugLoopLastTick() removeObjectForKey:@(pid)];
+    [lock unlock];
+}
+
+void dumpDebugLoopState(void) {
+    NSLock *lock = debugLoopTickLock();
+    [lock lock];
+    NSDictionary<NSNumber *, NSNumber *> *snapshot = [debugLoopLastTick() copy];
+    [lock unlock];
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    logger([NSString stringWithFormat:@"hangDump: %lu session(s) registered", (unsigned long)snapshot.count]);
+
+    for (NSNumber *key in snapshot) {
+        int32_t pid = key.intValue;
+        double ageMs = (now - snapshot[key].doubleValue) * 1000.0;
+
+        // Anything past a second is already far outside a healthy 30-60ms
+        // iteration, so it is worth marking rather than leaving to be
+        // eyeballed.
+        logger([NSString stringWithFormat:@"hangDump:   pid %d last ticked %.0fms ago, CS_DEBUGGED=%@%@",
+                pid, ageMs, processIsDebugged(pid) ? @"YES" : @"NO",
+                ageMs > 1000.0 ? @"  <<< STUCK" : @""]);
+    }
+}
+
 static void registerDebugSessionPID(int32_t pid) {
     if (pid <= 0) return;
     
@@ -1174,6 +1234,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
     while (YES) {
         @autoreleasepool {
             debugServiceIteration++;
+            // Stamped at the top of every iteration, so a stale value
+            // means this loop is not running. See
+            // fix_dump_loop_state_on_hang.py.
+            recordDebugLoopTick(pid);
             BOOL verboseThisIteration = debugServiceIteration <= kUnconditionalLogIterations;
             
             NSString *stopResponse = nil;
@@ -1436,6 +1500,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // never see a freed proxy - see
     // fix_cancel_blocked_debug_loops.py.
     unregisterDebugSessionProxy(pid);
+    forgetDebugLoopTick(pid);
     unregisterDebugSessionPID(pid);
     unregisterJITEndpointForPID(pid);
     freeDebugSession(session);

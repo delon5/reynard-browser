@@ -34,6 +34,11 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void);
 /// fix_detach_debug_sessions_on_background.py.
 void requestDetachForAllDebugSessions(void);
 
+/// Logs every registered debug loop with the age of its last iteration.
+/// Called when the hang watchdog fires, to name which process stopped
+/// answering. See fix_dump_loop_state_on_hang.py.
+void dumpDebugLoopState(void);
+
 /// Tells content processes whether a debugger is listening, so they
 /// know whether trapping into one is safe. See
 /// fix_stop_trapping_on_background.py.

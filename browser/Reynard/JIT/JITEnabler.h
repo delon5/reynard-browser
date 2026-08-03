@@ -44,6 +44,10 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// directly - that header is not in the bridging header.
 + (void)cancelAllDebugSessionCalls NS_SWIFT_NAME(cancelAllDebugSessionCalls());
 
+/// Logs every debug loop and how long since it last ran, so a hang can
+/// name the process the main thread is waiting on.
++ (void)dumpDebugLoopState NS_SWIFT_NAME(dumpDebugLoopState());
+
 /// Tells content processes whether trapping into the debugger is safe.
 ///
 /// Cleared before a suspension rather than after one has gone wrong: a

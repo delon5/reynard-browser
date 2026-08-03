@@ -430,6 +430,18 @@ final class JITController {
     // otherwise be unsafe in a way a single optional assignment is not.
     private static var enableJITInFlightByPID: [Int32: Date] = [:]
     private static let enableJITInFlightLock = NSLock()
+    
+    /// How many attaches are running right now.
+    ///
+    /// Exposed so backgrounding can wait for them: vAttach leaves its
+    /// target STOPPED until the debug loop sends continue, and a
+    /// suspension landing mid-attach strands it there for minutes. See
+    /// fix_hold_background_for_inflight_attach.py.
+    static var attachesInFlight: Int {
+        enableJITInFlightLock.lock()
+        defer { enableJITInFlightLock.unlock() }
+        return enableJITInFlightByPID.count
+    }
     private static let enableJITMaxWaitSeconds: TimeInterval = 90.0
     
     private func boundedEnableJIT(forPID pid: Int32) -> (Bool, NSError?) {
