@@ -11,7 +11,9 @@
 #import "IdeviceFFI.h"
 
 #include <arpa/inet.h>
-#include <libproc.h>
+// libproc.h is macOS-only; proc_pidinfo is in libSystem anyway.
+int proc_pidinfo(int pid, int flavor, unsigned long long arg,
+                 void *buffer, int buffersize);
 #include <sys/proc_info.h>
 #include <notify.h>
 #include <errno.h>
