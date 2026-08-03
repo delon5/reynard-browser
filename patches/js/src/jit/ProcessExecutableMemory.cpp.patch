@@ -2,7 +2,7 @@ diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutab
 index cea7d764ca96..c9ef61b53f7d 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
-@@ -14,6 +14,15 @@
+@@ -14,6 +14,16 @@
  
  #include <errno.h>
  
@@ -11,6 +11,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +#  include <mach/mach.h>
 +#  include <signal.h>
 +#  include <errno.h>
++#  include <stdio.h>
 +#  include <sys/mman.h>
 +#  include <unistd.h>
 +#endif
@@ -18,7 +19,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #include "jsfriendapi.h"
  
  #include "gc/Memory.h"
-@@ -26,6 +35,7 @@
+@@ -26,6 +36,7 @@
  #include "util/RandomSeed.h"
  #include "util/WindowsWrapper.h"
  #include "vm/MutexIDs.h"
@@ -26,7 +27,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +57,321 @@
+@@ -47,6 +58,341 @@
  using namespace js;
  using namespace js::jit;
  
@@ -245,7 +246,27 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +  static const bool kDefaultTryMprotect = true;
 +  static bool sTryMprotect = [] {
 +    const char* env = getenv("REYNARD_TRY_MPROTECT");
-+    return env ? (env[0] == '1') : kDefaultTryMprotect;
++    if (env) {
++      return env[0] == '1';
++    }
++
++    // A file is the only toggle an installed app has: js/src cannot
++    // read prefs, and there is no shell to set an environment variable
++    // from. iOS sets HOME to the app container, so this lands in the
++    // Documents folder the Files app shows.
++    //
++    // Create no-mprotect there to turn the experiment off, delete it to
++    // turn it back on. No rebuild either way.
++    const char* home = getenv("HOME");
++    if (home) {
++      char path[1024];
++      snprintf(path, sizeof(path), "%s/Documents/no-mprotect", home);
++      if (access(path, F_OK) == 0) {
++        return false;
++      }
++    }
++
++    return kDefaultTryMprotect;
 +  }();
 +
 +  if (sTryMprotect) {
@@ -348,7 +369,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +788,20 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +809,20 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -369,7 +390,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +846,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +867,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -397,7 +418,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +901,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +922,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -429,7 +450,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +932,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +953,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -447,7 +468,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +949,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +970,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -503,7 +524,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +1107,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1128,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -546,7 +567,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1162,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1183,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -567,7 +588,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1334,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1355,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -585,7 +606,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1364,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1385,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -605,7 +626,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1426,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1447,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
