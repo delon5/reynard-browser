@@ -159,6 +159,20 @@ extension BrowserViewController: TabManagerDelegate {
         case .loading:
             if index == tabManager.selectedTabIndex {
                 let tab = tabManager.activeTabs[index]
+                
+                // A recovered tab holds a new session, and nothing on
+                // this path was rebinding the view to it - so the page
+                // loaded correctly into something the view was not
+                // showing. Three completed refreshes of ign.com, blank
+                // every time. See fix_rebind_view_after_recovery.py.
+                //
+                // The same test tabManagerDidChangeTabs uses, and a
+                // pointer comparison on a path that already runs.
+                if !contentView.isDisplaying(session: tab.session) {
+                    logger("tabRecovery: rebinding the view to the tab's new session")
+                    contentView.setSession(tab.session)
+                }
+                
                 browserChrome.setAddressBarLoadingProgress(
                     tab.state.loadingState.progress,
                     isLoading: tab.state.loadingState.isLoading
