@@ -1307,9 +1307,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
             // Bracketed, so the dump can tell a loop resting in the wait
             // from one that has left it. See
             // fix_track_loop_waiting_state.py.
-            recordDebugLoopWaiting(pid, YES);
             BOOL continueOK = sendDebugCommand(session->debugProxy, @"c", &stopResponse, &commandError);
-            recordDebugLoopWaiting(pid, NO);
             CFAbsoluteTime continueCallEnd = CFAbsoluteTimeGetCurrent();
             NSTimeInterval continueCallDuration = continueCallEnd - continueCallStart;
             
