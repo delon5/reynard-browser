@@ -11,6 +11,8 @@
 #import "IdeviceFFI.h"
 
 #include <arpa/inet.h>
+#include <libproc.h>
+#include <sys/proc_info.h>
 #include <notify.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -532,9 +534,34 @@ void dumpDebugLoopState(void) {
         // Anything past a second is already far outside a healthy 30-60ms
         // iteration, so it is worth marking rather than leaving to be
         // eyeballed.
-        logger([NSString stringWithFormat:@"hangDump:   pid %d last ticked %.0fms ago, CS_DEBUGGED=%@%@",
-                pid, ageMs, processIsDebugged(pid) ? @"YES" : @"NO",
-                ageMs > 1000.0 ? @"  <<< STUCK" : @""]);
+        // The kernel's own view, rather than an inference from how long
+        // the loop has been quiet - which cannot discriminate, because
+        // no loop ticks while the app is suspended and the watchdog
+        // fires before any has resumed. See
+        // fix_dump_process_run_state.py.
+        //
+        // CS_DEBUGGED is not reported: csops returns EPERM for another
+        // process, so every answer was a failed read printed as NO.
+        struct proc_bsdinfo info;
+        NSString *state = @"?";
+        BOOL stopped = NO;
+
+        int rv = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+        if (rv == sizeof(info)) {
+            switch (info.pbi_status) {
+                case SIDL:   state = @"SIDL  "; break;
+                case SRUN:   state = @"SRUN  "; break;
+                case SSLEEP: state = @"SSLEEP"; break;
+                case SSTOP:  state = @"SSTOP "; stopped = YES; break;
+                case SZOMB:  state = @"SZOMB "; break;
+                default:     state = [NSString stringWithFormat:@"%u", info.pbi_status]; break;
+            }
+        } else {
+            state = @"gone  ";
+        }
+
+        logger([NSString stringWithFormat:@"hangDump:   pid %d %@%@  (loop idle %.0fms)",
+                pid, state, stopped ? @"  <<< STOPPED" : @"", ageMs]);
     }
 }
 
