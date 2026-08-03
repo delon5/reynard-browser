@@ -39,6 +39,11 @@ void requestDetachForAllDebugSessions(void);
 /// answering. See fix_dump_loop_state_on_hang.py.
 void dumpDebugLoopState(void);
 
+/// The same dump under a caller-supplied label, so the hang-time and
+/// background-time call sites can be told apart in the log. See
+/// fix_dump_loops_at_background.py.
+void dumpDebugLoopStateLabelled(const char *label);
+
 /// Tells content processes whether a debugger is listening, so they
 /// know whether trapping into one is safe. See
 /// fix_stop_trapping_on_background.py.

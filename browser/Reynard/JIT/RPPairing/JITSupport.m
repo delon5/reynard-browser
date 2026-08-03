@@ -517,13 +517,18 @@ void forgetDebugLoopTick(int32_t pid) {
 }
 
 void dumpDebugLoopState(void) {
+    dumpDebugLoopStateLabelled("hangDump");
+}
+
+void dumpDebugLoopStateLabelled(const char *label) {
     NSLock *lock = debugLoopTickLock();
     [lock lock];
     NSDictionary<NSNumber *, NSNumber *> *snapshot = [debugLoopLastTick() copy];
     [lock unlock];
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    logger([NSString stringWithFormat:@"hangDump: %lu session(s) registered", (unsigned long)snapshot.count]);
+    NSString *tag = [NSString stringWithUTF8String:label ?: "loopState"];
+    logger([NSString stringWithFormat:@"%@: %lu session(s) registered", tag, (unsigned long)snapshot.count]);
 
     for (NSNumber *key in snapshot) {
         int32_t pid = key.intValue;
@@ -532,9 +537,15 @@ void dumpDebugLoopState(void) {
         // Anything past a second is already far outside a healthy 30-60ms
         // iteration, so it is worth marking rather than leaving to be
         // eyeballed.
-        logger([NSString stringWithFormat:@"hangDump:   pid %d last ticked %.0fms ago, CS_DEBUGGED=%@%@",
-                pid, ageMs, processIsDebugged(pid) ? @"YES" : @"NO",
-                ageMs > 1000.0 ? @"  <<< STUCK" : @""]);
+        // CS_DEBUGGED is not reported: csops returns EPERM for another
+        // process, so every answer was a failed read printed as NO.
+        //
+        // A second past a 30-60ms iteration is already far outside
+        // normal, and at backgrounding - where every healthy loop is
+        // still running - that makes a stopped one obvious. See
+        // fix_dump_loops_at_background.py.
+        logger([NSString stringWithFormat:@"%@:   pid %d ticked %.0fms ago%@",
+                tag, pid, ageMs, ageMs > 1000.0 ? @"  <<< STALE" : @""]);
     }
 }
 

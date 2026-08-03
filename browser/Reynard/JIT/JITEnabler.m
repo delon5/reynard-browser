@@ -540,6 +540,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     dumpDebugLoopState();
 }
 
++ (void)dumpDebugLoopStateLabelled:(NSString *)label {
+    dumpDebugLoopStateLabelled(label.UTF8String);
+}
+
 + (void)setDebuggerListening:(BOOL)listening {
     setDebuggerListeningState(listening ? 1 : 0);
 }

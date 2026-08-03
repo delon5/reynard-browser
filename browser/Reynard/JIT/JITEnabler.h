@@ -48,6 +48,10 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// name the process the main thread is waiting on.
 + (void)dumpDebugLoopState NS_SWIFT_NAME(dumpDebugLoopState());
 
+/// The same dump, labelled - so a background-time dump is not mistaken
+/// for a hang-time one.
++ (void)dumpDebugLoopStateLabelled:(NSString *)label NS_SWIFT_NAME(dumpDebugLoopState(labelled:));
+
 /// Tells content processes whether trapping into the debugger is safe.
 ///
 /// Cleared before a suspension rather than after one has gone wrong: a

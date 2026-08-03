@@ -261,6 +261,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // fallback and matters little in an app whose tabs are asleep.
         JITEnabler.setDebuggerListening(false)
         
+        // Before the detach, while every loop is still running normally -
+        // a stopped one stands out against ticks of 30-60ms, where at
+        // hang time they are all equally stale after a suspension. See
+        // fix_dump_loops_at_background.py.
+        JITEnabler.dumpDebugLoopState(labelled: "loopState at background")
+        
         JITEnabler.requestDetachForAllDebugSessions()
         
         // An attach in flight has left its target STOPPED, and it stays
