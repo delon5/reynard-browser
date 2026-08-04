@@ -65,7 +65,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
-            key("ExperimentalSettings", "reattachesOrphanedProcessesOnForeground"): true,
+            key("ExperimentalSettings", "reattachesOrphanedProcessesOnForeground"): false,
             key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
