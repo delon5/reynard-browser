@@ -34,6 +34,11 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void);
 /// fix_detach_debug_sessions_on_background.py.
 void requestDetachForAllDebugSessions(void);
 
+/// Sends the GDB interrupt byte to every live debug session, so a loop
+/// blocked in its continue can act on a pending detach request. See
+/// fix_interrupt_before_detach.py.
+void interruptLiveDebugSessions(void);
+
 /// Logs every registered debug loop with the age of its last iteration.
 /// Called when the hang watchdog fires, to name which process stopped
 /// answering. See fix_dump_loop_state_on_hang.py.

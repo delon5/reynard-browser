@@ -729,6 +729,42 @@ void interruptAttachingDebugSessions(void) {
     logger([NSString stringWithFormat:@"interruptAttachingDebugSessions: %lu attach(es) in flight, interrupted %lu", (unsigned long)attachingCount, (unsigned long)interruptedCount]);
 }
 
+// Interrupts every LIVE session, as opposed to
+// interruptAttachingDebugSessions which handles attaches still in
+// flight. See fix_interrupt_before_detach.py.
+//
+// A loop blocked in sendDebugCommand(@"c") cannot see a detach request,
+// because that flag is only read at the top of an iteration. 0x03 makes
+// the target stop, the continue return, and the loop come back round to
+// where it can act on the request.
+//
+// Out-of-band by design - unlike cancellation, which aborts the
+// in-flight read and desyncs the connection permanently. That was
+// measured at 1 successful detach in 10.
+void interruptLiveDebugSessions(void) {
+    __block NSUInteger liveCount = 0;
+    __block NSUInteger interruptedCount = 0;
+
+    dispatch_sync(debugSessionStateQueue(), ^{
+        liveCount = debugSessionProxies().count;
+
+        for (NSValue *proxyValue in debugSessionProxies().allValues) {
+            DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
+            if (!proxy) continue;
+
+            uint8_t interruptByte = 0x03;
+            IdeviceFfiError *interruptError = debug_proxy_send_raw(proxy, &interruptByte, 1);
+            if (interruptError) {
+                idevice_error_free(interruptError);
+                continue;
+            }
+            interruptedCount++;
+        }
+    });
+
+    logger([NSString stringWithFormat:@"interruptLiveDebugSessions: %lu live session(s), interrupted %lu", (unsigned long)liveCount, (unsigned long)interruptedCount]);
+}
+
 static void unregisterDebugSessionProxy(int32_t pid) {
     if (pid <= 0) return;
 
@@ -811,6 +847,15 @@ void requestDetachForAllDebugSessions(void) {
 
         logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)active.count]);
     });
+
+    // After the flag is set, so every interrupted loop finds the request
+    // waiting when it comes back round. See
+    // fix_interrupt_before_detach.py.
+    //
+    // Without this the request sits unread against loops blocked in a
+    // continue, which for an idle page may be minutes away from
+    // returning on its own.
+    interruptLiveDebugSessions();
 }
 
 // ADDED - see fix_reattach_orphaned_sessions_on_foreground.py.
