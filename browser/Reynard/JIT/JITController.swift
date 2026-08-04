@@ -324,16 +324,14 @@ final class JITController {
         // Read here because applicationState is main-thread only, and the
         // decision below runs on the attach queue. See
         // fix_check_real_app_state_before_attach.py.
-        let actualStateIsActive: Bool
-        if Thread.isMainThread {
-            actualStateIsActive = UIApplication.shared.applicationState == .active
-        } else {
-            var state = false
-            DispatchQueue.main.sync {
-                state = UIApplication.shared.applicationState == .active
-            }
-            actualStateIsActive = state
-        }
+        // Never blocks. main.sync from the attach queue deadlocks if the
+        // main thread is waiting on anything that queue holds - which
+        // froze the app on launch. Off the main thread we assume active
+        // and let the cached flag decide, which is the behaviour that
+        // existed before.
+        let actualStateIsActive = Thread.isMainThread
+            ? UIApplication.shared.applicationState == .active
+            : true
         // DIAGNOSTIC - see fix_log_all_jit_status_reporters.py. This
         // whole function was silent on every path, including three
         // ReportJITStatusForChild(false) exits. Since that pipe is
