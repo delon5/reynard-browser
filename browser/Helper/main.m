@@ -11,6 +11,7 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <os/log.h>
+#import <os/proc.h>
 #import <sys/utsname.h>
 #import <unistd.h>
 #import <sys/file.h>
@@ -482,6 +483,16 @@ static void logAppGroupDiagnostics(void) {
 __attribute__((used, visibility("default"))) int NSExtensionMain(int argc,
                                                                  char *argv[]) {
   logAppGroupDiagnostics();
+
+  // What the memory entitlements actually bought, if anything. Apple's
+  // documentation for increased-memory-limit says to call this rather
+  // than assume. See fix_memory_entitlements.py.
+  //
+  // Logged before JIT is enabled, so the number is the ceiling this
+  // process starts with rather than one already eaten into.
+  logger([NSString stringWithFormat:@"helperMemory: %llu MB available to this content process",
+                                    (unsigned long long)(os_proc_available_memory() / (1024 * 1024))]);
+
   enableJITForSelfIfNeeded();
   // Was a direct, synchronous call here - a real, confirmed bug found
   // from an actual crash log tonight. This attempts a genuine network
