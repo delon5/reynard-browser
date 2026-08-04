@@ -167,13 +167,13 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         webView.addInteraction(interaction)
     }
     
-    func makeThumbnail() -> UIImage? {
+    func makeThumbnail(visibleSize: CGSize) -> UIImage? {
         layoutIfNeeded()
-        guard bounds.width > 1, bounds.height > 1 else {
+        guard visibleSize.width > 1, visibleSize.height > 1 else {
             return nil
         }
         
-        let renderer = UIGraphicsImageRenderer(size: bounds.size)
+        let renderer = UIGraphicsImageRenderer(size: visibleSize)
         return renderer.image { context in
             layer.render(in: context.cgContext)
         }

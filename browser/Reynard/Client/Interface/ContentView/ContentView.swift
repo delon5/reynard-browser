@@ -57,6 +57,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private(set) var state: State = .browsing
     private var layoutState = LayoutState(mode: .standard)
     private var session: GeckoSession?
+    private var dynamicToolbarMaxHeight: CGFloat = 0
     private var focusedInputTask: Task<Void, Never>?
     private var inputBottomRatio: CGFloat?
     private var focusedInputOffset: CGFloat = 0
@@ -80,6 +81,10 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     
     private var topConstraint: NSLayoutConstraint?
     private var bottomConstraint: NSLayoutConstraint?
+    
+    var webContentBottomAnchor: NSLayoutYAxisAnchor {
+        return webContentView.bottomAnchor
+    }
     
     // MARK: - Lifecycle
     
@@ -126,7 +131,13 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     private func configureConstraints() {
-        [webContentView, historyPreviewImageView, historyTransitionOverlayView, overlayContentView].forEach { contentView in
+        NSLayoutConstraint.activate([
+            webContentView.topAnchor.constraint(equalTo: topAnchor),
+            webContentView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            webContentView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        
+        [historyPreviewImageView, historyTransitionOverlayView, overlayContentView].forEach { contentView in
             NSLayoutConstraint.activate([
                 contentView.topAnchor.constraint(equalTo: topAnchor),
                 contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -177,6 +188,11 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         }
         
         return previousSize != size
+    }
+    
+    func setDynamicToolbarMaxHeight(_ height: CGFloat) {
+        dynamicToolbarMaxHeight = height
+        session?.setDynamicToolbarMaxHeight(height)
     }
     
     private func applyLayoutState(
@@ -359,6 +375,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         self.session = session
         resetFocusedInputRelocation()
         webContentView.setSession(session)
+        session?.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updatePullToRefreshAvailability()
     }
     
@@ -685,7 +702,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     // MARK: - Thumbnail
     
     func makeWebThumbnail() -> UIImage? {
-        return webContentView.makeThumbnail()
+        return webContentView.makeThumbnail(visibleSize: bounds.size)
     }
     
     // MARK: - Overlay Hosting
@@ -696,6 +713,10 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         in parentViewController: UIViewController
     ) {
         overlayContentView.setController(viewController, for: page, in: parentViewController)
+    }
+    
+    func layoutOverlayIfNeeded() {
+        overlayContentView.layoutIfNeeded()
     }
     
     func removeOverlayController(for page: OverlayContentView.Page) {

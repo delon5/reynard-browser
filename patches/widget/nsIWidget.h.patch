@@ -1,0 +1,18 @@
+diff --git a/widget/nsIWidget.h b/widget/nsIWidget.h
+index 459b278379ee..292c1c3ea31e 100644
+--- a/widget/nsIWidget.h
++++ b/widget/nsIWidget.h
+@@ -2318,12 +2318,12 @@ class nsIWidget : public nsSupportsWeakReference {
+    * @param aMessage message being sent to Android UI thread.
+    */
+   virtual void RecvToolbarAnimatorMessageFromCompositor(int32_t aMessage) {}
++#endif
+ 
+   virtual void UpdateDynamicToolbarMaxHeight(mozilla::ScreenIntCoord aHeight) {}
+   virtual mozilla::ScreenIntCoord GetDynamicToolbarMaxHeight() const {
+     return 0;
+   }
+-#endif
+ 
+   void EnsureLocalesChangedObserver();
+   virtual void LocalesChanged() {}

@@ -273,6 +273,7 @@ final class BrowserViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         syncSelectedPageZoomControls()
+        updateDynamicToolbarMaxHeight()
         invalidateNavigationThumbnailsIfNeeded()
     }
     
@@ -347,6 +348,7 @@ final class BrowserViewController: UIViewController {
             contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             contentView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor).withPriority(.defaultHigh),
             contentView.bottomAnchor.constraint(equalTo: browserChrome.bottomToolbarTopAnchor).withPriority(.defaultHigh),
+            contentView.webContentBottomAnchor.constraint(equalTo: view.bottomAnchor),
             
             browserChrome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             browserChrome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -604,6 +606,15 @@ final class BrowserViewController: UIViewController {
             : browserChrome.bottomToolbarTopAnchor
         )
         setTabBarVisible(false)
+    }
+    
+    private func updateDynamicToolbarMaxHeight() {
+        let hasBottomToolbar = !isShowingFullscreenMedia &&
+        browserLayout.chromeMode != .pad &&
+        !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
+        let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
+        let height = hasBottomToolbar ? max(0, view.bounds.maxY - toolbarFrame.minY) : 0
+        contentView.setDynamicToolbarMaxHeight(height)
     }
     
     private func applyPadLayout() {

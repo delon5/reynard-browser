@@ -1,5 +1,5 @@
 diff --git a/dom/ipc/BrowserParent.cpp b/dom/ipc/BrowserParent.cpp
-index ba640fdbc080..db600335591f 100644
+index ba640fdbc080..fe637cc0b3ea 100644
 --- a/dom/ipc/BrowserParent.cpp
 +++ b/dom/ipc/BrowserParent.cpp
 @@ -793,6 +793,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
@@ -24,6 +24,15 @@ index ba640fdbc080..db600335591f 100644
    }
    return IPC_OK();
  }
+@@ -1020,7 +1035,7 @@ void BrowserParent::InitRendering() {
+         widget->SupportsUnadjustedMovement());
+   }
+ 
+-#if defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_ANDROID) || defined(MOZ_WIDGET_UIKIT)
+   MOZ_ASSERT(widget);
+ 
+   if (GetBrowsingContext()->IsTopContent()) {
 @@ -2554,14 +2569,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
      const ContentCache& aContentCache,
      const IMENotification& aIMENotification) {
