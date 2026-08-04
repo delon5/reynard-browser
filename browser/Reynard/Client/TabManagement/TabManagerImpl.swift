@@ -327,6 +327,23 @@ final class TabManagerImplementation: NSObject, TabManager {
         if let location = tabLocation(for: tab.id) {
             notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
         }
+        // A slept tab has had its session closed by
+        // evictSessionIfNeeded, and load() on a closed session goes
+        // nowhere - which is why a restored tab stayed blank until it was
+        // refreshed by hand. See fix_reopen_session_before_restore.py.
+        //
+        // Replaced rather than reopened: SessionManager owns creation,
+        // and a closed GeckoSession is not documented as reusable.
+        if !tab.session.isOpen() {
+            logger(String(format: "tabRestore: session for tab %@ was closed - creating a new one before loading", tab.id.uuidString))
+            tab.session = createSession(
+                tabID: tab.id,
+                url: nil,
+                windowId: nil,
+                isPrivate: tab.isPrivate
+            )
+        }
+        
         sessionManager.updateSettings(of: tab.session, for: url, tabID: tab.id)
         tab.session.load(url)
     }
