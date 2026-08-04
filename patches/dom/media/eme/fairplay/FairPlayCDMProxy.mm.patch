@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..735db2e0c810
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,577 @@
+@@ -0,0 +0,587 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -231,7 +231,17 @@ index 000000000000..735db2e0c810
 +        "com.minh-ton.Reynard.FairPlayKeys", DISPATCH_QUEUE_SERIAL);
 +    [mKeySession setDelegate:mDelegate queue:queue];
 +
-+    ResolvePromise(aPromiseId);
++    // OnCDMCreated, not ResolvePromise. The latter resolves with
++    // undefined unless the promise carries a session token, and the
++    // create promise has none - so createMediaKeys() handed the page
++    // undefined and every call after it failed. MediaDrmCDMProxy does
++    // the same thing. See fix_fairplay_oncdmcreated.py.
++    //
++    // Plugin id 0 identifies a GMP process, and FairPlay has none -
++    // AVFoundation runs in-process.
++    if (!mKeys.IsNull()) {
++      mKeys->OnCDMCreated(aPromiseId, 0);
++    }
 +    return;
 +  }
 +
