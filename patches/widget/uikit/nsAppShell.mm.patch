@@ -174,7 +174,7 @@ index 4441c8faf625..7fb660eefaa2 100644
  - (void)applicationWillTerminate:(UIApplication*)application {
    ALOG("[AppShellDelegate applicationWillTerminate:]");
    ApplicationWillTerminate(/* aCallExit */ false);
-@@ -68,15 +190,154 @@ - (void)applicationWillTerminate:(UIApplication*)application {
+@@ -68,15 +190,166 @@ - (void)applicationWillTerminate:(UIApplication*)application {
  
  - (void)applicationDidBecomeActive:(UIApplication*)application {
    ALOG("[AppShellDelegate applicationDidBecomeActive:]");
@@ -257,6 +257,18 @@ index 4441c8faf625..7fb660eefaa2 100644
 +
 +- (void)sceneDidEnterBackground:(NSNotification*)notification {
 +  if ([self anySceneIsForegrounded]) {
++    // Still reclaim, even though the application has not gone away.
++    // See fix_heap_minimize_with_carplay.py.
++    //
++    // handleForegroundTransition sends application-background AND
++    // heap-minimize together. Suppressing the pair to keep CarPlay
++    // playing also suppressed the reclamation, so Gecko never shrank
++    // its heap for as long as the car stayed connected.
++    //
++    // heap-minimize touches no media state - it drops caches, compacts
++    // the JS heap and releases decoded images. Playback is unaffected,
++    // which application-background would not be.
++    NotifyObserverTopic("memory-pressure", u"heap-minimize");
 +    return;
 +  }
 +  [self handleForegroundTransition:NO];
@@ -330,7 +342,7 @@ index 4441c8faf625..7fb660eefaa2 100644
  }
  @end
  
-@@ -281,7 +542,12 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
+@@ -281,7 +554,12 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
    ALOG("nsAppShell::Run");
  
    nsresult rv = NS_OK;
@@ -344,7 +356,7 @@ index 4441c8faf625..7fb660eefaa2 100644
      char argv[1][4] = {"app"};
      UIApplicationMain(1, (char**)argv, nil, @"AppShellDelegate");
      // UIApplicationMain doesn't exit. :-(
-@@ -298,7 +564,10 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
+@@ -298,7 +576,10 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
  
    mTerminated = true;
  
@@ -356,7 +368,7 @@ index 4441c8faf625..7fb660eefaa2 100644
      // Dispatch a native event to the main queue to terminate. XPCOM doesn't
      // like being shut down from within an XPCOM runnable, so we cannot use
      // `NS_DispatchToMainThread` here.
-@@ -318,6 +587,11 @@ static void ApplicationWillTerminate(bool aCallExit) {
+@@ -318,6 +599,11 @@ static void ApplicationWillTerminate(bool aCallExit) {
      return;
    }
  
@@ -368,7 +380,7 @@ index 4441c8faf625..7fb660eefaa2 100644
    // Perform the steps which would normally happen after nsAppShell::Run, such
    // as `~ScopedXPCOMStartup`, as UIApplicationMain will never shutdown.
    if (nsCOMPtr<nsIAppStartup> appStartup = components::AppStartup::Service()) {
-@@ -331,12 +605,19 @@ static void ApplicationWillTerminate(bool aCallExit) {
+@@ -331,12 +617,19 @@ static void ApplicationWillTerminate(bool aCallExit) {
  
    gDirServiceProvider->DoShutdown();
  
