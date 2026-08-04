@@ -2,7 +2,7 @@ diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutab
 index cea7d764ca96..c9ef61b53f7d 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
-@@ -14,6 +14,16 @@
+@@ -14,6 +14,12 @@
  
  #include <errno.h>
  
@@ -10,16 +10,12 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +#  include <libkern/OSCacheControl.h>
 +#  include <mach/mach.h>
 +#  include <signal.h>
-+#  include <errno.h>
-+#  include <stdio.h>
-+#  include <sys/mman.h>
-+#  include <unistd.h>
 +#endif
 +
  #include "jsfriendapi.h"
  
  #include "gc/Memory.h"
-@@ -26,6 +36,7 @@
+@@ -26,6 +32,7 @@
  #include "util/RandomSeed.h"
  #include "util/WindowsWrapper.h"
  #include "vm/MutexIDs.h"
@@ -27,7 +23,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +58,356 @@
+@@ -47,6 +54,258 @@
  using namespace js;
  using namespace js::jit;
  
@@ -216,104 +212,6 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +    return;
 +  }
 +
-+  // EXPERIMENT, off by default. See fix_try_mprotect_before_trap.py.
-+  //
-+  // The whole debugger apparatus exists because TXM is assumed to stop
-+  // a process making its own JIT pages writable. But CS_DEBUGGED exists
-+  // to relax code-signing enforcement for debugging, and whether that
-+  // relaxation covers self-mprotect has never been tested - the
-+  // debugger route was built first and worked, so the cheaper one was
-+  // never tried.
-+  //
-+  // If it works, the per-process debug loop becomes unnecessary: attach
-+  // once to set CS_DEBUGGED, detach, and the process runs free. Which
-+  // is the same mechanism that has been causing trouble all along -
-+  // processes left flagged with no debugger - put to use.
-+  //
-+  // Falls through to the trap on failure, so the worst case is one
-+  // wasted syscall per region.
-+  // getenv rather than a pref: js/src builds outside libxul, so
-+  // StaticPrefs_javascript.h pulls in Preferences.h and fails with
-+  // "This header is only usable from within libxul". SpiderMonkey reads
-+  // its own JIT options the same way. See fix_mprotect_use_getenv.py.
-+  //
-+  // An installed app has no shell to set this from, so the device test
-+  // means flipping kDefaultTryMprotect below and rebuilding. Worse than
-+  // a pref, and the only thing available here.
-+  // ON deliberately: an installed app has no shell to set
-+  // REYNARD_TRY_MPROTECT from, so a build with it off answers
-+  // nothing. Set false and rebuild to turn the experiment off.
-+  static const bool kDefaultTryMprotect = true;
-+  static bool sTryMprotect = [] {
-+    const char* env = getenv("REYNARD_TRY_MPROTECT");
-+    if (env) {
-+      return env[0] == '1';
-+    }
-+
-+    // A file is the only toggle an installed app has: js/src cannot
-+    // read prefs, and there is no shell to set an environment variable
-+    // from. iOS sets HOME to the app container, so this lands in the
-+    // Documents folder the Files app shows.
-+    //
-+    // Create no-mprotect there to turn the experiment off, delete it to
-+    // turn it back on. No rebuild either way.
-+    const char* home = getenv("HOME");
-+    if (home) {
-+      char path[1024];
-+      snprintf(path, sizeof(path), "%s/Documents/no-mprotect", home);
-+      if (access(path, F_OK) == 0) {
-+        return false;
-+      }
-+    }
-+
-+    return kDefaultTryMprotect;
-+  }();
-+
-+  if (sTryMprotect) {
-+    uintptr_t pageSize = static_cast<uintptr_t>(getpagesize());
-+    uintptr_t start = reinterpret_cast<uintptr_t>(aAddress) & ~(pageSize - 1);
-+    uintptr_t end = (reinterpret_cast<uintptr_t>(aAddress) + aSize +
-+                     pageSize - 1) & ~(pageSize - 1);
-+
-+    int rv = mprotect(reinterpret_cast<void*>(start), end - start,
-+                      PROT_READ | PROT_WRITE | PROT_EXEC);
-+
-+    // Logged once. Every region would drown everything else, and the
-+    // first answer is the only one that matters.
-+    // To a file, because printf_stderr reaches nothing readable on
-+    // device and js/src cannot use Reynard's own logger. See
-+    // fix_mprotect_result_to_file.py.
-+    //
-+    // Appended, so each content process leaves its own line - one
-+    // succeeding and others failing would itself be informative.
-+    static bool sReported = false;
-+    if (!sReported) {
-+      sReported = true;
-+      const char* reportHome = getenv("HOME");
-+      if (reportHome) {
-+        char reportPath[1024];
-+        snprintf(reportPath, sizeof(reportPath),
-+                 "%s/Documents/mprotect-result.txt", reportHome);
-+        FILE* f = fopen(reportPath, "a");
-+        if (f) {
-+          if (rv == 0) {
-+            fprintf(f, "pid %d: mprotect SUCCEEDED (addr %p len %zu)\n",
-+                    getpid(), aAddress, aSize);
-+          } else {
-+            fprintf(f,
-+                    "pid %d: mprotect FAILED errno=%d (addr %p len %zu)\n",
-+                    getpid(), errno, aAddress, aSize);
-+          }
-+          fclose(f);
-+        }
-+      }
-+    }
-+
-+    if (rv == 0) {
-+      return;
-+    }
-+  }
-+
 +  if (!sExecutableMemoryBase) {
 +    RequestDebuggerToPrepareRegion(aAddress, aSize);
 +    return;
@@ -384,7 +282,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +824,20 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +722,20 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -405,7 +303,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +882,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +780,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -433,7 +331,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +937,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +835,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -465,7 +363,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +968,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +866,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -483,7 +381,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +985,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +883,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -539,7 +437,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +1143,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1041,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -582,7 +480,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1198,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1096,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -603,7 +501,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1370,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1268,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -621,7 +519,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1400,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1298,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -641,7 +539,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1462,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1360,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  

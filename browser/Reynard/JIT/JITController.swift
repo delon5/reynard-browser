@@ -321,6 +321,19 @@ final class JITController {
     }
     
     func childProcessDidStart(pid: Int32, processType: String) {
+        // Read here because applicationState is main-thread only, and the
+        // decision below runs on the attach queue. See
+        // fix_check_real_app_state_before_attach.py.
+        let actualStateIsActive: Bool
+        if Thread.isMainThread {
+            actualStateIsActive = UIApplication.shared.applicationState == .active
+        } else {
+            var state = false
+            DispatchQueue.main.sync {
+                state = UIApplication.shared.applicationState == .active
+            }
+            actualStateIsActive = state
+        }
         // DIAGNOSTIC - see fix_log_all_jit_status_reporters.py. This
         // whole function was silent on every path, including three
         // ReportJITStatusForChild(false) exits. Since that pipe is
@@ -372,9 +385,24 @@ final class JITController {
             //
             // Deliberately before inserting into attachedPIDs, so the
             // drain on return is not skipped by the dedup check.
-            guard self.isApplicationActive else {
+            // Both the flag and the real state. See
+            // fix_check_real_app_state_before_attach.py.
+            //
+            // isApplicationActive is set on activate and cleared on
+            // resign, but iOS wakes a backgrounded app periodically -
+            // background tasks, audio, network - and content processes
+            // can start during those wakes with no resign/activate cycle
+            // in between. The flag is then stale-true and the attach
+            // proceeds while the app is, to iOS, backgrounded.
+            //
+            // Which is how one attach took 117 seconds with its target
+            // stopped throughout, and the app was killed on the next
+            // foreground for failing to answer XPC.
+            let reallyActive = self.isApplicationActive && actualStateIsActive
+            
+            guard reallyActive else {
                 self.pendingAttachPIDs.insert(pid)
-                logger(String(format: "childProcessDidStart: pid %d deferred - app is not active, will attach on return", pid))
+                logger(String(format: "childProcessDidStart: pid %d deferred - app is not active (flag=%@, state=%@), will attach on return", pid, self.isApplicationActive ? "active" : "inactive", actualStateIsActive ? "active" : "inactive"))
                 return
             }
             
