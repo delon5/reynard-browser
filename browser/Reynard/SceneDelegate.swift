@@ -158,22 +158,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             // See fix_stop_trapping_on_background.py.
             JITEnabler.setDebuggerListening(true)
             
-            // Gated for testing - see fix_gate_foreground_reattach.py.
-            //
-            // This did not exist when hangs were last measured at zero,
-            // and it attaches during the lifecycle window where iOS
-            // sends extensions synchronous XPC. vAttach stops its target
-            // for about a second, which is exactly long enough to miss
-            // one.
-            //
-            // Off means processes that lost their session during a
-            // suspension stay interpreted until something else attaches
-            // them - slower, and the trade being measured.
-            if Prefs.ExperimentalSettings.reattachesOrphanedProcessesOnForeground {
-                JITController.shared.reattachOrphanedProcesses()
-            } else {
-                logger("reattach: SKIPPED on foreground - gated off for testing")
-            }
+            JITController.shared.reattachOrphanedProcesses()
             
             if reattachTask != .invalid {
                 reattachApplication.endBackgroundTask(reattachTask)

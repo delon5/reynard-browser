@@ -65,7 +65,6 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
-            key("ExperimentalSettings", "reattachesOrphanedProcessesOnForeground"): false,
             key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
@@ -1154,22 +1153,6 @@ final class BrowserPreferences {
         /// and a running extension can answer the synchronous XPC iOS
         /// sends on a lifecycle transition. So leaving it alone may
         /// be strictly better than cancelling it.
-        /// Whether to re-attach processes that lost their debug session
-        /// during a suspension.
-        ///
-        /// True keeps current behaviour. False tests whether this is
-        /// what brought the watchdog hangs back - it did not exist when
-        /// they were last measured at zero. See
-        /// fix_gate_foreground_reattach.py.
-        static var reattachesOrphanedProcessesOnForeground: Bool {
-            get {
-                return prefs.bool(forSetting: "ExperimentalSettings", key: "reattachesOrphanedProcessesOnForeground")
-            }
-            set {
-                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "reattachesOrphanedProcessesOnForeground")
-            }
-        }
-        
         static var cancelsDebugSessionsOnBackground: Bool {
             get {
                 return prefs.bool(forSetting: "ExperimentalSettings", key: "cancelsDebugSessionsOnBackground")
