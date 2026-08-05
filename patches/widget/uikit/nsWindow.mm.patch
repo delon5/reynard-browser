@@ -1099,7 +1099,7 @@ index ffb8da937efa..65aae4577e58 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1724,24 @@ - (UIView*)view {
+@@ -1247,6 +1724,20 @@ - (UIView*)view {
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1117,14 +1117,10 @@ index ffb8da937efa..65aae4577e58 100644
 +  }
 +}
 +
-+- (BOOL)focusForHardwareKeyboard {
-+  return mWindow && mWindow->FocusForHardwareKeyboard();
-+}
-+
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1755,10 @@ - (void)close {
+@@ -1260,6 +1751,10 @@ - (void)close {
      mOuterWindow = nullptr;
    }
  }
@@ -1135,7 +1131,7 @@ index ffb8da937efa..65aae4577e58 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1801,7 @@ - (void)close {
+@@ -1302,6 +1797,7 @@ - (void)close {
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());
