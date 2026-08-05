@@ -2,7 +2,7 @@ diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutab
 index cea7d764ca96..c9ef61b53f7d 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
-@@ -14,6 +14,12 @@
+@@ -14,6 +14,13 @@
  
  #include <errno.h>
  
@@ -10,12 +10,13 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +#  include <libkern/OSCacheControl.h>
 +#  include <mach/mach.h>
 +#  include <signal.h>
++#  include <string.h>
 +#endif
 +
  #include "jsfriendapi.h"
  
  #include "gc/Memory.h"
-@@ -26,6 +32,7 @@
+@@ -26,6 +33,7 @@
  #include "util/RandomSeed.h"
  #include "util/WindowsWrapper.h"
  #include "vm/MutexIDs.h"
@@ -23,7 +24,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +54,258 @@
+@@ -47,6 +55,271 @@
  using namespace js;
  using namespace js::jit;
  
@@ -240,9 +241,22 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +      continue;
 +    }
 +
++    // Re-checked per chunk. The check at the top of this function is
++    // hoisted above a loop that can trap several times, so a tunnel
++    // dying between chunks would leave the later ones trapping into
++    // nothing. notify_get_state is cheap. See
++    // fix_sigbus_and_chunk_mask.py.
++    if (!DebuggerIsListening()) {
++      return;
++    }
++
 +    uint8_t* chunkStart = sExecutableMemoryBase + (chunk * kPrepareChunkBytes);
 +    RequestDebuggerToPrepareRegion(chunkStart, kPrepareChunkBytes);
-+    sPreparedChunkMask = sPreparedChunkMask | bit;
++    // |= rather than a load, OR and store. mozilla::Atomic makes the
++    // compound form atomic; spelling it out defeats that, and two
++    // compile threads can lose one another's bit - costing an extra brk
++    // round trip later. See fix_sigbus_and_chunk_mask.py.
++    sPreparedChunkMask |= bit;
 +  }
 +}
 +
@@ -282,7 +296,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +722,20 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +736,47 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -291,8 +305,35 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +  unsigned protection = PROT_READ | PROT_EXEC;
 +  unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
 +
-+  // Modifying exec page during execution may cause SIGBUS on some devices.
-+  signal(SIGBUS, SIG_IGN);
++  // Modifying exec page during execution may cause SIGBUS on some
++  // devices. This used to be signal(SIGBUS, SIG_IGN), which does not
++  // work for a synchronous signal: the kernel delivers it, SIG_IGN
++  // discards it, and the thread resumes at the same PC and faults
++  // again - forever, on any thread, for any SIGBUS in the process.
++  //
++  // A content process spinning in a fault loop cannot answer the
++  // synchronous XPC iOS sends on a lifecycle transition, which is a
++  // watchdog kill with nothing in the log to explain it.
++  //
++  // Advancing PC past the faulting instruction is what the ignore was
++  // presumably meant to achieve. On arm64 every instruction is four
++  // bytes, so pc+4 is exact. See fix_sigbus_and_chunk_mask.py.
++  static bool sInstalledBusHandler = false;
++  if (!sInstalledBusHandler) {
++    sInstalledBusHandler = true;
++    struct sigaction sa;
++    memset(&sa, 0, sizeof(sa));
++    sa.sa_flags = SA_SIGINFO;
++    sa.sa_sigaction = [](int, siginfo_t*, void* context) {
++      auto* uc = static_cast<ucontext_t*>(context);
++      if (uc && uc->uc_mcontext) {
++        // Skip the faulting instruction rather than re-executing it.
++        uc->uc_mcontext->__ss.__pc += 4;
++      }
++    };
++    sigemptyset(&sa.sa_mask);
++    sigaction(SIGBUS, &sa, nullptr);
++  }
 +
 +  void* p = reynard_mmap(randomAddr, bytes, protection, flags, -1, 0);
 +  if (p == MAP_FAILED) {
@@ -303,7 +344,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +780,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +821,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -331,7 +372,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +835,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +876,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -363,7 +404,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +866,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +907,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -381,7 +422,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +883,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +924,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -437,7 +478,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +1041,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1082,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -480,7 +521,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1096,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1137,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -501,7 +542,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1268,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1309,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -519,7 +560,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1298,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1339,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -539,7 +580,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1360,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1401,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
