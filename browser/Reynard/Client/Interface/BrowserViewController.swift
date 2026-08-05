@@ -568,8 +568,11 @@ final class BrowserViewController: UIViewController {
     // shows one tab reporting NO and then YES for the same tab as its
     // content loaded.
     func updateArtificialSafeAreaInset() {
+        // DISABLED for testing - the dynamic toolbar now tells Gecko the
+        // bottom toolbar height directly, so this artificial inset would
+        // reserve the same strip twice.
         let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        let shouldInflate = browserChrome.isScrollCondensed && pageReservesSpace
+        let shouldInflate = false && browserChrome.isScrollCondensed && pageReservesSpace
 
         guard shouldInflate else {
             additionalSafeAreaInsets.bottom = 0
