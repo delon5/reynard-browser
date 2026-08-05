@@ -856,7 +856,7 @@ index ffb8da937efa..65aae4577e58 100644
 +//
 +// A global is safe because window creation is synchronous on the main
 +// thread: set, open, clear. Nothing else observes it in between.
-+void GeckoViewSetBackingScaleOverride(CGFloat aScale) {
++extern "C" void GeckoViewSetBackingScaleOverride(CGFloat aScale) {
 +  sBackingScaleOverride = aScale;
 +}
 +
