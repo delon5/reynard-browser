@@ -615,8 +615,30 @@ final class BrowserViewController: UIViewController {
         let hasBottomToolbar = !isShowingFullscreenMedia &&
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
-        let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
-        let height = hasBottomToolbar ? max(0, view.bounds.maxY - toolbarFrame.minY) : 0
+        // CHANGED - see fix_dynamic_toolbar_height_when_condensed.py.
+        //
+        // bottomToolbarTransitionFrame returns the FULL toolbar's frame.
+        // Condensing to a pill only fades the toolbar out and scales it
+        // 0.92 - it never shrinks the layout frame, which is the same
+        // fact applyPhoneLayout, applyCompactLayout and
+        // updateArtificialSafeAreaInset each already compensate for.
+        // So while condensed this told Gecko about the full toolbar's
+        // strip at the full toolbar's position while a much shorter
+        // pill was on screen, and the page reserved space there.
+        //
+        // condensedPillContentBoundary is the established number for
+        // how far above the screen bottom content should stop, just
+        // above the pill, and is already expressed as a distance from
+        // the screen bottom - the same shape as the else branch.
+        let height: CGFloat
+        if !hasBottomToolbar {
+            height = 0
+        } else if browserChrome.isScrollCondensed {
+            height = BrowserChrome.condensedPillContentBoundary
+        } else {
+            let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
+            height = max(0, view.bounds.maxY - toolbarFrame.minY)
+        }
         contentView.setDynamicToolbarMaxHeight(height)
     }
     
