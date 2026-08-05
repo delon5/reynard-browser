@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..735db2e0c810
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +0,617 @@
+@@ -0,0 +0,587 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -221,29 +221,6 @@ index 000000000000..735db2e0c810
 +    mKeySession = [session retain];
 +    mDelegate = [[FairPlayKeyDelegate alloc] initWithProxy:this];
 +
-+    // PROBE - see fix_fairplay_content_key_recipient.py.
-+    //
-+    // AVContentKeySession appears not to process key requests until
-+    // something is registered as a recipient: processContentKeyRequest
-+    // is issued and no delegate callback ever arrives, neither
-+    // didProvide nor didFail.
-+    //
-+    // Only AVURLAsset and AVSampleBufferDisplayLayer conform to
-+    // AVContentKeyRecipient - objects that own playback, which Gecko
-+    // does not hand over. So this registers a layer that is never added
-+    // to a view, purely to see whether the session then calls back.
-+    //
-+    // If it does, the licence path and the rendering path are not
-+    // separable, and the way forward is a real layer positioned where
-+    // the video element sits. If it does not, something else is wrong
-+    // and a great deal of layer work has been avoided.
-+    mProbeRecipientLayer = [[AVSampleBufferDisplayLayer alloc] init];
-+    if (mProbeRecipientLayer) {
-+      [mKeySession addContentKeyRecipient:mProbeRecipientLayer];
-+      EME_LOG("FairPlayCDMProxy::Init({}) registered a probe recipient",
-+              fmt::ptr(this));
-+    }
-+
 +    // A serial queue, so requests and their completions cannot
 +    // interleave. Everything is marshalled to main before touching
 +    // MediaKeys.
@@ -456,13 +433,6 @@ index 000000000000..735db2e0c810
 +    [mDelegate detach];
 +    [mDelegate release];
 +    mDelegate = nullptr;
-+  }
-+  if (mProbeRecipientLayer) {
-+    if (mKeySession) {
-+      [mKeySession removeContentKeyRecipient:mProbeRecipientLayer];
-+    }
-+    [mProbeRecipientLayer release];
-+    mProbeRecipientLayer = nullptr;
 +  }
 +  if (mKeySession) {
 +    [mKeySession release];
