@@ -1324,6 +1324,16 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // the transport died rather than the target exiting. See
     // fix_chunk_coverage_and_dead_connection_detach.py.
     BOOL connectionFailed = NO;
+
+    // ADDED - fix_advance_pc_past_brk_on_detach.py.
+    // Nonzero while the target is stopped at a 0xf00d brk whose PC
+    // has NOT yet been advanced. Set the instant such a stop is
+    // received, cleared the instant pc+4 is written. If the loop
+    // exits with this still set, the detach below advances PC first
+    // so the target does not resume onto the brk and re-trap into a
+    // debugger that is about to be gone.
+    uint64_t stoppedAtUnservicedBrkPC = 0;
+    NSString *stoppedAtUnservicedBrkThreadID = nil;
     
     while (YES) {
         @autoreleasepool {
@@ -1464,6 +1474,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
             
             if (breakpointImmediate == 0xf00d) {
                 logger([NSString stringWithFormat:@"runDebugService: (pid %d) 0xf00d breakpoint hit at iteration %ld - x0=0x%llx x1=0x%llx x16=%llu", pid, (long)debugServiceIteration, x0, x1, x16]);
+                // ADDED - fix_advance_pc_past_brk_on_detach.py: we are
+                // now stopped at a brk whose PC is not yet advanced.
+                stoppedAtUnservicedBrkPC = pc;
+                stoppedAtUnservicedBrkThreadID = threadID;
                 if (!x0Field || !x1Field || !x16Field) break;
                 
                 // CHANGED - see
@@ -1475,6 +1489,9 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // target re-trapped on the identical instruction
                 // forever.
                 if (!writeRegisterValue(session->debugProxy, @"20", pc + 4, threadID, &commandError)) break;
+                // ADDED - fix_advance_pc_past_brk_on_detach.py: PC is
+                // now past the brk; the detach path need not advance it.
+                stoppedAtUnservicedBrkPC = 0;
                 
                 // x16 is a COMMAND SELECTOR, not a flag:
                 //   0 = CMD_DETACH
@@ -1563,6 +1580,24 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // the hang watchdog and the observed total tab loss. See
     // fix_chunk_coverage_and_dead_connection_detach.py.
     if (!exitPacketPresent && !detachedByCommand && !connectionFailed) {
+        // ADDED - fix_advance_pc_past_brk_on_detach.py.
+        // The loop broke while the target was still stopped at a
+        // 0xf00d brk whose PC was never advanced (a malformed stop
+        // packet took the field-check break, or the pc+4 write
+        // failed). connectionFailed is NO here, so the tunnel is
+        // still live - advance PC past the brk before the D so the
+        // target resumes onto the next instruction instead of
+        // re-trapping into a debugger that is about to be gone.
+        if (stoppedAtUnservicedBrkPC != 0 && stoppedAtUnservicedBrkThreadID) {
+            NSError *pcAdvanceError = nil;
+            if (writeRegisterValue(session->debugProxy, @"20", stoppedAtUnservicedBrkPC + 4, stoppedAtUnservicedBrkThreadID, &pcAdvanceError)) {
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) advanced PC past unserviced brk before detach", pid]);
+            } else {
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) could not advance PC before detach: %@", pid, pcAdvanceError.localizedDescription ?: @"write failed"]);
+            }
+            stoppedAtUnservicedBrkPC = 0;
+        }
+
         detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
         
         // ADDED - one retry. See fix_retry_detach_after_cancel.py.
