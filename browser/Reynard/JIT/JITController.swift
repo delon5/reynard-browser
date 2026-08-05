@@ -182,11 +182,7 @@ final class JITController {
             logger(String(format: "applicationDidBecomeActive: attaching %d deferred process(es)", stillAlive.count))
             
             for pid in stillAlive {
-                // Same reasoning as the main attach path - a stale entry
-                // here would skip a deferred process that has no live
-                // session. See
-                // fix_session_liveness_and_reattach_delay.py.
-                guard !JITEnabler.hasActiveDebugSession(forPID: pid) else {
+                guard !self.attachedPIDs.contains(pid) else {
                     continue
                 }
                 self.attachedPIDs.insert(pid)
@@ -377,17 +373,7 @@ final class JITController {
         logger(String(format: "childProcessDidStart: pid %d passed all guards, queueing native attach", pid))
         
         attachQueue.async {
-            // Session liveness, not set membership. attachedPIDs is
-            // insert-only, so a dead process's entry outlives it - and
-            // when iOS reuses that PID the new process is skipped and
-            // never signalled, times out after five seconds and disables
-            // JIT permanently, while this path reports success.
-            //
-            // reattachOrphanedProcesses already asks the right question;
-            // this asks it too. It also covers a live process whose
-            // tunnel died, which a liveness filter on the PID would not.
-            // See fix_session_liveness_and_reattach_delay.py.
-            if JITEnabler.hasActiveDebugSession(forPID: pid) {
+            if self.attachedPIDs.contains(pid) {
                 return
             }
             // Held rather than attached: starting one now would stop
@@ -499,7 +485,6 @@ final class JITController {
         // Nothing slow happens under the lock: the decision is made
         // inside, and its logging after.
         var skipAge: Double?
-        var inFlightToken: Date?
         
         Self.enableJITInFlightLock.lock()
         if let existingInFlightSince = Self.enableJITInFlightByPID[pid] {
@@ -515,11 +500,7 @@ final class JITController {
             // An entry older than enableJITMaxWaitSeconds is treated as
             // abandoned and overwritten here, so one hung attach cannot
             // block a process forever.
-            // Remembered so the completion can check the entry is still
-            // its own before clearing it. See
-            // fix_inflight_ownership_and_bad_request_files.py.
-            inFlightToken = Date()
-            Self.enableJITInFlightByPID[pid] = inFlightToken
+            Self.enableJITInFlightByPID[pid] = Date()
         }
         Self.enableJITInFlightLock.unlock()
         
@@ -540,17 +521,8 @@ final class JITController {
                 result = (false, error as NSError)
             }
             
-            // Only if the entry is still ours. An attach that timed out
-            // leaves its entry set on purpose; a newer attach for the
-            // same PID then overwrites it, and this clearing it would
-            // let a third start alongside the second - two live vAttaches
-            // on one process. See
-            // fix_inflight_ownership_and_bad_request_files.py.
             Self.enableJITInFlightLock.lock()
-            if let inFlightToken,
-               Self.enableJITInFlightByPID[pid] == inFlightToken {
-                Self.enableJITInFlightByPID.removeValue(forKey: pid)
-            }
+            Self.enableJITInFlightByPID.removeValue(forKey: pid)
             Self.enableJITInFlightLock.unlock()
             
             // DIAGNOSTIC - see fix_log_orphaned_call_completion.py's
@@ -1034,26 +1006,12 @@ extension JITController {
                 for requestFileName in pendingRequests {
                     let remainder = requestFileName.dropFirst(Self.jitAttachRequestFilePrefix.count)
                     guard let underscoreIndex = remainder.firstIndex(of: "_") else {
-                        // A file that cannot be parsed cannot be acted
-                        // on, and leaving it means pendingRequests is
-                        // never empty - so every scan runs all fifty
-                        // passes forever. See
-                        // fix_inflight_ownership_and_bad_request_files.py.
-                        logger(String(format: "helperRequest: %@ could not be parsed - removing it", requestFileName))
-                        try? fileManager.removeItem(at: containerURL.appendingPathComponent(requestFileName))
-                                                continue
+                        continue
                     }
                     let pidString = remainder[remainder.startIndex..<underscoreIndex]
                     let token = String(remainder[remainder.index(after: underscoreIndex)...])
                     guard let pid = Int32(pidString), !token.isEmpty else {
-                        // A file that cannot be parsed cannot be acted
-                        // on, and leaving it means pendingRequests is
-                        // never empty - so every scan runs all fifty
-                        // passes forever. See
-                        // fix_inflight_ownership_and_bad_request_files.py.
-                        logger(String(format: "helperRequest: %@ could not be parsed - removing it", requestFileName))
-                        try? fileManager.removeItem(at: containerURL.appendingPathComponent(requestFileName))
-                                                continue
+                        continue
                     }
                     
                     // Removed first, before the attach attempt itself - if
