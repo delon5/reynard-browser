@@ -596,6 +596,22 @@ final class JITController {
     private func attachToProcess(pid: Int32) {
         let (success, error) = boundedEnableJIT(forPID: pid)
         cancelPreflightWatchdog(for: pid)
+        
+        // EBUSY means another attach for this PID is already running -
+        // not a failure, and reporting FALSE for it tells the child to
+        // give up while the real attach is a second from succeeding.
+        // The in-flight call signals when it finishes.
+        //
+        // The old dedup on attachedPIDs caught duplicates before they
+        // reached here, because it was set before the attach began.
+        // hasActiveDebugSession only becomes true after, so duplicates
+        // now get this far. See
+        // fix_dont_report_false_when_in_flight.py.
+        if !success, (error?.code).map({ $0 == Int(EBUSY) }) == true {
+            logger(String(format: "attachToProcess: pid %d already in flight - leaving the signal to that call", pid))
+            return
+        }
+        
         if success {
             logger(String(format: "attachToProcess: pid %d reporting TRUE (native path)", pid))
             ReportJITStatusForChild(pid, true, newJITRuntimeInfo())
