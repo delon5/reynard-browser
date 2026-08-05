@@ -765,7 +765,7 @@ index ffb8da937efa..65aae4577e58 100644
    if (mWidgetListener) {
      mWidgetListener->WindowResized(this, innerBounds.Size());
    }
-@@ -1020,19 +1217,73 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1020,17 +1217,73 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
  
    const bool changingEnabledState =
        aContext.IsInputAttributeChanged(mInputContext);
@@ -828,8 +828,7 @@ index ffb8da937efa..65aae4577e58 100644
 +      aContext.IsPasswordEditor() &&
 +      (aAction.mFocusChange == InputContextAction::GOT_FOCUS ||
 +       mNativeView->mEditable.mWaitingForPasswordAutofillFocus);
- 
--  if (aAction.UserMightRequestOpenVKB() || changingEnabledState) {
++
 +  if (shouldWaitForPasswordAutofillFocus) {
 +    mNativeView->mEditable.mWaitingForPasswordAutofillFocus = YES;
 +  } else if (shouldBecomeFirstResponder) {
@@ -843,7 +842,7 @@ index ffb8da937efa..65aae4577e58 100644
      // TODO(m_kato):
      // It is unnecessary to call reloadInputViews with changingEnabledState if
      // virtual keyboard is disappeared.
-@@ -1050,6 +1301,39 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1050,6 +1303,39 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return mInputContext;
  }
  
@@ -883,7 +882,7 @@ index ffb8da937efa..65aae4577e58 100644
  widget::TextEventDispatcherListener*
  nsWindow::GetNativeTextEventDispatcherListener() {
    return mTextInputHandler;
-@@ -1110,6 +1394,27 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1110,6 +1396,27 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
 -  return [UIScreen mainScreen].scale;
 +  // ADDED - see fix_carplay_backing_scale_override.py.
 +  //
@@ -912,7 +911,7 @@ index ffb8da937efa..65aae4577e58 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1422,105 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1117,10 +1424,105 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return 1;
  }
  
@@ -1018,7 +1017,7 @@ index ffb8da937efa..65aae4577e58 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1227,6 +1627,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1227,6 +1629,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return window.forget();
  }
  
@@ -1100,7 +1099,7 @@ index ffb8da937efa..65aae4577e58 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1722,24 @@ - (UIView*)view {
+@@ -1247,6 +1724,24 @@ - (UIView*)view {
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1125,7 +1124,7 @@ index ffb8da937efa..65aae4577e58 100644
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1753,10 @@ - (void)close {
+@@ -1260,6 +1755,10 @@ - (void)close {
      mOuterWindow = nullptr;
    }
  }
@@ -1136,7 +1135,7 @@ index ffb8da937efa..65aae4577e58 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1799,7 @@ - (void)close {
+@@ -1302,6 +1801,7 @@ - (void)close {
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());
