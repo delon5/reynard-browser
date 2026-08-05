@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b645920014e9
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,141 @@
+@@ -0,0 +0,145 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,6 +17,7 @@ index 000000000000..b645920014e9
 +
 +#ifdef __OBJC__
 +@class AVContentKeySession;
++@class AVSampleBufferDisplayLayer;
 +@class FairPlayKeyDelegate;
 +#else
 +using AVContentKeySession = struct objc_object;
@@ -138,6 +139,9 @@ index 000000000000..b645920014e9
 +  void RejectPromiseWithStateError(PromiseId aId, const nsCString& aReason);
 +
 +  AVContentKeySession* mKeySession = nullptr;
++  // Exists only to be a content key recipient - never displayed. See
++  // fix_fairplay_content_key_recipient.py.
++  AVSampleBufferDisplayLayer* mProbeRecipientLayer = nullptr;
 +  FairPlayKeyDelegate* mDelegate = nullptr;
 +  nsCOMPtr<nsISerialEventTarget> mOwnerThread;
 +};
