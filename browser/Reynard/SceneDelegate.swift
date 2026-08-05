@@ -152,7 +152,17 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        // 0.3s, not 2.0. A suspension-orphaned process has no debugger
+        // until this runs, and a tab compiling JavaScript in that window
+        // traps into one that died with the tunnel - which is the
+        // foreground watchdog kill. Two seconds close to guarantees the
+        // trap wins.
+        //
+        // Some delay is still wanted so this does not run inside the
+        // transition itself; the settling period now covers keeping
+        // attaches out of the lifecycle cascade. See
+        // fix_session_liveness_and_reattach_delay.py.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             // Restored alongside the re-attach, not before it: the
             // sessions it creates are what make trapping safe again.
             // See fix_stop_trapping_on_background.py.
