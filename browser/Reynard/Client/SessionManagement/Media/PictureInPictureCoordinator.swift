@@ -506,6 +506,7 @@ extension PictureInPictureCoordinator: AVPictureInPictureControllerDelegate {
               presentation.controller === pictureInPictureController else {
             return
         }
+        logger("pipLife: willStart - handing the session to PiP")
         isAwaitingAutomaticStart = false
         state = .starting(presentation)
         sessionManager.setPictureInPictureSession(presentation.session)
@@ -516,8 +517,10 @@ extension PictureInPictureCoordinator: AVPictureInPictureControllerDelegate {
     ) {
         guard case let .starting(presentation) = state,
               presentation.controller === pictureInPictureController else {
+            logger("pipLife: didStart IGNORED - not in .starting for this controller")
             return
         }
+        logger("pipLife: didStart - PiP is now active, its content process must stay alive in the background")
         state = .active(presentation)
     }
     
@@ -525,6 +528,7 @@ extension PictureInPictureCoordinator: AVPictureInPictureControllerDelegate {
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
+        logger("pipLife: failedToStart - \(error)")
         NSLog("Failed to start Picture in Picture: \(error)")
         finishPresentation(for: pictureInPictureController)
     }
@@ -535,14 +539,17 @@ extension PictureInPictureCoordinator: AVPictureInPictureControllerDelegate {
         guard let presentation = presentation(
             for: pictureInPictureController
         ) else {
+            logger("pipLife: willStop IGNORED - no presentation for this controller")
             return
         }
+        logger("pipLife: willStop")
         state = .stopping(presentation)
     }
     
     func pictureInPictureControllerDidStopPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        logger("pipLife: didStop")
         finishPresentation(for: pictureInPictureController)
     }
     
@@ -550,18 +557,24 @@ extension PictureInPictureCoordinator: AVPictureInPictureControllerDelegate {
         _ pictureInPictureController: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
+        // The reattach. This is the transition the watchdog kills are
+        // being attributed to, so it is bracketed: if the delegate call
+        // is where the time goes, the two lines will be seconds apart,
+        // and if they are adjacent the block is elsewhere.
         guard let presentation = presentation(
             for: pictureInPictureController
         ),
               !presentation.wasStopRequested else {
+            logger("pipLife: restore DECLINED - no presentation, or stop was requested")
             completionHandler(false)
             return
         }
-        completionHandler(
-            delegate?.pictureInPictureCoordinator(
-                self,
-                restore: presentation.session
-            ) == true
-        )
+        logger("pipLife: restore STARTED - reattaching the session to the page")
+        let restored = delegate?.pictureInPictureCoordinator(
+            self,
+            restore: presentation.session
+        ) == true
+        logger(String(format: "pipLife: restore FINISHED - restored=%@", restored ? "YES" : "NO"))
+        completionHandler(restored)
     }
 }
