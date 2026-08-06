@@ -911,7 +911,7 @@ index ffb8da937efa..65aae4577e58 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1424,146 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1117,10 +1424,152 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return 1;
  }
  
@@ -949,10 +949,16 @@ index ffb8da937efa..65aae4577e58 100644
 +    return;
 +  }
 +
++  printf_stderr(
++      "toolbarTrace: nsWindow offset=%d max=%d listener=%d attached=%d\n",
++      (int)aOffset, (int)mDynamicToolbarMaxHeight, mWidgetListener ? 1 : 0,
++      mAttachedWidgetListener ? 1 : 0);
++
 +  // nsPresContext::UpdateDynamicToolbarOffset asserts
 +  // -maxHeight <= offset <= 0 and early-returns unless HasDynamicToolbar,
 +  // so clamp here rather than send something it will assert on.
 +  if (mDynamicToolbarMaxHeight <= 0) {
++    printf_stderr("toolbarTrace: nsWindow DROPPED - max is zero\n");
 +    return;
 +  }
 +  if (aOffset > 0) {
@@ -1058,7 +1064,7 @@ index ffb8da937efa..65aae4577e58 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1227,6 +1670,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1227,6 +1676,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return window.forget();
  }
  
@@ -1140,7 +1146,7 @@ index ffb8da937efa..65aae4577e58 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1765,27 @@ - (UIView*)view {
+@@ -1247,6 +1771,27 @@ - (UIView*)view {
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1168,7 +1174,7 @@ index ffb8da937efa..65aae4577e58 100644
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1799,10 @@ - (void)close {
+@@ -1260,6 +1805,10 @@ - (void)close {
      mOuterWindow = nullptr;
    }
  }
@@ -1179,7 +1185,7 @@ index ffb8da937efa..65aae4577e58 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1845,7 @@ - (void)close {
+@@ -1302,6 +1851,7 @@ - (void)close {
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());

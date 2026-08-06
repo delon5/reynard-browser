@@ -1,5 +1,5 @@
 diff --git a/layout/base/nsPresContext.cpp b/layout/base/nsPresContext.cpp
-index adfe90e07214..d949e7b8dc12 100644
+index adfe90e0..36cde08b 100644
 --- a/layout/base/nsPresContext.cpp
 +++ b/layout/base/nsPresContext.cpp
 @@ -714,7 +714,7 @@ void nsPresContext::Init(nsDeviceContext* aDeviceContext) {
@@ -11,3 +11,37 @@ index adfe90e07214..d949e7b8dc12 100644
    if (IsRootContentDocumentCrossProcess()) {
      if (BrowserChild* browserChild = BrowserChild::GetFrom(GetDocShell())) {
        if (MOZ_LIKELY(!Preferences::HasUserValue(
+@@ -2932,11 +2932,21 @@ void nsPresContext::AdjustSizeForViewportUnits() {
+ 
+ void nsPresContext::UpdateDynamicToolbarOffset(ScreenIntCoord aOffset) {
+   MOZ_ASSERT(IsRootContentDocumentCrossProcess());
++  printf_stderr(
++      "toolbarTrace: nsPresContext RECEIVED offset=%d max=%d height=%d shell=%d\n",
++      (int)aOffset, (int)mDynamicToolbarMaxHeight, (int)mDynamicToolbarHeight,
++      mPresShell ? 1 : 0);
+   if (!mPresShell) {
+     return;
+   }
+ 
+   if (!HasDynamicToolbar()) {
++    // The line the whole hypothesis turns on. The content process only
++    // ever received a max from BrowserParent::InitRendering's one-shot,
++    // captured before the toolbar had been measured.
++    printf_stderr(
++        "toolbarTrace: nsPresContext DROPPED - HasDynamicToolbar false (max=%d)\n",
++        (int)mDynamicToolbarMaxHeight);
+     return;
+   }
+ 
+@@ -2971,6 +2981,11 @@ void nsPresContext::UpdateDynamicToolbarOffset(ScreenIntCoord aOffset) {
+ 
+   mDynamicToolbarHeight = mDynamicToolbarMaxHeight + aOffset;
+ 
++  printf_stderr(
++      "toolbarTrace: nsPresContext APPLIED height=%d state=%d mvm=%d\n",
++      (int)mDynamicToolbarHeight, (int)GetDynamicToolbarState(),
++      mPresShell->GetMobileViewportManager() ? 1 : 0);
++
+   if (RefPtr<MobileViewportManager> mvm =
+           mPresShell->GetMobileViewportManager()) {
+     mvm->UpdateVisualViewportSizeByDynamicToolbar(-aOffset);

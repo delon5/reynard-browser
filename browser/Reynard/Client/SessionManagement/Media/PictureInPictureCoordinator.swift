@@ -53,8 +53,6 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
         }
     }
     
-    private var fairPlayProbe: FairPlayLayerProbe?
-    
     private enum State {
         case idle
         case prepared(Presentation)
@@ -196,14 +194,6 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
         guard isValid(positionState) else {
             os_log("eligibleSession: positionState failed isValid check", log: pipLog, type: .debug)
             return nil
-        }
-        // FairPlay stage 2 probe. Piggybacks here because this is the one
-        // place that already has a compositor-owned video layer in hand.
-        // See FairPlayLayerProbe.swift.
-        if FairPlayLayerProbe.isEnabled, fairPlayProbe == nil {
-            let probe = FairPlayLayerProbe(hostLayer: displayLayer)
-            fairPlayProbe = probe
-            probe.start()
         }
         os_log("eligibleSession: all checks passed, session is eligible", log: pipLog, type: .debug)
         return EligibleSession(

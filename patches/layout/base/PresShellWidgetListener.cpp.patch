@@ -1,0 +1,34 @@
+diff --git a/layout/base/PresShellWidgetListener.cpp b/layout/base/PresShellWidgetListener.cpp
+index 11d1400b..5b49beac 100644
+--- a/layout/base/PresShellWidgetListener.cpp
++++ b/layout/base/PresShellWidgetListener.cpp
+@@ -157,16 +157,27 @@ void PresShellWidgetListener::DynamicToolbarOffsetChanged(
+     ScreenIntCoord aOffset) {
+   MOZ_ASSERT(XRE_IsParentProcess(),
+              "Should be only called for the browser parent process");
++  int visited = 0;
++  int delivered = 0;
+   CallOnAllRemoteChildren(
+-      [aOffset](dom::BrowserParent* aBrowserParent) -> CallState {
+-        // Skip background tabs.
++      [aOffset, &visited, &delivered](dom::BrowserParent* aBrowserParent)
++          -> CallState {
++        visited++;
++        // Skip background tabs. Unlike DynamicToolbarMaxHeightChanged,
++        // which calls every remote child unconditionally, this delivers
++        // only to an active docshell - so an inactive browsing context
++        // loses the offset with no trace.
+         if (!aBrowserParent->GetDocShellIsActive()) {
+           return CallState::Continue;
+         }
+ 
++        delivered++;
+         aBrowserParent->DynamicToolbarOffsetChanged(aOffset);
+         return CallState::Stop;
+       });
++  printf_stderr(
++      "toolbarTrace: PresShellWidgetListener offset=%d visited=%d delivered=%d\n",
++      (int)aOffset, visited, delivered);
+ }
+ 
+ void PresShellWidgetListener::KeyboardHeightChanged(ScreenIntCoord aHeight) {
