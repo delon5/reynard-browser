@@ -143,7 +143,10 @@ final class PrivateBrowsingLockCoordinator {
             String(describing: type(of: host?.presentedViewController))
         ))
         guard isLocked, isProtectionEnabled, isEffectivelyOnPrivateTabs else {
-            logger("privateLock: presentLockIfNeeded RETURNED EARLY - curtain stays up with no lock screen")
+            // Only worth attention when locked=YES, which means a
+            // curtain is up with nothing on top that can authenticate.
+            // locked=NO is the ordinary case.
+            logger(String(format: "privateLock: presentLockIfNeeded returned early (locked=%@)", isLocked ? "YES - CURTAIN STAYS UP" : "NO - nothing locked"))
             return
         }
         presentLockScreen(animated: animated)

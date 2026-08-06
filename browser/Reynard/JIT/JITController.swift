@@ -391,7 +391,11 @@ final class JITController {
                 // Silent until now, and the liveness check that made it
                 // safe was reverted in f795d87, so a reused pid lands
                 // here and is dropped without ever being signalled.
-                logger(String(format: "attachStall: pid %d SKIPPED by the attachedPIDs dedup - no attach will run for it", pid))
+                // Usually benign: the Helper delegation path claims the
+                // pid first and inserts it, then childProcessDidStart
+                // arrives and lands here. Only a concern if no attach for
+                // this pid appears anywhere in the capture.
+                logger(String(format: "attachStall: pid %d already claimed - skipping the native attach", pid))
                 return
             }
             // Held rather than attached: starting one now would stop

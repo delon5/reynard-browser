@@ -619,6 +619,15 @@ final class BrowserViewController: UIViewController {
     }
     
     private var dynamicToolbarMaxHeight: CGFloat = 0
+    private var lastCondensedStateForToolbar: Bool?
+    private var condensedStateChangedAt: CFAbsoluteTime = 0
+    
+    /// How long to wait after a condense or expand before trusting a
+    /// toolbar measurement. bottomToolbarTransitionFrame goes through
+    /// convert(), which honours the 0.92 condense transform, so a sample
+    /// taken mid-animation reports a frame the toolbar is only passing
+    /// through. Comfortably longer than the transition itself.
+    private static let toolbarSettleSeconds: CFTimeInterval = 0.45
     
     // CHANGED - the max height is CONFIGURATION, not animation.
     //
@@ -651,10 +660,34 @@ final class BrowserViewController: UIViewController {
             return
         }
         
+        guard CFAbsoluteTimeGetCurrent() - condensedStateChangedAt >= Self.toolbarSettleSeconds else {
+            logger("dynToolbar: max sample IGNORED - chrome still settling")
+            return
+        }
+        
         let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
-        dynamicToolbarMaxHeight = max(0, view.bounds.maxY - toolbarFrame.minY)
-        logger(String(format: "dynToolbar: max measured %.1f (viewMaxY=%.1f toolbarMinY=%.1f)",
-                      dynamicToolbarMaxHeight, view.bounds.maxY, toolbarFrame.minY))
+        
+        // A toolbar above the top of the view, or below its bottom, is
+        // one that has not been positioned yet. At startup this produced
+        // toolbarMinY=-54 and a 928pt "toolbar".
+        guard toolbarFrame.minY >= 0, toolbarFrame.minY < view.bounds.maxY else {
+            logger(String(format: "dynToolbar: max sample REJECTED - implausible toolbarMinY=%.1f (viewMaxY=%.1f)",
+                          toolbarFrame.minY, view.bounds.maxY))
+            return
+        }
+        
+        let candidate = view.bounds.maxY - toolbarFrame.minY
+        
+        // The reflow suppressor. SetDynamicToolbarMaxHeight forces a full
+        // resize reflow on every change, so an unchanged value must not
+        // be sent at all.
+        guard abs(candidate - dynamicToolbarMaxHeight) > 0.5 else {
+            return
+        }
+        
+        logger(String(format: "dynToolbar: max measured %.1f (was %.1f, viewMaxY=%.1f toolbarMinY=%.1f)",
+                      candidate, dynamicToolbarMaxHeight, view.bounds.maxY, toolbarFrame.minY))
+        dynamicToolbarMaxHeight = candidate
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }
@@ -669,7 +702,16 @@ final class BrowserViewController: UIViewController {
     // the toolbar is gone, content underlays the pill, and the strip above
     // the pill is reserved by updateArtificialSafeAreaInset instead.
     private func updateDynamicToolbarOffset() {
-        let offset = browserChrome.isScrollCondensed ? -dynamicToolbarMaxHeight : 0
+        let condensed = browserChrome.isScrollCondensed
+        
+        // The settle timer starts here rather than in the chrome, because
+        // this is the one call site that sees every condense and expand.
+        if lastCondensedStateForToolbar != condensed {
+            lastCondensedStateForToolbar = condensed
+            condensedStateChangedAt = CFAbsoluteTimeGetCurrent()
+        }
+        
+        let offset = condensed ? -dynamicToolbarMaxHeight : 0
         // An offset of 0 with a max of 0 is the inert case. Only
         // offset == -max exactly reaches Gecko's Collapsed state.
         logger(String(format: "dynToolbar: offset %.1f (condensed=%@ max=%.1f)",
