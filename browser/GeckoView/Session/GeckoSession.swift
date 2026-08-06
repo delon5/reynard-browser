@@ -469,4 +469,12 @@ public class GeckoSession {
     public func setDynamicToolbarMaxHeight(_ height: CGFloat) {
         window?.setDynamicToolbarMaxHeight(max(0, height))
     }
+    
+    /// How far the toolbar is displaced from fully visible. Zero while
+    /// expanded; -maxHeight once condensed, which is the only value that
+    /// reaches Gecko's Collapsed state and lets fixed-position content
+    /// drop to the window bottom.
+    public func setDynamicToolbarOffset(_ offset: CGFloat) {
+        window?.setDynamicToolbarOffset(min(0, offset))
+    }
 }

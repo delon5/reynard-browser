@@ -227,6 +227,7 @@ final class BrowserViewController: UIViewController {
             // instantly, before the (separately animated) chrome fade
             // begins, so GeckoView gets its real final size immediately
             // rather than a continuously-changing target.
+            self.updateDynamicToolbarOffset()
             self.applyBrowserLayout(animated: false)
         }
         
@@ -617,35 +618,53 @@ final class BrowserViewController: UIViewController {
         setTabBarVisible(false)
     }
     
+    private var dynamicToolbarMaxHeight: CGFloat = 0
+    
+    // CHANGED - the max height is CONFIGURATION, not animation.
+    //
+    // nsPresContext::SetDynamicToolbarMaxHeight sets mDynamicToolbarHeight
+    // equal to whatever max it receives, which forces the Expanded state
+    // and a full resize reflow. Changing it on every condense therefore
+    // reflows on each scroll direction flip and still cannot express "the
+    // toolbar went away". It only ever carries the real toolbar height,
+    // measured while expanded - condensing applies a 0.92 scale that
+    // convert() honours, so measuring then would report a slightly wrong
+    // height and reconfigure Gecko for nothing.
     private func updateDynamicToolbarMaxHeight() {
         let hasBottomToolbar = !isShowingFullscreenMedia &&
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
-        // CHANGED - see fix_dynamic_toolbar_height_when_condensed.py.
-        //
-        // bottomToolbarTransitionFrame returns the FULL toolbar's frame.
-        // Condensing to a pill only fades the toolbar out and scales it
-        // 0.92 - it never shrinks the layout frame, which is the same
-        // fact applyPhoneLayout, applyCompactLayout and
-        // updateArtificialSafeAreaInset each already compensate for.
-        // So while condensed this told Gecko about the full toolbar's
-        // strip at the full toolbar's position while a much shorter
-        // pill was on screen, and the page reserved space there.
-        //
-        // condensedPillContentBoundary is the established number for
-        // how far above the screen bottom content should stop, just
-        // above the pill, and is already expressed as a distance from
-        // the screen bottom - the same shape as the else branch.
-        let height: CGFloat
-        if !hasBottomToolbar {
-            height = 0
-        } else if browserChrome.isScrollCondensed {
-            height = BrowserChrome.condensedPillContentBoundary
-        } else {
-            let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
-            height = max(0, view.bounds.maxY - toolbarFrame.minY)
+        
+        guard hasBottomToolbar else {
+            dynamicToolbarMaxHeight = 0
+            contentView.setDynamicToolbarMaxHeight(0)
+            updateDynamicToolbarOffset()
+            return
         }
-        contentView.setDynamicToolbarMaxHeight(height)
+        
+        guard !browserChrome.isScrollCondensed else {
+            return
+        }
+        
+        let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
+        dynamicToolbarMaxHeight = max(0, view.bounds.maxY - toolbarFrame.minY)
+        contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
+        updateDynamicToolbarOffset()
+    }
+    
+    // The animation channel. Only -maxHeight exactly reaches
+    // DynamicToolbarState::Collapsed, the one state where
+    // PresShell::GetFixedViewportSize adds the toolbar height back and a
+    // page's position:fixed content drops to the true window bottom.
+    // Partial offsets are InTransition and move nothing.
+    //
+    // Condensed is therefore all-or-nothing: as far as Gecko is concerned
+    // the toolbar is gone, content underlays the pill, and the strip above
+    // the pill is reserved by updateArtificialSafeAreaInset instead.
+    private func updateDynamicToolbarOffset() {
+        contentView.setDynamicToolbarOffset(
+            browserChrome.isScrollCondensed ? -dynamicToolbarMaxHeight : 0
+        )
     }
     
     private func applyPadLayout() {

@@ -48,7 +48,7 @@ index e68fca9134c0..79b39c6a5ca3 100644
  @end
  
  @protocol GeckoProcessExtension <NSObject>
-@@ -56,6 +87,10 @@
+@@ -56,6 +87,13 @@
  
  @protocol GeckoViewWindow <NSObject>
  - (UIView*)view;
@@ -56,10 +56,13 @@ index e68fca9134c0..79b39c6a5ca3 100644
 +- (void)setInputResultDelegate:(id<GeckoViewInputResultDelegate>)delegate;
 +// Tells Gecko the bottom toolbar height so content can underlay it.
 +- (void)setDynamicToolbarMaxHeight:(CGFloat)height;
++// Tells Gecko how far the toolbar is currently displaced from fully
++// visible: 0 while expanded, -maxHeight once condensed to the pill.
++- (void)setDynamicToolbarOffset:(CGFloat)offset;
  - (void)close;
  @end
  
-@@ -62,7 +97,18 @@
+@@ -62,7 +100,18 @@
  MOZ_BEGIN_EXTERN_C
  
  MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(

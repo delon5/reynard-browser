@@ -58,6 +58,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private var layoutState = LayoutState(mode: .standard)
     private var session: GeckoSession?
     private var dynamicToolbarMaxHeight: CGFloat = 0
+    private var dynamicToolbarOffset: CGFloat = 0
     private var focusedInputTask: Task<Void, Never>?
     private var inputBottomRatio: CGFloat?
     private var focusedInputOffset: CGFloat = 0
@@ -193,6 +194,11 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     func setDynamicToolbarMaxHeight(_ height: CGFloat) {
         dynamicToolbarMaxHeight = height
         session?.setDynamicToolbarMaxHeight(height)
+    }
+    
+    func setDynamicToolbarOffset(_ offset: CGFloat) {
+        dynamicToolbarOffset = offset
+        session?.setDynamicToolbarOffset(offset)
     }
     
     private func applyLayoutState(
@@ -376,6 +382,8 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         resetFocusedInputRelocation()
         webContentView.setSession(session)
         session?.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
+        // Order matters - nsWindow drops an offset while the max is zero.
+        session?.setDynamicToolbarOffset(dynamicToolbarOffset)
         updatePullToRefreshAvailability()
     }
     

@@ -30,6 +30,7 @@ final class JITSettingsSection: NSObject {
     private let jitSwitch = UISwitch()
     private let backgroundQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITSettingsSection.Queue", qos: .userInitiated)
     private var isJITLessModeActive = false
+    private var isTunnelUnavailable = false
     private var activeDDIDownloadToken: UUID?
     
     var rowCount: Int {
@@ -156,6 +157,8 @@ final class JITSettingsSection: NSObject {
         
         if isJITLessModeActive {
             stackView.addArrangedSubview(jitlessStatusLabel())
+        } else if isTunnelUnavailable {
+            stackView.addArrangedSubview(tunnelUnavailableStatusLabel())
         }
         stackView.addArrangedSubview(performanceDetailLabel())
         
@@ -180,6 +183,7 @@ final class JITSettingsSection: NSObject {
         jitSwitch.isEnabled = Prefs.JITSettings.hasPairingFile
         jitSwitch.isOn = Prefs.JITSettings.isJITEnabled
         isJITLessModeActive = JITController.shared.isJITLessModeActive
+        isTunnelUnavailable = JITController.shared.isTunnelUnavailable
     }
     
     @objc private func jitSwitchChanged(_ sender: UISwitch) {
@@ -333,6 +337,23 @@ final class JITSettingsSection: NSObject {
     
     private func connectSwitchActions() {
         jitSwitch.addTarget(self, action: #selector(jitSwitchChanged(_:)), for: .valueChanged)
+    }
+    
+    /// Shown when attaches are failing but JIT-Less Mode has not
+    /// latched, which is what a tunnel that died over a suspension looks
+    /// like: JIT is on, nothing is degraded on paper, and every tab is
+    /// running interpreted.
+    private func tunnelUnavailableStatusLabel() -> UILabel {
+        let footerPointSize = UIFont.preferredFont(forTextStyle: .footnote).pointSize
+        let statusBoldFont = UIFontMetrics(forTextStyle: .footnote)
+            .scaledFont(for: UIFont.systemFont(ofSize: footerPointSize, weight: .semibold))
+        let statusLabel = UILabel()
+        statusLabel.numberOfLines = 0
+        statusLabel.font = statusBoldFont
+        statusLabel.adjustsFontForContentSizeCategory = true
+        statusLabel.textColor = .systemOrange
+        statusLabel.text = NSLocalizedString("\u{25B2} Lost the debugger connection - new tabs are running without JIT. Reopening the app usually restores it.", comment: "")
+        return statusLabel
     }
     
     private func jitlessStatusLabel() -> UILabel {

@@ -911,7 +911,7 @@ index ffb8da937efa..65aae4577e58 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1424,105 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1117,10 +1424,146 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return 1;
  }
  
@@ -928,6 +928,47 @@ index ffb8da937efa..65aae4577e58 100644
 +
 +  if (mAttachedWidgetListener) {
 +    mAttachedWidgetListener->DynamicToolbarMaxHeightChanged(aHeight);
++  }
++}
++
++// The toolbar's current displacement from fully visible: 0 when the full
++// toolbar is showing, -maxHeight once it has condensed to the pill.
++//
++// This is the channel Gecko expects the toolbar's MOVEMENT on.
++// UpdateDynamicToolbarMaxHeight is configuration - nsPresContext sets
++// mDynamicToolbarHeight equal to whatever max it is handed, forcing the
++// Expanded state and a full resize reflow - so the max must carry the
++// real toolbar height and change only when that height changes.
++//
++// Only offset == -maxHeight reaches DynamicToolbarState::Collapsed, the
++// one state where PresShell::GetFixedViewportSize adds the toolbar
++// height back and position:fixed content drops to the window bottom.
++// Partial offsets are InTransition and do not move fixed content.
++void nsWindow::UpdateDynamicToolbarOffset(ScreenIntCoord aOffset) {
++  if (mDynamicToolbarOffset == aOffset) {
++    return;
++  }
++
++  // nsPresContext::UpdateDynamicToolbarOffset asserts
++  // -maxHeight <= offset <= 0 and early-returns unless HasDynamicToolbar,
++  // so clamp here rather than send something it will assert on.
++  if (mDynamicToolbarMaxHeight <= 0) {
++    return;
++  }
++  if (aOffset > 0) {
++    aOffset = 0;
++  } else if (aOffset < -mDynamicToolbarMaxHeight) {
++    aOffset = -mDynamicToolbarMaxHeight;
++  }
++
++  mDynamicToolbarOffset = aOffset;
++
++  if (mWidgetListener) {
++    mWidgetListener->DynamicToolbarOffsetChanged(aOffset);
++  }
++
++  if (mAttachedWidgetListener) {
++    mAttachedWidgetListener->DynamicToolbarOffsetChanged(aOffset);
 +  }
 +}
 +
@@ -1017,7 +1058,7 @@ index ffb8da937efa..65aae4577e58 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1227,6 +1629,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1227,6 +1670,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return window.forget();
  }
  
@@ -1099,7 +1140,7 @@ index ffb8da937efa..65aae4577e58 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1724,20 @@ - (UIView*)view {
+@@ -1247,6 +1765,27 @@ - (UIView*)view {
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1117,10 +1158,17 @@ index ffb8da937efa..65aae4577e58 100644
 +  }
 +}
 +
++- (void)setDynamicToolbarOffset:(CGFloat)offset {
++  if (mWindow) {
++    mWindow->UpdateDynamicToolbarOffset(
++        ScreenIntCoord(lround(offset * mWindow->BackingScaleFactor())));
++  }
++}
++
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1751,10 @@ - (void)close {
+@@ -1260,6 +1799,10 @@ - (void)close {
      mOuterWindow = nullptr;
    }
  }
@@ -1131,7 +1179,7 @@ index ffb8da937efa..65aae4577e58 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1797,7 @@ - (void)close {
+@@ -1302,6 +1845,7 @@ - (void)close {
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());

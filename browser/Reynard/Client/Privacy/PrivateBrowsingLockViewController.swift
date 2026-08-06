@@ -91,10 +91,12 @@ final class PrivateBrowsingLockViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         guard !hasRequestedAutomaticUnlock else {
+            logger("privateLock: lock screen appeared but automatic unlock already used - NOT re-requesting")
             return
         }
 
         hasRequestedAutomaticUnlock = true
+        logger("privateLock: lock screen appeared, requesting automatic unlock")
         onUnlockRequested?()
     }
 

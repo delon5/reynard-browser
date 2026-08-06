@@ -93,6 +93,20 @@ final class JITController {
     private var isApplicationActive = true
     private var pendingAttachPIDs = Set<Int32>()
     private(set) var isJITLessModeActive = false
+    
+    /// Whether the debugger tunnel currently looks dead.
+    ///
+    /// Deliberately separate from isJITLessModeActive, which is a
+    /// one-way latch that also detaches everything. This is reporting
+    /// only, and it clears itself the moment an attach succeeds - a
+    /// tunnel that dies over a suspension comes back on its own.
+    private(set) var isTunnelUnavailable = false
+    private var consecutiveAttachFailures = 0
+    
+    /// How many consecutive failures before saying so. Three is past
+    /// any single unlucky process and still well inside the burst of
+    /// content processes a single page load creates.
+    private static let tunnelFailureThreshold = 3
     private var pendingFailureAction: (() -> Void)?
     private let preflightTimeoutSeconds: Int = 5
     private let failurePresentationRetryLimit = 12
@@ -374,6 +388,10 @@ final class JITController {
         
         attachQueue.async {
             if self.attachedPIDs.contains(pid) {
+                // Silent until now, and the liveness check that made it
+                // safe was reverted in f795d87, so a reused pid lands
+                // here and is dropped without ever being signalled.
+                logger(String(format: "attachStall: pid %d SKIPPED by the attachedPIDs dedup - no attach will run for it", pid))
                 return
             }
             // Held rather than attached: starting one now would stop
@@ -399,6 +417,7 @@ final class JITController {
             let reallyActive = self.isApplicationActive && actualStateIsActive
             
             guard reallyActive else {
+                logger(String(format: "attachStall: pid %d DEFERRED, %ld now pending", pid, self.pendingAttachPIDs.count + 1))
                 self.pendingAttachPIDs.insert(pid)
                 logger(String(format: "childProcessDidStart: pid %d deferred - app is not active (flag=%@, state=%@), will attach on return", pid, self.isApplicationActive ? "active" : "inactive", actualStateIsActive ? "active" : "inactive"))
                 return
@@ -411,8 +430,18 @@ final class JITController {
             // ~1012ms attach itself runs concurrently. See
             // fix_concurrent_attach_slots.py.
             self.attachWorkQueue.async {
+                // The slot wait is unbounded. Three attaches parked on a
+                // dead tunnel hold every slot and everything behind them
+                // waits here, silently.
+                let slotWaitStart = CFAbsoluteTimeGetCurrent()
+                logger(String(format: "attachStall: pid %d waiting for an attach slot (%ld already in flight)", pid, Self.attachesInFlight))
                 self.attachSlots.wait()
-                defer { self.attachSlots.signal() }
+                let slotWaited = (CFAbsoluteTimeGetCurrent() - slotWaitStart) * 1000.0
+                logger(String(format: "attachStall: pid %d got a slot after %.0fms, starting attachToProcess", pid, slotWaited))
+                defer {
+                    logger(String(format: "attachStall: pid %d releasing its attach slot", pid))
+                    self.attachSlots.signal()
+                }
                 self.attachToProcess(pid: pid)
             }
         }
@@ -550,6 +579,7 @@ final class JITController {
             } else {
                 logger(String(format: "boundedEnableJIT: background call for pid %d actually completed after %.0fms (success=%@)", pid, elapsedMs, result.0 ? "YES" : "NO"))
             }
+            self.recordAttachOutcome(success: result.0, error: result.1)
             semaphore.signal()
         }
         
@@ -594,7 +624,14 @@ final class JITController {
     }
     
     private func attachToProcess(pid: Int32) {
+        let attachStart = CFAbsoluteTimeGetCurrent()
+        logger(String(format: "attachStall: pid %d entering boundedEnableJIT", pid))
         let (success, error) = boundedEnableJIT(forPID: pid)
+        logger(String(format: "attachStall: pid %d boundedEnableJIT returned after %.0fms (success=%@, code=%ld)",
+                      pid,
+                      (CFAbsoluteTimeGetCurrent() - attachStart) * 1000.0,
+                      success ? "YES" : "NO",
+                      (error?.code).map { Int($0) } ?? 0))
         cancelPreflightWatchdog(for: pid)
         
         // EBUSY means another attach for this PID is already running -
@@ -818,6 +855,38 @@ final class JITController {
         UIApplication.shared.perform(#selector(NSXPCConnection.suspend))
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(1)) {
             exit(EXIT_SUCCESS)
+        }
+    }
+    
+    /// Called from boundedEnableJIT's completion, which both the native
+    /// and the Helper-delegation paths funnel through, so neither can
+    /// report a healthy tunnel the other knows is dead.
+    private func recordAttachOutcome(success: Bool, error: NSError?) {
+        // EBUSY means another attach for the same pid is already
+        // running. Not a tunnel failure, and counting it would trip the
+        // threshold on a burst of duplicates.
+        if !success, (error?.code).map({ $0 == Int(EBUSY) }) == true {
+            return
+        }
+        
+        attachQueue.async {
+            if success {
+                if self.isTunnelUnavailable {
+                    logger("tunnelHealth: an attach succeeded - tunnel is back, clearing the degraded state")
+                }
+                self.consecutiveAttachFailures = 0
+                self.isTunnelUnavailable = false
+                return
+            }
+            
+            self.consecutiveAttachFailures += 1
+            guard self.consecutiveAttachFailures >= Self.tunnelFailureThreshold,
+                  !self.isTunnelUnavailable else {
+                return
+            }
+            
+            self.isTunnelUnavailable = true
+            logger(String(format: "tunnelHealth: %d consecutive attach failures - reporting the tunnel as unavailable", self.consecutiveAttachFailures))
         }
     }
     

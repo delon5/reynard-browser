@@ -97,11 +97,21 @@ final class PrivateBrowsingLockCoordinator {
     }
     
     private func showPrivacyCurtain() {
-        guard let window = host?.view.window, privacyCurtain.superview == nil else {
+        guard let window = host?.view.window else {
+            logger("privateLock: showPrivacyCurtain SKIPPED - host has no window")
+            return
+        }
+        guard privacyCurtain.superview == nil else {
+            logger("privateLock: showPrivacyCurtain SKIPPED - curtain already up")
             return
         }
         privacyCurtain.frame = window.bounds
         window.addSubview(privacyCurtain)
+        logger(String(
+            format: "privateLock: curtain ADDED as window subview %ld of %ld",
+            window.subviews.firstIndex(of: privacyCurtain) ?? -1,
+            window.subviews.count
+        ))
         // Force the curtain to actually render immediately, rather than
         // leaving it to UIKit's normal, deferred layout pass. Without
         // this, the system's app-switcher snapshot can be captured
@@ -112,6 +122,7 @@ final class PrivateBrowsingLockCoordinator {
     }
     
     private func hidePrivacyCurtain() {
+        logger(String(format: "privateLock: curtain REMOVED (wasUp=%@)", privacyCurtain.superview != nil ? "YES" : "NO"))
         privacyCurtain.removeFromSuperview()
     }
 
@@ -120,7 +131,19 @@ final class PrivateBrowsingLockCoordinator {
     /// needed; otherwise does nothing.
     func presentLockIfNeeded(animated: Bool) {
         os_log("presentLockIfNeeded called, isLocked=%{public}@, alreadyPresented=%{public}@", log: lockLog, type: .debug, String(isLocked), String(presentedLockViewController != nil))
+        logger(String(
+            format: "privateLock: presentLockIfNeeded locked=%@ protectionOn=%@ onPrivate=%@ selectedMode=%@ overviewMode=%@ alreadyPresented=%@ curtainUp=%@ hostPresenting=%@",
+            isLocked ? "YES" : "NO",
+            isProtectionEnabled ? "YES" : "NO",
+            isEffectivelyOnPrivateTabs ? "YES" : "NO",
+            String(describing: tabManager.selectedTabMode),
+            String(describing: host?.tabOverview.mode),
+            presentedLockViewController != nil ? "YES" : "NO",
+            privacyCurtain.superview != nil ? "YES" : "NO",
+            String(describing: type(of: host?.presentedViewController))
+        ))
         guard isLocked, isProtectionEnabled, isEffectivelyOnPrivateTabs else {
+            logger("privateLock: presentLockIfNeeded RETURNED EARLY - curtain stays up with no lock screen")
             return
         }
         presentLockScreen(animated: animated)
@@ -155,9 +178,22 @@ final class PrivateBrowsingLockCoordinator {
     // MARK: - Lock Screen
 
     private func presentLockScreen(animated: Bool) {
-        guard let host, presentedLockViewController == nil else {
+        guard let host else {
+            logger("privateLock: presentLockScreen SKIPPED - host is nil")
             return
         }
+        guard presentedLockViewController == nil else {
+            logger(String(
+                format: "privateLock: presentLockScreen SKIPPED - already presented (onScreen=%@)",
+                presentedLockViewController?.viewIfLoaded?.window != nil ? "YES" : "NO"
+            ))
+            return
+        }
+        logger(String(
+            format: "privateLock: presentLockScreen presenting (hostInWindow=%@ hostAlreadyPresenting=%@)",
+            host.viewIfLoaded?.window != nil ? "YES" : "NO",
+            String(describing: type(of: host.presentedViewController))
+        ))
 
         let lockViewController = PrivateBrowsingLockViewController()
         lockViewController.modalPresentationStyle = .overFullScreen
@@ -170,15 +206,39 @@ final class PrivateBrowsingLockCoordinator {
         }
 
         presentedLockViewController = lockViewController
-        host.present(lockViewController, animated: animated)
+        host.present(lockViewController, animated: animated) { [weak self, weak lockViewController] in
+            guard let self, let lockViewController else {
+                return
+            }
+            let window = lockViewController.viewIfLoaded?.window
+            let lockIndex = window.flatMap { w in
+                lockViewController.viewIfLoaded.flatMap { w.subviews.firstIndex(of: $0) }
+            } ?? -1
+            let curtainIndex = window.flatMap { w in
+                w.subviews.firstIndex(of: self.privacyCurtain)
+            } ?? -1
+            logger(String(
+                format: "privateLock: presented onScreen=%@ lockIndex=%ld curtainIndex=%ld curtainCoversLock=%@",
+                window != nil ? "YES" : "NO",
+                lockIndex,
+                curtainIndex,
+                (curtainIndex >= 0 && curtainIndex > lockIndex) ? "YES" : "NO"
+            ))
+        }
     }
 
     private func authenticateAndUnlock() {
+        logger("privateLock: authenticate requested")
         os_log("authenticateAndUnlock: starting authentication request", log: lockLog, type: .debug)
         PrivateBrowsingAuthenticator.shared.authenticate(
             reason: NSLocalizedString("Authenticate to view your private tabs", comment: "")
         ) { [weak self] result in
             os_log("authenticateAndUnlock: result=%{public}@", log: lockLog, type: .debug, String(describing: result))
+            var detail = String(describing: result)
+            if case .failed(let error) = result, let nsError = error as NSError? {
+                detail += String(format: " domain=%@ code=%ld", nsError.domain, nsError.code)
+            }
+            logger("privateLock: authenticate result " + detail)
             switch result {
             case .success, .unavailable:
                 self?.dismissLockScreen(unlocked: true)
