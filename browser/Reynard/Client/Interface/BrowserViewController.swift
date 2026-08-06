@@ -621,6 +621,8 @@ final class BrowserViewController: UIViewController {
         setTabBarVisible(false)
     }
     
+    private var dynamicToolbarMaxHeight: CGFloat = 0
+    
     // CHANGED - the max is a CONSTANT, not a measurement.
     //
     // The 22:5x trace showed the whole offset chain working end to end:
@@ -679,14 +681,6 @@ final class BrowserViewController: UIViewController {
     // the pill is reserved by updateArtificialSafeAreaInset instead.
     private func updateDynamicToolbarOffset() {
         let condensed = browserChrome.isScrollCondensed
-        
-        // The settle timer starts here rather than in the chrome, because
-        // this is the one call site that sees every condense and expand.
-        if lastCondensedStateForToolbar != condensed {
-            lastCondensedStateForToolbar = condensed
-            condensedStateChangedAt = CFAbsoluteTimeGetCurrent()
-        }
-        
         let offset = condensed ? -dynamicToolbarMaxHeight : 0
         // An offset of 0 with a max of 0 is the inert case. Only
         // offset == -max exactly reaches Gecko's Collapsed state.
