@@ -26,6 +26,7 @@
 import AVFoundation
 import Foundation
 import QuartzCore
+import UIKit
 
 /// Flip to false to disable the probe without removing it.
 private let kFairPlayLayerProbeEnabled = true
@@ -36,7 +37,7 @@ private let kFairPlayLayerProbeStream =
 
 /// How many one-second reports to make before giving up. Enough to cover
 /// a scroll and a rotation without filling the log.
-private let kFairPlayLayerProbeTicks = 30
+private let kFairPlayLayerProbeTicks = 240
 
 final class FairPlayLayerProbe {
     static var isEnabled: Bool { return kFairPlayLayerProbeEnabled }
@@ -130,12 +131,40 @@ final class FairPlayLayerProbe {
         playerLayer.removeFromSuperlayer()
     }
     
+    /// Whether a layer's superlayer chain still terminates at the
+    /// window's own layer. An orphaned subtree keeps every internal link
+    /// intact, so this is the only reliable way to tell.
+    private func isRootedInWindow(_ layer: CALayer) -> Bool {
+        var root: CALayer = layer
+        while let parent = root.superlayer {
+            root = parent
+        }
+        
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else {
+                continue
+            }
+            for window in windowScene.windows where window.layer === root {
+                return true
+            }
+        }
+        return false
+    }
+    
     private func tick() {
         ticks += 1
         
         // The question the whole probe exists to answer: is our layer
         // still in the tree, and is it still where the video is?
-        let stillAttached = playerLayer.superlayer === attachedTo
+        //
+        // The parent pointer alone is not enough. A subtree removed from
+        // the window keeps its internal links, so an orphaned layer
+        // reports a healthy parent forever while rendering nothing -
+        // which is how this test passed twice through a fullscreen
+        // transition that had thrown the layer away.
+        let parentUnchanged = playerLayer.superlayer === attachedTo
+        let rooted = isRootedInWindow(playerLayer)
+        let stillAttached = parentUnchanged && rooted
         let hostMoved = insertedAsSibling && playerLayer.frame != hostLayer.frame
         
         logger(String(
@@ -149,7 +178,14 @@ final class FairPlayLayerProbe {
         ))
         
         if !stillAttached {
-            logger("fairPlayProbe: the compositor discarded our layer - AVPlayerLayer cannot live in this slot as-is")
+            if parentUnchanged {
+                // The subtree came away whole. The layer would have to be
+                // created by NativeLayerCA rather than inserted beside
+                // its content layer.
+                logger("fairPlayProbe: ORPHANED - parent intact but the subtree is no longer in the window")
+            } else {
+                logger("fairPlayProbe: REPARENTED - the compositor took our layer out of its parent")
+            }
             stop()
             return
         }
