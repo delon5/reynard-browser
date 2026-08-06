@@ -192,11 +192,13 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     func setDynamicToolbarMaxHeight(_ height: CGFloat) {
+        logger(String(format: "dynToolbar: ContentView max=%.1f sessionAttached=%@", height, session != nil ? "YES" : "NO"))
         dynamicToolbarMaxHeight = height
         session?.setDynamicToolbarMaxHeight(height)
     }
     
     func setDynamicToolbarOffset(_ offset: CGFloat) {
+        logger(String(format: "dynToolbar: ContentView offset=%.1f sessionAttached=%@", offset, session != nil ? "YES" : "NO"))
         dynamicToolbarOffset = offset
         session?.setDynamicToolbarOffset(offset)
     }

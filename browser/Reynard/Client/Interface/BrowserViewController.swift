@@ -636,6 +636,7 @@ final class BrowserViewController: UIViewController {
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
         
         guard hasBottomToolbar else {
+            logger("dynToolbar: no bottom toolbar - max forced to 0")
             dynamicToolbarMaxHeight = 0
             contentView.setDynamicToolbarMaxHeight(0)
             updateDynamicToolbarOffset()
@@ -643,11 +644,17 @@ final class BrowserViewController: UIViewController {
         }
         
         guard !browserChrome.isScrollCondensed else {
+            // If this is all that ever runs, the max is never measured,
+            // stays 0, and Gecko's HasDynamicToolbar() is false - the
+            // mechanism cannot engage at all.
+            logger(String(format: "dynToolbar: max NOT measured - condensed (current max=%.1f)", dynamicToolbarMaxHeight))
             return
         }
         
         let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
         dynamicToolbarMaxHeight = max(0, view.bounds.maxY - toolbarFrame.minY)
+        logger(String(format: "dynToolbar: max measured %.1f (viewMaxY=%.1f toolbarMinY=%.1f)",
+                      dynamicToolbarMaxHeight, view.bounds.maxY, toolbarFrame.minY))
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }
@@ -662,9 +669,14 @@ final class BrowserViewController: UIViewController {
     // the toolbar is gone, content underlays the pill, and the strip above
     // the pill is reserved by updateArtificialSafeAreaInset instead.
     private func updateDynamicToolbarOffset() {
-        contentView.setDynamicToolbarOffset(
-            browserChrome.isScrollCondensed ? -dynamicToolbarMaxHeight : 0
-        )
+        let offset = browserChrome.isScrollCondensed ? -dynamicToolbarMaxHeight : 0
+        // An offset of 0 with a max of 0 is the inert case. Only
+        // offset == -max exactly reaches Gecko's Collapsed state.
+        logger(String(format: "dynToolbar: offset %.1f (condensed=%@ max=%.1f)",
+                      offset,
+                      browserChrome.isScrollCondensed ? "YES" : "NO",
+                      dynamicToolbarMaxHeight))
+        contentView.setDynamicToolbarOffset(offset)
     }
     
     private func applyPadLayout() {
