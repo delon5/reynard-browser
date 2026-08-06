@@ -687,6 +687,8 @@ final class BrowserViewController: UIViewController {
                       pageReservesSpaceForToolbar ? "YES" : "NO",
                       browserChrome.isScrollCondensed ? "YES" : "NO"))
         dynamicToolbarMaxHeight = target
+        // Nothing reserved means no gap to fill.
+        browserChrome.setPillBackdropVisible(target > 0)
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }

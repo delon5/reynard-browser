@@ -225,6 +225,19 @@ final class BrowserChrome: UIView {
     /// unconditionally — only on pages confirmed to actually respect
     /// the CSS boundary; other pages get the full screen extent
     /// instead, with the pill floating over them as before.
+    /// Shows or hides the strip behind the pill.
+    ///
+    /// Driven by whether anything is reserved, so the strip and the
+    /// reservation cannot disagree - a fullscreen video reserves nothing
+    /// and must not leave a band behind.
+    ///
+    /// No animation, deliberately. An earlier version animated this from
+    /// a path that runs on every scroll direction flip and hung the main
+    /// thread for 19 seconds.
+    func setPillBackdropVisible(_ visible: Bool) {
+        pillBackdrop.isHidden = !visible
+    }
+    
     var condensedPillTopAnchor: NSLayoutYAxisAnchor {
         return condensedPill.topAnchor
     }
@@ -679,6 +692,8 @@ final class BrowserChrome: UIView {
         pillBackdrop.translatesAutoresizingMaskIntoConstraints = false
         pillBackdrop.backgroundColor = .appBackground
         pillBackdrop.isUserInteractionEnabled = false
+        // Hidden until a reservation says otherwise.
+        pillBackdrop.isHidden = true
         addSubview(pillBackdrop)
         addSubview(topToolbar)
         addSubview(bottomToolbar)
