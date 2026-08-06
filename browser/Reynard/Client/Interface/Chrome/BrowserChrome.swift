@@ -141,6 +141,16 @@ final class BrowserChrome: UIView {
     private let topToolbar: TopToolbar
     private let bottomToolbar: BottomToolbar
     private let condensedPill = CondensedAddressPill()
+    
+    /// Fills the strip the page no longer paints into.
+    ///
+    /// The dynamic toolbar max shortens Gecko's ICB by
+    /// condensedPillOccupiedHeight, so document content ends at the
+    /// pill's top edge and nothing renders below it. Only shown when a
+    /// page actually reserves that space - otherwise there is nothing
+    /// floating above the pill and no gap to cover.
+    private let pillBackdrop = UIView()
+    private var pillBackdropWanted = false
     private let overlayDismissView: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -216,6 +226,33 @@ final class BrowserChrome: UIView {
     /// unconditionally — only on pages confirmed to actually respect
     /// the CSS boundary; other pages get the full screen extent
     /// instead, with the pill floating over them as before.
+    /// Whether the selected page reserves space above the pill. Same
+    /// condition updateArtificialSafeAreaInset uses, passed in because
+    /// the chrome cannot see the tab's safe-area detection.
+    func setPillBackdropWanted(_ wanted: Bool) {
+        guard pillBackdropWanted != wanted else {
+            return
+        }
+        pillBackdropWanted = wanted
+        
+        guard isScrollCondensed else {
+            pillBackdrop.isHidden = true
+            pillBackdrop.alpha = 0
+            return
+        }
+        
+        if wanted {
+            pillBackdrop.isHidden = false
+        }
+        UIView.animate(withDuration: 0.2) {
+            self.pillBackdrop.alpha = wanted ? 1 : 0
+        } completion: { _ in
+            if !wanted {
+                self.pillBackdrop.isHidden = true
+            }
+        }
+    }
+    
     var condensedPillTopAnchor: NSLayoutYAxisAnchor {
         return condensedPill.topAnchor
     }
@@ -458,6 +495,9 @@ final class BrowserChrome: UIView {
         
         if condensed {
             condensedPill.isHidden = false
+            if pillBackdropWanted {
+                pillBackdrop.isHidden = false
+            }
         }
         
         let animations = {
@@ -470,6 +510,7 @@ final class BrowserChrome: UIView {
                 ? CGAffineTransform(scaleX: 0.92, y: 0.92)
                 : .identity
             self.condensedPill.alpha = condensed ? 1 : 0
+            self.pillBackdrop.alpha = (condensed && self.pillBackdropWanted) ? 1 : 0
         }
         
         let completion: (Bool) -> Void = { [weak self] _ in
@@ -477,6 +518,7 @@ final class BrowserChrome: UIView {
                 return
             }
             self.condensedPill.isHidden = true
+            self.pillBackdrop.isHidden = true
         }
         
         guard animated else {
@@ -670,6 +712,12 @@ final class BrowserChrome: UIView {
         addSubview(overlayDismissView)
         addSubview(overlayContentView)
         addSubview(actionBar)
+        pillBackdrop.translatesAutoresizingMaskIntoConstraints = false
+        pillBackdrop.backgroundColor = .black
+        pillBackdrop.isUserInteractionEnabled = false
+        pillBackdrop.isHidden = true
+        pillBackdrop.alpha = 0
+        addSubview(pillBackdrop)
         addSubview(condensedPill)
     }
     
@@ -697,6 +745,10 @@ final class BrowserChrome: UIView {
             actionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             actionBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             
+            pillBackdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pillBackdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pillBackdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
+            pillBackdrop.heightAnchor.constraint(equalToConstant: Self.condensedPillOccupiedHeight),
             condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor),
             // CHANGED - bottomAnchor, not safeAreaLayoutGuide.bottomAnchor.
             // See fix_repin_pill_to_screen_bottom.py. Against the guide
