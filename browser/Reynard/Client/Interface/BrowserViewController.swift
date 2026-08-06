@@ -667,25 +667,18 @@ final class BrowserViewController: UIViewController {
         // On anything else the content should run the full height of the
         // screen and pass under the pill.
         let pageReservesSpaceForToolbar = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        // Whichever chrome is actually on screen. Content must clear the
-        // full toolbar while it is expanded and the pill once condensed,
-        // so the reservation follows the state rather than being fixed
-        // at the smaller of the two.
-        let expandedHeight = BottomToolbar.expandedContentHeight + (view.window?.safeAreaInsets.bottom ?? 0)
-        let chromeHeight = browserChrome.isScrollCondensed
+        let target = (hasBottomToolbar && pageReservesSpaceForToolbar)
             ? BrowserChrome.condensedPillOccupiedHeight
-            : expandedHeight
-        let target = (hasBottomToolbar && pageReservesSpaceForToolbar) ? chromeHeight : 0
+            : 0
         
         guard abs(target - dynamicToolbarMaxHeight) > 0.5 else {
             return
         }
         
-        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ reservesSpace=%@ condensed=%@)",
+        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ reservesSpace=%@)",
                       dynamicToolbarMaxHeight, target,
                       hasBottomToolbar ? "YES" : "NO",
-                      pageReservesSpaceForToolbar ? "YES" : "NO",
-                      browserChrome.isScrollCondensed ? "YES" : "NO"))
+                      pageReservesSpaceForToolbar ? "YES" : "NO"))
         dynamicToolbarMaxHeight = target
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()

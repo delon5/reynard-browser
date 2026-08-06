@@ -9,17 +9,6 @@ import UIKit
 
 
 final class BottomToolbar: UIView {
-    /// The expanded toolbar's content height, without the safe area
-    /// inset the toolbar sits above.
-    ///
-    /// Exposed so the dynamic toolbar max can be a constant rather than
-    /// a measurement: bottomToolbarTransitionFrame goes through
-    /// convert(), which honours the condense transform, and sampling it
-    /// produced values from 108 to 928 in a single run.
-    static var expandedContentHeight: CGFloat {
-        return UX.bottomToolbarStandardContentHeight
-    }
-    
     private enum UX {
         static let bottomToolbarStandardContentHeight: CGFloat = 108
         static let bottomToolbarFocusedContentHeight: CGFloat = 58
