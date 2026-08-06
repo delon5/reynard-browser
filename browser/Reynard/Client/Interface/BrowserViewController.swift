@@ -579,12 +579,6 @@ final class BrowserViewController: UIViewController {
         // safe area -> env(safe-area-inset-bottom) - is the one that
         // was observed working on main.
         let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        // The max is otherwise only computed during layout, so a tab
-        // whose detection flips after its content settles would keep the
-        // wrong viewport height until something else triggers a layout
-        // pass. This function already runs on every event that can
-        // change the answer.
-        updateDynamicToolbarMaxHeight()
         // OFF. The dynamic toolbar max now reserves the pill's clearance
         // through the ICB, so inflating env(safe-area-inset-bottom) by
         // the same amount would reserve it twice.
@@ -663,22 +657,14 @@ final class BrowserViewController: UIViewController {
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
         
-        // Only a page that reserves space wants a shortened viewport.
-        // On anything else the content should run the full height of the
-        // screen and pass under the pill.
-        let pageReservesSpaceForToolbar = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        let target = (hasBottomToolbar && pageReservesSpaceForToolbar)
-            ? BrowserChrome.condensedPillOccupiedHeight
-            : 0
+        let target = hasBottomToolbar ? BrowserChrome.condensedPillOccupiedHeight : 0
         
         guard abs(target - dynamicToolbarMaxHeight) > 0.5 else {
             return
         }
         
-        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ reservesSpace=%@)",
-                      dynamicToolbarMaxHeight, target,
-                      hasBottomToolbar ? "YES" : "NO",
-                      pageReservesSpaceForToolbar ? "YES" : "NO"))
+        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@)",
+                      dynamicToolbarMaxHeight, target, hasBottomToolbar ? "YES" : "NO"))
         dynamicToolbarMaxHeight = target
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
