@@ -579,7 +579,10 @@ final class BrowserViewController: UIViewController {
         // safe area -> env(safe-area-inset-bottom) - is the one that
         // was observed working on main.
         let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        let shouldInflate = browserChrome.isScrollCondensed && pageReservesSpace
+        // OFF. The dynamic toolbar max now reserves the pill's clearance
+        // through the ICB, so inflating env(safe-area-inset-bottom) by
+        // the same amount would reserve it twice.
+        let shouldInflate = false && browserChrome.isScrollCondensed && pageReservesSpace
 
         guard shouldInflate else {
             additionalSafeAreaInsets.bottom = 0
@@ -618,76 +621,49 @@ final class BrowserViewController: UIViewController {
         setTabBarVisible(false)
     }
     
-    private var dynamicToolbarMaxHeight: CGFloat = 0
-    private var lastCondensedStateForToolbar: Bool?
-    private var condensedStateChangedAt: CFAbsoluteTime = 0
-    
-    /// How long to wait after a condense or expand before trusting a
-    /// toolbar measurement. bottomToolbarTransitionFrame goes through
-    /// convert(), which honours the 0.92 condense transform, so a sample
-    /// taken mid-animation reports a frame the toolbar is only passing
-    /// through. Comfortably longer than the transition itself.
-    private static let toolbarSettleSeconds: CFTimeInterval = 0.45
-    
-    // CHANGED - the max height is CONFIGURATION, not animation.
+    // CHANGED - the max is a CONSTANT, not a measurement.
     //
-    // nsPresContext::SetDynamicToolbarMaxHeight sets mDynamicToolbarHeight
-    // equal to whatever max it receives, which forces the Expanded state
-    // and a full resize reflow. Changing it on every condense therefore
-    // reflows on each scroll direction flip and still cannot express "the
-    // toolbar went away". It only ever carries the real toolbar height,
-    // measured while expanded - condensing applies a 0.92 scale that
-    // convert() honours, so measuring then would report a slightly wrong
-    // height and reconfigure Gecko for nothing.
+    // The 22:5x trace showed the whole offset chain working end to end:
+    //
+    //   nsWindow offset=-426 max=426 listener=1 attached=1
+    //   PresShellWidgetListener offset=-426 visited=1 delivered=1
+    //   nsPresContext RECEIVED offset=-426 max=426 height=426 shell=1
+    //   nsPresContext APPLIED height=0 state=3 mvm=1
+    //
+    // Collapsed reached, every time, and page content still sat exactly
+    // at the full toolbar's height. Because the offset was never what
+    // reserved that space - the MAX is.
+    // SetDynamicToolbarMaxHeight calls
+    // ForceResizeReflowWithCurrentDimensions(), and ResizeReflow
+    // subtracts the toolbar height from the window dimensions, so the
+    // ICB becomes viewHeight - max and ordinary document content ends
+    // there. The offset only moves position:fixed content and the
+    // visual viewport.
+    //
+    // So the max carries the pill's clearance instead of the toolbar's
+    // height. Content then ends just above the pill, and the expanded
+    // toolbar covers content rather than reserving space for it - which
+    // is what "underlay the bottom toolbar" means, and it hides on
+    // scroll anyway.
+    //
+    // A constant also makes it genuinely stable: never measured, so no
+    // oscillation and no reflow storm. The settle window and
+    // plausibility checks that existed to tame the measurement are gone
+    // with it.
     private func updateDynamicToolbarMaxHeight() {
         let hasBottomToolbar = !isShowingFullscreenMedia &&
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
         
-        guard hasBottomToolbar else {
-            logger("dynToolbar: no bottom toolbar - max forced to 0")
-            dynamicToolbarMaxHeight = 0
-            contentView.setDynamicToolbarMaxHeight(0)
-            updateDynamicToolbarOffset()
+        let target = hasBottomToolbar ? BrowserChrome.condensedPillOccupiedHeight : 0
+        
+        guard abs(target - dynamicToolbarMaxHeight) > 0.5 else {
             return
         }
         
-        guard !browserChrome.isScrollCondensed else {
-            // If this is all that ever runs, the max is never measured,
-            // stays 0, and Gecko's HasDynamicToolbar() is false - the
-            // mechanism cannot engage at all.
-            logger(String(format: "dynToolbar: max NOT measured - condensed (current max=%.1f)", dynamicToolbarMaxHeight))
-            return
-        }
-        
-        guard CFAbsoluteTimeGetCurrent() - condensedStateChangedAt >= Self.toolbarSettleSeconds else {
-            logger("dynToolbar: max sample IGNORED - chrome still settling")
-            return
-        }
-        
-        let toolbarFrame = browserChrome.bottomToolbarTransitionFrame(in: view)
-        
-        // A toolbar above the top of the view, or below its bottom, is
-        // one that has not been positioned yet. At startup this produced
-        // toolbarMinY=-54 and a 928pt "toolbar".
-        guard toolbarFrame.minY >= 0, toolbarFrame.minY < view.bounds.maxY else {
-            logger(String(format: "dynToolbar: max sample REJECTED - implausible toolbarMinY=%.1f (viewMaxY=%.1f)",
-                          toolbarFrame.minY, view.bounds.maxY))
-            return
-        }
-        
-        let candidate = view.bounds.maxY - toolbarFrame.minY
-        
-        // The reflow suppressor. SetDynamicToolbarMaxHeight forces a full
-        // resize reflow on every change, so an unchanged value must not
-        // be sent at all.
-        guard abs(candidate - dynamicToolbarMaxHeight) > 0.5 else {
-            return
-        }
-        
-        logger(String(format: "dynToolbar: max measured %.1f (was %.1f, viewMaxY=%.1f toolbarMinY=%.1f)",
-                      candidate, dynamicToolbarMaxHeight, view.bounds.maxY, toolbarFrame.minY))
-        dynamicToolbarMaxHeight = candidate
+        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@)",
+                      dynamicToolbarMaxHeight, target, hasBottomToolbar ? "YES" : "NO"))
+        dynamicToolbarMaxHeight = target
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }

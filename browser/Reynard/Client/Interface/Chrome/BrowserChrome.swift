@@ -59,6 +59,17 @@ final class BrowserChrome: UIView {
     /// there instead. This is a distance from the screen bottom, NOT an
     /// inset to add directly - the caller subtracts whatever the device
     /// already reports.
+    /// Pill height plus its bottom margin - how much of the screen the
+    /// condensed chrome occupies. Reported to Gecko as the dynamic
+    /// toolbar max, which shrinks the ICB by exactly this much, so
+    /// document content ends level with the pill's top edge.
+    ///
+    /// Deliberately without condensedPillContentGap: that gap belongs to
+    /// the env(safe-area-inset-bottom) path, which is now off.
+    static var condensedPillOccupiedHeight: CGFloat {
+        return condensedPillBottomMargin + CondensedAddressPill.height
+    }
+    
     static var condensedPillContentBoundary: CGFloat {
         condensedPillBottomMargin + CondensedAddressPill.height + condensedPillContentGap
     }
