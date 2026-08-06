@@ -141,15 +141,6 @@ final class BrowserChrome: UIView {
     private let topToolbar: TopToolbar
     private let bottomToolbar: BottomToolbar
     private let condensedPill = CondensedAddressPill()
-    
-    /// Fills the strip the page cannot paint into.
-    ///
-    /// The dynamic toolbar max shortens Gecko's ICB by
-    /// condensedPillOccupiedHeight, so document content ends level with
-    /// the pill's top edge and nothing renders below it. Static and
-    /// unconditional: the bottom toolbar covers it when expanded, and it
-    /// is the backing behind the pill when condensed.
-    private let pillBackdrop = UIView()
     private let overlayDismissView: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -674,12 +665,6 @@ final class BrowserChrome: UIView {
     }
     
     private func configureHierarchy() {
-        // First, so every piece of chrome draws above it - including the
-        // bottom toolbar, which covers it entirely when expanded.
-        pillBackdrop.translatesAutoresizingMaskIntoConstraints = false
-        pillBackdrop.backgroundColor = .appBackground
-        pillBackdrop.isUserInteractionEnabled = false
-        addSubview(pillBackdrop)
         addSubview(topToolbar)
         addSubview(bottomToolbar)
         addSubview(overlayDismissView)
@@ -712,10 +697,6 @@ final class BrowserChrome: UIView {
             actionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             actionBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             
-            pillBackdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
-            pillBackdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pillBackdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
-            pillBackdrop.heightAnchor.constraint(equalToConstant: Self.condensedPillOccupiedHeight),
             condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor),
             // CHANGED - bottomAnchor, not safeAreaLayoutGuide.bottomAnchor.
             // See fix_repin_pill_to_screen_bottom.py. Against the guide
