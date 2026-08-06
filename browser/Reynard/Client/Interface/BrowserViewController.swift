@@ -579,9 +579,6 @@ final class BrowserViewController: UIViewController {
         // safe area -> env(safe-area-inset-bottom) - is the one that
         // was observed working on main.
         let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        // The strip behind the pill is only black when a page has
-        // actually reserved it. See fix_pill_backdrop.py.
-        browserChrome.setPillBackdropWanted(pageReservesSpace)
         // OFF. The dynamic toolbar max now reserves the pill's clearance
         // through the ICB, so inflating env(safe-area-inset-bottom) by
         // the same amount would reserve it twice.
