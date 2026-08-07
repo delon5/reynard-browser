@@ -1,5 +1,5 @@
 diff --git a/layout/base/PresShellWidgetListener.cpp b/layout/base/PresShellWidgetListener.cpp
-index 11d1400b..9904ed3b 100644
+index 11d1400b..fedc2351 100644
 --- a/layout/base/PresShellWidgetListener.cpp
 +++ b/layout/base/PresShellWidgetListener.cpp
 @@ -157,16 +157,27 @@ void PresShellWidgetListener::DynamicToolbarOffsetChanged(
@@ -32,7 +32,17 @@ index 11d1400b..9904ed3b 100644
  }
  
  void PresShellWidgetListener::KeyboardHeightChanged(ScreenIntCoord aHeight) {
-@@ -261,6 +272,16 @@ void PresShellWidgetListener::SafeAreaInsetsChanged(
+@@ -256,11 +267,25 @@ void PresShellWidgetListener::SafeAreaInsetsChanged(
+ 
+   LayoutDeviceIntMargin windowSafeAreaInsets;
+   const LayoutDeviceIntRect windowRect = mWindow->GetScreenBounds();
+-  if (nsCOMPtr<nsIScreen> screen = mWindow->GetWidgetScreen()) {
++  // Hoisted out of the if-condition so the trace below can name it.
++  // GetWidgetScreen returns already_AddRefed, which is not contextually
++  // convertible to bool, so it cannot be called inline in a ternary.
++  nsCOMPtr<nsIScreen> screen = mWindow->GetWidgetScreen();
++  if (screen) {
+     windowSafeAreaInsets = nsContentUtils::GetWindowSafeAreaInsets(
          screen, aSafeAreaInsets, windowRect);
    }
  
@@ -43,7 +53,7 @@ index 11d1400b..9904ed3b 100644
 +      "safeAreaTrace: PresShellWidgetListener in=%d windowRect=%d,%d %dx%d "
 +      "screen=%d out=%d\n",
 +      (int)aSafeAreaInsets.bottom, windowRect.x, windowRect.y, windowRect.width,
-+      windowRect.height, mWindow->GetWidgetScreen() ? 1 : 0,
++      windowRect.height, screen ? 1 : 0,
 +      (int)windowSafeAreaInsets.bottom);
 +
    presShell->GetPresContext()->SetSafeAreaInsets(windowSafeAreaInsets);
