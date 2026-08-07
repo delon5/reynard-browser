@@ -240,7 +240,27 @@ static void jitHangBacktraceHandler(int signalNumber) {
         @try {
         DebugSession session = {0};
         
-        if (!connectDebugSession(provider, &session, @"10.7.0.1", pid, error)) return NO;
+        if (!connectDebugSession(provider, &session, @"10.7.0.1", pid, error)) {
+            // A transport failure means this tunnel is dead, not that
+            // this process is unattachable. Left cached it fails every
+            // later attach in the same 1-3ms for the rest of the
+            // session, which is the state a long suspension leaves
+            // behind.
+            NSInteger failureCode = error && *error ? (*error).code : 0;
+            if (failureCode == RemoteServerConnectFailed ||
+                failureCode == DebugProxyConnectFailed) {
+                if ([self invalidateSharedProviderIfCurrent:provider]) {
+                    logger([NSString stringWithFormat:
+                        @"tunnelRecovery: (pid %d) transport failure %ld - dropped the cached provider, the next attach will rebuild the tunnel",
+                        pid, (long)failureCode]);
+                } else {
+                    logger([NSString stringWithFormat:
+                        @"tunnelRecovery: (pid %d) transport failure %ld against an already-replaced provider - leaving the new one alone",
+                        pid, (long)failureCode]);
+                }
+            }
+            return NO;
+        }
         
         // REMOVED process_control_new / process_control_disable_memory_limit /
         // process_control_free entirely - see
@@ -575,6 +595,31 @@ static void jitHangBacktraceHandler(int signalNumber) {
         self.sharedProvider = NULL;
         self.didEnsureDDIMounted = NO;
     });
+}
+
+// Invalidates only if the caller's provider is still the cached one.
+//
+// When the tunnel dies, every content process attaching at that moment
+// fails against the same provider. Without this check the first failure
+// invalidates, the next attach rebuilds, and the remaining failures -
+// which happened against the OLD provider and know nothing of the new
+// one - throw the rebuild away too.
+//
+// Runs inside providerQueue, like invalidateSharedProviderAfterTimeout,
+// so the comparison and the clear cannot race a concurrent
+// getProviderForPID. Also inherits its deliberate refusal to call
+// freeDeviceProvider: an orphaned background call may still be inside
+// an FFI call holding this exact pointer.
+- (BOOL)invalidateSharedProviderIfCurrent:(DeviceProvider *)provider {
+    __block BOOL invalidated = NO;
+    dispatch_sync(self.providerQueue, ^{
+        if (provider && self.sharedProvider == provider) {
+            self.sharedProvider = NULL;
+            self.didEnsureDDIMounted = NO;
+            invalidated = YES;
+        }
+    });
+    return invalidated;
 }
 
 - (DeviceProvider *)getProviderForPID:(int32_t)pid error:(NSError **)error {

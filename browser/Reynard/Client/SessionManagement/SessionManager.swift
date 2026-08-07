@@ -27,6 +27,17 @@ final class SessionManager {
     private var sessionsRequestedActive: [ObjectIdentifier: GeckoSession] = [:]
     private var isApplicationForeground = true
     private weak var pictureInPictureSession: GeckoSession?
+    
+    /// Whether this session is the one Picture in Picture is rendering
+    /// from. Exposed because tab eviction has to know: closing it would
+    /// tear down a content process that is required to stay alive and
+    /// rendering while the app is backgrounded.
+    func isRenderingPictureInPicture(_ session: GeckoSession?) -> Bool {
+        guard let session, let pictureInPictureSession else {
+            return false
+        }
+        return pictureInPictureSession === session
+    }
     private var pendingCleanup: (
         session: GeckoSession,
         perform: (SessionManager) -> Void

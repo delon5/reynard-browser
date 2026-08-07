@@ -141,6 +141,15 @@ final class BrowserChrome: UIView {
     private let topToolbar: TopToolbar
     private let bottomToolbar: BottomToolbar
     private let condensedPill = CondensedAddressPill()
+    
+    /// Fills the strip Gecko has been told not to paint into.
+    ///
+    /// Its height is whatever was reported as the dynamic toolbar max,
+    /// because that is exactly how much the ICB was shortened by - so
+    /// the strip and the boundary cannot disagree. Zero means no
+    /// reservation and nothing to fill.
+    private let pillBackdrop = UIView()
+    private var pillBackdropHeight: NSLayoutConstraint?
     private let overlayDismissView: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -216,6 +225,21 @@ final class BrowserChrome: UIView {
     /// unconditionally — only on pages confirmed to actually respect
     /// the CSS boundary; other pages get the full screen extent
     /// instead, with the pill floating over them as before.
+    /// Matches the strip to the boundary Gecko was given.
+    ///
+    /// No animation, deliberately: an earlier version animated this from
+    /// a path that runs on every scroll direction flip and hung the main
+    /// thread for 19 seconds.
+    func setPillBackdropHeight(_ height: CGFloat) {
+        if pillBackdropHeight == nil {
+            let constraint = pillBackdrop.heightAnchor.constraint(equalToConstant: 0)
+            constraint.isActive = true
+            pillBackdropHeight = constraint
+        }
+        pillBackdropHeight?.constant = max(0, height)
+        pillBackdrop.isHidden = height <= 0
+    }
+    
     var condensedPillTopAnchor: NSLayoutYAxisAnchor {
         return condensedPill.topAnchor
     }
@@ -665,6 +689,12 @@ final class BrowserChrome: UIView {
     }
     
     private func configureHierarchy() {
+        // First, so every piece of chrome draws above it.
+        pillBackdrop.translatesAutoresizingMaskIntoConstraints = false
+        pillBackdrop.backgroundColor = .appBackground
+        pillBackdrop.isUserInteractionEnabled = false
+        pillBackdrop.isHidden = true
+        addSubview(pillBackdrop)
         addSubview(topToolbar)
         addSubview(bottomToolbar)
         addSubview(overlayDismissView)
@@ -697,6 +727,9 @@ final class BrowserChrome: UIView {
             actionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             actionBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             
+            pillBackdrop.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pillBackdrop.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pillBackdrop.bottomAnchor.constraint(equalTo: bottomAnchor),
             condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor),
             // CHANGED - bottomAnchor, not safeAreaLayoutGuide.bottomAnchor.
             // See fix_repin_pill_to_screen_bottom.py. Against the guide

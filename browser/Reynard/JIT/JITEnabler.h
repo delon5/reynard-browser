@@ -78,6 +78,12 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 // still be using it).
 - (void)invalidateSharedProviderAfterTimeout NS_SWIFT_NAME(invalidateSharedProviderAfterTimeout());
 
+// Same as above, but only if the provider that failed is still the one
+// cached. Lets the first of a burst of parallel transport failures
+// rebuild the tunnel while the rest, whose failures are already stale,
+// leave the new one alone.
+- (BOOL)invalidateSharedProviderIfCurrent:(DeviceProvider *_Nullable)provider;
+
 // Timestamp of when the most recent vAttach FFI call started, if it
 // might still genuinely be running - nil if none is currently thought
 // to be in flight. Set immediately before the call, cleared

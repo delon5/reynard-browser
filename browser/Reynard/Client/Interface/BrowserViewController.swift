@@ -657,15 +657,28 @@ final class BrowserViewController: UIViewController {
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
         
-        let target = hasBottomToolbar ? BrowserChrome.condensedPillOccupiedHeight : 0
+        // Whichever chrome is actually on screen. Content must clear the
+        // full toolbar while it is expanded and the pill once condensed,
+        // so the reservation follows the state rather than being fixed at
+        // the smaller of the two.
+        let expandedHeight = BottomToolbar.expandedContentHeight + (view.window?.safeAreaInsets.bottom ?? 0)
+        let chromeHeight = browserChrome.isScrollCondensed
+            ? BrowserChrome.condensedPillOccupiedHeight
+            : expandedHeight
+        let target = hasBottomToolbar ? chromeHeight : 0
         
         guard abs(target - dynamicToolbarMaxHeight) > 0.5 else {
             return
         }
         
-        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@)",
-                      dynamicToolbarMaxHeight, target, hasBottomToolbar ? "YES" : "NO"))
+        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@)",
+                      dynamicToolbarMaxHeight, target,
+                      hasBottomToolbar ? "YES" : "NO",
+                      browserChrome.isScrollCondensed ? "YES" : "NO"))
         dynamicToolbarMaxHeight = target
+        // Gecko shortens the ICB by exactly this, so the strip behind the
+        // pill is exactly this tall - and absent when it is zero.
+        browserChrome.setPillBackdropHeight(dynamicToolbarMaxHeight)
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }

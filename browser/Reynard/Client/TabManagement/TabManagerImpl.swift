@@ -157,6 +157,17 @@ final class TabManagerImplementation: NSObject, TabManager {
             return
         }
         
+        // Nor the one Picture in Picture is rendering from. It is not the
+        // selected tab - the video is in the floating window and the user
+        // is elsewhere - so nothing above catches it, and closing its
+        // session tears down a content process that has to stay alive and
+        // rendering while the app is backgrounded. SessionManager already
+        // keeps that session active; this stops us closing it anyway.
+        guard !sessionManager.isRenderingPictureInPicture(tab.session) else {
+            logger(String(format: "tabSleep: NOT sleeping tab %@ - it is rendering Picture in Picture", tab.id.uuidString))
+            return
+        }
+        
         logger(String(format: "tabSleep: sleeping tab %@ (url=%@, suppressInitialNavigation was %@)", tab.id.uuidString, url, String(tab.state.suppressInitialNavigation)))
         sessionManager.close(tab.session)
         tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
