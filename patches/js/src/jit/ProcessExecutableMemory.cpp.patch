@@ -1,5 +1,5 @@
 diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutableMemory.cpp
-index cea7d764ca96..c9ef61b53f7d 100644
+index cea7d764..4e912f86 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
 @@ -14,6 +14,13 @@
@@ -296,7 +296,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +736,47 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +736,112 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -335,6 +335,71 @@ index cea7d764ca96..c9ef61b53f7d 100644
 +    sigaction(SIGBUS, &sa, nullptr);
 +  }
 +
++  // The backstop for brk #0xf00d executing with nobody listening.
++  //
++  // PrepareExecutableRegionForWriting guards on ProcessHasDebuggerAttached
++  // and DebuggerIsListening, but both are checks performed three
++  // instructions before the trap, and the debug session can die in
++  // between. That race is not winnable: notify state can flip at any
++  // point, and no amount of narrowing removes the window.
++  //
++  // A Helper crash report caught it:
++  //
++  //   EXC_BREAKPOINT (SIGTRAP), thread 1 MainThread
++  //   RequestDebuggerToPrepareRegion
++  //     <- ProcessExecutableMemory::allocate
++  //     <- EnterBaselineInterpreterAtBranch <- js::Interpret
++  //
++  // The process died a second before its debug session was ready, taking
++  // the tab with it.
++  //
++  // Skipping the trap lands exactly where both guards already land:
++  // PrepareExecutableRegionForWriting returns void and its caller ignores
++  // whether preparation happened, so an unprepared region is the normal,
++  // exercised path - it runs interpreted rather than dying.
++  //
++  // Deliberately narrow. Only our own brk is skipped; the ESR carries the
++  // immediate, so it is checked rather than assumed, and any other
++  // SIGTRAP is re-raised through the default handler so real breakpoints
++  // and debugger traps behave as before.
++  static bool sInstalledTrapHandler = false;
++  if (!sInstalledTrapHandler) {
++    sInstalledTrapHandler = true;
++    struct sigaction trapAction;
++    memset(&trapAction, 0, sizeof(trapAction));
++    trapAction.sa_flags = SA_SIGINFO;
++    trapAction.sa_sigaction = [](int, siginfo_t*, void* context) {
++      auto* uc = static_cast<ucontext_t*>(context);
++      if (!uc || !uc->uc_mcontext) {
++        return;
++      }
++
++      // ESR for a brk is 0xF2000000 | imm16, so the low 16 bits are the
++      // immediate. Anything that is not 0xf00d is somebody else's.
++      const uint64_t esr = uc->uc_mcontext->__es.__esr;
++      const bool isOurBreakpoint =
++          ((esr >> 26) & 0x3f) == 0x3c && (esr & 0xffff) == 0xf00d;
++
++      if (!isOurBreakpoint) {
++        // Restore the default and return: the instruction re-executes
++        // and terminates the way it would have without us, so real
++        // breakpoints and debugger traps keep their semantics.
++        struct sigaction dfl;
++        memset(&dfl, 0, sizeof(dfl));
++        dfl.sa_handler = SIG_DFL;
++        sigemptyset(&dfl.sa_mask);
++        sigaction(SIGTRAP, &dfl, nullptr);
++        return;
++      }
++
++      // Four bytes on arm64, every instruction. The region is left
++      // unprepared, which is the same state the guards produce.
++      uc->uc_mcontext->__ss.__pc += 4;
++    };
++    sigemptyset(&trapAction.sa_mask);
++    sigaction(SIGTRAP, &trapAction, nullptr);
++  }
++
 +  void* p = reynard_mmap(randomAddr, bytes, protection, flags, -1, 0);
 +  if (p == MAP_FAILED) {
 +    return nullptr;
@@ -344,7 +409,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +821,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +886,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -372,7 +437,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +876,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +941,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -404,7 +469,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +907,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +972,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -422,7 +487,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +924,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +989,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -478,7 +543,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  #  endif
  }
  #endif
-@@ -722,8 +1082,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1147,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -521,7 +586,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1137,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1202,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -542,7 +607,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1309,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1374,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -560,7 +625,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1339,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1404,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -580,7 +645,7 @@ index cea7d764ca96..c9ef61b53f7d 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1401,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1466,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
