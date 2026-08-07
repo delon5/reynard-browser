@@ -684,13 +684,20 @@ final class BrowserViewController: UIViewController {
         // indicator - a page padding itself by env() expects that to be
         // covered. Reporting the chrome height alone leaves content
         // sitting 34pt lower than the same page in Safari.
-        let deviceBottomInsetForSafeArea = view.window?.safeAreaInsets.bottom ?? 0
+        // Device inset plus a few points of breathing room, so content
+        // does not sit flush against the chrome. The + 4 is the knob.
+        let deviceBottomInsetForSafeArea = (view.window?.safeAreaInsets.bottom ?? 0) + 4
         contentView.setSafeAreaInsetBottom(target > 0 ? target + deviceBottomInsetForSafeArea : 0)
         
         // Zero, deliberately. Reporting the inset AND shortening the ICB
         // would reserve the same strip twice. The viewport runs the full
         // height of the screen and the page pads itself.
-        dynamicToolbarMaxHeight = 0
+        // Store the target, not 0, so the guard above converges. Sending
+        // 0 is deliberate - the page reserves through
+        // env(safe-area-inset-bottom) rather than the viewport being
+        // shortened - but storing 0 meant the guard never tripped and
+        // this ran on every layout pass, five IPC messages at a time.
+        dynamicToolbarMaxHeight = target
         contentView.setDynamicToolbarMaxHeight(0)
         updateDynamicToolbarOffset()
     }
