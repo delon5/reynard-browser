@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/nsWindow.mm b/widget/uikit/nsWindow.mm
-index ffb8da93..b25573d0 100644
+index ffb8da93..94958d27 100644
 --- a/widget/uikit/nsWindow.mm
 +++ b/widget/uikit/nsWindow.mm
 @@ -26,6 +26,20 @@
@@ -766,7 +766,23 @@ index ffb8da93..b25573d0 100644
    if (mWidgetListener) {
      mWidgetListener->WindowResized(this, innerBounds.Size());
    }
-@@ -1020,17 +1217,73 @@ void nsWindow::SetInputContext(const InputContext& aContext,
+@@ -1001,7 +1198,14 @@ LayoutDeviceIntPoint nsWindow::WidgetToScreenOffset() {
+     offset = mParent->WidgetToScreenOffset();
+   }
+ 
+-  CGPoint temp = [mNativeView convertPoint:temp toView:nil];
++  // temp was previously declared and passed to convertPoint: in the same
++  // statement, so it was read uninitialised and the offset was stack
++  // garbage. GetScreenBounds is built from this, and
++  // PresShellWidgetListener::SafeAreaInsetsChanged intersects the safe
++  // area against that rect - which is why env(safe-area-inset-*) has
++  // always resolved to 0px on this port however the insets were reported.
++  CGPoint temp = CGPointZero;
++  temp = [mNativeView convertPoint:temp toView:nil];
+ 
+   if (!mParent && mNativeView.window) {
+     // convert to screen coords
+@@ -1020,17 +1224,73 @@ void nsWindow::SetInputContext(const InputContext& aContext,
  
    const bool changingEnabledState =
        aContext.IsInputAttributeChanged(mInputContext);
@@ -828,22 +844,22 @@ index ffb8da93..b25573d0 100644
 +      aContext.IsPasswordEditor() &&
 +      (aAction.mFocusChange == InputContextAction::GOT_FOCUS ||
 +       mNativeView->mEditable.mWaitingForPasswordAutofillFocus);
- 
--  if (aAction.UserMightRequestOpenVKB() || changingEnabledState) {
++
 +  if (shouldWaitForPasswordAutofillFocus) {
 +    mNativeView->mEditable.mWaitingForPasswordAutofillFocus = YES;
 +  } else if (shouldBecomeFirstResponder) {
 +    [mNativeView cancelResponderBlur];
 +    [mNativeView becomeFirstResponder];
 +  }
-+
+ 
+-  if (aAction.UserMightRequestOpenVKB() || changingEnabledState) {
 +  if ((aAction.UserMightRequestOpenVKB() || changingEnabledState) &&
 +      (hadFirstResponder || shouldBecomeFirstResponder) &&
 +      !shouldWaitForPasswordAutofillFocus) {
      // TODO(m_kato):
      // It is unnecessary to call reloadInputViews with changingEnabledState if
      // virtual keyboard is disappeared.
-@@ -1050,6 +1303,39 @@ widget::InputContext nsWindow::GetInputContext() {
+@@ -1050,6 +1310,39 @@ widget::InputContext nsWindow::GetInputContext() {
    return mInputContext;
  }
  
@@ -883,7 +899,7 @@ index ffb8da93..b25573d0 100644
  widget::TextEventDispatcherListener*
  nsWindow::GetNativeTextEventDispatcherListener() {
    return mTextInputHandler;
-@@ -1107,9 +1393,30 @@ CGFloat nsWindow::BackingScaleFactor() {
+@@ -1107,9 +1400,30 @@ CGFloat nsWindow::BackingScaleFactor() {
    if (mNativeView) {
      return [mNativeView contentScaleFactor];
    }
@@ -914,7 +930,7 @@ index ffb8da93..b25573d0 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1424,173 @@ int32_t nsWindow::RoundsWidgetCoordinatesTo() {
+@@ -1117,10 +1431,182 @@ int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    return 1;
  }
  
@@ -962,6 +978,15 @@ index ffb8da93..b25573d0 100644
 +  if (mSafeAreaInsets == aInsets) {
 +    return;
 +  }
++
++  // The rect the conversion downstream depends on. If the insets still do
++  // not reach content, these numbers say whether the window rect is sane
++  // now that WidgetToScreenOffset no longer reads uninitialised memory.
++  const LayoutDeviceIntRect screenBounds = GetScreenBounds();
++  printf_stderr(
++      "safeAreaTrace: nsWindow bottom=%d bounds=%d,%d %dx%d listener=%d\n",
++      (int)aInsets.bottom, screenBounds.x, screenBounds.y, screenBounds.width,
++      screenBounds.height, mWidgetListener ? 1 : 0);
 +
 +  mSafeAreaInsets = aInsets;
 +
@@ -1088,7 +1113,7 @@ index ffb8da93..b25573d0 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1227,6 +1697,81 @@ already_AddRefed<nsWindow> nsWindow::From(nsIWidget* aWidget) {
+@@ -1227,6 +1713,81 @@ already_AddRefed<nsWindow> nsWindow::From(nsIWidget* aWidget) {
    return window.forget();
  }
  
@@ -1170,7 +1195,7 @@ index ffb8da93..b25573d0 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1792,39 @@ nsresult IOSView::GetInitData(JSContext* aCx,
+@@ -1247,6 +1808,39 @@ nsresult IOSView::GetInitData(JSContext* aCx,
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1210,7 +1235,7 @@ index ffb8da93..b25573d0 100644
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1838,10 @@ nsresult IOSView::GetInitData(JSContext* aCx,
+@@ -1260,6 +1854,10 @@ nsresult IOSView::GetInitData(JSContext* aCx,
      mOuterWindow = nullptr;
    }
  }
@@ -1221,7 +1246,7 @@ index ffb8da93..b25573d0 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1884,7 @@ id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
+@@ -1302,6 +1900,7 @@ id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());
