@@ -693,10 +693,21 @@ final class BrowserViewController: UIViewController {
     // the toolbar is gone, content underlays the pill, and the strip above
     // the pill is reserved by updateArtificialSafeAreaInset instead.
     private func updateDynamicToolbarOffset() {
-        let condensed = browserChrome.isScrollCondensed
-        let offset = condensed ? -dynamicToolbarMaxHeight : 0
-        // An offset of 0 with a max of 0 is the inert case. Only
-        // offset == -max exactly reaches Gecko's Collapsed state.
+        // Always 0, which keeps the state Expanded.
+        //
+        // -max would reach Collapsed, and Collapsed is the one state
+        // where PresShell::GetFixedViewportSize adds the toolbar height
+        // back - dropping a page's position:fixed content to the true
+        // window bottom, behind the pill, instead of leaving it at the
+        // boundary the max established. Expanded puts fixed content at
+        // the bottom of the ICB, which is the reservation itself, so
+        // document flow, hovering elements and the strip behind the pill
+        // all follow the same number.
+        //
+        // Collapsed is for a toolbar that scrolls away entirely. The pill
+        // is still on screen and still needs clearing, so the reservation
+        // shrinks rather than disappearing.
+        let offset: CGFloat = 0
         logger(String(format: "dynToolbar: offset %.1f (condensed=%@ max=%.1f)",
                       offset,
                       browserChrome.isScrollCondensed ? "YES" : "NO",
