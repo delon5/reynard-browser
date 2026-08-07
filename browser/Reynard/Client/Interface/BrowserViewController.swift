@@ -675,17 +675,14 @@ final class BrowserViewController: UIViewController {
                       dynamicToolbarMaxHeight, target,
                       hasBottomToolbar ? "YES" : "NO",
                       browserChrome.isScrollCondensed ? "YES" : "NO"))
-        // The page reserves this itself through env(safe-area-inset-bottom).
-        // Its own background then fills the space behind the pill, which
-        // is what Safari does and what no amount of drawing over the page
-        // from here could achieve.
-        contentView.setSafeAreaInsetBottom(target)
-        
-        // Zero, deliberately. Reporting the inset AND shortening the ICB
-        // would reserve the same strip twice. The viewport runs the full
-        // height of the screen and the page pads itself.
-        dynamicToolbarMaxHeight = 0
-        contentView.setDynamicToolbarMaxHeight(0)
+        // Back to the max carrying the reservation. Gecko shortens the
+        // ICB by exactly this, so content ends clear of whichever chrome
+        // is showing. env(safe-area-inset-bottom) does not arrive on this
+        // port - PresShellWidgetListener::SafeAreaInsetsChanged recomputes
+        // whatever it is given against the screen geometry, which is a
+        // notch mechanism, not a channel for chrome we draw ourselves.
+        dynamicToolbarMaxHeight = target
+        contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }
     
