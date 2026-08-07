@@ -326,7 +326,7 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         // Marked active because Gecko otherwise throttles it as a
         // background tab - video stops while audio carries on. If this
         // is ever undone by something else, that is the symptom.
-        logger(String(format: "carPlayLife: session %p marked active and focused", session))
+        logger("carPlayLife: session \(ObjectIdentifier(session)) marked active and focused")
 
         // Assigning the session is what embeds its window view.
         // GeckoView.layoutSubviews then calls updateViewportWidth, so
