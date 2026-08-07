@@ -676,9 +676,6 @@ final class BrowserViewController: UIViewController {
                       hasBottomToolbar ? "YES" : "NO",
                       browserChrome.isScrollCondensed ? "YES" : "NO"))
         dynamicToolbarMaxHeight = target
-        // Gecko shortens the ICB by exactly this, so the strip behind the
-        // pill is exactly this tall - and absent when it is zero.
-        browserChrome.setPillBackdropHeight(dynamicToolbarMaxHeight)
         contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         updateDynamicToolbarOffset()
     }
