@@ -679,7 +679,13 @@ final class BrowserViewController: UIViewController {
         // Its own background then fills the space behind the pill, which
         // is what Safari does and what no amount of drawing over the page
         // from here could achieve.
-        contentView.setSafeAreaInsetBottom(target)
+        // env(safe-area-inset-bottom) is a clearance from the window's
+        // bottom edge, and on a device it already accounts for the home
+        // indicator - a page padding itself by env() expects that to be
+        // covered. Reporting the chrome height alone leaves content
+        // sitting 34pt lower than the same page in Safari.
+        let deviceBottomInsetForSafeArea = view.window?.safeAreaInsets.bottom ?? 0
+        contentView.setSafeAreaInsetBottom(target > 0 ? target + deviceBottomInsetForSafeArea : 0)
         
         // Zero, deliberately. Reporting the inset AND shortening the ICB
         // would reserve the same strip twice. The viewport runs the full
