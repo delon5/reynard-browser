@@ -675,8 +675,17 @@ final class BrowserViewController: UIViewController {
                       dynamicToolbarMaxHeight, target,
                       hasBottomToolbar ? "YES" : "NO",
                       browserChrome.isScrollCondensed ? "YES" : "NO"))
-        dynamicToolbarMaxHeight = target
-        contentView.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
+        // The page reserves this itself through env(safe-area-inset-bottom).
+        // Its own background then fills the space behind the pill, which
+        // is what Safari does and what no amount of drawing over the page
+        // from here could achieve.
+        contentView.setSafeAreaInsetBottom(target)
+        
+        // Zero, deliberately. Reporting the inset AND shortening the ICB
+        // would reserve the same strip twice. The viewport runs the full
+        // height of the screen and the page pads itself.
+        dynamicToolbarMaxHeight = 0
+        contentView.setDynamicToolbarMaxHeight(0)
         updateDynamicToolbarOffset()
     }
     

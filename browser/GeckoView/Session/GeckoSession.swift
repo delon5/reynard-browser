@@ -477,4 +477,11 @@ public class GeckoSession {
     public func setDynamicToolbarOffset(_ offset: CGFloat) {
         window?.setDynamicToolbarOffset(min(0, offset))
     }
+    
+    /// Reported to web content as env(safe-area-inset-*), so a page can
+    /// reserve the space the chrome occupies itself instead of the
+    /// viewport being shortened or a view drawn over it.
+    public func setSafeAreaInsets(bottom: CGFloat) {
+        window?.setSafeAreaInsetsTop(0, right: 0, bottom: max(0, bottom), left: 0)
+    }
 }
