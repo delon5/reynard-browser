@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/nsWindow.mm b/widget/uikit/nsWindow.mm
-index ffb8da93..94958d27 100644
+index ffb8da93..24dbc9c5 100644
 --- a/widget/uikit/nsWindow.mm
 +++ b/widget/uikit/nsWindow.mm
 @@ -26,6 +26,20 @@
@@ -930,7 +930,7 @@ index ffb8da93..94958d27 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1431,182 @@ int32_t nsWindow::RoundsWidgetCoordinatesTo() {
+@@ -1117,10 +1431,193 @@ int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    return 1;
  }
  
@@ -975,14 +975,25 @@ index ffb8da93..94958d27 100644
 +// child unconditionally - no docshell filter, unlike the toolbar offset
 +// path - so this needs nothing else on the Gecko side.
 +void nsWindow::UpdateSafeAreaInsets(const LayoutDeviceIntMargin& aInsets) {
-+  if (mSafeAreaInsets == aInsets) {
++  const LayoutDeviceIntRect screenBounds = GetScreenBounds();
++
++  // Deliberately not deduped on the inset alone. The trace showed the
++  // same inset producing different results depending on the window rect
++  // it was converted against:
++  //
++  //   in=426 windowRect=0,0  1206x2622 -> out=426
++  //   in=426 windowRect=0,62 1206x2436 -> out=302
++  //
++  // The short rect is the window before it has been laid out at full
++  // size. Resending when the bounds change lets a later, settled layout
++  // correct an early bad conversion, which gating on "bounds look right"
++  // could not do without guessing at what right means.
++  if (mSafeAreaInsets == aInsets && mSafeAreaBounds == screenBounds) {
 +    return;
 +  }
 +
-+  // The rect the conversion downstream depends on. If the insets still do
-+  // not reach content, these numbers say whether the window rect is sane
-+  // now that WidgetToScreenOffset no longer reads uninitialised memory.
-+  const LayoutDeviceIntRect screenBounds = GetScreenBounds();
++  mSafeAreaBounds = screenBounds;
++
 +  printf_stderr(
 +      "safeAreaTrace: nsWindow bottom=%d bounds=%d,%d %dx%d listener=%d\n",
 +      (int)aInsets.bottom, screenBounds.x, screenBounds.y, screenBounds.width,
@@ -1113,7 +1124,7 @@ index ffb8da93..94958d27 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1227,6 +1713,81 @@ already_AddRefed<nsWindow> nsWindow::From(nsIWidget* aWidget) {
+@@ -1227,6 +1724,81 @@ already_AddRefed<nsWindow> nsWindow::From(nsIWidget* aWidget) {
    return window.forget();
  }
  
@@ -1195,7 +1206,7 @@ index ffb8da93..94958d27 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1808,39 @@ nsresult IOSView::GetInitData(JSContext* aCx,
+@@ -1247,6 +1819,39 @@ nsresult IOSView::GetInitData(JSContext* aCx,
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1235,7 +1246,7 @@ index ffb8da93..94958d27 100644
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1854,10 @@ nsresult IOSView::GetInitData(JSContext* aCx,
+@@ -1260,6 +1865,10 @@ nsresult IOSView::GetInitData(JSContext* aCx,
      mOuterWindow = nullptr;
    }
  }
@@ -1246,7 +1257,7 @@ index ffb8da93..94958d27 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1900,7 @@ id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
+@@ -1302,6 +1911,7 @@ id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());
