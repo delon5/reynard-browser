@@ -66,6 +66,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     ) {
         self.interfaceController = interfaceController
         self.carWindow = window
+        logger("carPlayLife: scene CONNECTED")
         
         // A navigation app MUST set a CPMapTemplate as its root, and
         // Apple's guidance is explicit that it must contain no
@@ -92,6 +93,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         didDisconnect interfaceController: CPInterfaceController,
         from window: CPWindow
     ) {
+        logger("carPlayLife: scene DISCONNECTING - session discarded, audio released")
         self.interfaceController = nil
         CarPlaySceneDelegate.currentSession = nil
         
@@ -126,6 +128,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         do {
             try session.setCategory(.playback, mode: .moviePlayback)
             try session.setActive(true)
+            logger("carPlayLife: audio session ACTIVE (.playback/.moviePlayback)")
             logger("CarPlay: audio session claimed for playback")
         } catch {
             logger(String(format: "CarPlay: audio session failed - %@", error.localizedDescription))
@@ -320,6 +323,10 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         // else, so both are true.
         session.setActive(true)
         session.setFocused(true)
+        // Marked active because Gecko otherwise throttles it as a
+        // background tab - video stops while audio carries on. If this
+        // is ever undone by something else, that is the symptom.
+        logger(String(format: "carPlayLife: session %p marked active and focused", session))
 
         // Assigning the session is what embeds its window view.
         // GeckoView.layoutSubviews then calls updateViewportWidth, so
