@@ -163,8 +163,8 @@ final class TabManagerImplementation: NSObject, TabManager {
         // session tears down a content process that has to stay alive and
         // rendering while the app is backgrounded. SessionManager already
         // keeps that session active; this stops us closing it anyway.
-        guard !sessionManager.isRenderingPictureInPicture(tab.session) else {
-            logger(String(format: "tabSleep: NOT sleeping tab %@ - it is rendering Picture in Picture", tab.id.uuidString))
+        guard !sessionManager.isMediaPriority(tab.session) else {
+            logger(String(format: "tabSleep: NOT sleeping tab %@ - it holds Picture in Picture or the media controls", tab.id.uuidString))
             return
         }
         

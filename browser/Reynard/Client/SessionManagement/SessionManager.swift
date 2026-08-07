@@ -119,8 +119,31 @@ final class SessionManager {
             return
         }
         sessionsRequestedActive[ObjectIdentifier(session)] = session
-        session.setActive(isApplicationForeground)
+        // isApplicationForeground alone would DEACTIVATE a session
+        // activated while backgrounded. Harmless for a tab, but it is how
+        // a session that must keep running gets throttled the moment
+        // anything routes it through here - Gecko stops painting while
+        // audio carries on, which is what CarPlay video stopping on lock
+        // looks like.
+        session.setActive(isApplicationForeground || mustStayActive(session))
         session.setFocused(true)
+    }
+    
+    /// Whether this session must keep running while the app is
+    /// backgrounded - Picture in Picture, or whatever currently owns the
+    /// system media controls. CarPlay registers itself as the latter.
+    private func mustStayActive(_ session: GeckoSession) -> Bool {
+        return pictureInPictureSession === session
+            || SystemMediaSession.shared.prioritySession === session
+    }
+    
+    /// Exposed for tab eviction, which must not sleep a tab whose
+    /// session is one of these.
+    func isMediaPriority(_ session: GeckoSession?) -> Bool {
+        guard let session else {
+            return false
+        }
+        return mustStayActive(session)
     }
     
     func deactivate(_ session: GeckoSession) {
@@ -129,7 +152,7 @@ final class SessionManager {
             return
         }
         session.setFocused(false)
-        if pictureInPictureSession === session {
+        if mustStayActive(session) {
             return
         }
         session.setActive(false)
@@ -141,7 +164,7 @@ final class SessionManager {
         }
         isApplicationForeground = isForeground
         for session in sessionsRequestedActive.values {
-            session.setActive(isForeground || pictureInPictureSession === session)
+            session.setActive(isForeground || mustStayActive(session))
             if pictureInPictureSession === session {
                 session.setFocused(isForeground)
             }
