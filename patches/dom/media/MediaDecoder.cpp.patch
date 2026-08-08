@@ -1,0 +1,29 @@
+diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
+--- a/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
++++ b/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
+@@ -546,15 +546,25 @@
+   SetStateMachine(CreateStateMachine(aDisableExternalEngine));
+ 
+   NS_ENSURE_TRUE(GetStateMachine(), NS_ERROR_FAILURE);
++  // REYNARD DIAGNOSTIC - capture 16 pinned a Gecko-main-thread
++  // EXC_BAD_ACCESS to somewhere between AVPlayerDecoder's
++  // CreateStateMachine probe and Load's return, held invisible by the
++  // attached JIT debugger. These brackets name the statement. They fire
++  // for every decoder, which doubles as the MP4 control experiment: if
++  // plain MP4 stalls at the same line, the bug is not AVPlayer's.
++  printf_stderr("mdsmInit: state machine set\n");
+   GetStateMachine()->DispatchIsLiveStream(aIsLiveStream);
++  printf_stderr("mdsmInit: live-stream flag dispatched\n");
+ 
+   mMDSMCreationTime = Some(TimeStamp::Now());
+   nsresult rv = mDecoderStateMachine->Init(this);
+   NS_ENSURE_SUCCESS(rv, rv);
++  printf_stderr("mdsmInit: MDSM Init returned\n");
+ 
+   // If some parameters got set before the state machine got created,
+   // set them now
+   SetStateMachineParameters();
++  printf_stderr("mdsmInit: parameters set - CreateAndInitStateMachine done\n");
+ 
+   return NS_OK;
+ }

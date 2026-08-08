@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,632 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -41,6 +41,14 @@ new file mode 100644
 +// the complete type to Release, and the forward declaration that
 +// satisfies MediaFormatReaderInit does not provide one.
 +#include "mozilla/layers/KnowsCompositor.h"
++// GetMediaThreadPool and SharedThreadPool, for warming the MDSM pool
++// before the state machine's constructor would create it inside the
++// capture-16 crash window.
++#include "VideoUtils.h"
++#include "SharedThreadPool.h"
++// NS_DispatchToMainThread - ReynardAVPlayerNotifyMetadata hops to
++// Gecko's main thread rather than trusting its caller's queue.
++#include "nsThreadUtils.h"
 +
 +#import <CoreVideo/CoreVideo.h>
 +
@@ -239,7 +247,22 @@ new file mode 100644
 +  mDemuxer = new AVPlayerDemuxer(kInitialDisplay);
 +  mReader = new MediaFormatReader(init, mDemuxer);
 +
-+  return MakeAndAddRef<MediaDecoderStateMachine>(this, mReader);
++  // Capture 16 pinned the crash between the probe above and Load's
++  // return, on Gecko's main thread, before InitializationTask was ever
++  // dispatched. The two lines below split the biggest step in that
++  // window - the state machine's constructor - and pull the MDSM
++  // thread pool's first-in-process creation out of it entirely.
++  // (MediaFormatReader's constructor already created a SUPERVISOR-pool
++  // task queue above, so pool creation per se is proven; this makes the
++  // MDSM pool's creation its own observable step anyway.)
++  RefPtr<SharedThreadPool> mdsmPool =
++      GetMediaThreadPool(MediaThreadType::MDSM);
++  printf_stderr("avPlayer: MDSM thread pool ready=%d\n", mdsmPool ? 1 : 0);
++
++  RefPtr<MediaDecoderStateMachine> stateMachine =
++      new MediaDecoderStateMachine(this, mReader);
++  printf_stderr("avPlayer: MDSM constructed\n");
++  return stateMachine.forget();
 +}
 +
 +void AVPlayerDecoder::Play() {
@@ -557,35 +580,58 @@ new file mode 100644
 +
 +// Declared in GeckoViewSwiftSupport.h. Defined outside the namespace so
 +// the symbol Swift links against is exactly this name.
++//
++// Hops to Gecko's main thread instead of trusting the caller's queue.
++// The Swift host dispatches on DispatchQueue.main, and in the parent
++// process that IS Gecko's main thread - but in a content process Gecko
++// runs its "MainThread" on a spawned thread, and the GCD main queue
++// drains on the extension's principal thread. Capture 16 proved the
++// difference the hard way: this callback ran and republished the
++// placeholder while Gecko's main thread sat frozen on an
++// EXC_BAD_ACCESS, which is only possible if they are different
++// threads. Every MOZ_ASSERT(NS_IsMainThread()) below this had been
++// violated on every callback, silently, in release. The registry
++// lookup, SetDuration, and the frame publish all touch main-thread-only
++// state, so the hop is the fix rather than the assertions.
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyMetadata(
 +    uintptr_t aPlayerId, double aDurationSeconds, int32_t aWidth,
 +    int32_t aHeight) {
-+  MOZ_ASSERT(NS_IsMainThread());
-+
-+  auto& players = mozilla::PlayersById();
-+  auto entry = players.find(aPlayerId);
-+  if (entry == players.end()) {
-+    // Routine during teardown rather than an error: the decoder erases
-+    // itself before the player is destroyed, so a KVO notification
-+    // already queued on this thread lands here and is dropped.
-+    printf_stderr("avPlayer: metadata for unknown player %llu - ignored\n",
-+                  (unsigned long long)aPlayerId);
-+    return;
-+  }
-+
-+  // AVFoundation reports an indefinite or NaN duration for a live
-+  // stream, and for any item that has not resolved one yet. Zero rather
-+  // than a garbage TimeUnit - the element reads that as unknown, which
-+  // is the truth.
-+  const mozilla::media::TimeUnit duration =
-+      (std::isfinite(aDurationSeconds) && aDurationSeconds > 0.0)
-+          ? mozilla::media::TimeUnit::FromSeconds(aDurationSeconds)
-+          : mozilla::media::TimeUnit::Zero();
-+
 +  printf_stderr(
-+      "avPlayer: metadata player=%llu duration=%.3f size=%dx%d\n",
-+      (unsigned long long)aPlayerId, aDurationSeconds, aWidth, aHeight);
++      "avPlayer: metadata callback player=%llu geckoMain=%d - dispatching\n",
++      (unsigned long long)aPlayerId, NS_IsMainThread() ? 1 : 0);
 +
-+  entry->second->NotifyMetadata(duration,
-+                                mozilla::gfx::IntSize(aWidth, aHeight));
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyMetadata",
++      [aPlayerId, aDurationSeconds, aWidth, aHeight]() {
++        MOZ_ASSERT(NS_IsMainThread());
++
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          // Routine during teardown rather than an error: the decoder
++          // erases itself before the player is destroyed, so a
++          // notification already in flight lands here and is dropped.
++          printf_stderr(
++              "avPlayer: metadata for unknown player %llu - ignored\n",
++              (unsigned long long)aPlayerId);
++          return;
++        }
++
++        // AVFoundation reports an indefinite or NaN duration for a live
++        // stream, and for any item that has not resolved one yet. Zero
++        // rather than a garbage TimeUnit - the element reads that as
++        // unknown, which is the truth.
++        const mozilla::media::TimeUnit duration =
++            (std::isfinite(aDurationSeconds) && aDurationSeconds > 0.0)
++                ? mozilla::media::TimeUnit::FromSeconds(aDurationSeconds)
++                : mozilla::media::TimeUnit::Zero();
++
++        printf_stderr(
++            "avPlayer: metadata player=%llu duration=%.3f size=%dx%d\n",
++            (unsigned long long)aPlayerId, aDurationSeconds, aWidth,
++            aHeight);
++
++        entry->second->NotifyMetadata(duration,
++                                      mozilla::gfx::IntSize(aWidth, aHeight));
++      }));
 +}

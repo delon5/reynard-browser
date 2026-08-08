@@ -1334,6 +1334,16 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // debugger that is about to be gone.
     uint64_t stoppedAtUnservicedBrkPC = 0;
     NSString *stoppedAtUnservicedBrkThreadID = nil;
+
+    // ADDED - non-breakpoint stops (real faults in the target) were
+    // continued in complete silence past iteration 3. Capture 16: a
+    // content process sat in a 100Hz EXC_BAD_ACCESS loop for 2295
+    // iterations over 23 seconds and the log's first and only mention
+    // was the detach packet at backgrounding. Counted and logged at
+    // powers of two, same scheme as the jitSkip counter and for the
+    // same reason: unconditional logging would flood, silence already
+    // cost a session.
+    NSInteger nonBreakpointStops = 0;
     
     while (YES) {
         @autoreleasepool {
@@ -1464,7 +1474,28 @@ void runDebugService(int32_t pid, DebugSession *session) {
             }
             if (instructionResponse.length == 0 || !instructionIsBreakpoint(instruction)) {
                 NSString *signal = packetSignal(stopResponse);
-                
+
+                // A stop that is not our brk is the target faulting for
+                // real. Forwarding the signal to a faulted thread just
+                // re-runs the faulting instruction, which re-raises the
+                // mach exception straight back here - so a crashed
+                // thread becomes a silent ~100Hz stop loop and no crash
+                // report is ever generated. Log at powers of two with
+                // enough of the packet to diagnose without a detach:
+                // metype 1 is EXC_BAD_ACCESS, and on the common
+                // message/vtable-through-garbage case x0 IS the bad
+                // address.
+                nonBreakpointStops++;
+                if ((nonBreakpointStops & (nonBreakpointStops - 1)) == 0) {
+                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) NON-BREAKPOINT stop #%ld signal=%@ metype=%@ medata=%@ pc=0x%llx x0=0x%llx thread=%@ (iteration %ld)",
+                            pid, (long)nonBreakpointStops,
+                            signal ?: @"<none>",
+                            packetField(stopResponse, @"metype") ?: @"<none>",
+                            packetField(stopResponse, @"medata") ?: @"<none>",
+                            pc, x0, threadID ?: @"<none>",
+                            (long)debugServiceIteration]);
+                }
+
                 // continue with signal
                 if (signal && !forwardSignalStop(session->debugProxy, signal, threadID, &commandError)) break;
                 continue;

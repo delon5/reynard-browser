@@ -211,8 +211,12 @@ public final class AVPlayerHost: NSObject {
             )
         }
 
-        // Main queue, because the decoder side is main-thread only - the
-        // registry it looks itself up in has no lock, by design.
+        // The main QUEUE is not Gecko's main THREAD in a content
+        // process - Gecko runs "MainThread" on a spawned thread there,
+        // and this queue drains on the extension's principal thread.
+        // ReynardAVPlayerNotifyMetadata hops to Gecko's main thread
+        // itself now (capture 16), so this dispatch is only for
+        // ordering and to get off AVFoundation's KVO queue.
         for observation in [
             item.observe(\.status, options: [.initial, .new]) { item, _ in
                 DispatchQueue.main.async { report(item) }
