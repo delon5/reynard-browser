@@ -243,7 +243,7 @@ final class ClearBrowsingDataViewController: SettingsTableViewController {
                 try await GeckoStorageController.clearHistory(since: nil)
                 // Keyed by host, so it is a list of every site visited -
                 // history-shaped data that has to go with the history.
-                TabManagerImpl.clearReservationCache()
+                TabManagerImplementation.clearReservationCache()
             }
             
             if selectedCategories.contains(.cookiesAndSiteData) {
