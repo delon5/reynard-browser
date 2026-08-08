@@ -444,7 +444,7 @@ public class GeckoSession {
     /// null - and callers should treat that the same as false.
     /// How a page reserves space at the bottom, which decides which
     /// mechanism can actually move its content.
-    public enum BottomReservation {
+    public enum BottomReservation: Equatable {
         /// Nothing pinned at the bottom - the pill floats over the page.
         case none
         /// The page reads env(safe-area-inset-bottom), so reporting a

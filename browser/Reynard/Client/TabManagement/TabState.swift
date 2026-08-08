@@ -5,6 +5,8 @@
 //  Created by Minh Ton on 16/6/26.
 //
 
+import GeckoView
+
 enum TabLoadingState: Equatable {
     case idle
     case loading(progress: Float)
