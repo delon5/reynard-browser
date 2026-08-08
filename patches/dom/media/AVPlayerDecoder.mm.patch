@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,558 @@
+@@ -0,0 +1,586 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -37,6 +37,10 @@ new file mode 100644
 +#include "MacIOSurfaceImage.h"
 +#include "VideoFrameContainer.h"
 +#include "mozilla/gfx/MacIOSurface.h"
++// For the RefPtr<KnowsCompositor> in CreateStateMachine - RefPtr needs
++// the complete type to Release, and the forward declaration that
++// satisfies MediaFormatReaderInit does not provide one.
++#include "mozilla/layers/KnowsCompositor.h"
 +
 +#import <CoreVideo/CoreVideo.h>
 +
@@ -167,19 +171,34 @@ new file mode 100644
 +
 +  rv = MediaShutdownManager::Instance().Register(this);
 +  if (NS_WARN_IF(NS_FAILED(rv))) {
++    printf_stderr("avPlayer: Load ABORTED - shutdown-manager Register rv=0x%08x\n",
++                  static_cast<uint32_t>(rv));
 +    return rv;
 +  }
 +
-+  return CreateAndInitStateMachine(false);
++  // The last two steps of Load were the only unobserved ones: every line
++  // a capture shows - created, placeholder, metadata - happens above, so
++  // a failure from here on is indistinguishable from success in the log.
++  // A non-zero rv here also means SetupDecoder called Shutdown, which is
++  // the only path that logs "destroyed" right after load.
++  rv = CreateAndInitStateMachine(false);
++  printf_stderr("avPlayer: Load done - CreateAndInitStateMachine rv=0x%08x\n",
++                static_cast<uint32_t>(rv));
++  return rv;
 +}
 +
 +already_AddRefed<MediaDecoderStateMachineBase>
 +AVPlayerDecoder::CreateStateMachine(bool aDisableExternalEngine) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +
++  // Held in a RefPtr rather than assigned straight through, because
++  // init.mKnowsCompositor is an already_AddRefed - a pure carrier that
++  // cannot be null-tested once it holds the reference, and the log
++  // below needs to say whether one existed.
++  RefPtr<layers::KnowsCompositor> knowsCompositor = GetCompositor();
++
 +  MediaFormatReaderInit init;
 +  init.mVideoFrameContainer = GetVideoFrameContainer();
-+  init.mKnowsCompositor = GetCompositor();
 +  init.mCrashHelper = GetOwner()->CreateGMPCrashHelper();
 +  init.mFrameStats = mFrameStats;
 +  init.mMediaDecoderOwnerID = mOwner;
@@ -207,6 +226,15 @@ new file mode 100644
 +        avcSupported ? ""
 +                     : " - MediaFormatReader WILL reject metadata for this");
 +  }
++
++  // The container feeds MediaFormatReader's "videoActive" gate: a null
++  // one turns OnDemuxerInitDone's video track down and rejects metadata
++  // with "No active audio or video track" - silently, in release. The
++  // placeholder publishing proves the container exists on the decoder;
++  // this proves what the reader was actually handed.
++  printf_stderr("avPlayer: CreateStateMachine container=%d compositor=%d\n",
++                init.mVideoFrameContainer ? 1 : 0, knowsCompositor ? 1 : 0);
++  init.mKnowsCompositor = knowsCompositor.forget();
 +
 +  mDemuxer = new AVPlayerDemuxer(kInitialDisplay);
 +  mReader = new MediaFormatReader(init, mDemuxer);

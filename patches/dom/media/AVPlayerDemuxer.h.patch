@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.h b/dom/media/AVPlayerDemuxer.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.h
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,104 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -64,7 +64,11 @@ new file mode 100644
 +  // Returning false takes MediaFormatReader's other branch, where both
 +  // tracks get a start time of zero without a sample - the same one MSE
 +  // uses, and for the same reason: the samples do not come from here.
-+  bool ShouldComputeStartTime() const override { return false; }
++  //
++  // Defined out of line so it can log: DemuxerProxy::Init snapshots this
++  // value last, right before it flips mInitDone, so the line printing is
++  // proof the proxy's init lambda ran to completion.
++  bool ShouldComputeStartTime() const override;
 +
 +  // AVFoundation reports the real duration once the asset loads; until
 +  // then the element sees an unknown duration rather than zero.
