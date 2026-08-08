@@ -1,8 +1,8 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15..8526459 100644
+index 9ca6e15..e12ac14 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,279 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,296 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -228,23 +228,40 @@ index 9ca6e15..8526459 100644
 +
 +    const focusedElement = Services.focus.focusedElement || contentWindow?.document?.activeElement;
 +    if (!this.isFocusedEditableElement(focusedElement)) {
-+      return null;
++      // A reason rather than a bare null: the embedder cannot otherwise
++      // tell "nothing is focused" from "focused, but this engine did not
++      // consider it editable", and those need different fixes.
++      return {
++        reason: focusedElement
++          ? `not editable: <${focusedElement.localName}> contentEditable=${focusedElement.isContentEditable}`
++          : "no focused element",
++      };
 +    }
 +
 +    const win = focusedElement.ownerGlobal || focusedElement.documentGlobal;
 +    if (!win) {
-+      return null;
++      return { reason: "focused element has no window" };
 +    }
 +
 +    const viewportHeight =
 +      win.visualViewport?.height || win.innerHeight;
 +    if (!viewportHeight || viewportHeight <= 0) {
-+      return null;
++      return { reason: "viewport height unavailable" };
 +    }
 +
 +    const bounds = this.getFocusedInputBounds(focusedElement, viewportHeight);
++    // The extra fields are diagnostic. bounds and viewportHeight both
++    // come from the FOCUSED element's own window, so for an input inside
++    // an iframe the ratio describes its position within that frame - a
++    // different thing from the position on screen, which is what the
++    // embedder applies it to. inSubframe is what distinguishes that case.
 +    return {
 +      bottomRatio: Math.max(0, Math.min(2, bounds.bottom / viewportHeight)),
++      tag: focusedElement.localName,
++      contentEditable: String(focusedElement.isContentEditable),
++      inSubframe: String(win.top !== win),
++      viewportHeight: String(Math.round(viewportHeight)),
++      boundsBottom: String(Math.round(bounds.bottom)),
 +    };
 +  }
 +
@@ -282,7 +299,7 @@ index 9ca6e15..8526459 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +457,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +474,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }

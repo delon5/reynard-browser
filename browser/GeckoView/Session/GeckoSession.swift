@@ -438,10 +438,26 @@ public class GeckoSession {
         let response = try? await dispatcher.query(type: "GeckoView:GetFocusedInputMetrics")
         guard let values = response as? [AnyHashable: Any],
               let bottomRatioValue = values["bottomRatio"] else {
+            // DIAGNOSTIC - Twitch chat does not lift above the keyboard
+            // and this path had no logging at all: the query is wrapped
+            // in try?, so a failed query, a missing actor and an element
+            // the engine did not consider editable all produced the same
+            // silent nil as "nothing focused". The actor sends back what
+            // it decided in the same payload, so a refusal says WHY.
+            let reason = (response as? [AnyHashable: Any])?["reason"] as? String
+            NSLog("focusedInput: no ratio (%@)", reason ?? (response == nil ? "query failed" : "no bottomRatio in payload"))
             return nil
         }
-        
-        return PayloadValue.cgFloat(bottomRatioValue)
+
+        let ratio = PayloadValue.cgFloat(bottomRatioValue)
+        let describe = { (key: String) -> String in
+            (values[key] as? String) ?? String(describing: values[key] ?? "?")
+        }
+        NSLog("focusedInput: ratio=%@ tag=%@ editable=%@ frame=%@ vh=%@ bottom=%@",
+              ratio.map { String(format: "%.3f", $0) } ?? "nil",
+              describe("tag"), describe("contentEditable"),
+              describe("inSubframe"), describe("viewportHeight"), describe("boundsBottom"))
+        return ratio
     }
     
     /// Whether this page's CSS uses env(safe-area-inset-bottom),

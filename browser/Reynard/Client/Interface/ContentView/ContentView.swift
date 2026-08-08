@@ -289,6 +289,20 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             inputBottomRatio = bottomRatio
             superview?.layoutIfNeeded()
             let newOffset = calculateFocusedInputOffset(keyboardFrame: keyboardFrame)
+
+            // DIAGNOSTIC - the other half of the Twitch chat question.
+            // A ratio can arrive and still produce no movement, because
+            // the offset is min(keyboardOverlap, focusBottom -
+            // visibleBottom) and either term can be zero. Logging the
+            // inputs distinguishes "the engine never told us where the
+            // input is" from "we were told, and computed no shift".
+            let unshifted = frame.offsetBy(dx: 0, dy: focusedInputOffset)
+            NSLog("focusedInput: offset %.1f -> %.1f (ratio=%@ viewH=%.1f kbTop=%.1f overlap=%.1f)",
+                  focusedInputOffset, newOffset,
+                  bottomRatio.map { String(format: "%.3f", $0) } ?? "nil",
+                  unshifted.height, keyboardFrame.minY,
+                  max(0, unshifted.maxY - keyboardFrame.minY))
+
             guard abs(newOffset - focusedInputOffset) > UX.focusedInputOffsetThreshold else {
                 return
             }
