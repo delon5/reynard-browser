@@ -24,7 +24,7 @@ index cea7d764..4e912f86 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +55,271 @@
+@@ -47,6 +55,274 @@
  using namespace js;
  using namespace js::jit;
  
@@ -43,6 +43,9 @@ index cea7d764..4e912f86 100644
 +void* reynard_mmap(void* addr, size_t len, int prot, int flags, int fd,
 +                   off_t offset) {
 +  void* map = __mmap(addr, len, prot, flags, fd, offset);
++  if (map == MAP_FAILED) {
++    return MAP_FAILED;
++  }
 +  // Handle some cases where it will still map but without executable permission
 +  if (mprotect(map, len, prot) == -1) {
 +    munmap(map, len);
@@ -296,7 +299,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +736,112 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +739,139 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -324,12 +327,39 @@ index cea7d764..4e912f86 100644
 +    struct sigaction sa;
 +    memset(&sa, 0, sizeof(sa));
 +    sa.sa_flags = SA_SIGINFO;
-+    sa.sa_sigaction = [](int, siginfo_t*, void* context) {
++    sa.sa_sigaction = [](int, siginfo_t* info, void* context) {
 +      auto* uc = static_cast<ucontext_t*>(context);
-+      if (uc && uc->uc_mcontext) {
-+        // Skip the faulting instruction rather than re-executing it.
-+        uc->uc_mcontext->__ss.__pc += 4;
++      if (!uc || !uc->uc_mcontext) {
++        return;
 +      }
++
++      // Only faults inside the JIT region (or its writable alias) are
++      // the W^X quirk this handler exists for. Anything else - a
++      // truncated mmapped file, an alignment fault in a library - must
++      // keep its default fatal behavior: skipping the instruction would
++      // silently corrupt state that a crash report would have caught.
++      // Same shape as the SIGTRAP backstop below: restore the default
++      // and return, so the instruction re-executes and terminates the
++      // way it would have without us.
++      auto* fault = info ? static_cast<uint8_t*>(info->si_addr) : nullptr;
++      const bool inExecutableRegion =
++          sExecutableMemoryBase && fault >= sExecutableMemoryBase &&
++          fault < sExecutableMemoryBase + MaxCodeBytesPerProcess;
++      const bool inWritableAlias =
++          sWritableExecutableMemoryBase &&
++          fault >= sWritableExecutableMemoryBase &&
++          fault < sWritableExecutableMemoryBase + MaxCodeBytesPerProcess;
++      if (!inExecutableRegion && !inWritableAlias) {
++        struct sigaction dfl;
++        memset(&dfl, 0, sizeof(dfl));
++        dfl.sa_handler = SIG_DFL;
++        sigemptyset(&dfl.sa_mask);
++        sigaction(SIGBUS, &dfl, nullptr);
++        return;
++      }
++
++      // Skip the faulting instruction rather than re-executing it.
++      uc->uc_mcontext->__ss.__pc += 4;
 +    };
 +    sigemptyset(&sa.sa_mask);
 +    sigaction(SIGBUS, &sa, nullptr);
@@ -409,7 +439,7 @@ index cea7d764..4e912f86 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +886,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +916,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -437,7 +467,7 @@ index cea7d764..4e912f86 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +941,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +971,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -469,7 +499,7 @@ index cea7d764..4e912f86 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +972,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +1002,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -487,7 +517,7 @@ index cea7d764..4e912f86 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +989,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +1019,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -543,7 +573,7 @@ index cea7d764..4e912f86 100644
  #  endif
  }
  #endif
-@@ -722,8 +1147,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1177,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -586,7 +616,7 @@ index cea7d764..4e912f86 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1202,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1232,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -607,7 +637,7 @@ index cea7d764..4e912f86 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1374,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1404,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -625,7 +655,7 @@ index cea7d764..4e912f86 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1404,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1434,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -645,7 +675,7 @@ index cea7d764..4e912f86 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1466,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1496,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  

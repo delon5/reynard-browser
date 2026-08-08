@@ -369,27 +369,49 @@ public class GeckoSession {
     /// that was saved (history, scroll position, and form data) is
     /// restored, overwriting the corresponding state of this session.
     ///
+    /// The state dictionary is the message itself, not wrapped under a
+    /// key: the engine's handler passes the message straight to
+    /// GeckoViewContentParent.restoreState, which destructures
+    /// { history, formdata, scrolldata } directly off it — the same
+    /// shape Android dispatches ("mEventDispatcher.dispatch(
+    /// "GeckoView:RestoreState", state.mState)").
+    ///
     /// - Parameter state: A state that originated from this session's
     ///   own ProgressDelegate.onSessionStateChange callback.
     public func restoreSessionState(_ state: GeckoSessionState) {
-        dispatcher.dispatch(type: "GeckoView:RestoreState", message: ["state": state.state])
+        dispatcher.dispatch(type: "GeckoView:RestoreState", message: state.state)
     }
     
     /// Merges an incoming "data" payload from a "GeckoView:StateUpdated"
     /// message into this session's accumulating state cache, and
     /// returns the full, merged state.
     ///
-    /// Deliberately simpler than Android's own merge logic: Android
-    /// applies an index-based partial splice to the history array as a
-    /// CPU-time optimization, with a code comment noting it exists
-    /// purely for performance ("the legacy bundle operation performs
-    /// better" for a full replace) — not for correctness. Reynard always
-    /// takes the full-replace path here, trading a little efficiency on
-    /// large history updates for meaningfully lower risk of a subtly
-    /// incorrect incremental merge.
+    /// The history is always full-replaced rather than spliced. That is
+    /// only correct because the pinned engine (FIREFOX_153_0_RELEASE)
+    /// always collects the FULL history: GeckoViewSessionStore.collect
+    /// hardcodes collectFull=true — the partial path is commented out
+    /// upstream pending Mozilla Bug 1915362 — so "historychange" always
+    /// arrives with fromIdx == -1. When fromIdx != -1 the payload holds
+    /// only the entries from that index on, and Android splices them
+    /// onto the previous entries (GeckoSession.SessionState
+    /// .getPartiallyUpdatedHistoryChange) — that path is correctness,
+    /// not just performance. The guard below is the tripwire for an
+    /// engine bump that starts sending partials: it keeps the last full
+    /// snapshot (stale but valid) instead of silently truncating.
     func mergeSessionStateUpdate(_ update: [String: Any?]) -> GeckoSessionState {
         if let history = update["historychange"] as? [String: Any?] {
-            sessionStateCache["history"] = history
+            let fromIdx = (history["fromIdx"] as? Int) ?? -1
+            if fromIdx == -1 {
+                sessionStateCache["history"] = history
+            } else {
+                assertionFailure(
+                    "Engine sent a PARTIAL history update (fromIdx \(fromIdx)) — "
+                    + "mergeSessionStateUpdate needs Android's splice logic now")
+                NSLog(
+                    "[GeckoSession] Ignoring partial history update (fromIdx %d) — "
+                    + "splice not implemented; keeping last full history snapshot",
+                    fromIdx)
+            }
         }
         if let scroll = update["scroll"] as? [String: Any?] {
             sessionStateCache["scrolldata"] = scroll

@@ -113,10 +113,18 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     }
     
     public func dispatch(toSwift type: String!, message: Any!, callback: EventCallback?) {
-        let message = message as! [String: Any?]?
+        let typedMessage = message as? [String: Any?]
+        if message != nil, typedMessage == nil {
+            // The engine only ever sends a bundle (NSDictionary) or nil
+            // here; anything else means a bridging bug on the Gecko
+            // side. Drop it rather than crash the app over it.
+            NSLog("[EventDispatcher] Dropping %@ — message is not a dictionary", type ?? "<nil type>")
+            callback?.sendError("invalid message payload")
+            return
+        }
         if let registeredListeners = listeners[type] {
             for listener in registeredListeners {
-                listener.handleMessage(type: type, message: message, callback: callback)
+                listener.handleMessage(type: type, message: typedMessage, callback: callback)
             }
         }
     }
