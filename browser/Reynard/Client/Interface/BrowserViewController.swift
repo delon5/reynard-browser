@@ -623,15 +623,26 @@ final class BrowserViewController: UIViewController {
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
         
-        // Whichever chrome is actually on screen. Content must clear the
-        // full toolbar while it is expanded and the pill once condensed,
-        // so the reservation follows the state rather than being fixed at
-        // the smaller of the two.
-        let expandedHeight = BottomToolbar.expandedContentHeight + (view.window?.safeAreaInsets.bottom ?? 0)
-        let chromeHeight = browserChrome.isScrollCondensed
-            ? BrowserChrome.condensedPillOccupiedHeight
-            : expandedHeight
-        let target = hasBottomToolbar ? chromeHeight : 0
+        // The PILL's clearance, always - deliberately not the expanded
+        // toolbar's height, and deliberately independent of
+        // isScrollCondensed.
+        //
+        // Following the condensed state meant this value flipped between
+        // the two heights on every scroll direction change, and each flip
+        // re-reported env(safe-area-inset-bottom), which runs
+        // PostRebuildAllStyleDataEvent(RestyleHint::RecascadeSubtree()) -
+        // a full style recascade of the document. A device log showed 414
+        // such flips in nine minutes, some 0.45s apart, on pages as heavy
+        // as YouTube and Facebook. That is the jank where content appears
+        // to drift and lose its hold while scrolling.
+        //
+        // A constant removes the churn entirely: the page is laid out once
+        // and never restyled by chrome movement. It is also what this
+        // file's own comment above already describes - the pill is the
+        // only chrome that persists, the expanded toolbar covers content
+        // rather than reserving space for it ("underlay the bottom
+        // toolbar") and hides on scroll anyway.
+        let target = hasBottomToolbar ? BrowserChrome.condensedPillOccupiedHeight : 0
 
         // The mode is part of the state, not just the height: a page can
         // flip between reading env() and merely having a bar - an SPA
