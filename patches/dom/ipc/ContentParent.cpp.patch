@@ -1,8 +1,42 @@
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 2ee13e7e51c7..b918e3c11cd9 100644
+index 2ee13e7e51c7..b3556e90c7ef 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
-@@ -3007,14 +3007,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+@@ -185,6 +185,7 @@
+ #include "nsContentPermissionHelper.h"
+ #include "nsContentUtils.h"
+ #include "nsDNSService2.h"
++#include "nsDebug.h"
+ #include "nsDebugImpl.h"
+ #include "nsDirectoryServiceDefs.h"
+ #include "nsDocShell.h"
+@@ -1956,6 +1957,25 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
+   MOZ_FUZZING_IPC_DROP_PEER("ContentParent::ActorDestroy");
+ #endif
+ 
++#if defined(MOZ_WIDGET_UIKIT)
++  // Diagnostic for silent content-process death - the "press Go twice"
++  // investigation. Logged before the NormalShutdown branch below
++  // rewrites mCalledClose, so calledClose reports whether the parent
++  // actually asked this process to go. An unrequested NormalShutdown
++  // (why=3, calledClose=0) is the suspected signature of iOS reclaiming
++  // the extension process cleanly: nothing downstream fires for it, so
++  // the app never learns the process is gone and the tab's next LoadUri
++  // is swallowed whole. why decodes as FailedConstructor=0, Deletion=1,
++  // AncestorDeletion=2, NormalShutdown=3, AbnormalShutdown=4,
++  // ManagedEndpointDropped=5. Pairs with the matching line in
++  // BrowserParent::ActorDestroy, which owns the crash-event decision.
++  printf_stderr(
++      "processExitTrace: ContentParent::ActorDestroy childID=%llu why=%d "
++      "calledClose=%d\n",
++      static_cast<unsigned long long>(static_cast<uint64_t>(this->ChildID())),
++      static_cast<int>(why), mCalledClose ? 1 : 0);
++#endif
++
+   if (mSendShutdownTimer) {
+     mSendShutdownTimer->Cancel();
+     mSendShutdownTimer = nullptr;
+@@ -3007,14 +3027,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -20,7 +54,7 @@ index 2ee13e7e51c7..b918e3c11cd9 100644
    } else {
      // This can fail if we've already started shutting down the compositor
      // thread. See Bug 1562763 comment 8. On Android this can fail we are are
-@@ -3193,16 +3194,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+@@ -3193,16 +3214,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -40,7 +74,7 @@ index 2ee13e7e51c7..b918e3c11cd9 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -7985,6 +7987,17 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -7985,6 +8007,17 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  

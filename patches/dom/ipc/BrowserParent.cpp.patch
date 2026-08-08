@@ -1,5 +1,5 @@
 diff --git a/dom/ipc/BrowserParent.cpp b/dom/ipc/BrowserParent.cpp
-index ba640fdbc080..fe637cc0b3ea 100644
+index ba640fdbc080..9ce93b6a526d 100644
 --- a/dom/ipc/BrowserParent.cpp
 +++ b/dom/ipc/BrowserParent.cpp
 @@ -793,6 +793,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
@@ -24,7 +24,35 @@ index ba640fdbc080..fe637cc0b3ea 100644
    }
    return IPC_OK();
  }
-@@ -1020,7 +1035,7 @@ void BrowserParent::InitRendering() {
+@@ -860,6 +875,27 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
+   // Tell our embedder that the tab is now going away unless we're an
+   // out-of-process iframe.
+   RefPtr<nsFrameLoader> frameLoader = GetFrameLoader(true);
++
++#if defined(MOZ_WIDGET_UIKIT)
++  // Diagnostic for silent content-process death - the "press Go twice"
++  // investigation. This is the decision point that turns a
++  // content-process exit into crash events: only AbnormalShutdown (4)
++  // and ManagedEndpointDropped (5) reach MaybeNotifyCrashed below,
++  // which fires "oop-frameloader-crashed" and becomes
++  // GeckoView:ContentKill / ContentCrash in the app. A clean exit the
++  // parent never requested (why=3, NormalShutdown) fires nothing - the
++  // session lives on around a dead process and its next LoadUri is
++  // swallowed. This line records what iOS process reclamation actually
++  // looks like here, which decides the real fix.
++  printf_stderr(
++      "processExitTrace: BrowserParent::ActorDestroy why=%d isTop=%d "
++      "hasFrameLoader=%d childID=%llu\n",
++      static_cast<int>(why), mBrowsingContext->IsTop() ? 1 : 0,
++      frameLoader ? 1 : 0,
++      static_cast<unsigned long long>(
++          static_cast<uint64_t>(Manager()->ChildID())));
++#endif
++
+   if (frameLoader) {
+     if (mBrowsingContext->IsTop()) {
+       // If this is a top-level BrowsingContext, tell the frameloader it's time
+@@ -1020,7 +1056,7 @@ void BrowserParent::InitRendering() {
          widget->SupportsUnadjustedMovement());
    }
  
@@ -33,7 +61,7 @@ index ba640fdbc080..fe637cc0b3ea 100644
    MOZ_ASSERT(widget);
  
    if (GetBrowsingContext()->IsTopContent()) {
-@@ -2554,14 +2569,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
+@@ -2554,14 +2590,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
      const ContentCache& aContentCache,
      const IMENotification& aIMENotification) {
    nsCOMPtr<nsIWidget> widget = GetTextInputHandlingWidget();
@@ -59,7 +87,7 @@ index ba640fdbc080..fe637cc0b3ea 100644
    return IPC_OK();
  }
  
-@@ -3223,18 +3246,31 @@ bool BrowserParent::HandleQueryContentEvent(WidgetQueryContentEvent& aEvent) {
+@@ -3223,18 +3267,31 @@ bool BrowserParent::HandleQueryContentEvent(WidgetQueryContentEvent& aEvent) {
        NS_WARN_IF(aEvent.Failed())) {
      return true;
    }
