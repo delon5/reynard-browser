@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,391 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -18,6 +18,10 @@ new file mode 100644
 +#include "nsContentUtils.h"
 +#include "nsIChannel.h"
 +#include "nsIScriptSecurityManager.h"
++#include "mozilla/NullPrincipal.h"
++#include "nsILoadInfo.h"
++#include "nsIContentPolicy.h"
++#include "nsNetUtil.h"
 +#include "nsIURI.h"
 +#include "nsNetUtil.h"
 +#include "MediaContainerType.h"
@@ -217,33 +221,80 @@ new file mode 100644
 +  UpdateCurrentPrincipal(aMediaUrl);
 +}
 +
++// Derives a principal from the RESOLVED url, mirroring
++// HLSDecoder::GetContentPrincipal.
++//
++// The previous version parsed the resolved URI and then never used it,
++// taking the principal from mChannel instead. AVFoundation's redirects
++// are invisible to that channel, so every call produced the identical
++// principal, Equals always passed, and mHadCrossOriginRedirects could
++// never become true - a cross-origin redirected stream was treated as
++// same-origin, which is the unsafe direction for canvas taint.
++already_AddRefed<nsIPrincipal> AVPlayerDecoder::GetContentPrincipal(
++    nsIURI* aMediaUri) {
++  MOZ_ASSERT(NS_IsMainThread());
++  nsCOMPtr<nsIPrincipal> principal = NullPrincipal::Create(OriginAttributes());
++
++  MediaDecoderOwner* owner = GetOwner();
++  RefPtr<dom::HTMLMediaElement> element =
++      owner ? owner->GetMediaElement() : nullptr;
++  if (!element) {
++    return principal.forget();
++  }
++
++  nsSecurityFlags securityFlags =
++      element->ShouldCheckAllowOrigin()
++          ? nsILoadInfo::SEC_REQUIRE_CORS_INHERITS_SEC_CONTEXT
++          : nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_INHERITS_SEC_CONTEXT;
++  if (element->GetCORSMode() == CORS_USE_CREDENTIALS) {
++    securityFlags |= nsILoadInfo::SEC_COOKIES_INCLUDE;
++  }
++
++  nsCOMPtr<nsIChannel> channel;
++  nsresult rv = NS_NewChannel(
++      getter_AddRefs(channel), aMediaUri, static_cast<dom::Element*>(element),
++      securityFlags, nsIContentPolicy::TYPE_INTERNAL_VIDEO);
++  NS_ENSURE_SUCCESS(rv, principal.forget());
++
++  nsIScriptSecurityManager* secMan = nsContentUtils::GetSecurityManager();
++  if (!secMan) {
++    return principal.forget();
++  }
++  secMan->GetChannelResultPrincipal(channel, getter_AddRefs(principal));
++  return principal.forget();
++}
++
 +void AVPlayerDecoder::UpdateCurrentPrincipal(nsCString aMediaUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +
-+  // Once AVFoundation owns the fetch, Gecko cannot observe redirects. If
-+  // the principal is not updated from the resolved URL the element is
-+  // treated as same-origin when it is not, and canvas taint checks are
-+  // wrong.
 +  nsCOMPtr<nsIURI> finalURI;
 +  if (NS_FAILED(NS_NewURI(getter_AddRefs(finalURI), aMediaUrl))) {
 +    return;
 +  }
 +
-+  nsIScriptSecurityManager* secMan = nsContentUtils::GetSecurityManager();
-+  if (!secMan || !mChannel) {
++  nsCOMPtr<nsIPrincipal> principal = GetContentPrincipal(finalURI);
++  if (!principal) {
 +    return;
 +  }
 +
-+  nsCOMPtr<nsIPrincipal> principal;
-+  if (NS_FAILED(secMan->GetChannelResultPrincipal(mChannel,
-+                                                  getter_AddRefs(principal)))) {
++  // Subsumption, as HLSDecoder does it: equal or disjoint are the only
++  // sane outcomes, and disjoint collapses to a null principal rather
++  // than silently keeping the more permissive one.
++  if (!mContentPrincipal || principal->GetIsNullPrincipal()) {
++    mContentPrincipal = std::move(principal);
++  } else if (principal->Equals(mContentPrincipal)) {
 +    return;
-+  }
-+
-+  if (mContentPrincipal && !mContentPrincipal->Equals(principal)) {
++  } else if (!principal->Subsumes(mContentPrincipal) &&
++             !mContentPrincipal->Subsumes(principal)) {
 +    mHadCrossOriginRedirects = true;
++    mContentPrincipal = NullPrincipal::Create(OriginAttributes());
++  } else {
++    mHadCrossOriginRedirects = true;
++    mContentPrincipal = std::move(principal);
 +  }
-+  mContentPrincipal = principal;
++
++  // Without this the element never learns the principal moved.
++  MediaDecoder::NotifyPrincipalChanged();
 +}
 +
 +void AVPlayerDecoder::NotifyDataArrived() {
@@ -278,25 +329,47 @@ new file mode 100644
 +    return;
 +  }
 +
-+  NSDictionary* properties = @{
-+    (__bridge NSString*)kIOSurfaceWidth : @(aDisplay.width),
-+    (__bridge NSString*)kIOSurfaceHeight : @(aDisplay.height),
-+    (__bridge NSString*)kIOSurfacePixelFormat :
-+        @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-+    (__bridge NSString*)kIOSurfaceBytesPerElement : @(1),
-+  };
-+
-+  CFTypeRefPtr<IOSurfaceRef> surface =
-+      CFTypeRefPtr<IOSurfaceRef>::WrapUnderCreateRule(
-+          IOSurfaceCreate((__bridge CFDictionaryRef)properties));
-+  if (!surface) {
++  // CreateBiPlanarSurface, not a hand-rolled IOSurfaceCreate.
++  //
++  // A surface built from width/height/format alone is NON-PLANAR:
++  // IOSurfaceGetPlaneCount returns 0. But MacIOSurfaceTextureHostOGL
++  // derives NV12 from the pixel format and then hard-requires exactly
++  // two planes - both PushResourceUpdates and PushDisplayItems bail on
++  // "mSurface->GetPlaneCount() != 2". NumSubTextures() says 2 from the
++  // format while the plane count is 0, so that branch always fires: no
++  // layer is pushed in release, and the GPU process asserts in debug.
++  // The whole point of this frame is to make a layer exist, so without
++  // the plane info it achieves nothing.
++  //
++  // This helper builds the plane dictionaries, offsets and alloc size,
++  // and takes the colour parameters directly - so the separate
++  // SetYUVColorSpace call afterwards is redundant and gone.
++  const gfx::IntSize chromaSize((aDisplay.width + 1) / 2,
++                                (aDisplay.height + 1) / 2);
++  RefPtr<MacIOSurface> macSurface = MacIOSurface::CreateBiPlanarSurface(
++      aDisplay, chromaSize, gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT,
++      gfx::YUVColorSpace::BT709, gfx::TransferFunction::BT709,
++      gfx::ColorRange::LIMITED, gfx::ColorDepth::COLOR_8,
++      MacIOSurface::AllowAlpha::No);
++  if (!macSurface) {
 +    return;
 +  }
 +
-+  RefPtr<MacIOSurface> macSurface = new MacIOSurface(
-+      std::move(surface), gfx::YUVColorSpace::BT709,
-+      gfx::TransferFunction::BT709, MacIOSurface::AllowAlpha::No);
-+  macSurface->SetYUVColorSpace(gfx::YUVColorSpace::BT709);
++  // Fresh IOSurface pages are zero-filled, and zeroed NV12 in
++  // video-range BT.709 (Y=0, CbCr=0) decodes to saturated GREEN, not
++  // black - which would be visible until an AVPlayerLayer replaces it.
++  // Black in 420v is Y=0x10, CbCr=0x80.
++  if (macSurface->Lock(/* aReadOnly */ false)) {
++    if (void* yPlane = macSurface->GetBaseAddressOfPlane(0)) {
++      memset(yPlane, 0x10,
++             macSurface->GetBytesPerRow(0) * macSurface->GetDevicePixelHeight(0));
++    }
++    if (void* cbcrPlane = macSurface->GetBaseAddressOfPlane(1)) {
++      memset(cbcrPlane, 0x80,
++             macSurface->GetBytesPerRow(1) * macSurface->GetDevicePixelHeight(1));
++    }
++    macSurface->Unlock(false);
++  }
 +
 +  RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(macSurface);
 +  // Five arguments: the trailing processing duration and media time

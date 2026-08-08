@@ -19,9 +19,13 @@ public enum GeckoStorageClearFlags {
 
 public enum GeckoStorageController {
     public static func clearData(flags: Int64) async throws {
+        // Clearing "all time" on a large profile is slow by nature, and
+        // reporting failure while Gecko carries on deleting would be
+        // worse than waiting.
         _ = try await GeckoEventDispatcherWrapper.runtimeInstance.query(
             type: "GeckoView:ClearData",
-            message: ["flags": flags]
+            message: ["flags": flags],
+            timeout: 300
         )
     }
     

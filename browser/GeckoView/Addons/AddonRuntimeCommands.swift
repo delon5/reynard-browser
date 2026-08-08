@@ -42,13 +42,18 @@ public extension AddonRuntime {
     
     func install(url: String, installMethod: AddonInstallMethod? = nil) async throws -> Addon {
         installCounter += 1
+        // Downloads and installs an XPI over the network, so it can
+        // legitimately outlast the default deadline. A timeout here would
+        // report failure for an install that then succeeds, leaving the
+        // addon list stale because the delegate's didUpdate never fires.
         let response = try await GeckoEventDispatcherWrapper.runtimeInstance.query(
             type: "GeckoView:WebExtension:Install",
             message: [
                 "locationUri": url,
                 "installId": "reynard-\(installCounter)",
                 "installMethod": installMethod?.rawValue as Any,
-            ]
+            ],
+            timeout: 300
         )
         guard let payload = response as? [String: Any?],
               let addonPayload = payload["extension"] as? [String: Any?] else {

@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,120 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -100,6 +100,12 @@ new file mode 100644
 +  }
 +
 +  void UpdateCurrentPrincipal(nsCString aMediaUrl);
++
++  // Principal for the RESOLVED media url, built from a fresh
++  // channel carrying the element's CORS flags - mirrors
++  // HLSDecoder::GetContentPrincipal. Deriving it from mChannel
++  // instead cannot see AVFoundation's redirects.
++  already_AddRefed<nsIPrincipal> GetContentPrincipal(nsIURI* aMediaUri);
 +
 +  RefPtr<MediaFormatReader> mReader;
 +  RefPtr<AVPlayerDemuxer> mDemuxer;
