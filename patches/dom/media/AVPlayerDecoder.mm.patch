@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,558 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,6 +25,7 @@ new file mode 100644
 +#include "nsIURI.h"
 +#include "nsNetUtil.h"
 +#include "MediaContainerType.h"
++#include "PDMFactorySupport.h"
 +
 +#include <cmath>
 +#include <unordered_map>
@@ -182,6 +183,30 @@ new file mode 100644
 +  init.mCrashHelper = GetOwner()->CreateGMPCrashHelper();
 +  init.mFrameStats = mFrameStats;
 +  init.mMediaDecoderOwnerID = mOwner;
++
++  // Asked here because MediaFormatReader is about to ask the same
++  // question, and a "no" there is silent in a way that misreads.
++  //
++  // OnDemuxerInitDone rejects the metadata promise outright when
++  // PDMFactorySupport::IsTypeSupported comes back empty for the track's
++  // MIME type - "We have no decoder for this track. Error." That
++  // rejection prints neither MetadataLoaded nor FirstFrameLoaded, which
++  // is indistinguishable from the promise simply never resolving, and
++  // the two want opposite fixes: a rejection means the advertised type
++  // is wrong, while never resolving means the start-time path is.
++  //
++  // AVPlayerDemuxer advertises video/avc, and nothing decodes through
++  // Gecko here at all - the frames come from the AVPlayer - so this
++  // check existing at all is incidental to how the pipeline works. It
++  // still has to pass.
++  {
++    const bool avcSupported =
++        !PDMFactorySupport::IsTypeSupported("video/avc"_ns).isEmpty();
++    printf_stderr(
++        "avPlayer: PDM support for video/avc = %d%s\n", avcSupported ? 1 : 0,
++        avcSupported ? ""
++                     : " - MediaFormatReader WILL reject metadata for this");
++  }
 +
 +  mDemuxer = new AVPlayerDemuxer(kInitialDisplay);
 +  mReader = new MediaFormatReader(init, mDemuxer);
