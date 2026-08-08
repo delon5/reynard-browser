@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..735db2e0c810
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +0,587 @@
+@@ -0,0 +0,593 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -85,8 +85,10 @@ index 000000000000..735db2e0c810
 +  if ([identifier isKindOfClass:[NSString class]]) {
 +    key = (NSString*)identifier;
 +  } else if ([identifier isKindOfClass:[NSData class]]) {
-+    key = [[NSString alloc] initWithData:(NSData*)identifier
-+                                encoding:NSUTF8StringEncoding];
++    // base64 to match the key CreateSession stored: raw key-id bytes are
++    // rarely valid UTF-8, so a UTF-8 decode usually yields nil and the
++    // lookup silently misses.
++    key = [(NSData*)identifier base64EncodedStringWithOptions:0];
 +  }
 +  if (!key) {
 +    return nil;
@@ -288,8 +290,12 @@ index 000000000000..735db2e0c810
 +    NSData* keyId = [NSData dataWithBytes:aInitData.Elements()
 +                                   length:aInitData.Length()];
 +    identifier = keyId;
-+    identifierKey = [[NSString alloc] initWithData:keyId
-+                                          encoding:NSUTF8StringEncoding];
++    // fMP4 "keyids" init data is raw bytes (typically a 16-byte key id)
++    // that are rarely valid UTF-8, so a UTF-8 decode returns nil and the
++    // session->request mapping never forms - key requests for fragmented
++    // MP4 could then never be answered. base64 round-trips any bytes and
++    // matches sessionIdForRequest, which keys the same way.
++    identifierKey = [keyId base64EncodedStringWithOptions:0];
 +  }
 +
 +  [mDelegate rememberSession:sessionIdNS forIdentifier:identifierKey];
