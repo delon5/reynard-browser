@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,634 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -43,9 +43,11 @@ new file mode 100644
 +#include "mozilla/layers/KnowsCompositor.h"
 +// GetMediaThreadPool and SharedThreadPool, for warming the MDSM pool
 +// before the state machine's constructor would create it inside the
-+// capture-16 crash window.
++// capture-16 crash window. VideoUtils.h declares GetMediaThreadPool and
++// already pulls in SharedThreadPool.h; the latter is named explicitly
++// for the RefPtr<SharedThreadPool> below.
 +#include "VideoUtils.h"
-+#include "SharedThreadPool.h"
++#include "mozilla/SharedThreadPool.h"
 +// NS_DispatchToMainThread - ReynardAVPlayerNotifyMetadata hops to
 +// Gecko's main thread rather than trusting its caller's queue.
 +#include "nsThreadUtils.h"
