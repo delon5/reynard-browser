@@ -93,6 +93,13 @@ public final class AVPlayerHost: NSObject {
         let keySession: AVContentKeySession
         let delegate: ContentKeyDelegate?
         var observers: [NSKeyValueObservation] = []
+        // Last values handed to the decoder, so an unchanged repeat is
+        // dropped. Three observations fire for one resolution, and each
+        // republish allocates and fills a fresh IOSurface - a device
+        // capture showed four identical 400x300 publishes for a single
+        // load.
+        var reportedDuration: Double?
+        var reportedSize: CGSize?
 
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
@@ -184,6 +191,19 @@ public final class AVPlayerHost: NSObject {
                 ? item.duration.seconds
                 : Double.nan
             let size = item.presentationSize
+
+            // A rendition switch genuinely changes the size mid-stream
+            // and must go through; an identical repeat must not.
+            // NaN != NaN, so an unknown duration is compared as a
+            // string rather than silently republishing forever.
+            let unchanged = entry.reportedSize == size
+                && String(describing: entry.reportedDuration) == String(describing: Optional(duration))
+            guard !unchanged else {
+                return
+            }
+            entry.reportedDuration = duration
+            entry.reportedSize = size
+
             avLog("metadata ready for \(playerId): duration=\(duration) size=\(size)")
             ReynardAVPlayerNotifyMetadata(
                 UInt(playerId), duration,
