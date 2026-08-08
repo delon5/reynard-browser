@@ -84,6 +84,10 @@ protocol TabManagerDelegate: AnyObject {
     func tabManager(_ tabManager: TabManager, shouldContinueExternalResponseAt localFilePath: String, bytesReceived: Int64) -> Bool
     func tabManager(_ tabManager: TabManager, didCompleteExternalResponseAt localFilePath: String, succeeded: Bool)
     func tabManager(_ tabManager: TabManager, didRequestContextMenuAt point: CGPoint, for element: ContextElement, in session: GeckoSession)
+    /// The selected tab's safe-area verdict changed after the page was
+    /// already showing - an SPA route that added or removed a bottom bar.
+    /// The content anchor depends on it, so the layout has to be redone.
+    func tabManagerDidUpdateSafeAreaUsage(_ tabManager: TabManager)
 }
 
 extension TabManagerDelegate {
@@ -103,4 +107,5 @@ extension TabManagerDelegate {
     }
     func tabManager(_ tabManager: TabManager, didCompleteExternalResponseAt localFilePath: String, succeeded: Bool) {}
     func tabManager(_ tabManager: TabManager, didRequestContextMenuAt point: CGPoint, for element: ContextElement, in session: GeckoSession) {}
+    func tabManagerDidUpdateSafeAreaUsage(_ tabManager: TabManager) {}
 }

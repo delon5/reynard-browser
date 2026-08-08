@@ -1,8 +1,8 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15..92d8c95 100644
+index 9ca6e15..c4532bd 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,252 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,265 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -153,23 +153,30 @@ index 9ca6e15..92d8c95 100644
 +    // static.xx.fbcdn.net) is invisible to it and was wrongly treated
 +    // as not reserving space, leaving its composer behind the pill.
 +    //
-+    // Rather than trying to read CSS that same-origin policy hides,
-+    // ask the question the pill actually cares about: is there real
-+    // page UI pinned to the bottom edge? Three hit tests along the
-+    // bottom of the layout viewport, each walking up from the deepest
-+    // element looking for position:fixed or sticky. O(3) regardless of
-+    // DOM size, so it is safe on the heaviest pages.
++    // The question the pill actually cares about is not "does the CSS
++    // mention safe-area" but "is there a real bottom BAR the pill would
++    // cover". Probe three points along the bottom edge, walk up for a
++    // position:fixed/sticky ancestor, and require that ancestor to be
++    // bar-like: spanning most of the width AND genuinely anchored to the
++    // bottom edge. That distinguishes a full-width composer or nav bar
++    // (reserve) from a corner floating button - Reddit's jump-to-top
++    // FAB, chat bubbles, cookie nubs - which are also position:fixed but
++    // must not push page content up. The bottom-anchor test also rejects
++    // full-width STICKY headers, which are fixed-ish but live at the top.
++    // O(3) hit tests regardless of DOM size.
 +    //
-+    // Pages with nothing pinned - ordinary articles, search results -
-+    // still return false and keep the pill floating over them, which
-+    // preserves fix_safe_area_scan_requires_matching_rule.py's Google
-+    // case. A full-screen fixed overlay (cookie banner) open at
-+    // detection time reads as true; that errs toward reserving a
-+    // strip, which is visually benign, and detection re-runs on the
-+    // next PageStop anyway.
++    // Pages with nothing bar-like pinned - articles, search results, a
++    // page whose only fixed element is a FAB - still return false and
++    // keep the pill floating, preserving
++    // fix_safe_area_scan_requires_matching_rule.py's Google case.
 +    const width = contentWindow.innerWidth;
 +    const height = contentWindow.innerHeight;
 +    if (width > 0 && height > 0) {
++      // A real bottom bar spans most of the width and sits at the very
++      // bottom; a corner FAB fails the width test, a sticky header fails
++      // the bottom-anchor test.
++      const minBarWidth = width * 0.6;
++      const bottomBand = 8;
 +      for (const fraction of [0.15, 0.5, 0.85]) {
 +        let element = document.elementFromPoint(width * fraction, height - 2);
 +        while (
@@ -179,7 +186,13 @@ index 9ca6e15..92d8c95 100644
 +        ) {
 +          const { position } = contentWindow.getComputedStyle(element);
 +          if (position === "fixed" || position === "sticky") {
-+            return { usesSafeAreaInset: true };
++            const rect = element.getBoundingClientRect();
++            if (rect.width >= minBarWidth && rect.bottom >= height - bottomBand) {
++              return { usesSafeAreaInset: true };
++            }
++            // Fixed but not a bottom bar - keep climbing in case this is
++            // a child inside a wider fixed bar, then fall through to the
++            // next probe point.
 +          }
 +          element = element.parentElement;
 +        }
@@ -255,7 +268,7 @@ index 9ca6e15..92d8c95 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +430,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +443,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }

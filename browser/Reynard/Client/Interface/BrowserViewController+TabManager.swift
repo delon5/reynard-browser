@@ -34,10 +34,11 @@ extension BrowserViewController: TabManagerDelegate {
         
         // Safe-area detection runs at PageStop and can flip after a
         // page settles - the device log shows one tab reporting NO and
-        // then YES as its content loaded. Applying only on selection
-        // would leave that stale until the next tab switch. See
+        // then YES as its content loaded. Re-applying the layout here
+        // picks up the new verdict through
+        // condensedContentBottomAnchor; applying only on selection
+        // would leave it stale until the next tab switch. See
         // fix_per_tab_artificial_safe_area_inset.py.
-        updateArtificialSafeAreaInset()
         applyBrowserLayout(animated: false)
     }
     
@@ -48,11 +49,10 @@ extension BrowserViewController: TabManagerDelegate {
             return
         }
         
-        // The inset follows the SELECTED tab's own flag, so switching
-        // tabs has to re-evaluate it - see
+        // The content anchor follows the SELECTED tab's own flag, so
+        // switching tabs re-evaluates it - updateBrowserLayout below
+        // reads condensedContentBottomAnchor. See
         // fix_per_tab_artificial_safe_area_inset.py.
-        updateArtificialSafeAreaInset()
-        
         browserChrome.setAddressBarLoadingProgress(
             selectedTab.state.loadingState.progress,
             isLoading: selectedTab.state.loadingState.isLoading
@@ -78,6 +78,15 @@ extension BrowserViewController: TabManagerDelegate {
         }
     }
     
+    func tabManagerDidUpdateSafeAreaUsage(_ tabManager: TabManager) {
+        // An SPA route change flipped the selected tab's verdict after
+        // the page was already showing - re-run the layout so
+        // condensedContentBottomAnchor is re-evaluated. Only fires when
+        // the value actually changed, so this is not a per-navigation
+        // relayout.
+        applyBrowserLayout(animated: false)
+    }
+
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession) {
         addonCoordinator.handleSelectedTabSessionReplacement(from: previousSession, to: replacementSession)
     }

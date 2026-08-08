@@ -200,29 +200,12 @@ final class BrowserViewController: UIViewController {
             guard let self else {
                 return
             }
-            // Content's actual frame always extends to the true window
-            // bottom — condensing to a pill only fades the toolbar, it
-            // doesn't shrink its layout frame, so without adjusting the
-            // safe area here there'd be a real gap between the content
-            // and the screen bottom.
+            // Condensing to a pill only fades the toolbar - its layout
+            // frame does not shrink - so the content anchor has to be
+            // re-decided explicitly here. applyBrowserLayout below reads
+            // condensedContentBottomAnchor, which gates on the selected
+            // tab's own env(safe-area-inset-bottom) usage.
             //
-            // additionalSafeAreaInsets doesn't change any view's frame,
-            // only what gets reported as the safe area — which becomes
-            // env(safe-area-inset-bottom) for the page's own CSS. This
-            // gives the page an artificial boundary just above the pill
-            // without touching content's real size, so a page using
-            // that CSS variable correctly positions its own
-            // fixed-position elements above the pill rather than
-            // underneath it.
-            // CHANGED - was `condensed ? artificialInset : 0`, which
-            // inflated the safe area for EVERY page whenever the pill
-            // condensed, regardless of whether that page uses
-            // env(safe-area-inset-bottom). The content anchor in
-            // applyPhoneLayout already gated on the tab's own flag, so
-            // the two decided the same thing differently and every page
-            // ended up with the reserved strip. See
-            // fix_per_tab_artificial_safe_area_inset.py.
-            self.updateArtificialSafeAreaInset()
             // Deliberately not animated: content's resize is snapped
             // instantly, before the (separately animated) chrome fade
             // begins, so GeckoView gets its real final size immediately
@@ -546,61 +529,29 @@ final class BrowserViewController: UIViewController {
             // screen extent instead, same as this app's original,
             // established behavior, with the pill floating over them.
             bottomAnchor: browserChrome.isScrollCondensed
-            ? (tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-                ? browserChrome.condensedPillTopAnchor
-                : view.bottomAnchor)
+            ? condensedContentBottomAnchor
             : (isSearchFocused ? view.safeAreaLayoutGuide.bottomAnchor : browserChrome.bottomToolbarTopAnchor)
         )
         setTabBarVisible(false)
     }
     
-    // ADDED - see fix_per_tab_artificial_safe_area_inset.py.
-    //
-    // Deliberately carries the SAME condition as the content anchor in
-    // applyPhoneLayout and applyCompactLayout below, rather than
-    // inventing its own - the two having different conditions is what
-    // caused every page to get the reserved strip. A single computed
-    // property both read would be better still, but that is a wider
-    // refactor of code that otherwise works.
-    //
-    // Must be called whenever EITHER half can change: the pill
-    // condensing, a different tab being selected, or detection flipping
-    // after a page settles. That last one is real - the device log
-    // shows one tab reporting NO and then YES for the same tab as its
-    // content loaded.
-    func updateArtificialSafeAreaInset() {
-        // RE-ENABLED - see fix_reenable_artificial_safe_area_inset.py.
-        //
-        // This was disabled on the assumption that the dynamic toolbar
-        // height had taken over the job. On device the page's own items
-        // did not move at all once it was off, which is what it looks
-        // like when that value never reaches the content process. This
-        // path - additionalSafeAreaInsets -> UIKit safe area -> Gecko
-        // safe area -> env(safe-area-inset-bottom) - is the one that
-        // was observed working on main.
-        let pageReservesSpace = tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-        // OFF. The dynamic toolbar max now reserves the pill's clearance
-        // through the ICB, so inflating env(safe-area-inset-bottom) by
-        // the same amount would reserve it twice.
-        let shouldInflate = false && browserChrome.isScrollCondensed && pageReservesSpace
-
-        guard shouldInflate else {
-            additionalSafeAreaInsets.bottom = 0
-            return
-        }
-        
-        // CHANGED - computed from the pill's real position rather than
-        // a fixed constant. See fix_repin_pill_to_screen_bottom.py.
-        //
-        // The window's inset is used rather than the view's
-        // deliberately: additionalSafeAreaInsets feeds back into the
-        // view's own safeAreaInsets, so reading it here would be
-        // circular. The window reports the device's true inset and is
-        // unaffected by what we set below - which also makes this
-        // device-independent rather than assuming any particular
-        // home-indicator height.
-        let deviceBottomInset = view.window?.safeAreaInsets.bottom ?? 0
-        additionalSafeAreaInsets.bottom = max(0, BrowserChrome.condensedPillContentBoundary - deviceBottomInset)
+    /// The content view's bottom anchor while the toolbar is condensed to
+    /// the pill: pinned above the pill for pages that reserve the space
+    /// themselves (usesSafeAreaInsetCSS), otherwise the true window
+    /// bottom, with the pill floating over the page.
+    ///
+    /// Shared by applyPhoneLayout and applyCompactLayout so the two can
+    /// never decide it differently - divergent copies of this exact
+    /// condition are what once gave every page the reserved strip
+    /// (fix_per_tab_artificial_safe_area_inset.py). The old
+    /// additionalSafeAreaInsets path that used to duplicate this was
+    /// inert (guarded by `false`) and has been removed; the reservation
+    /// is now entirely the content anchor here plus the
+    /// env(safe-area-inset-bottom) reported by updateDynamicToolbarMaxHeight.
+    private var condensedContentBottomAnchor: NSLayoutYAxisAnchor {
+        tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
+            ? browserChrome.condensedPillTopAnchor
+            : view.bottomAnchor
     }
     
     private func applyCompactLayout() {
@@ -613,9 +564,7 @@ final class BrowserViewController: UIViewController {
             // explicitly rather than left to the toolbar's own bounds.
             // Same two-rule reasoning as applyPhoneLayout above.
             bottomAnchor: browserChrome.isScrollCondensed
-            ? (tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-                ? browserChrome.condensedPillTopAnchor
-                : view.bottomAnchor)
+            ? condensedContentBottomAnchor
             : browserChrome.bottomToolbarTopAnchor
         )
         setTabBarVisible(false)
@@ -710,7 +659,9 @@ final class BrowserViewController: UIViewController {
     //
     // Condensed is therefore all-or-nothing: as far as Gecko is concerned
     // the toolbar is gone, content underlays the pill, and the strip above
-    // the pill is reserved by updateArtificialSafeAreaInset instead.
+    // the pill is reserved by the env(safe-area-inset-bottom) that
+    // updateDynamicToolbarMaxHeight reports, plus the content anchor in
+    // condensedContentBottomAnchor.
     private func updateDynamicToolbarOffset() {
         // Always 0, which keeps the state Expanded.
         //

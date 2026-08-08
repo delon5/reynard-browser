@@ -1361,7 +1361,71 @@ extension TabManagerImplementation: NavigationDelegate {
         notifyUpdate(at: location.index, mode: location.mode, reason: .location)
         scheduleFaviconUpdate(forTabAt: location.index, mode: location.mode)
         persistState()
-        
+
+        // Re-detect on location change, not only at PageStop. Facebook,
+        // YouTube and Reddit are single-page apps: moving from the feed
+        // to messages swaps the whole bottom of the page - adding or
+        // removing a composer - through pushState, which fires this but
+        // never fires another PageStop. Without this the tab keeps the
+        // verdict from its first load, which is exactly the case where
+        // the composer ended up behind the pill.
+        //
+        // Cheap enough to repeat: the detector short-circuits on the
+        // first matching stylesheet rule, and its fallback is three
+        // elementFromPoint probes regardless of DOM size.
+        detectSafeAreaInsetUsage(for: tab, session: session, reason: "locationChange")
+    }
+
+    /// Asks the content process whether this page reserves space at the
+    /// bottom - either through env(safe-area-inset-bottom) in CSS the
+    /// scan can read, or by having a real bottom bar pinned there - so
+    /// the condensed pill knows whether to reserve a strip above itself.
+    /// See fix_native_safe_area_detection.py.
+    ///
+    /// PageStop rather than an earlier hook deliberately: the previous
+    /// WebExtension scanned at document_idle, which on a heavy site runs
+    /// before the CSS it is looking for exists. By PageStop, loading is
+    /// genuinely complete. Also runs on location change for SPA routes,
+    /// which never reach PageStop again.
+    ///
+    /// The pill reads the result lazily when it is about to condense, so
+    /// this triggers no relayout by itself.
+    private func detectSafeAreaInsetUsage(
+        for tab: Tab,
+        session: GeckoSession,
+        reason: String
+    ) {
+        Task { @MainActor in
+            // DIAGNOSTIC - see
+            // fix_log_safe_area_detection_result.py. Without this the
+            // log is silent whether the query succeeds, returns false,
+            // or fails outright, since dispatcher.query is wrapped in
+            // try? and nil is treated as "no answer". That made a
+            // missing actor case indistinguishable from a page that
+            // simply does not use safe-area CSS.
+            if let usesSafeAreaInset = await session.usesSafeAreaInsetCSS() {
+                let changed = tab.state.usesSafeAreaInsetCSS != usesSafeAreaInset
+                logger(String(format: "safeArea: tab %@ usesSafeAreaInset=%@ (%@%@)",
+                              tab.id.uuidString,
+                              usesSafeAreaInset ? "YES" : "NO",
+                              reason,
+                              changed ? ", CHANGED" : ""))
+                tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
+
+                // Only relayout when the verdict actually moved, and
+                // only for the tab on screen - an SPA route change in a
+                // background tab must not disturb the visible one.
+                if changed, self.selectedTab === tab {
+                    self.delegate?.tabManagerDidUpdateSafeAreaUsage(self)
+                }
+            } else {
+                // Only this case indicates something is actually wrong -
+                // the actor case missing from the build, or the query
+                // failing. The existing value is deliberately left
+                // alone rather than being overwritten with a guess.
+                logger(String(format: "safeArea: tab %@ - no answer from the content process (%@)", tab.id.uuidString, reason))
+            }
+        }
     }
 
     
@@ -1628,26 +1692,8 @@ extension TabManagerImplementation: ProgressDelegate {
         //
         // The pill reads this lazily when it is about to condense, so
         // no relayout is triggered here.
-        Task { @MainActor in
-            // DIAGNOSTIC - see
-            // fix_log_safe_area_detection_result.py. Without this the
-            // log is silent whether the query succeeds, returns false,
-            // or fails outright, since dispatcher.query is wrapped in
-            // try? and nil is treated as "no answer". That made a
-            // missing actor case indistinguishable from a page that
-            // simply does not use safe-area CSS.
-            if let usesSafeAreaInset = await session.usesSafeAreaInsetCSS() {
-                logger(String(format: "safeArea: tab %@ usesSafeAreaInset=%@", tab.id.uuidString, usesSafeAreaInset ? "YES" : "NO"))
-                tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
-            } else {
-                // Only this case indicates something is actually wrong -
-                // the actor case missing from the build, or the query
-                // failing. The existing value is deliberately left
-                // alone rather than being overwritten with a guess.
-                logger(String(format: "safeArea: tab %@ - no answer from the content process", tab.id.uuidString))
-            }
-        }
-        
+        detectSafeAreaInsetUsage(for: tab, session: session, reason: "pageStop")
+
         notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
         notifyUpdate(at: location.index, mode: location.mode, reason: .thumbnail)
         delegate?.tabManager(self, didFinishLoading: session)

@@ -38,40 +38,12 @@ final class BrowserChrome: UIView {
     /// against this value.
     private static let condensedPillClearanceBuffer: CGFloat = 32
     
-    /// The artificial safe-area boundary reported to web content's own
-    /// CSS while condensed, via additionalSafeAreaInsets — computed from
-    /// the pill's actual height and margin rather than an independent
-    /// hardcoded number, so it can never silently drift out of sync with
-    /// the pill's real size.
-    /// Breathing room between the bottom of a page's own content and
-    /// the top of the pill, on pages that reserve space. Only affects
-    /// that gap - it does not move the pill.
-    static let condensedPillContentGap: CGFloat = 8
-    
-    /// How far above the physical screen bottom a page's content should
-    /// stop, on pages using env(safe-area-inset-bottom) - just above
-    /// the pill.
-    ///
-    /// CHANGED - see fix_repin_pill_to_screen_bottom.py. Previously
-    /// this was `height + margin - clearanceBuffer`, which assumed the
-    /// pill was positioned against the safe area guide. It is now
-    /// pinned to the view's real bottom, so the strip is measured from
-    /// there instead. This is a distance from the screen bottom, NOT an
-    /// inset to add directly - the caller subtracts whatever the device
-    /// already reports.
     /// Pill height plus its bottom margin - how much of the screen the
     /// condensed chrome occupies. Reported to Gecko as the dynamic
     /// toolbar max, which shrinks the ICB by exactly this much, so
     /// document content ends level with the pill's top edge.
-    ///
-    /// Deliberately without condensedPillContentGap: that gap belongs to
-    /// the env(safe-area-inset-bottom) path, which is now off.
     static var condensedPillOccupiedHeight: CGFloat {
         return condensedPillBottomMargin + CondensedAddressPill.height
-    }
-    
-    static var condensedPillContentBoundary: CGFloat {
-        condensedPillBottomMargin + CondensedAddressPill.height + condensedPillContentGap
     }
     private enum UX {
         static let overlayTopSpacing: CGFloat = 12

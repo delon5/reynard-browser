@@ -37,6 +37,18 @@ extension GeckoEventListenerInternal {
 
 public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     static var runtimeInstance = GeckoEventDispatcherWrapper()
+
+    /// Named dispatchers, created on demand and kept for the process
+    /// lifetime.
+    ///
+    /// Deliberately never pruned. The keys come from the engine's own
+    /// EventDispatcher.byName() (Messaging.sys.mjs -> nsIOSBridge
+    /// ::GetDispatcherByName -> `dispatcherByName:` here), which names a
+    /// small, fixed set of modules rather than anything per-tab or
+    /// per-session, so this cannot grow with usage. Each entry is also a
+    /// long-lived endpoint the engine expects to resolve to the SAME
+    /// object on every lookup - dropping one would silently detach any
+    /// listener already registered against it.
     static var dispatchers: [String: GeckoEventDispatcherWrapper] = [:]
     
     struct QueuedMessage {
