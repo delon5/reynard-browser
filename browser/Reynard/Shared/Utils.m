@@ -76,15 +76,19 @@ int spawnRoot(NSString *path, NSArray<NSString *> *args) {
     for (NSUInteger index = 0; index < argCount; index++) free(argv[index]);
     free(argv);
     
-    if (spawnError != 0) return spawnError;
-    
+    if (spawnError != 0) return -spawnError;
+
     int status = 0;
     do {
         if (waitpid(taskPID, &status, 0) == -1) {
             if (errno == EINTR) continue;
-            return errno;
+            return -errno;
         }
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-    
+
+    // WEXITSTATUS is undefined for a signaled child, so it must not be
+    // read here - encode the signal shell-style instead.
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+
     return WEXITSTATUS(status);
 }

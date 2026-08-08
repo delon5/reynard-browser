@@ -56,6 +56,18 @@ final class JITController {
     // each on processes that have no use for JIT. Only ever touched on
     // attachQueue, same as attachedPIDs.
     private var rejectedPIDs: Set<Int32> = []
+    // Guarded by preflightWatchdogLock, NOT attachQueue: scheduling
+    // happens on attachQueue but cancellation happens from
+    // attachToProcess, which mostly runs on the CONCURRENT
+    // attachWorkQueue - an unsynchronized Dictionary mutated from both
+    // is a data race. A lock rather than hopping the cancel onto
+    // attachQueue, deliberately: the watchdog-retry path can block
+    // attachQueue for a full bounded attach, and a cancel queued
+    // behind that would arrive after the watchdog had already fired
+    // and burned the single-use ReportJITStatusForChild pipe with a
+    // false FALSE. The lock keeps cancellation synchronous from any
+    // queue; DispatchWorkItem.cancel() itself is thread-safe.
+    private let preflightWatchdogLock = NSLock()
     private var preflightWatchdogs: [Int32: DispatchWorkItem] = [:]
     // Moved here from the Helper Process Attach Delegation extension
     // below - Swift extensions cannot contain stored properties, a
@@ -70,8 +82,8 @@ final class JITController {
     private var isProcessingHelperAttachRequests = false
     // Only ever touched from within the watchdog closure below, which
     // always runs on watchdogQueue - single-queue access, no lock
-    // needed, consistent with how preflightWatchdogs/attachedPIDs are
-    // themselves always touched only from attachQueue.
+    // needed, consistent with how attachedPIDs is itself always
+    // touched only from attachQueue.
     private var retriedWatchdogPIDs: Set<Int32> = []
     private var hasHandledFailure = false
     
@@ -130,6 +142,7 @@ final class JITController {
     /// applies that to attaches.
     func reattachOrphanedProcesses() {
         attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
             // CHANGED - the three counts are computed and logged
             // separately, unconditionally. See
             // fix_unconditional_reattach_logging.py.
@@ -174,6 +187,7 @@ final class JITController {
     /// See fix_defer_attaches_while_inactive.py.
     func applicationWillResignActive() {
         attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.isApplicationActive = false
         }
     }
@@ -181,8 +195,9 @@ final class JITController {
     /// Attaches anything that arrived while inactive.
     func applicationDidBecomeActive() {
         attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.isApplicationActive = true
-            
+
             let deferred = self.pendingAttachPIDs
             self.pendingAttachPIDs.removeAll()
             
@@ -378,6 +393,7 @@ final class JITController {
             // wastefully attach this process a second later - see
             // fix_dedupe_attach_paths.py's docstring.
             attachQueue.async {
+                dispatchPrecondition(condition: .onQueue(self.attachQueue))
                 self.rejectedPIDs.insert(pid)
             }
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
@@ -387,6 +403,7 @@ final class JITController {
         logger(String(format: "childProcessDidStart: pid %d passed all guards, queueing native attach", pid))
         
         attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
             if self.attachedPIDs.contains(pid) {
                 // Silent until now, and the liveness check that made it
                 // safe was reverted in f795d87, so a reused pid lands
@@ -699,7 +716,10 @@ final class JITController {
             guard let self else {
                 return
             }
-            
+
+            // retriedWatchdogPIDs below is confined to watchdogQueue.
+            dispatchPrecondition(condition: .onQueue(self.watchdogQueue))
+
             guard let watchdog, !watchdog.isCancelled else {
                 return
             }
@@ -744,18 +764,26 @@ final class JITController {
             return
         }
         
+        preflightWatchdogLock.lock()
         preflightWatchdogs[pid] = watchdog
+        preflightWatchdogLock.unlock()
         watchdogQueue.asyncAfter(deadline: .now() + .seconds(preflightTimeoutSeconds), execute: watchdog)
     }
-    
+
     private func cancelPreflightWatchdog(for pid: Int32) {
-        preflightWatchdogs[pid]?.cancel()
-        preflightWatchdogs.removeValue(forKey: pid)
+        preflightWatchdogLock.lock()
+        let watchdog = preflightWatchdogs.removeValue(forKey: pid)
+        preflightWatchdogLock.unlock()
+        watchdog?.cancel()
     }
-    
+
     private func cancelAllPreflightWatchdogs() {
-        for pid in preflightWatchdogs.keys {
-            cancelPreflightWatchdog(for: pid)
+        preflightWatchdogLock.lock()
+        let watchdogs = Array(preflightWatchdogs.values)
+        preflightWatchdogs.removeAll()
+        preflightWatchdogLock.unlock()
+        for watchdog in watchdogs {
+            watchdog.cancel()
         }
     }
     
@@ -874,6 +902,7 @@ final class JITController {
         }
         
         attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
             if success {
                 if self.isTunnelUnavailable {
                     logger("tunnelHealth: an attach succeeded - tunnel is back, clearing the degraded state")
@@ -901,6 +930,7 @@ final class JITController {
         
         isJITLessModeActive = true
         attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.cancelAllPreflightWatchdogs()
             self.attachedPIDs.removeAll()
             JITEnabler.shared.detachAllJITSessions()
@@ -1044,6 +1074,10 @@ extension JITController {
     // assumes exactly one request is waiting. Also opportunistically
     // prunes stale, abandoned result files every time it runs.
     fileprivate func processPendingHelperAttachRequests() {
+        // isProcessingHelperAttachRequests is unsynchronized and relies
+        // on every caller being on the main thread - enforce that
+        // instead of assuming it.
+        dispatchPrecondition(condition: .onQueue(.main))
         if isProcessingHelperAttachRequests {
             return
         }
@@ -1059,7 +1093,9 @@ extension JITController {
             guard let self, let containerURL = self.appGroupContainerURL() else {
                 return
             }
-            
+
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
+
             let fileManager = FileManager.default
             
             // CHANGED - loops until a full scan finds nothing pending,

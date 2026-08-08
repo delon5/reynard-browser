@@ -180,9 +180,13 @@ static void jitHangBacktraceHandler(int signalNumber) {
         int result = spawnRoot(helperPath, @[[NSString stringWithFormat:@"%d", pid]]);
         logger([NSString stringWithFormat:@"ptrace_jit result %d", result]);
         
-        if (result != 0 && result != EACCES && result != ENOENT && result != ENOEXEC && result != 126 && result != 127) {
-            // keep existing behavior for non-permission failures
-        } else if (result == EACCES || result == ENOENT || result == ENOEXEC || result == 126 || result == 127) {
+        // spawnRoot returns -errno when the helper could not be launched
+        // at all - the only failures a copy-to-temp retry can help with.
+        // 126/127 are kept for the shell convention ("found but not
+        // executable" / "not found"). Positive child exit codes that
+        // merely collide with errno values (a helper exiting 2 or 13)
+        // no longer land here.
+        if (result == -EACCES || result == -ENOENT || result == -ENOEXEC || result == 126 || result == 127) {
             // Was ReynardDirectoriesBridge.jitTemporaryPath — that
             // required Reynard-Swift.h, the main app target's own
             // private bridging header, unavailable now that this file
@@ -210,6 +214,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
                 logger([NSString stringWithFormat:@"Failed to copy ptrace_jit to temp path: %@", copyError.localizedDescription ?: @"unknown"]);
             }
         }
+        // 128+N is spawnRoot's encoding for "killed by signal N" -
+        // previously this read WEXITSTATUS of a signaled child, which is
+        // undefined and usually 0, so a signal-killed helper could be
+        // reported as success.
         if (result >= 128) {
             if (error) *error = MakeError(TSPtraceHelperTerminated);
             return NO;

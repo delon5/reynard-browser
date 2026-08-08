@@ -147,18 +147,28 @@ final class GeckoAutofillHandler: NSObject, GeckoSessionHandlerCommon {
     }
     
     // Call to GeckoEditableSupport.mm
+    //
+    // These selectors are implemented by the separately-built, patched
+    // Gecko - if a Gecko update renames one, a release build must ship
+    // a browser without autofill, not one that crashes on every field
+    // focus. assertionFailure still stops debug builds at the exact
+    // mismatch.
     func attach(to view: UIView) {
         let selector = NSSelectorFromString("setAutofillDelegate:")
         guard view.responds(to: selector) else {
-            fatalError("Unimplemented")
+            assertionFailure("Gecko view no longer responds to setAutofillDelegate:")
+            NSLog("GeckoAutofillHandler: setAutofillDelegate: missing - autofill disabled")
+            return
         }
         view.perform(selector, with: self)
     }
-    
+
     func detach(from view: UIView) {
         let selector = NSSelectorFromString("setAutofillDelegate:")
         guard view.responds(to: selector) else {
-            fatalError("Unimplemented")
+            assertionFailure("Gecko view no longer responds to setAutofillDelegate:")
+            NSLog("GeckoAutofillHandler: setAutofillDelegate: missing - nothing to detach")
+            return
         }
         view.perform(selector, with: nil)
     }
@@ -301,7 +311,9 @@ final class GeckoAutofillHandler: NSObject, GeckoSessionHandlerCommon {
         }
         let selector = NSSelectorFromString("setInputDelegate:")
         guard view.responds(to: selector) else {
-            fatalError("Unimplemented")
+            assertionFailure("Gecko view no longer responds to setInputDelegate:")
+            NSLog("GeckoAutofillHandler: setInputDelegate: missing - skipping input document discard")
+            return
         }
         view.perform(selector, with: nil)
     }
@@ -314,7 +326,9 @@ final class GeckoAutofillHandler: NSObject, GeckoSessionHandlerCommon {
         }
         let selector = NSSelectorFromString("activatePasswordInputForAutofill")
         guard view.responds(to: selector) else {
-            fatalError("Unimplemented")
+            assertionFailure("Gecko view no longer responds to activatePasswordInputForAutofill")
+            NSLog("GeckoAutofillHandler: activatePasswordInputForAutofill missing - skipping")
+            return
         }
         view.perform(selector)
     }

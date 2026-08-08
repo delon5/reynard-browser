@@ -206,10 +206,20 @@ final class BrowserViewController: UIViewController {
             // condensedContentBottomAnchor, which gates on the selected
             // tab's own env(safe-area-inset-bottom) usage.
             //
+            // The reservation has to be re-sent too, and this is the only
+            // place that can: how much chrome the page must clear differs
+            // between the full toolbar and the pill, but condensing
+            // changes no view frame, so viewDidLayoutSubviews - the only
+            // other caller - does not necessarily run. Without this the
+            // engine keeps whichever reservation it was last given and
+            // page content stays at the expanded height while the chrome
+            // shrinks to the pill, which is exactly what Facebook showed.
+            //
             // Deliberately not animated: content's resize is snapped
             // instantly, before the (separately animated) chrome fade
             // begins, so GeckoView gets its real final size immediately
             // rather than a continuously-changing target.
+            self.updateDynamicToolbarMaxHeight()
             self.updateDynamicToolbarOffset()
             self.applyBrowserLayout(animated: false)
         }
@@ -659,7 +669,32 @@ final class BrowserViewController: UIViewController {
         // The inset is the gentler of the two, since the page keeps the
         // full viewport and paints its own background behind the pill, so
         // it is preferred wherever the page is known to read env().
-        let usesInset = tabManager.selectedTab?.state.bottomReservation == .readsSafeAreaInset
+        // Three cases, not two. An earlier revision wrote this as "is it
+        // an env() reader, yes or no", which put BOTH the not-yet-detected
+        // case (nil, every page while it is still loading) and the
+        // nothing-pinned case into the viewport-shortening branch - so it
+        // silently turned viewport shortening on for the entire web, where
+        // before the max was always 0. On device that stopped YouTube
+        // rendering at all.
+        //
+        // Unknown and none therefore reserve NOTHING, which is this app's
+        // established behaviour: the page keeps the full viewport and the
+        // pill floats over it.
+        let reservationMode = tabManager.selectedTab?.state.bottomReservation
+        let insetTarget: CGFloat
+        let maxTarget: CGFloat
+        switch reservationMode {
+        case .some(.readsSafeAreaInset):
+            insetTarget = target
+            maxTarget = 0
+        case .some(.hasBottomBar):
+            insetTarget = 0
+            maxTarget = target
+        default:
+            // Not detected yet, or nothing pinned at the bottom.
+            insetTarget = 0
+            maxTarget = 0
+        }
 
         // NO device inset added. env(safe-area-inset-bottom) is measured
         // from the window's bottom edge, and so is the chrome: the pill is
@@ -671,8 +706,8 @@ final class BrowserViewController: UIViewController {
         // while the inset never reached the content process at all (see
         // the BrowserChild.cpp safe-area patch), so it was compensating
         // for that bug rather than for real geometry.
-        contentView.setSafeAreaInsetBottom(usesInset ? target : 0)
-        contentView.setDynamicToolbarMaxHeight(usesInset ? 0 : target)
+        contentView.setSafeAreaInsetBottom(insetTarget)
+        contentView.setDynamicToolbarMaxHeight(maxTarget)
 
         // Store the target rather than what was sent, so the guard above
         // converges - storing 0 meant it never tripped and this ran on
