@@ -1385,6 +1385,33 @@ extension TabManagerImplementation: NavigationDelegate {
         }
 
         detectSafeAreaInsetUsage(for: tab, session: session, reason: "locationChange")
+
+        // A first-ever visit has nothing remembered, and at this instant
+        // the new document usually has neither its stylesheets parsed nor
+        // its bottom bar built - the detector answers "no" and the page
+        // then settles into something else, which is why such a load
+        // needed a manual refresh to come good.
+        //
+        // These re-asks let it settle by itself. The detector is cheap
+        // (a stylesheet scan that short-circuits on the first match, else
+        // three elementFromPoint probes regardless of DOM size) and only
+        // triggers a relayout when the verdict actually moves, so a page
+        // that was already right pays nothing but the query.
+        //
+        // Spread rather than repeated at one delay because sites differ
+        // by an order of magnitude in when their chrome appears: a static
+        // page is done by 400ms, an SPA that builds its nav bar after
+        // hydration often is not settled before ~2s.
+        for delay in [0.4, 1.2, 2.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak tab, weak session] in
+                guard let self, let tab, let session,
+                      self.tabLocation(for: session) != nil else {
+                    return
+                }
+                self.detectSafeAreaInsetUsage(
+                    for: tab, session: session, reason: "settle+\(delay)s")
+            }
+        }
     }
 
     /// Asks the content process whether this page reserves space at the

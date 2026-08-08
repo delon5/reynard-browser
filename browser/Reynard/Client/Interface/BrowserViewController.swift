@@ -623,26 +623,23 @@ final class BrowserViewController: UIViewController {
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
         
-        // The PILL's clearance, always - deliberately not the expanded
-        // toolbar's height, and deliberately independent of
-        // isScrollCondensed.
+        // Whichever chrome is actually on screen: the full toolbar while
+        // expanded, the pill once condensed. Content therefore clears
+        // whatever is actually covering it, rather than being hidden
+        // behind the expanded toolbar.
         //
-        // Following the condensed state meant this value flipped between
-        // the two heights on every scroll direction change, and each flip
-        // re-reported env(safe-area-inset-bottom), which runs
-        // PostRebuildAllStyleDataEvent(RestyleHint::RecascadeSubtree()) -
-        // a full style recascade of the document. A device log showed 414
-        // such flips in nine minutes, some 0.45s apart, on pages as heavy
-        // as YouTube and Facebook. That is the jank where content appears
-        // to drift and lose its hold while scrolling.
-        //
-        // A constant removes the churn entirely: the page is laid out once
-        // and never restyled by chrome movement. It is also what this
-        // file's own comment above already describes - the pill is the
-        // only chrome that persists, the expanded toolbar covers content
-        // rather than reserving space for it ("underlay the bottom
-        // toolbar") and hides on scroll anyway.
-        let target = hasBottomToolbar ? BrowserChrome.condensedPillOccupiedHeight : 0
+        // This does mean the reported env(safe-area-inset-bottom) changes
+        // on a scroll direction flip, and each change costs a
+        // RecascadeSubtree in content. Accepted deliberately: it is one
+        // restyle per flip, not per frame, and it is the pre-existing
+        // behaviour that never drew a complaint - the scroll jank
+        // reported during this work traced to the viewport-shortening
+        // path (which forced a resize reflow on top), not to this.
+        let expandedHeight = BottomToolbar.expandedContentHeight + (view.window?.safeAreaInsets.bottom ?? 0)
+        let chromeHeight = browserChrome.isScrollCondensed
+            ? BrowserChrome.condensedPillOccupiedHeight
+            : expandedHeight
+        let target = hasBottomToolbar ? chromeHeight : 0
 
         // The mode is part of the state, not just the height: a page can
         // flip between reading env() and merely having a bar - an SPA
