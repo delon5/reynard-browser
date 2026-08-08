@@ -688,8 +688,30 @@ final class BrowserViewController: UIViewController {
             insetTarget = target
             maxTarget = 0
         case .some(.hasBottomBar):
-            insetTarget = 0
-            maxTarget = target
+            // The INSET, not viewport shortening - see the device
+            // evidence below.
+            //
+            // This case means "something is pinned to the bottom edge,
+            // and the readable CSS does not mention env()". It does NOT
+            // mean the page ignores env(): most large sites serve their
+            // CSS from a CDN, and a cross-origin stylesheet throws on
+            // .cssRules, so the scan cannot see usage that is really
+            // there. YouTube is exactly that - it lands here, yet it
+            // demonstrably responds to the inset (it moved, and was
+            // over-reserved, before the +38 double-count was removed).
+            //
+            // Shortening the viewport for this case rendered YouTube into
+            // a box smaller than the window: a black band above the page
+            // header and the page ending short of the pill, with window
+            // background showing through at both ends.
+            //
+            // So the inset is the default for any detected page. It is
+            // the gentler mechanism - the page keeps the full viewport and
+            // paints its own background behind the pill - and a page that
+            // genuinely does not read env() is simply left where it was
+            // rather than being mis-rendered.
+            insetTarget = target
+            maxTarget = 0
         default:
             // Not detected yet, or nothing pinned at the bottom.
             insetTarget = 0
