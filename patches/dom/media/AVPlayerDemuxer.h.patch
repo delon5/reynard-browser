@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.h b/dom/media/AVPlayerDemuxer.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,100 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -43,6 +43,28 @@ new file mode 100644
 +      TrackInfo::TrackType aType, uint32_t aTrackNumber) override;
 +
 +  bool IsSeekable() const override;
++
++  // MediaFormatReader will not resolve its metadata promise until every
++  // active track has a first demuxed sample time, and GetSamples here
++  // always rejects with END_OF_STREAM - the frames come from the
++  // AVPlayer, not from samples passing through this demuxer. Left at
++  // the default true, OnDemuxerInitDone calls RequestDemuxSamples,
++  // OnDemuxFailed takes the END_OF_STREAM branch and notifies end of
++  // stream without ever setting mFirstDemuxedSampleTime, and
++  // MaybeResolveMetadataPromise returns early forever.
++  //
++  // The element therefore never leaves HAVE_NOTHING, and nsVideoFrame
++  // paints nothing however correct the frame sitting in its
++  // VideoFrameContainer is. Device captures showed exactly that: the
++  // placeholder published at the asset's real dimensions with
++  // planes=2, metadata delivered, and a black screen - which stayed
++  // black when the placeholder was filled magenta to tell the two
++  // apart.
++  //
++  // Returning false takes MediaFormatReader's other branch, where both
++  // tracks get a start time of zero without a sample - the same one MSE
++  // uses, and for the same reason: the samples do not come from here.
++  bool ShouldComputeStartTime() const override { return false; }
 +
 +  // AVFoundation reports the real duration once the asset loads; until
 +  // then the element sees an unknown duration rather than zero.
