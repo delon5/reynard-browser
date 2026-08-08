@@ -222,7 +222,65 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.setApplicationForeground(false)
         browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
-        
+
+        // Everything below runs AFTER this notification returns, not
+        // inside it. See fix_defer_background_teardown.py.
+        //
+        // ExtensionFoundation observes didEnterBackground too, and its
+        // handler synchronously XPCs every extension it hosts
+        // (-[EXConcreteExtension _hostDidEnterBackgroundNote:] ->
+        // dispatch_sync -> NSXPCConnection sendSelector). Our content
+        // processes ARE those extensions. Closing their sessions from
+        // inside the same notification leaves that handler messaging
+        // processes that are already exiting, and it blocks the main
+        // thread until the 10s scene-update budget runs out.
+        //
+        // Two device captures, identical stack, one with PiP active and
+        // one without - so it is the teardown, not PiP:
+        //
+        //   [TabMemory] Sleeping backgrounded tab sessions
+        //   Exiting due to channel error.   x11 and x12
+        //   0x8BADF00D  ... _hostDidEnterBackgroundNote: ... mach_msg
+        //
+        // b7d7ba3's processExitTrace confirms the ordering: every
+        // deliberate close logs a BrowserParent/ContentParent pair, and
+        // those eleven exits logged NOTHING - the parent never reached
+        // them, because it was already blocked.
+        //
+        // The assertion is taken NOW, synchronously, so iOS grants the
+        // runtime for work that no longer happens before this method
+        // returns. The block's internal order is untouched: tabs are
+        // still slept before the detach flags are set
+        // (fix_sleep_tabs_before_detach.py), which is a separate
+        // constraint from this one.
+        let teardownApplication = UIApplication.shared
+        var teardownTask = UIBackgroundTaskIdentifier.invalid
+        teardownTask = teardownApplication.beginBackgroundTask(withName: "BackgroundTeardown") {
+            if teardownTask != .invalid {
+                teardownApplication.endBackgroundTask(teardownTask)
+                teardownTask = .invalid
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            defer {
+                if teardownTask != .invalid {
+                    teardownApplication.endBackgroundTask(teardownTask)
+                    teardownTask = .invalid
+                }
+            }
+            guard let self else {
+                return
+            }
+            self.performBackgroundTeardown(for: browserViewController)
+        }
+    }
+
+    /// The backgrounding teardown, deferred off the didEnterBackground
+    /// notification - see sceneDidEnterBackground for why. The order
+    /// within this method is load-bearing and unchanged.
+    private func performBackgroundTeardown(for browserViewController: BrowserViewController) {
+
         // Release any content process the debugger is holding stopped,
         // before iOS suspends us and the tunnel dies. A Helper left
         // stopped cannot answer the synchronous XPC iOS sends every
