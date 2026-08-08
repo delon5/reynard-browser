@@ -26,6 +26,12 @@ final class SessionManager {
     
     private var sessionsRequestedActive: [ObjectIdentifier: GeckoSession] = [:]
     private var isApplicationForeground = true
+    // Tracks the resign/become-active pair, which is narrower than
+    // foreground/background: Control Centre, the app switcher and the
+    // lock screen all resign active while still foreground. The commit
+    // latch keys on this because the compositor-vs-UIKit CA race lives
+    // in exactly those transitions.
+    private var isPhoneSceneActive = true
     private weak var pictureInPictureSession: GeckoSession?
     
     /// Whether this session is the one Picture in Picture is rendering
@@ -119,6 +125,13 @@ final class SessionManager {
             return
         }
         sessionsRequestedActive[ObjectIdentifier(session)] = session
+        // Keep the commit latch consistent for sessions that enter the
+        // active set after the scene-wide sweep ran - without this, a
+        // session activated mid-transition could carry a stale latch
+        // and render frozen, or commit while the scene is inactive.
+        session.setOffMainThreadCommitsSuspended(
+            !isPhoneSceneActive && !isCommitLatchExempt(session)
+        )
         // isApplicationForeground alone would DEACTIVATE a session
         // activated while backgrounded. Harmless for a tab, but it is how
         // a session that must keep running gets throttled the moment
@@ -178,11 +191,53 @@ final class SessionManager {
     }
     
     func applicationWillResignActive() {
+        setCommitsSuspendedForPhoneHostedSessions(true)
         applicationStateObserver?.sessionManagerWillResignActive(self)
     }
-    
+
     func applicationDidBecomeActive() {
+        setCommitsSuspendedForPhoneHostedSessions(false)
         applicationStateObserver?.sessionManagerDidChangeApplicationState(self)
+    }
+
+    /// Latches compositor CoreAnimation commits off for phone-hosted
+    /// sessions while the phone scene is inactive, and back on when it
+    /// returns.
+    ///
+    /// A commit made on Gecko's compositor thread flushes any layer
+    /// with pending layout in the phone display's CA context -
+    /// including UIKit's own windows - and UIKit's Auto Layout engine
+    /// aborts the app when that happens off the main thread. Observed
+    /// on device as NSInternalInconsistencyException in
+    /// _AssertAutoLayoutOnAllowedThreadsOnly under
+    /// NativeLayerRootCA::CommitToScreen, during a
+    /// background-to-foreground transition with the keyboard window's
+    /// layout pending.
+    ///
+    /// Exempt, deliberately: the Picture in Picture session, because
+    /// its video frames ride these commits, and the CarPlay session,
+    /// because it renders to the car display's own CA context - which
+    /// the crash cannot involve - and car video must keep playing
+    /// while the phone is locked.
+    private func setCommitsSuspendedForPhoneHostedSessions(_ suspended: Bool) {
+        isPhoneSceneActive = !suspended
+        for session in sessionsRequestedActive.values {
+            session.setOffMainThreadCommitsSuspended(
+                suspended && !isCommitLatchExempt(session)
+            )
+        }
+    }
+
+    private func isCommitLatchExempt(_ session: GeckoSession) -> Bool {
+        if session === pictureInPictureSession {
+            return true
+        }
+        // CarPlay scenes require iOS 14; on 13 there is nothing to
+        // exempt.
+        if #available(iOS 14.0, *) {
+            return session === CarPlaySceneDelegate.currentSession
+        }
+        return false
     }
     
     func close(_ session: GeckoSession) {

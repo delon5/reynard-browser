@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
-index e68fca9..2de13df 100644
+index e68fca9134c0..5f76bc9d5a00 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
 @@ -18,14 +18,73 @@
@@ -76,7 +76,7 @@ index e68fca9..2de13df 100644
  @end
  
  @protocol GeckoProcessExtension <NSObject>
-@@ -56,6 +115,19 @@
+@@ -56,7 +115,30 @@
  
  @protocol GeckoViewWindow <NSObject>
  - (UIView*)view;
@@ -94,9 +94,20 @@ index e68fca9..2de13df 100644
 +                      bottom:(CGFloat)bottom
 +                        left:(CGFloat)left;
  - (void)close;
++@optional
++// Latches the compositor's off-main-thread CoreAnimation commits off
++// for this window while its hosting scene is inactive - see
++// nsWindow::SetEmbedderCommitsSuspended for the full reasoning (UIKit
++// Auto Layout hard-asserts when a compositor-thread commit flushes a
++// UIKit window's pending layout). Never latched for windows on the
++// CarPlay display or feeding Picture in Picture, which must keep
++// rendering while the phone is locked. Optional so the app keeps
++// building against an engine artifact predating this method.
++- (void)setOffMainThreadCommitsSuspended:(BOOL)suspended;
  @end
  
-@@ -65,6 +137,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+ MOZ_BEGIN_EXTERN_C
+@@ -65,6 +147,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

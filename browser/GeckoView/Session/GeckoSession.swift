@@ -342,6 +342,18 @@ public class GeckoSession {
     public func setFocused(_ focused: Bool) {
         dispatcher.dispatch(type: "GeckoView:SetFocused", message: ["focused": focused])
     }
+
+    /// Latches the compositor's off-main-thread CoreAnimation commits
+    /// for this session's window. Used while the phone scene is
+    /// inactive: a compositor-thread commit flushes any layer with
+    /// pending layout in the same CA context - including UIKit's own
+    /// windows - and UIKit's Auto Layout engine aborts the app when
+    /// that happens off the main thread. An optional protocol
+    /// requirement, so this no-ops against an engine artifact built
+    /// before the method existed.
+    public func setOffMainThreadCommitsSuspended(_ suspended: Bool) {
+        window?.setOffMainThreadCommitsSuspended?(suspended)
+    }
     
     // MARK: - Session State
     
