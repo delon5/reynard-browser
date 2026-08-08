@@ -1149,6 +1149,67 @@ extension JITController {
                     } else if self.ledger.isAttached(pid) {
                         skipReason = "already attached by the native path"
                     }
+
+                    // NOT folded into skipReason above: that branch replies
+                    // "success", and telling a child JIT is ready when
+                    // nothing attached is worse than telling it no. It would
+                    // keep JIT enabled with no W^X mediation behind it, and
+                    // the first write into the executable region would take
+                    // a SIGBUS. A failure reply drops the child to the
+                    // interpreter, which is the fallback this code already
+                    // uses everywhere else - slow, but alive.
+                    if skipReason == nil, !self.ledger.isApplicationActive {
+                        // The guard childProcessDidStart has had since
+                        // fix_defer_attaches_while_inactive.py, which this
+                        // path never got - and this is the path that
+                        // actually performs the attach when the Helper
+                        // claims a pid first.
+                        //
+                        // Captured end to end on device, 0x8BADF00D at
+                        // 19:47:52 (Reynard-2026-08-08-194754):
+                        //
+                        //   :19.955  requestDetachForAllDebugSessions: 13
+                        //   :20.242  tabRecovery: content process kill
+                        //   :20.567  getProvider: (pid 61314) starting
+                        //   :20.578  childProcessDidStart: ENTRY pid 61314
+                        //   :20.580  attachStall: already claimed - skipping
+                        //   :42.725  Attach response: <stop packet> (22062ms)
+                        //   :42.726  continue -> Failed to send debug command
+                        //   :42.726  skipping detach - transport already dead
+                        //
+                        // The attach landed a stop packet 22 seconds later,
+                        // by which time the tunnel was gone, so the continue
+                        // failed and the detach was skipped. pid 61314 was
+                        // left STOPPED with nothing able to resume it, and a
+                        // stopped extension cannot answer the synchronous XPC
+                        // in _hostWillEnterForegroundNote:. The watchdog took
+                        // the app on the next foreground.
+                        //
+                        // The backgrounding drain cannot help here: this
+                        // request arrived 600ms AFTER the teardown ran,
+                        // because killing the media tab's content process
+                        // makes tabRecovery spawn a replacement, which asks
+                        // for JIT on the way up.
+                        //
+                        // Deferred rather than dropped - drainDeferredPIDs
+                        // picks it up on the next activate.
+                        let pendingCount = self.ledger.deferAttach(pid)
+                        logger(String(
+                            format: "processPendingHelperAttachRequests: pid %d DEFERRED - app is not active, %ld now pending",
+                            pid, pendingCount
+                        ))
+                        let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
+                        try? "failed:deferred - app is not active"
+                            .write(to: resultFileURL, atomically: true, encoding: .utf8)
+                        CFNotificationCenterPostNotification(
+                            CFNotificationCenterGetDarwinNotifyCenter(),
+                            CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
+                            nil,
+                            nil,
+                            true
+                        )
+                        continue
+                    }
                     
                     if let skipReason {
                         logger(String(format: "processPendingHelperAttachRequests: skipping pid %d - %@", pid, skipReason))
