@@ -260,6 +260,24 @@ final class SessionManager {
     
     func setPictureInPictureSession(_ session: GeckoSession) {
         pictureInPictureSession = session
+
+        // Clear the commit latch NOW, because this session was almost
+        // certainly latched a moment ago.
+        //
+        // isCommitLatchExempt only helps a session that is already known
+        // to be PiP's when the sweep runs, and for system-initiated PiP
+        // it never is: iOS resigns the app active BEFORE calling
+        // pipWillStart, so applicationWillResignActive latches every
+        // phone-hosted session while pictureInPictureSession is still
+        // nil. PiP then registers here and nothing re-evaluates the
+        // latch - activate() re-checks only for sessions ENTERING the
+        // active set, and this one is already in it.
+        //
+        // The compositor then stops presenting while audio, which never
+        // goes through it, carries on: a frozen picture with sound,
+        // which is exactly how this was reported on Twitch.
+        session.setOffMainThreadCommitsSuspended(false)
+
         if !isApplicationForeground {
             session.setFocused(false)
         }
@@ -276,6 +294,17 @@ final class SessionManager {
             return
         }
         pictureInPictureSession = nil
+
+        // The mirror of setPictureInPictureSession: this session just
+        // lost its exemption, so if the scene is still inactive it has
+        // to be latched again. Otherwise it keeps committing off-main
+        // while inactive, which is the UIKit Auto Layout crash the latch
+        // exists to prevent - PiP ending while backgrounded is exactly
+        // when that would happen.
+        session.setOffMainThreadCommitsSuspended(
+            !isPhoneSceneActive && !isCommitLatchExempt(session)
+        )
+
         if isApplicationForeground,
            sessionsRequestedActive[ObjectIdentifier(session)] != nil {
             session.setActive(true)
