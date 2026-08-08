@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,306 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -287,7 +287,12 @@ new file mode 100644
 +  macSurface->SetYUVColorSpace(gfx::YUVColorSpace::BT709);
 +
 +  RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(macSurface);
-+  container->SetCurrentFrame(aDisplay, image, TimeStamp::Now());
++  // Five arguments: the trailing processing duration and media time
++  // are required by this signature. Zero for both - nothing was
++  // decoded to measure, and the AVPlayer owns the timeline.
++  container->SetCurrentFrame(aDisplay, image, TimeStamp::Now(),
++                             media::TimeUnit::Zero(),
++                             media::TimeUnit::Zero());
 +  container->Invalidate();
 +}
 +
