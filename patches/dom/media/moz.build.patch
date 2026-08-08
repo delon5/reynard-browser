@@ -1,5 +1,5 @@
 diff --git a/dom/media/moz.build b/dom/media/moz.build
-index 28bbbf64..e967369b 100644
+index 28bbbf6..aa32007 100644
 --- a/dom/media/moz.build
 +++ b/dom/media/moz.build
 @@ -25,6 +25,9 @@ component_av = ("Core", "WebRTC: Audio/Video")
@@ -26,20 +26,20 @@ index 28bbbf64..e967369b 100644
  
  if CONFIG["MOZ_WEBSPEECH"]:
      DIRS += ["webspeech"]
-@@ -138,6 +144,8 @@ EXPORTS += [
-     "../../third_party/rust/audio_thread_priority/audio_thread_priority.h",
-     "ADTSDecoder.h",
-     "ADTSDemuxer.h",
+@@ -152,6 +158,8 @@ EXPORTS += [
+     "AudioSampleFormat.h",
+     "AudioSegment.h",
+     "AudioStream.h",
 +    "AVPlayerDecoder.h",
 +    "AVPlayerDemuxer.h",
-     "AsyncLogger.h",
-     "AudibilityMonitor.h",
-     "AudioBufferUtils.h",
-@@ -265,6 +273,7 @@ EXPORTS.mozilla.dom += [
- UNIFIED_SOURCES += [
-     "ADTSDecoder.cpp",
-     "ADTSDemuxer.cpp",
+     "BackgroundVideoDecodingPermissionObserver.h",
+     "BitReader.h",
+     "BitWriter.h",
+@@ -279,6 +287,7 @@ UNIFIED_SOURCES += [
+     "AudioStreamTrack.cpp",
+     "AudioTrack.cpp",
+     "AudioTrackList.cpp",
 +    "AVPlayerDemuxer.cpp",
-     "AudioCaptureTrack.cpp",
-     "AudioChannelFormat.cpp",
-     "AudioCompactor.cpp",
+     "BackgroundVideoDecodingPermissionObserver.cpp",
+     "BaseMediaResource.cpp",
+     "BitReader.cpp",
