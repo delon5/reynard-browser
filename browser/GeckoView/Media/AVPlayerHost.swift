@@ -11,10 +11,20 @@
 //  .avPlayerHost. App-target placement would leave content
 //  processes with no host at all.
 //
-//  NSLog rather than the app's logger(): logger's implementation
+//  stderr rather than the app's logger(): logger's implementation
 //  (JITUtils.m) is app-target-only and does not link into this
 //  framework - the exact linker failure GeckoRuntime.swift already
 //  documents.
+//
+//  And stderr rather than NSLog, which is what this used to be.
+//  Everything here runs in the CONTENT process, and the device capture
+//  only picks up stderr from those - every NSLog-format line in a
+//  capture carries the parent's pid, never a content pid. So none of
+//  this file's output ever reached a log, and "did createPlayer even
+//  run?" could not be answered from one: the C++ side would print
+//  "avPlayer: Create()" and then nothing followed it, whether the
+//  player was built or not. printf_stderr on that side lands fine, so
+//  avLog matches its channel.
 //
 //  FairPlay forces this split: only AVURLAsset conforms to
 //  AVContentKeyRecipient, so an AVContentKeySession can never be attached
@@ -29,6 +39,15 @@
 
 import AVFoundation
 import Foundation
+
+/// Unbuffered stderr, matching the C++ side's printf_stderr - see the
+/// file comment for why this is not NSLog. Flushed every time: a
+/// content process that is about to be killed still gets its last line
+/// out, which is the case this logging exists to catch.
+private func avLog(_ message: String) {
+    fputs("avPlayer: \(message)\n", stderr)
+    fflush(stderr)
+}
 
 @objc(ReynardAVPlayerHost)
 public final class AVPlayerHost: NSObject {
@@ -64,7 +83,7 @@ public final class AVPlayerHost: NSObject {
     /// created here can be registered as recipients of it.
     @objc public func useContentKeySession(_ session: AVContentKeySession) {
         emeContentKeySession = session
-        NSLog("%@", "avPlayer: EME published a content key session")
+        avLog("EME published a content key session")
     }
 
     private final class Player {
@@ -90,7 +109,7 @@ public final class AVPlayerHost: NSObject {
     /// Returns 0 on failure, which the decoder treats as a load error.
     @objc public func createPlayer(url: String) -> UInt {
         guard let parsed = URL(string: url) else {
-            NSLog("%@", "avPlayer: could not parse \(url)")
+            avLog("could not parse \(url)")
             return 0
         }
 
@@ -114,14 +133,14 @@ public final class AVPlayerHost: NSObject {
         if let published = emeContentKeySession {
             keySession = published
             delegate = nil
-            NSLog("%@", "avPlayer: using the EME-published content key session")
+            avLog("using the EME-published content key session")
         } else {
             let owned = AVContentKeySession(keySystem: .fairPlayStreaming)
             let ownedDelegate = ContentKeyDelegate()
             owned.setDelegate(ownedDelegate, queue: .main)
             keySession = owned
             delegate = ownedDelegate
-            NSLog("%@", "avPlayer: no EME session published - using a local one (no licence)")
+            avLog("no EME session published - using a local one (no licence)")
         }
         keySession.addContentKeyRecipient(asset)
 
@@ -134,7 +153,7 @@ public final class AVPlayerHost: NSObject {
         players[id] = Player(player: player, item: item, asset: asset,
                              keySession: keySession, delegate: delegate)
 
-        NSLog("%@", "avPlayer: created \(id) for \(parsed.absoluteString)")
+        avLog("created \(id) for \(parsed.absoluteString)")
         return id
     }
 
@@ -164,7 +183,7 @@ public final class AVPlayerHost: NSObject {
         entry.player.pause()
         entry.player.replaceCurrentItem(with: nil)
         entry.keySession.removeContentKeyRecipient(entry.asset)
-        NSLog("%@", "avPlayer: destroyed \(id)")
+        avLog("destroyed \(id)")
     }
 
     /// The layer the compositor will hand us once NativeLayerCA builds an
@@ -175,7 +194,7 @@ public final class AVPlayerHost: NSObject {
             return
         }
         layer.player = entry.player
-        NSLog("%@", "avPlayer: attached layer to \(id)")
+        avLog("attached layer to \(id)")
     }
 
     /// Seconds, or -1 when not yet known.
@@ -214,7 +233,7 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
     func contentKeySession(_ session: AVContentKeySession,
                            didProvide keyRequest: AVContentKeyRequest) {
         let identifier = (keyRequest.identifier as? String) ?? "<none>"
-        NSLog("%@", "avPlayer: content key requested for \(identifier)")
+        avLog("content key requested for \(identifier)")
 
         // Without a licence server the request cannot be satisfied.
         // Failing it explicitly is better than leaving it pending, which
@@ -230,6 +249,6 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
     func contentKeySession(_ session: AVContentKeySession,
                            contentKeyRequest keyRequest: AVContentKeyRequest,
                            didFailWithError err: Error) {
-        NSLog("%@", "avPlayer: content key request failed - \(err)")
+        avLog("content key request failed - \(err)")
     }
 }
