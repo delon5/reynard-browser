@@ -40,16 +40,43 @@ public final class AVPlayerHost: NSObject {
     private var players: [UInt: Player] = [:]
     private var nextID: UInt = 1
 
+    /// The AVContentKeySession the EME licence exchange is bound to,
+    /// published by FairPlayCDMProxy the moment it creates one.
+    ///
+    /// Held weakly: the proxy owns it and tears it down with the page's
+    /// MediaKeys, and a strong reference here would keep a dead session
+    /// - and its delegate, which retains the proxy - alive for the
+    /// process lifetime.
+    ///
+    /// LIMITATION, deliberately not hidden: this is the most RECENT
+    /// session, not one bound per decoder, because
+    /// MediaDecoder::SetCDMProxy is not virtual and AVPlayerDecoder has
+    /// no hook to reach its own proxy through. With a single protected
+    /// element playing - all this pipeline supports today - that is the
+    /// same pairing. Two protected elements at once would attach the
+    /// second one's asset to the first one's session; fixing that
+    /// properly needs SetCDMProxy made virtual.
+    private weak var emeContentKeySession: AVContentKeySession?
+
+    // MARK: - Called from FairPlayCDMProxy
+
+    /// Publishes the session the EME key exchange runs on, so assets
+    /// created here can be registered as recipients of it.
+    @objc public func useContentKeySession(_ session: AVContentKeySession) {
+        emeContentKeySession = session
+        NSLog("%@", "avPlayer: EME published a content key session")
+    }
+
     private final class Player {
         let player: AVPlayer
         let item: AVPlayerItem
         let asset: AVURLAsset
         let keySession: AVContentKeySession
-        let delegate: ContentKeyDelegate
+        let delegate: ContentKeyDelegate?
         var observers: [NSKeyValueObservation] = []
 
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
-             keySession: AVContentKeySession, delegate: ContentKeyDelegate) {
+             keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
             self.player = player
             self.item = item
             self.asset = asset
@@ -72,9 +99,30 @@ public final class AVPlayerHost: NSObject {
         // The whole reason this pipeline exists. addContentKeyRecipient
         // accepts AVURLAsset and nothing else, which is why Gecko's own
         // decoders can never be given FairPlay keys.
-        let keySession = AVContentKeySession(keySystem: .fairPlayStreaming)
-        let delegate = ContentKeyDelegate()
-        keySession.setDelegate(delegate, queue: .main)
+        //
+        // Prefer the session the EME exchange is bound to, published by
+        // FairPlayCDMProxy through useContentKeySession(_:). Its keys
+        // only decrypt assets registered on THAT session - a session we
+        // made here holds none of them, however correctly configured.
+        //
+        // The locally-created fallback is for plain HLS reaching this
+        // decoder with no EME involved: it never receives a licence, so
+        // its delegate just reports the request and fails it, which is
+        // the same behaviour as before this pipeline knew about EME.
+        let keySession: AVContentKeySession
+        let delegate: ContentKeyDelegate?
+        if let published = emeContentKeySession {
+            keySession = published
+            delegate = nil
+            NSLog("%@", "avPlayer: using the EME-published content key session")
+        } else {
+            let owned = AVContentKeySession(keySystem: .fairPlayStreaming)
+            let ownedDelegate = ContentKeyDelegate()
+            owned.setDelegate(ownedDelegate, queue: .main)
+            keySession = owned
+            delegate = ownedDelegate
+            NSLog("%@", "avPlayer: no EME session published - using a local one (no licence)")
+        }
         keySession.addContentKeyRecipient(asset)
 
         let item = AVPlayerItem(asset: asset)

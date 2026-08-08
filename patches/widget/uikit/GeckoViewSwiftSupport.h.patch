@@ -65,6 +65,13 @@ index e68fca9..80ed533 100644
 +- (double)currentTime:(NSUInteger)playerId;
 +- (double)duration:(NSUInteger)playerId;
 +- (void)seek:(NSUInteger)playerId to:(double)seconds;
++@optional
++// The AVContentKeySession the EME licence exchange is bound to, handed
++// over by FairPlayCDMProxy as soon as it creates one. FairPlay only
++// decrypts an AVURLAsset registered as a recipient of that same session,
++// so the host must use this rather than create its own. Optional so an
++// engine built without the EME patches still links.
++- (void)useContentKeySession:(AVContentKeySession*)session;
  @end
  
  @protocol GeckoProcessExtension <NSObject>

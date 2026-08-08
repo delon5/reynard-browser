@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..735db2e0c810
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +0,593 @@
+@@ -0,0 +0,631 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,6 +16,11 @@ index 000000000000..735db2e0c810
 +#include "nsThreadUtils.h"
 +
 +#import <AVFoundation/AVFoundation.h>
++
++// GetSwiftRuntime and the GeckoAVPlayerHost protocol, for publishing the
++// key session to the embedder. Exported as mozilla/widget/... - the bare
++// name does not resolve from dom/media.
++#include "mozilla/widget/GeckoViewSupport.h"
 +
 +using namespace mozilla;
 +
@@ -191,6 +196,21 @@ index 000000000000..735db2e0c810
 +
 +namespace mozilla {
 +
++// The embedder's AVPlayer host, or nil. Optional on the runtime
++// protocol, so a build without it simply never publishes a session and
++// FairPlay stays inert.
++static id<GeckoAVPlayerHost> AVPlayerHostForKeySession() {
++  id<SwiftGeckoViewRuntime> runtime = widget::GetSwiftRuntime();
++  if (!runtime || ![runtime respondsToSelector:@selector(avPlayerHost)]) {
++    return nil;
++  }
++  id<GeckoAVPlayerHost> host = [runtime avPlayerHost];
++  if (![host respondsToSelector:@selector(useContentKeySession:)]) {
++    return nil;
++  }
++  return host;
++}
++
 +FairPlayCDMProxy::FairPlayCDMProxy(dom::MediaKeys* aKeys,
 +                                   const nsAString& aKeySystem,
 +                                   bool aDistinctiveIdentifierRequired,
@@ -232,6 +252,24 @@ index 000000000000..735db2e0c810
 +    dispatch_queue_t queue = dispatch_queue_create(
 +        "com.minh-ton.Reynard.FairPlayKeys", DISPATCH_QUEUE_SERIAL);
 +    [mKeySession setDelegate:mDelegate queue:queue];
++
++    // Hand the session to the embedder.
++    //
++    // FairPlay only decrypts media AVFoundation itself owns, and only
++    // for an AVURLAsset added as a recipient of the SAME session the
++    // licence was negotiated on - a second session holds no keys. So
++    // AVPlayerHost cannot create its own; it has to use this one.
++    //
++    // Published rather than pulled because MediaDecoder::SetCDMProxy is
++    // not virtual, so AVPlayerDecoder has no hook to reach the proxy
++    // through. The embedder keeps the most recent session and attaches
++    // assets to it; with one protected element playing at a time - the
++    // only case this pipeline supports today - that is the same
++    // pairing, and the optional protocol method means a build without
++    // the host simply skips this.
++    if (id<GeckoAVPlayerHost> host = AVPlayerHostForKeySession()) {
++      [host useContentKeySession:mKeySession];
++    }
 +
 +    // OnCDMCreated, not ResolvePromise. The latter resolves with
 +    // undefined unless the promise carries a session token, and the

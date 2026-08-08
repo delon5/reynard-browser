@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b645920014e9
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,154 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -131,6 +131,19 @@ index 000000000000..b645920014e9
 +  // cannot produce an SPC without it, so a generateRequest before one
 +  // arrives is rejected rather than left hanging.
 +  nsTArray<uint8_t> mAppCertificate;
++
++  // The session the EME key exchange is bound to.
++  //
++  // FairPlay only decrypts media AVFoundation itself owns, and only when
++  // that media's AVURLAsset has been added to the SAME
++  // AVContentKeySession the licence was negotiated on - a second session
++  // holds no keys. AVPlayerDecoder therefore reaches in here, through
++  // MediaDecoder::SetCDMProxy, and hands this to the embedder so the
++  // asset can be registered as a recipient.
++  //
++  // Main thread only, matching every other member here, and null until
++  // Init has run.
++  AVContentKeySession* KeySession() const { return mKeySession; }
 +
 + private:
 +  ~FairPlayCDMProxy();
