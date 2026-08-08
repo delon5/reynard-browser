@@ -1403,14 +1403,14 @@ extension TabManagerImplementation: NavigationDelegate {
             // try? and nil is treated as "no answer". That made a
             // missing actor case indistinguishable from a page that
             // simply does not use safe-area CSS.
-            if let usesSafeAreaInset = await session.usesSafeAreaInsetCSS() {
-                let changed = tab.state.usesSafeAreaInsetCSS != usesSafeAreaInset
-                logger(String(format: "safeArea: tab %@ usesSafeAreaInset=%@ (%@%@)",
+            if let reservation = await session.bottomReservation() {
+                let changed = tab.state.bottomReservation != reservation
+                logger(String(format: "safeArea: tab %@ reservation=%@ (%@%@)",
                               tab.id.uuidString,
-                              usesSafeAreaInset ? "YES" : "NO",
+                              String(describing: reservation),
                               reason,
                               changed ? ", CHANGED" : ""))
-                tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
+                tab.state.bottomReservation = reservation
 
                 // Only relayout when the verdict actually moved, and
                 // only for the tab on screen - an SPA route change in a

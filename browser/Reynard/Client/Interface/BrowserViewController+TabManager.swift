@@ -79,12 +79,16 @@ extension BrowserViewController: TabManagerDelegate {
     }
     
     func tabManagerDidUpdateSafeAreaUsage(_ tabManager: TabManager) {
-        // An SPA route change flipped the selected tab's verdict after
-        // the page was already showing - re-run the layout so
-        // condensedContentBottomAnchor is re-evaluated. Only fires when
-        // the value actually changed, so this is not a per-navigation
-        // relayout.
+        // The selected tab's verdict changed after the page was already
+        // showing - a page settling, or an SPA route swapping the bottom
+        // of the document. Re-run the layout so
+        // condensedContentBottomAnchor is re-evaluated, and re-report the
+        // reservation so the right mechanism is engaged: which of the two
+        // is used depends on this verdict, and the chrome height alone may
+        // not have changed. Only fires when the value actually changed, so
+        // this is not a per-navigation relayout.
         applyBrowserLayout(animated: false)
+        updateDynamicToolbarMaxHeight()
     }
 
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession) {

@@ -571,6 +571,11 @@ final class BrowserViewController: UIViewController {
     }
     
     private var dynamicToolbarMaxHeight: CGFloat = 0
+
+    /// The reservation mode the last report was built for, so a mode flip
+    /// at an unchanged chrome height still re-sends. See
+    /// updateDynamicToolbarMaxHeight.
+    private var lastReportedBottomReservation: GeckoSession.BottomReservation?
     
     // CHANGED - the max is a CONSTANT, not a measurement.
     //
@@ -601,7 +606,9 @@ final class BrowserViewController: UIViewController {
     // oscillation and no reflow storm. The settle window and
     // plausibility checks that existed to tame the measurement are gone
     // with it.
-    private func updateDynamicToolbarMaxHeight() {
+    // Not private: the tab-manager extension lives in another file and
+    // re-reports when a page's reservation verdict changes.
+    func updateDynamicToolbarMaxHeight() {
         let hasBottomToolbar = !isShowingFullscreenMedia &&
         browserLayout.chromeMode != .pad &&
         !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
@@ -615,39 +622,62 @@ final class BrowserViewController: UIViewController {
             ? BrowserChrome.condensedPillOccupiedHeight
             : expandedHeight
         let target = hasBottomToolbar ? chromeHeight : 0
-        
-        guard abs(target - dynamicToolbarMaxHeight) > 0.5 else {
+
+        // The mode is part of the state, not just the height: a page can
+        // flip between reading env() and merely having a bar - an SPA
+        // route change does exactly that - while the chrome height stays
+        // identical. Guarding on the height alone would then leave the
+        // wrong mechanism engaged, with the other still at whatever it
+        // was last told.
+        let reservation = tabManager.selectedTab?.state.bottomReservation
+        guard abs(target - dynamicToolbarMaxHeight) > 0.5
+                || reservation != lastReportedBottomReservation else {
             return
         }
-        
-        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@)",
+        lastReportedBottomReservation = reservation
+
+        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@ reservation=%@)",
                       dynamicToolbarMaxHeight, target,
                       hasBottomToolbar ? "YES" : "NO",
-                      browserChrome.isScrollCondensed ? "YES" : "NO"))
-        // The page reserves this itself through env(safe-area-inset-bottom).
-        // Its own background then fills the space behind the pill, which
-        // is what Safari does and what no amount of drawing over the page
-        // from here could achieve.
-        // env(safe-area-inset-bottom) is a clearance from the window's
-        // bottom edge, and on a device it already accounts for the home
-        // indicator - a page padding itself by env() expects that to be
-        // covered. Reporting the chrome height alone leaves content
-        // sitting 34pt lower than the same page in Safari.
-        // Device inset plus a few points of breathing room, so content
-        // does not sit flush against the chrome. The + 4 is the knob.
-        let deviceBottomInsetForSafeArea = (view.window?.safeAreaInsets.bottom ?? 0) + 4
-        contentView.setSafeAreaInsetBottom(target > 0 ? target + deviceBottomInsetForSafeArea : 0)
-        
-        // Zero, deliberately. Reporting the inset AND shortening the ICB
-        // would reserve the same strip twice. The viewport runs the full
-        // height of the screen and the page pads itself.
-        // Store the target, not 0, so the guard above converges. Sending
-        // 0 is deliberate - the page reserves through
-        // env(safe-area-inset-bottom) rather than the viewport being
-        // shortened - but storing 0 meant the guard never tripped and
-        // this ran on every layout pass, five IPC messages at a time.
+                      browserChrome.isScrollCondensed ? "YES" : "NO",
+                      reservation.map { String(describing: $0) } ?? "unknown"))
+        // Two mechanisms, and only one of them works per page - reporting
+        // both reserves the same strip twice.
+        //
+        // env(safe-area-inset-bottom) only moves a page that actually
+        // reads it. Device evidence: with the inset arriving correctly,
+        // YouTube (which reads env) responded, while Facebook's composer
+        // did not move at all, because it never consults the variable.
+        //
+        // Shortening the layout viewport moves any page: the dynamic
+        // toolbar max makes ResizeReflow subtract it from the window
+        // dimensions, so the ICB ends higher and both document flow and -
+        // while the state stays Expanded, which updateDynamicToolbarOffset
+        // guarantees by always sending 0 - position:fixed content follow
+        // it.
+        //
+        // The inset is the gentler of the two, since the page keeps the
+        // full viewport and paints its own background behind the pill, so
+        // it is preferred wherever the page is known to read env().
+        let usesInset = tabManager.selectedTab?.state.bottomReservation == .readsSafeAreaInset
+
+        // NO device inset added. env(safe-area-inset-bottom) is measured
+        // from the window's bottom edge, and so is the chrome: the pill is
+        // constrained to the view's real bottomAnchor, not the safe area
+        // guide, so condensedPillOccupiedHeight already spans the home
+        // indicator band. Adding the device inset on top double-counted it
+        // and pushed content ~38pt too high, which is what the device
+        // showed on YouTube. The previous "+ deviceInset + 4" was tuned
+        // while the inset never reached the content process at all (see
+        // the BrowserChild.cpp safe-area patch), so it was compensating
+        // for that bug rather than for real geometry.
+        contentView.setSafeAreaInsetBottom(usesInset ? target : 0)
+        contentView.setDynamicToolbarMaxHeight(usesInset ? 0 : target)
+
+        // Store the target rather than what was sent, so the guard above
+        // converges - storing 0 meant it never tripped and this ran on
+        // every layout pass, five IPC messages at a time.
         dynamicToolbarMaxHeight = target
-        contentView.setDynamicToolbarMaxHeight(0)
         updateDynamicToolbarOffset()
     }
     

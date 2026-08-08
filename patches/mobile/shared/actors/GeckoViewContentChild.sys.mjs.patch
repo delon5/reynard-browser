@@ -1,8 +1,8 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15..c4532bd 100644
+index 9ca6e15..8526459 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,265 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,279 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -97,7 +97,7 @@ index 9ca6e15..c4532bd 100644
 +    const { contentWindow } = this;
 +    const document = contentWindow?.document;
 +    if (!document) {
-+      return { usesSafeAreaInset: false };
++      return { usesSafeAreaInset: false, hasBottomBar: false };
 +    }
 +
 +    for (const sheet of document.styleSheets) {
@@ -142,7 +142,7 @@ index 9ca6e15..c4532bd 100644
 +          }
 +        }
 +
-+        return { usesSafeAreaInset: true };
++        return { usesSafeAreaInset: true, hasBottomBar: false };
 +      }
 +    }
 +
@@ -154,28 +154,32 @@ index 9ca6e15..c4532bd 100644
 +    // as not reserving space, leaving its composer behind the pill.
 +    //
 +    // The question the pill actually cares about is not "does the CSS
-+    // mention safe-area" but "is there a real bottom BAR the pill would
-+    // cover". Probe three points along the bottom edge, walk up for a
-+    // position:fixed/sticky ancestor, and require that ancestor to be
-+    // bar-like: spanning most of the width AND genuinely anchored to the
-+    // bottom edge. That distinguishes a full-width composer or nav bar
-+    // (reserve) from a corner floating button - Reddit's jump-to-top
-+    // FAB, chat bubbles, cookie nubs - which are also position:fixed but
-+    // must not push page content up. The bottom-anchor test also rejects
-+    // full-width STICKY headers, which are fixed-ish but live at the top.
-+    // O(3) hit tests regardless of DOM size.
++    // mention safe-area" but "is anything of the page's own pinned to the
++    // bottom edge, where the chrome would cover it". Probe three points
++    // along the bottom edge and walk up for a position:fixed/sticky
++    // ancestor anchored to that edge. O(3) hit tests regardless of DOM
++    // size.
 +    //
-+    // Pages with nothing bar-like pinned - articles, search results, a
-+    // page whose only fixed element is a FAB - still return false and
-+    // keep the pill floating, preserving
++    // Deliberately NOT requiring a full-width bar. An earlier revision
++    // did, to keep a corner floating button - Reddit's jump-to-top FAB,
++    // chat bubbles - from pushing page content up. That mattered when the
++    // only remedy was inflating env(safe-area-inset-bottom), which moves
++    // the page's own layout. The remedy for this case is now shortening
++    // the layout viewport, which moves everything uniformly and is what
++    // any mobile browser does for its own toolbar, so a floating button
++    // riding up with the chrome is the wanted behaviour rather than a
++    // false positive.
++    //
++    // The bottom-anchor test still rejects sticky HEADERS, which are
++    // fixed-ish but live at the top. Pages with nothing pinned at all -
++    // articles, search results - still return neither signal and keep the
++    // pill floating over them, preserving
 +    // fix_safe_area_scan_requires_matching_rule.py's Google case.
 +    const width = contentWindow.innerWidth;
 +    const height = contentWindow.innerHeight;
 +    if (width > 0 && height > 0) {
-+      // A real bottom bar spans most of the width and sits at the very
-+      // bottom; a corner FAB fails the width test, a sticky header fails
-+      // the bottom-anchor test.
-+      const minBarWidth = width * 0.6;
++      // Anchored to the bottom edge is the whole test; a sticky header
++      // fails it, a bottom bar and a corner button both pass.
 +      const bottomBand = 8;
 +      for (const fraction of [0.15, 0.5, 0.85]) {
 +        let element = document.elementFromPoint(width * fraction, height - 2);
@@ -187,8 +191,18 @@ index 9ca6e15..c4532bd 100644
 +          const { position } = contentWindow.getComputedStyle(element);
 +          if (position === "fixed" || position === "sticky") {
 +            const rect = element.getBoundingClientRect();
-+            if (rect.width >= minBarWidth && rect.bottom >= height - bottomBand) {
-+              return { usesSafeAreaInset: true };
++            if (rect.bottom >= height - bottomBand) {
++              // A bar is present, but nothing in the readable CSS says
++              // the page consumes env(safe-area-inset-bottom). Reported
++              // separately: on device, Facebook's composer did not move
++              // at all when the inset was reported correctly, because it
++              // never reads the variable - such a page needs the layout
++              // viewport shortened instead. Cross-origin sheets mean
++              // this cannot distinguish "does not use env()" from "uses
++              // it where we cannot see it", so the app treats a bar as
++              // the weaker signal and shortens the viewport, which moves
++              // page content either way.
++              return { usesSafeAreaInset: false, hasBottomBar: true };
 +            }
 +            // Fixed but not a bottom bar - keep climbing in case this is
 +            // a child inside a wider fixed bar, then fall through to the
@@ -199,7 +213,7 @@ index 9ca6e15..c4532bd 100644
 +      }
 +    }
 +
-+    return { usesSafeAreaInset: false };
++    return { usesSafeAreaInset: false, hasBottomBar: false };
 +  }
 +
 +  async getFocusedInputMetrics() {
@@ -268,7 +282,7 @@ index 9ca6e15..c4532bd 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +443,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +457,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }

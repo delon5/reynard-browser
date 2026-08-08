@@ -442,14 +442,41 @@ public class GeckoSession {
     ///
     /// nil means no answer - the query failed or the actor returned
     /// null - and callers should treat that the same as false.
-    public func usesSafeAreaInsetCSS() async -> Bool? {
+    /// How a page reserves space at the bottom, which decides which
+    /// mechanism can actually move its content.
+    public enum BottomReservation {
+        /// Nothing pinned at the bottom - the pill floats over the page.
+        case none
+        /// The page reads env(safe-area-inset-bottom), so reporting a
+        /// larger inset moves its own content.
+        case readsSafeAreaInset
+        /// The page has a bar pinned to the bottom edge but is not known
+        /// to read env() - reporting an inset does nothing for it, so the
+        /// layout viewport has to be shortened instead. Observed on
+        /// device: Facebook's composer stayed behind the pill even once
+        /// the inset was reported correctly.
+        case hasBottomBar
+    }
+
+    public func bottomReservation() async -> BottomReservation? {
         let response = try? await dispatcher.query(type: "GeckoView:GetSafeAreaInsetUsage")
-        guard let values = response as? [AnyHashable: Any],
-              let usesSafeAreaInset = values["usesSafeAreaInset"] as? Bool else {
+        guard let values = response as? [AnyHashable: Any] else {
             return nil
         }
-        
-        return usesSafeAreaInset
+
+        if values["usesSafeAreaInset"] as? Bool == true {
+            return .readsSafeAreaInset
+        }
+        if values["hasBottomBar"] as? Bool == true {
+            return .hasBottomBar
+        }
+        // Only treat a well-formed negative as "none"; a response missing
+        // both keys means an engine without this actor change, which must
+        // not be read as a confident no.
+        guard values["usesSafeAreaInset"] is Bool else {
+            return nil
+        }
+        return .none
     }
     
     /// Runs a script against this session's page, as page script.

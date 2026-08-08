@@ -309,7 +309,12 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
         guard let usesSafeAreaInset = payload?["usesSafeAreaInset"] as? Bool else {
             return
         }
-        tab.state.usesSafeAreaInsetCSS = usesSafeAreaInset
+        // The addon only ever reported env() usage, so it can express the
+        // env-reading case and "nothing found" - never the bottom-bar
+        // case, which the native detector added. Superseded by
+        // GeckoSession.bottomReservation and kept only as a fallback for
+        // an engine without that actor change.
+        tab.state.bottomReservation = usesSafeAreaInset ? .readsSafeAreaInset : .none
     }
     
     func handleExternalResponse(_ response: ExternalResponseInfo) -> Bool {
