@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,391 @@
+@@ -0,0 +1,424 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -324,10 +324,25 @@ new file mode 100644
 +void AVPlayerDecoder::PublishPlaceholderFrame(const gfx::IntSize& aDisplay) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +
++  // Split out of one combined guard so a log line names the actual
++  // cause. Every return in this function used to be bare, which is why
++  // a device capture could show "avPlayer: created 1" followed by a
++  // blank screen with nothing in between to explain it - the Swift side
++  // proved the AVPlayer existed and said nothing about whether a frame
++  // was ever built.
 +  VideoFrameContainer* container = GetVideoFrameContainer();
-+  if (!container || aDisplay.width <= 0 || aDisplay.height <= 0) {
++  if (!container) {
++    printf_stderr(
++        "avPlayer: placeholder ABORTED - no VideoFrameContainer\n");
 +    return;
 +  }
++  if (aDisplay.width <= 0 || aDisplay.height <= 0) {
++    printf_stderr("avPlayer: placeholder ABORTED - display is %dx%d\n",
++                  aDisplay.width, aDisplay.height);
++    return;
++  }
++  printf_stderr("avPlayer: placeholder building %dx%d\n", aDisplay.width,
++                aDisplay.height);
 +
 +  // CreateBiPlanarSurface, not a hand-rolled IOSurfaceCreate.
 +  //
@@ -352,6 +367,8 @@ new file mode 100644
 +      gfx::ColorRange::LIMITED, gfx::ColorDepth::COLOR_8,
 +      MacIOSurface::AllowAlpha::No);
 +  if (!macSurface) {
++    printf_stderr(
++        "avPlayer: placeholder ABORTED - CreateBiPlanarSurface failed\n");
 +    return;
 +  }
 +
@@ -369,6 +386,12 @@ new file mode 100644
 +             macSurface->GetBytesPerRow(1) * macSurface->GetDevicePixelHeight(1));
 +    }
 +    macSurface->Unlock(false);
++  } else {
++    // Not fatal - the frame is still published. But an unfilled
++    // surface is zeroed, and zeroed NV12 reads as saturated green, so
++    // a green rectangle on screen means exactly this line fired.
++    printf_stderr(
++        "avPlayer: placeholder Lock() FAILED - surface left unfilled\n");
 +  }
 +
 +  RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(macSurface);
@@ -379,6 +402,16 @@ new file mode 100644
 +                             media::TimeUnit::Zero(),
 +                             media::TimeUnit::Zero());
 +  container->Invalidate();
++
++  // Plane count is the diagnostic that matters. MacIOSurfaceTextureHostOGL
++  // derives NV12 from the pixel format and then hard-requires exactly two
++  // planes; anything else and both PushResourceUpdates and
++  // PushDisplayItems bail, so no layer is pushed and the frame published
++  // here reaches nothing. A surface built without plane info reports 0,
++  // which is the bug this function was already fixed for once.
++  printf_stderr("avPlayer: placeholder PUBLISHED %dx%d planes=%u\n",
++                aDisplay.width, aDisplay.height,
++                (unsigned)macSurface->GetPlaneCount());
 +}
 +
 +void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& aDuration,
