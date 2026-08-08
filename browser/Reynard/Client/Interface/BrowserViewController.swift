@@ -1037,6 +1037,16 @@ final class BrowserViewController: UIViewController {
             view.bounds.maxY - keyboardFrame.minY - view.safeAreaInsets.bottom
         )
         let animation = keyboardAnimation(from: notification)
+
+        // DIAGNOSTIC - the else branch relocates nothing and logs
+        // nothing, so a page input that never lifted was indistinguishable
+        // from one this gate rejected. See the focusedInput logging in
+        // ContentView.
+        NSLog("focusedInput: keyboard inset=%.1f searchFocused=%@ overview=%@",
+              keyboardInset,
+              searchOverlayCoordinator.isFocused ? "YES" : "NO",
+              tabOverview.isPresented ? "YES" : "NO")
+
         if !searchOverlayCoordinator.isFocused && !tabOverview.isPresented && keyboardInset > 0 {
             contentView.relocateFocusedInput(
                 above: keyboardFrame,

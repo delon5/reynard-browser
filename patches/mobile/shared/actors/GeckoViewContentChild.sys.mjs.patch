@@ -1,8 +1,8 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15..e12ac14 100644
+index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,296 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,313 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -219,10 +219,27 @@ index 9ca6e15..e12ac14 100644
 +  async getFocusedInputMetrics() {
 +    const { contentWindow } = this;
 +    if (contentWindow) {
++      // Raced against a timer, deliberately. requestAnimationFrame does
++      // not fire for a document that is not painting - occluded, in a
++      // background tab, or throttled - so awaiting it unconditionally
++      // parked this query forever. On device that meant the focused
++      // input never lifted above the keyboard AND nothing was logged at
++      // either end, because the embedder's await never returned.
++      //
++      // Two frames still give layout a chance to settle when they do
++      // arrive; the timer only decides how long to wait for them.
 +      await new contentWindow.Promise(resolve => {
++        let settled = false;
++        const done = () => {
++          if (!settled) {
++            settled = true;
++            resolve();
++          }
++        };
 +        contentWindow.requestAnimationFrame(() => {
-+          contentWindow.requestAnimationFrame(resolve);
++          contentWindow.requestAnimationFrame(done);
 +        });
++        contentWindow.setTimeout(done, 200);
 +      });
 +    }
 +
@@ -299,7 +316,7 @@ index 9ca6e15..e12ac14 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +474,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +491,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
