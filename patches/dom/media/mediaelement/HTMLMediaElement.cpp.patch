@@ -1,0 +1,44 @@
+diff --git a/dom/media/mediaelement/HTMLMediaElement.cpp b/dom/media/mediaelement/HTMLMediaElement.cpp
+index dbf941c..6357b9b 100644
+--- a/dom/media/mediaelement/HTMLMediaElement.cpp
++++ b/dom/media/mediaelement/HTMLMediaElement.cpp
+@@ -13,6 +13,9 @@
+ #include "AudioStreamTrack.h"
+ #include "AutoplayPolicy.h"
+ #include "ChannelMediaDecoder.h"
++#ifdef MOZ_WIDGET_UIKIT
++#  include "AVPlayerDecoder.h"
++#endif
+ #include "CrossGraphPort.h"
+ #include "DOMMediaStream.h"
+ #include "DecoderDoctorDiagnostics.h"
+@@ -5747,6 +5750,29 @@ nsresult HTMLMediaElement::InitializeDecoderForChannel(
+   }
+ #endif
+ 
++#ifdef MOZ_WIDGET_UIKIT
++  // The missing half of the AVPlayer pipeline. DecoderTraits only
++  // answers "can this be played" - it never builds anything - so
++  // AVPlayerDecoder::IsSupportedType returned true for
++  // application/vnd.apple.mpegurl while Create() was never called, and
++  // the stream fell through to ChannelMediaDecoder as if the decoder
++  // did not exist. Confirmed on device: ten "pref=1 claimed=1" lines
++  // and not one Create().
++  //
++  // Mirrors the Android HLS block above deliberately, including
++  // SetupDecoder, which is what calls Load(aChannel) and hands the URL
++  // to AVFoundation.
++  if (AVPlayerDecoder::IsSupportedType(*containerType)) {
++    RefPtr<AVPlayerDecoder> decoder = AVPlayerDecoder::Create(decoderInit);
++    if (!decoder) {
++      reportCanPlay(false);
++      return NS_ERROR_OUT_OF_MEMORY;
++    }
++    reportCanPlay(true);
++    return SetupDecoder(decoder.get(), aChannel);
++  }
++#endif
++
+   RefPtr<ChannelMediaDecoder> decoder =
+       ChannelMediaDecoder::Create(decoderInit, &diagnostics);
+   if (!decoder) {
