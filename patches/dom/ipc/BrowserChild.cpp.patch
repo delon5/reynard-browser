@@ -1,0 +1,46 @@
+diff --git a/dom/ipc/BrowserChild.cpp b/dom/ipc/BrowserChild.cpp
+index f70a010..0632826 100644
+--- a/dom/ipc/BrowserChild.cpp
++++ b/dom/ipc/BrowserChild.cpp
+@@ -3743,6 +3743,33 @@ mozilla::ipc::IPCResult BrowserChild::RecvSafeAreaInsetsChanged(
+   mPuppetWidget->UpdateSafeAreaInsets(aSafeAreaInsets);
+ 
+   LayoutDeviceIntMargin currentSafeAreaInsets;
++#ifdef MOZ_WIDGET_UIKIT
++  // Used verbatim on this port, for the same reason the parent side does
++  // in PresShellWidgetListener::SafeAreaInsetsChanged.
++  //
++  // GetWindowSafeAreaInsets implements notch semantics: it intersects the
++  // screen's safe-area rect with the window rect, so a window that does
++  // not reach the screen's bottom edge is assumed to have no home
++  // indicator under it and loses the inset. On Reynard these insets
++  // describe chrome the BROWSER draws over the page - the condensed
++  // address pill and the bottom toolbar - so they apply wherever the
++  // window sits, and intersecting against the window rect is wrong.
++  //
++  // Without this the parent-side bypass is undone one IPC hop later:
++  // the parent forwards the real margin through
++  // SendSafeAreaInsetsChanged, and this function recomputed the very
++  // intersection the parent skipped, so the page's own nsPresContext -
++  // which for a remote tab is the one that matters, since the parent
++  // only sets its chrome document's - still saw the reduced value.
++  //
++  // The failure was also silent in the worst way: when ScreenForRect
++  // returns nullptr the `if (screen)` below leaves currentSafeAreaInsets
++  // default-constructed, the page gets 0px, and because
++  // nsPresContext::SetSafeAreaInsets early-returns when the value is
++  // unchanged, no restyle is posted at all - which is why pages only
++  // picked up a new inset after a reload built a fresh pres context.
++  currentSafeAreaInsets = aSafeAreaInsets;
++#else
+   // aSafeAreaInsets is for current screen. But we have to calculate safe insets
+   // for content window.
+   LayoutDeviceIntRect outerRect = GetOuterRect();
+@@ -3753,6 +3780,7 @@ mozilla::ipc::IPCResult BrowserChild::RecvSafeAreaInsetsChanged(
+     currentSafeAreaInsets = nsContentUtils::GetWindowSafeAreaInsets(
+         screen, aSafeAreaInsets, windowRect);
+   }
++#endif
+ 
+   if (nsCOMPtr<Document> document = GetTopLevelDocument()) {
+     if (nsPresContext* presContext = document->GetPresContext()) {
