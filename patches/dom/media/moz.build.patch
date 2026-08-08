@@ -1,5 +1,5 @@
 diff --git a/dom/media/moz.build b/dom/media/moz.build
-index 28bbbf644297..976ad66d5baf 100644
+index 28bbbf64..e967369b 100644
 --- a/dom/media/moz.build
 +++ b/dom/media/moz.build
 @@ -25,6 +25,9 @@ component_av = ("Core", "WebRTC: Audio/Video")
@@ -12,13 +12,34 @@ index 28bbbf644297..976ad66d5baf 100644
  DIRS += [
      "autoplay",
      "doctor",
-@@ -60,9 +63,6 @@ DIRS += [
+@@ -60,8 +63,11 @@ DIRS += [
  if CONFIG["MOZ_ANDROID_HLS_SUPPORT"]:
      DIRS += ["hls"]
  
 -if CONFIG["MOZ_WEBRTC"]:
 -    DIRS += ["bridge"]
--
++if CONFIG["MOZ_WIDGET_TOOLKIT"] == "uikit":
++    # Objective-C++, so it cannot join the unified C++ translation units.
++    SOURCES += [
++        "AVPlayerDecoder.mm",
++    ]
+ 
  if CONFIG["MOZ_WEBSPEECH"]:
      DIRS += ["webspeech"]
- 
+@@ -138,6 +144,8 @@ EXPORTS += [
+     "../../third_party/rust/audio_thread_priority/audio_thread_priority.h",
+     "ADTSDecoder.h",
+     "ADTSDemuxer.h",
++    "AVPlayerDecoder.h",
++    "AVPlayerDemuxer.h",
+     "AsyncLogger.h",
+     "AudibilityMonitor.h",
+     "AudioBufferUtils.h",
+@@ -265,6 +273,7 @@ EXPORTS.mozilla.dom += [
+ UNIFIED_SOURCES += [
+     "ADTSDecoder.cpp",
+     "ADTSDemuxer.cpp",
++    "AVPlayerDemuxer.cpp",
+     "AudioCaptureTrack.cpp",
+     "AudioChannelFormat.cpp",
+     "AudioCompactor.cpp",

@@ -1,0 +1,83 @@
+diff --git a/dom/media/AVPlayerDemuxer.h b/dom/media/AVPlayerDemuxer.h
+new file mode 100644
+--- /dev/null
++++ b/dom/media/AVPlayerDemuxer.h
+@@ -0,0 +1,78 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef AVPlayerDemuxer_h_
++#define AVPlayerDemuxer_h_
++
++#include "MediaDataDemuxer.h"
++#include "MediaInfo.h"
++
++namespace mozilla {
++
++// A demuxer that never demuxes anything.
++//
++// MediaDecoderStateMachineBase's constructor wraps its reader
++// unconditionally - mReader(new ReaderProxy(mTaskQueue, aReader)) - and
++// Init() then calls mReader->Init(), CanonicalBuffered(),
++// OnMediaNotSeekable() and SetCanonicalDuration(). A null reader crashes
++// on construction, so a state machine with no reader cannot exist. This
++// gives Gecko something structurally valid to hold while AVFoundation
++// owns the media.
++//
++// It reports exactly one video track of the right dimensions and returns
++// end-of-stream for every sample request, so the reader has metadata to
++// publish and nothing to decode. Duration and position come from the
++// AVPlayer via the decoder, not from here.
++class AVPlayerTrackDemuxer;
++
++class AVPlayerDemuxer final : public MediaDataDemuxer {
++ public:
++  explicit AVPlayerDemuxer(const gfx::IntSize& aDisplay);
++
++  RefPtr<InitPromise> Init() override;
++
++  uint32_t GetNumberTracks(TrackInfo::TrackType aType) const override;
++
++  already_AddRefed<MediaTrackDemuxer> GetTrackDemuxer(
++      TrackInfo::TrackType aType, uint32_t aTrackNumber) override;
++
++  bool IsSeekable() const override;
++
++  // AVFoundation reports the real duration once the asset loads; until
++  // then the element sees an unknown duration rather than zero.
++  void SetDuration(const media::TimeUnit& aDuration);
++
++ private:
++  ~AVPlayerDemuxer() = default;
++
++  VideoInfo mVideoInfo;
++  media::TimeUnit mDuration;
++};
++
++class AVPlayerTrackDemuxer final : public MediaTrackDemuxer {
++ public:
++  explicit AVPlayerTrackDemuxer(const VideoInfo& aInfo);
++
++  UniquePtr<TrackInfo> GetInfo() const override;
++
++  RefPtr<SeekPromise> Seek(const media::TimeUnit& aTime) override;
++
++  RefPtr<SamplesPromise> GetSamples(int32_t aNumSamples) override;
++
++  RefPtr<SkipAccessPointPromise> SkipToNextRandomAccessPoint(
++      const media::TimeUnit& aTimeThreshold) override;
++
++  void Reset() override;
++
++  media::TimeIntervals GetBuffered() override;
++
++ private:
++  ~AVPlayerTrackDemuxer() = default;
++
++  const VideoInfo mInfo;
++};
++
++}  // namespace mozilla
++
++#endif  // AVPlayerDemuxer_h_

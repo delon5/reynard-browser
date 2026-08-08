@@ -1,5 +1,5 @@
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 3d33f9916a24..3c1bb4a54a6f 100644
+index 3d33f991..91e71e74 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
 @@ -5884,7 +5884,7 @@
@@ -74,13 +74,10 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    mirror: always
  
  # Whether to expose the MockExtensionAPI test interface in tests.
-@@ -7147,6 +7149,21 @@
- # Nb: we ignore this pref on release and beta.
- - name: gfx.blocklist.all
-   type: int32_t
+@@ -7151,6 +7153,21 @@
    value: 0
    mirror: once
-+
+ 
 +# Allows picture-in-picture to start from a video that is not in
 +# fullscreen. See fix_pip_allow_windowed_video.py.
 +#
@@ -95,7 +92,10 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
 +  type: bool
 +  value: false
 +  mirror: always
- 
++
+ #if defined(XP_DARWIN)
+ - name: gfx.cairo_quartz_cg_layer.enabled
+   type: bool
 @@ -7162,6 +7179,8 @@
    type: bool
  #if defined(XP_MACOSX) || defined(XP_LINUX) && !defined(ANDROID)
@@ -247,7 +247,23 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
      value: false
    #else
      value: true
-@@ -15074,7 +15115,10 @@
+@@ -13156,6 +13197,15 @@
+   value: true
+   mirror: always
+ 
++# Hand HLS to AVFoundation instead of Gecko, so AVURLAsset owns the URL
++# and FairPlay can attach an AVContentKeySession to it. Off until the
++# pipeline is complete; turning it on changes which decoder claims every
++# HLS stream.
++- name: media.reynard.avplayer.enabled
++  type: RelaxedAtomicBool
++  value: false
++  mirror: always
++
+ # Hls
+ - name: media.hls.enabled
+   type: RelaxedAtomicBool
+@@ -15074,7 +15124,10 @@
  - name: network.process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -259,7 +275,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: false # see bug 1641427
  #else
    value: true
-@@ -15123,7 +15167,13 @@
+@@ -15123,7 +15176,13 @@
  - name: network.http.network_access_on_socket_process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -273,7 +289,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
  
  # Telemetry of traffic categories. Whether or not to enable HttpTrafficAnalyzer.
  - name: network.traffic_analyzer.enabled
-@@ -19129,7 +19179,7 @@
+@@ -19129,7 +19188,7 @@
  # If the service is available, set threads to low-power mode when in the background.
  - name: threads.use_low_power.enabled
    type: RelaxedAtomicBool
@@ -282,7 +298,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19138,10 +19188,10 @@
+@@ -19138,10 +19197,10 @@
  
  
  # If the process priority is set to background, put the main thread in the background.
@@ -295,7 +311,7 @@ index 3d33f9916a24..3c1bb4a54a6f 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19938,7 +19988,7 @@
+@@ -19938,7 +19997,7 @@
  # on a platform that supports the GPU process, else true.
  - name: webgl.allow-in-parent
    type: bool

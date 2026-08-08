@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
-index e68fca91..7bd51599 100644
+index e68fca9..80ed533 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,14 +18,45 @@
+@@ -18,14 +18,65 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -11,7 +11,8 @@ index e68fca91..7bd51599 100644
  #import <xpc/xpc.h>
  
  @protocol SwiftEventDispatcher;
- 
++@protocol GeckoAVPlayerHost;
++
 +typedef NS_ENUM(NSInteger, GeckoInputHandling) {
 +  GeckoInputHandlingUnhandled = 0,
 +  GeckoInputHandlingBrowser = 1,
@@ -38,17 +39,36 @@ index e68fca91..7bd51599 100644
 +        overscrollAxes:(GeckoOverscrollAxes)overscrollAxes;
 +- (void)touchSequenceDidEnd:(uint64_t)sequenceId;
 +@end
-+
+ 
  @protocol SwiftGeckoViewRuntime <NSObject>
  - (id<SwiftEventDispatcher>)runtimeDispatcher;
  - (id<SwiftEventDispatcher>)dispatcherByName:(const char*)name;
 +@optional
 +- (void)childProcessDidStartWithPID:(int32_t)pid
 +                        processType:(NSString*)processType;
++- (id<GeckoAVPlayerHost>)avPlayerHost;
++@end
++
++// The app's AVPlayer host. FairPlay content is owned by AVFoundation end
++// to end - only AVURLAsset conforms to AVContentKeyRecipient - so
++// AVPlayerDecoder drives a player living in the app rather than decoding
++// anything itself. Reached through GetSwiftRuntime, like every other
++// Gecko-to-app call here; raw C symbols would not link, because libxul
++// cannot leave undefined symbols pointing at the app.
++@protocol GeckoAVPlayerHost <NSObject>
++- (NSUInteger)createPlayerWithUrl:(NSString*)url;
++- (void)play:(NSUInteger)playerId;
++- (void)pause:(NSUInteger)playerId;
++- (void)suspend:(NSUInteger)playerId;
++- (void)resume:(NSUInteger)playerId;
++- (void)destroy:(NSUInteger)playerId;
++- (double)currentTime:(NSUInteger)playerId;
++- (double)duration:(NSUInteger)playerId;
++- (void)seek:(NSUInteger)playerId to:(double)seconds;
  @end
  
  @protocol GeckoProcessExtension <NSObject>
-@@ -56,6 +87,19 @@
+@@ -56,6 +107,19 @@
  
  @protocol GeckoViewWindow <NSObject>
  - (UIView*)view;
@@ -68,7 +88,7 @@ index e68fca91..7bd51599 100644
  - (void)close;
  @end
  
-@@ -65,6 +109,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +129,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

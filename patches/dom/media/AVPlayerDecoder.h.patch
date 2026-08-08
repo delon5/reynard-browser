@@ -1,0 +1,111 @@
+diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
+new file mode 100644
+--- /dev/null
++++ b/dom/media/AVPlayerDecoder.h
+@@ -0,0 +1,106 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef AVPlayerDecoder_h_
++#define AVPlayerDecoder_h_
++
++#include "MediaDecoder.h"
++
++class nsIChannel;
++class nsIURI;
++
++namespace mozilla {
++
++class AVPlayerDemuxer;
++
++// A MediaDecoder for content AVFoundation must own end to end.
++//
++// FairPlay requires it: only AVURLAsset conforms to
++// AVContentKeyRecipient, so AVContentKeySession can never be attached to
++// samples Gecko demuxed. AVFoundation has to hold the URL from the
++// network down, which means Gecko cannot be in the media path at all.
++//
++// Modelled on HLSDecoder, which does the same job for Android. Load()
++// does not consume the channel - it takes the URI, hands the URL to the
++// platform player and keeps the channel only for principal and security
++// bookkeeping. Play/Pause/Suspend/Resume forward to the player, exactly
++// as HLSDecoder forwards to GeckoHLSResourceWrapper.
++//
++// The state machine it creates reads from AVPlayerDemuxer, which never
++// produces a sample. That is deliberate: the state machine base wraps
++// its reader unconditionally and cannot be given a null one, so the
++// reader exists to satisfy the structure while the AVPlayer does the
++// work.
++class AVPlayerDecoder final : public MediaDecoder {
++ public:
++  static RefPtr<AVPlayerDecoder> Create(MediaDecoderInit& aInit);
++
++  // Whether this backend is pref'ed on and the platform can use it.
++  static bool IsEnabled();
++
++  // Whether aContainerType is something AVFoundation should own rather
++  // than Gecko. HLS, which is what FairPlay is delivered over.
++  static bool IsSupportedType(const MediaContainerType& aContainerType);
++
++  nsresult Load(nsIChannel* aChannel);
++
++  // MediaDecoder interface.
++  void Play() override;
++  void Pause() override;
++  void Suspend() override;
++  void Resume() override;
++  void Shutdown() override;
++
++  void AddSizeOfResources(ResourceSizes* aSizes) override;
++  already_AddRefed<nsIPrincipal> GetCurrentPrincipal() override;
++  bool HadCrossOriginRedirects() override;
++  bool IsTransportSeekable() override { return true; }
++
++  // Called by the platform player once the asset has resolved, so the
++  // principal reflects any redirect Gecko never saw. Without this a
++  // redirected stream is treated as cross-origin and taints canvas.
++  // Main thread only.
++  void NotifyLoad(nsCString aMediaUrl);
++
++  // Called as the player buffers, to drive progress events. Main thread
++  // only.
++  void NotifyDataArrived();
++
++  // Called when the player knows the asset's duration and dimensions.
++  // Main thread only.
++  void NotifyMetadata(const media::TimeUnit& aDuration,
++                      const gfx::IntSize& aDisplay);
++
++ private:
++  explicit AVPlayerDecoder(MediaDecoderInit& aInit);
++  ~AVPlayerDecoder();
++
++  already_AddRefed<MediaDecoderStateMachineBase> CreateStateMachine(
++      bool aDisableExternalEngine) override;
++
++  bool CanPlayThroughImpl() final {
++    // AVFoundation manages its own buffering and does not report an
++    // estimate Gecko can use. Returning true keeps autoplay working, the
++    // same compromise HLSDecoder makes.
++    return true;
++  }
++
++  void UpdateCurrentPrincipal(nsCString aMediaUrl);
++
++  RefPtr<MediaFormatReader> mReader;
++  RefPtr<AVPlayerDemuxer> mDemuxer;
++
++  // Kept for the principal and for security checks. Never read from.
++  nsCOMPtr<nsIChannel> mChannel;
++  nsCOMPtr<nsIPrincipal> mContentPrincipal;
++
++  // Opaque handle to the Swift-side AVPlayer. Zero until Load succeeds.
++  uintptr_t mPlayerId = 0;
++
++  bool mHadCrossOriginRedirects = false;
++};
++
++}  // namespace mozilla
++
++#endif  // AVPlayerDecoder_h_

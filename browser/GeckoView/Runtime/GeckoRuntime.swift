@@ -50,6 +50,23 @@ class GeckoRuntimeImpl: NSObject, SwiftGeckoViewRuntime {
             ]
         )
     }
+
+    /// Optional SwiftGeckoViewRuntime hook: Gecko's AVPlayerDecoder
+    /// reaches the embedder's AVPlayer through this, via
+    /// GetSwiftRuntime(), when media.reynard.avplayer.enabled is on.
+    /// It runs in whichever process owns the media element — content
+    /// processes included — which is exactly why AVPlayerHost lives in
+    /// this framework rather than the app target.
+    ///
+    /// Returns AnyObject rather than id<GeckoAVPlayerHost>: that
+    /// protocol only exists in GeckoViewSwiftSupport.h once the
+    /// FairPlay engine patches are built in, and the C++ side looks the
+    /// method up by selector, so the declared type never matters at
+    /// runtime.
+    @objc(avPlayerHost)
+    func avPlayerHost() -> AnyObject? {
+        return AVPlayerHost.shared
+    }
 }
 
 public class GeckoRuntime {

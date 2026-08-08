@@ -1,0 +1,94 @@
+diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
+new file mode 100644
+--- /dev/null
++++ b/dom/media/AVPlayerDemuxer.cpp
+@@ -0,0 +1,89 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "AVPlayerDemuxer.h"
++
++namespace mozilla {
++
++AVPlayerDemuxer::AVPlayerDemuxer(const gfx::IntSize& aDisplay)
++    : mDuration(media::TimeUnit::Invalid()) {
++  // Enough for the reader to publish metadata and for the compositor to
++  // size the layer. Nothing decodes these samples, so the codec string is
++  // only ever inspected, never acted on.
++  mVideoInfo.mMimeType = "video/avc"_ns;
++  mVideoInfo.mDisplay = aDisplay;
++  mVideoInfo.mImage = aDisplay;
++}
++
++RefPtr<AVPlayerDemuxer::InitPromise> AVPlayerDemuxer::Init() {
++  return InitPromise::CreateAndResolve(NS_OK, __func__);
++}
++
++uint32_t AVPlayerDemuxer::GetNumberTracks(TrackInfo::TrackType aType) const {
++  // Video only. The audio is AVPlayer's and never passes through Gecko,
++  // so claiming an audio track here would leave the state machine waiting
++  // for samples that cannot arrive.
++  return aType == TrackInfo::kVideoTrack ? 1 : 0;
++}
++
++already_AddRefed<MediaTrackDemuxer> AVPlayerDemuxer::GetTrackDemuxer(
++    TrackInfo::TrackType aType, uint32_t aTrackNumber) {
++  if (aType != TrackInfo::kVideoTrack || aTrackNumber != 0) {
++    return nullptr;
++  }
++  return MakeAndAddRef<AVPlayerTrackDemuxer>(mVideoInfo);
++}
++
++bool AVPlayerDemuxer::IsSeekable() const {
++  // Seeking is real, it just happens on the AVPlayer. Saying otherwise
++  // would disable the element's seek UI.
++  return true;
++}
++
++void AVPlayerDemuxer::SetDuration(const media::TimeUnit& aDuration) {
++  mDuration = aDuration;
++}
++
++AVPlayerTrackDemuxer::AVPlayerTrackDemuxer(const VideoInfo& aInfo)
++    : mInfo(aInfo) {}
++
++UniquePtr<TrackInfo> AVPlayerTrackDemuxer::GetInfo() const {
++  return mInfo.Clone();
++}
++
++RefPtr<AVPlayerTrackDemuxer::SeekPromise> AVPlayerTrackDemuxer::Seek(
++    const media::TimeUnit& aTime) {
++  // Resolve where we were asked to go. The AVPlayer performs the real
++  // seek; this only keeps the reader's bookkeeping consistent.
++  return SeekPromise::CreateAndResolve(aTime, __func__);
++}
++
++RefPtr<AVPlayerTrackDemuxer::SamplesPromise> AVPlayerTrackDemuxer::GetSamples(
++    int32_t aNumSamples) {
++  // Always end of stream. The state machine stops asking, and the frames
++  // the compositor shows come from the AVPlayerLayer rather than from any
++  // sample that passed through here.
++  return SamplesPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_END_OF_STREAM,
++                                         __func__);
++}
++
++RefPtr<AVPlayerTrackDemuxer::SkipAccessPointPromise>
++AVPlayerTrackDemuxer::SkipToNextRandomAccessPoint(
++    const media::TimeUnit& aTimeThreshold) {
++  // Pure virtual in MediaTrackDemuxer, so it must exist; nothing is
++  // ever demuxed here, so there is nothing to skip past. Reject with
++  // end-of-stream, consistent with GetSamples.
++  return SkipAccessPointPromise::CreateAndReject(
++      SkipFailureHolder(NS_ERROR_DOM_MEDIA_END_OF_STREAM, 0), __func__);
++}
++
++void AVPlayerTrackDemuxer::Reset() {}
++
++media::TimeIntervals AVPlayerTrackDemuxer::GetBuffered() {
++  // Buffered ranges are reported by the decoder from the AVPlayer's
++  // loadedTimeRanges, not from here.
++  return media::TimeIntervals();
++}
++
++}  // namespace mozilla

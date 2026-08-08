@@ -1,0 +1,241 @@
+diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
+new file mode 100644
+--- /dev/null
++++ b/dom/media/AVPlayerDecoder.mm
+@@ -0,0 +1,236 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "AVPlayerDecoder.h"
++
++#include "AVPlayerDemuxer.h"
++#include "MediaDecoderStateMachine.h"
++#include "MediaFormatReader.h"
++#include "MediaShutdownManager.h"
++#include "mozilla/StaticPrefs_media.h"
++#include "mozilla/dom/HTMLMediaElement.h"
++#include "nsContentUtils.h"
++#include "nsIChannel.h"
++#include "nsIScriptSecurityManager.h"
++#include "nsIURI.h"
++#include "nsNetUtil.h"
++#include "MediaContainerType.h"
++// Exported to dist/include as mozilla/widget/...; dom/media has no
++// /widget/uikit in LOCAL_INCLUDES, so the bare name does not resolve.
++// This header includes GeckoView/GeckoViewSwiftSupport.h itself.
++#include "mozilla/widget/GeckoViewSupport.h"
++
++
++namespace mozilla {
++
++// The app's player, or nil. Optional on the runtime protocol, so a build
++// without it simply never claims any stream.
++static id<GeckoAVPlayerHost> AVPlayerHost() {
++  id<SwiftGeckoViewRuntime> runtime = widget::GetSwiftRuntime();
++  if (!runtime || ![runtime respondsToSelector:@selector(avPlayerHost)]) {
++    return nil;
++  }
++  return [runtime avPlayerHost];
++}
++
++// Default until the asset reports its real size. The compositor needs
++// something non-degenerate to build a layer from before the first
++// metadata callback arrives.
++static const gfx::IntSize kInitialDisplay(1920, 1080);
++
++AVPlayerDecoder::AVPlayerDecoder(MediaDecoderInit& aInit)
++    : MediaDecoder(aInit) {}
++
++AVPlayerDecoder::~AVPlayerDecoder() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    [AVPlayerHost() destroy:mPlayerId];
++    mPlayerId = 0;
++  }
++}
++
++RefPtr<AVPlayerDecoder> AVPlayerDecoder::Create(MediaDecoderInit& aInit) {
++  if (!IsEnabled()) {
++    return nullptr;
++  }
++  return new AVPlayerDecoder(aInit);
++}
++
++bool AVPlayerDecoder::IsEnabled() {
++  return StaticPrefs::media_reynard_avplayer_enabled();
++}
++
++bool AVPlayerDecoder::IsSupportedType(const MediaContainerType& aType) {
++  if (!IsEnabled()) {
++    return false;
++  }
++  // The HLS family. FairPlay is only ever delivered this way, and it is
++  // also the container Gecko has no demuxer for on this platform - so
++  // handing it to AVFoundation loses nothing.
++  const MediaMIMEType& mimeType = aType.Type();
++  return mimeType == MEDIAMIMETYPE("application/vnd.apple.mpegurl") ||
++         mimeType == MEDIAMIMETYPE("application/x-mpegurl") ||
++         mimeType == MEDIAMIMETYPE("audio/mpegurl") ||
++         mimeType == MEDIAMIMETYPE("audio/x-mpegurl");
++}
++
++nsresult AVPlayerDecoder::Load(nsIChannel* aChannel) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  // The channel is not consumed. Gecko performs the load decision and the
++  // security setup, then AVFoundation owns the network from here - the
++  // same division HLSDecoder makes with ExoPlayer.
++  nsCOMPtr<nsIURI> uri;
++  nsresult rv = NS_GetFinalChannelURI(aChannel, getter_AddRefs(uri));
++  if (NS_WARN_IF(NS_FAILED(rv))) {
++    return rv;
++  }
++
++  mChannel = aChannel;
++
++  nsCString spec;
++  rv = uri->GetSpec(spec);
++  if (NS_WARN_IF(NS_FAILED(rv))) {
++    return rv;
++  }
++
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (!host) {
++    return NS_ERROR_NOT_AVAILABLE;
++  }
++
++  mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
++  if (!mPlayerId) {
++    return NS_ERROR_FAILURE;
++  }
++
++  rv = MediaShutdownManager::Instance().Register(this);
++  if (NS_WARN_IF(NS_FAILED(rv))) {
++    return rv;
++  }
++
++  return CreateAndInitStateMachine(false);
++}
++
++already_AddRefed<MediaDecoderStateMachineBase>
++AVPlayerDecoder::CreateStateMachine(bool aDisableExternalEngine) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  MediaFormatReaderInit init;
++  init.mVideoFrameContainer = GetVideoFrameContainer();
++  init.mKnowsCompositor = GetCompositor();
++  init.mCrashHelper = GetOwner()->CreateGMPCrashHelper();
++  init.mFrameStats = mFrameStats;
++  init.mMediaDecoderOwnerID = mOwner;
++
++  mDemuxer = new AVPlayerDemuxer(kInitialDisplay);
++  mReader = new MediaFormatReader(init, mDemuxer);
++
++  return MakeAndAddRef<MediaDecoderStateMachine>(this, mReader);
++}
++
++void AVPlayerDecoder::Play() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    [AVPlayerHost() play:mPlayerId];
++  }
++  MediaDecoder::Play();
++}
++
++void AVPlayerDecoder::Pause() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    [AVPlayerHost() pause:mPlayerId];
++  }
++  MediaDecoder::Pause();
++}
++
++void AVPlayerDecoder::Suspend() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    [AVPlayerHost() suspend:mPlayerId];
++  }
++  MediaDecoder::Suspend();
++}
++
++void AVPlayerDecoder::Resume() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    [AVPlayerHost() resume:mPlayerId];
++  }
++  MediaDecoder::Resume();
++}
++
++void AVPlayerDecoder::Shutdown() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    [AVPlayerHost() destroy:mPlayerId];
++    mPlayerId = 0;
++  }
++  MediaDecoder::Shutdown();
++}
++
++void AVPlayerDecoder::AddSizeOfResources(ResourceSizes* aSizes) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // The media lives in AVFoundation; nothing here to account for.
++}
++
++already_AddRefed<nsIPrincipal> AVPlayerDecoder::GetCurrentPrincipal() {
++  MOZ_ASSERT(NS_IsMainThread());
++  return do_AddRef(mContentPrincipal);
++}
++
++bool AVPlayerDecoder::HadCrossOriginRedirects() {
++  MOZ_ASSERT(NS_IsMainThread());
++  return mHadCrossOriginRedirects;
++}
++
++void AVPlayerDecoder::NotifyLoad(nsCString aMediaUrl) {
++  MOZ_ASSERT(NS_IsMainThread());
++  UpdateCurrentPrincipal(aMediaUrl);
++}
++
++void AVPlayerDecoder::UpdateCurrentPrincipal(nsCString aMediaUrl) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  // Once AVFoundation owns the fetch, Gecko cannot observe redirects. If
++  // the principal is not updated from the resolved URL the element is
++  // treated as same-origin when it is not, and canvas taint checks are
++  // wrong.
++  nsCOMPtr<nsIURI> finalURI;
++  if (NS_FAILED(NS_NewURI(getter_AddRefs(finalURI), aMediaUrl))) {
++    return;
++  }
++
++  nsIScriptSecurityManager* secMan = nsContentUtils::GetSecurityManager();
++  if (!secMan || !mChannel) {
++    return;
++  }
++
++  nsCOMPtr<nsIPrincipal> principal;
++  if (NS_FAILED(secMan->GetChannelResultPrincipal(mChannel,
++                                                  getter_AddRefs(principal)))) {
++    return;
++  }
++
++  if (mContentPrincipal && !mContentPrincipal->Equals(principal)) {
++    mHadCrossOriginRedirects = true;
++  }
++  mContentPrincipal = principal;
++}
++
++void AVPlayerDecoder::NotifyDataArrived() {
++  MOZ_ASSERT(NS_IsMainThread());
++  DownloadProgressed();
++}
++
++void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& aDuration,
++                                     const gfx::IntSize& aDisplay) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mDemuxer) {
++    mDemuxer->SetDuration(aDuration);
++  }
++}
++
++}  // namespace mozilla
