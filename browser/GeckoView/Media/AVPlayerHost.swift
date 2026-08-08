@@ -153,8 +153,59 @@ public final class AVPlayerHost: NSObject {
         players[id] = Player(player: player, item: item, asset: asset,
                              keySession: keySession, delegate: delegate)
 
+        observeMetadata(of: item, playerId: id, storingInto: players[id]!)
+
         avLog("created \(id) for \(parsed.absoluteString)")
         return id
+    }
+
+    /// Reports duration and dimensions back to AVPlayerDecoder once the
+    /// item resolves them.
+    ///
+    /// Nothing did this before, so AVPlayerDecoder::NotifyMetadata had no
+    /// caller at all: the demuxer never got a duration, MediaFormatReader
+    /// never produced metadata, and the element stayed at HAVE_NOTHING -
+    /// which paints nothing no matter how correct the frame in its
+    /// VideoFrameContainer is. Device captures showed exactly that,
+    /// "placeholder PUBLISHED 1920x1080 planes=2" over a blank screen.
+    ///
+    /// .initial matters: an item that is already ready when this runs
+    /// would otherwise never send a change, and the metadata would never
+    /// arrive at all.
+    private func observeMetadata(of item: AVPlayerItem, playerId: UInt,
+                                 storingInto entry: Player) {
+        let report: (AVPlayerItem) -> Void = { item in
+            guard item.status == .readyToPlay else {
+                return
+            }
+            // Both can be indefinite or NaN before the asset resolves;
+            // the C side treats a non-finite duration as unknown.
+            let duration = item.duration.isValid && !item.duration.isIndefinite
+                ? item.duration.seconds
+                : Double.nan
+            let size = item.presentationSize
+            avLog("metadata ready for \(playerId): duration=\(duration) size=\(size)")
+            ReynardAVPlayerNotifyMetadata(
+                UInt(playerId), duration,
+                Int32(size.width.rounded()), Int32(size.height.rounded())
+            )
+        }
+
+        // Main queue, because the decoder side is main-thread only - the
+        // registry it looks itself up in has no lock, by design.
+        for observation in [
+            item.observe(\.status, options: [.initial, .new]) { item, _ in
+                DispatchQueue.main.async { report(item) }
+            },
+            item.observe(\.duration, options: [.new]) { item, _ in
+                DispatchQueue.main.async { report(item) }
+            },
+            item.observe(\.presentationSize, options: [.new]) { item, _ in
+                DispatchQueue.main.async { report(item) }
+            },
+        ] {
+            entry.observers.append(observation)
+        }
     }
 
     @objc public func play(_ id: UInt) {

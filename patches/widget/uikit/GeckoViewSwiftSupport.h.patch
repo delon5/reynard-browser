@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5f76bc9d5a00 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,14 +18,73 @@
+@@ -18,14 +18,97 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -74,7 +74,31 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// engine built without the EME patches still links.
 +- (void)useContentKeySession:(AVContentKeySession*)session;
  @end
- 
++
++// The reverse direction, and the only one there is.
++//
++// Everything above is app-bound: Gecko asks the player to do things.
++// Nothing came back, so AVPlayerDecoder::NotifyMetadata and
++// ::NotifyLoad were defined with no callers at all - and without
++// metadata the element never leaves HAVE_NOTHING and paints nothing,
++// however correct the frame sitting in its VideoFrameContainer is.
++// Device captures showed exactly that: "placeholder PUBLISHED
++// 1920x1080 planes=2" and a blank screen.
++//
++// A C symbol rather than a delegate protocol, because AVPlayerDecoder.h
++// is included from HTMLMediaElement.cpp - plain C++ - and cannot carry
++// an Obj-C member. This is the same shape as MainProcessInit and
++// ChildProcessInit, which Swift already calls: defined in libxul,
++// declared in a header the GeckoView umbrella exports. (The comment
++// above about raw C symbols not linking is about the opposite
++// direction, libxul referencing the app.)
++//
++// aPlayerId is the handle createPlayerWithUrl returned. The decoder
++// that owns it is found by lookup, so a stale id after teardown
++// resolves to nothing and is ignored rather than dereferenced.
++//
++// Main thread only. Declared with the other C entry points below.
+
  @protocol GeckoProcessExtension <NSObject>
 @@ -56,7 +115,30 @@
  
@@ -107,7 +131,7 @@ index e68fca9134c0..5f76bc9d5a00 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +147,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +147,24 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
@@ -121,6 +145,13 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// immediately after. Zero means "use the existing behaviour",
 +// so the phone path is unaffected.
 +MOZ_EXPORT void GeckoViewSetBackingScaleOverride(CGFloat aScale);
++
++// Called from the Swift AVPlayer host once an item reports duration and
++// dimensions - see the GeckoAVPlayerHost comment above for why this is a
++// C symbol rather than a delegate callback.
++MOZ_EXPORT void ReynardAVPlayerNotifyMetadata(uintptr_t aPlayerId,
++                                              double aDurationSeconds,
++                                              int32_t aWidth, int32_t aHeight);
 +
  MOZ_END_EXTERN_C
  

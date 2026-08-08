@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,424 @@
+@@ -0,0 +1,489 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,6 +25,9 @@ new file mode 100644
 +#include "nsIURI.h"
 +#include "nsNetUtil.h"
 +#include "MediaContainerType.h"
++
++#include <cmath>
++#include <unordered_map>
 +#include "mozilla/Debug.h"  // printf_stderr
 +// Exported to dist/include as mozilla/widget/...; dom/media has no
 +// /widget/uikit in LOCAL_INCLUDES, so the bare name does not resolve.
@@ -54,12 +57,33 @@ new file mode 100644
 +// metadata callback arrives.
 +static const gfx::IntSize kInitialDisplay(1920, 1080);
 +
++// Live decoders by the player handle the Swift host handed back.
++//
++// The metadata callback arrives as a C symbol carrying only that handle
++// (AVPlayerDecoder.h is included from plain C++ and cannot hold an
++// Obj-C delegate), so it is resolved here rather than by passing a raw
++// decoder pointer through Swift and hoping it is still alive. An entry
++// is removed before the player is destroyed, so a KVO notification
++// already queued on the main thread finds nothing and is dropped
++// instead of dereferencing a freed decoder.
++//
++// Main thread only, which is what makes it safe without a lock: Load,
++// Shutdown, the destructor and the callback all run there.
++static std::unordered_map<uintptr_t, AVPlayerDecoder*>& PlayersById() {
++  MOZ_ASSERT(NS_IsMainThread());
++  static std::unordered_map<uintptr_t, AVPlayerDecoder*> sPlayersById;
++  return sPlayersById;
++}
++
 +AVPlayerDecoder::AVPlayerDecoder(MediaDecoderInit& aInit)
 +    : MediaDecoder(aInit) {}
 +
 +AVPlayerDecoder::~AVPlayerDecoder() {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (mPlayerId) {
++    // Erased first: destroy tears down the KVO observations, but one
++    // may already be queued on this thread, and it must not find us.
++    PlayersById().erase(mPlayerId);
 +    [AVPlayerHost() destroy:mPlayerId];
 +    mPlayerId = 0;
 +  }
@@ -131,6 +155,11 @@ new file mode 100644
 +    return NS_ERROR_FAILURE;
 +  }
 +
++  // Registered before anything can call back. The Swift host starts
++  // observing the item inside createPlayerWithUrl, so a ready item can
++  // deliver metadata almost immediately.
++  PlayersById()[mPlayerId] = this;
++
 +  // A layer has to exist before the first metadata callback, or there is
 +  // nothing on screen while the asset resolves.
 +  PublishPlaceholderFrame(kInitialDisplay);
@@ -195,6 +224,7 @@ new file mode 100644
 +void AVPlayerDecoder::Shutdown() {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (mPlayerId) {
++    PlayersById().erase(mPlayerId);
 +    [AVPlayerHost() destroy:mPlayerId];
 +    mPlayerId = 0;
 +  }
@@ -427,3 +457,38 @@ new file mode 100644
 +}
 +
 +}  // namespace mozilla
++
++// Declared in GeckoViewSwiftSupport.h. Defined outside the namespace so
++// the symbol Swift links against is exactly this name.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyMetadata(
++    uintptr_t aPlayerId, double aDurationSeconds, int32_t aWidth,
++    int32_t aHeight) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  auto& players = mozilla::PlayersById();
++  auto entry = players.find(aPlayerId);
++  if (entry == players.end()) {
++    // Routine during teardown rather than an error: the decoder erases
++    // itself before the player is destroyed, so a KVO notification
++    // already queued on this thread lands here and is dropped.
++    printf_stderr("avPlayer: metadata for unknown player %llu - ignored\n",
++                  (unsigned long long)aPlayerId);
++    return;
++  }
++
++  // AVFoundation reports an indefinite or NaN duration for a live
++  // stream, and for any item that has not resolved one yet. Zero rather
++  // than a garbage TimeUnit - the element reads that as unknown, which
++  // is the truth.
++  const mozilla::media::TimeUnit duration =
++      (std::isfinite(aDurationSeconds) && aDurationSeconds > 0.0)
++          ? mozilla::media::TimeUnit::FromSeconds(aDurationSeconds)
++          : mozilla::media::TimeUnit::Zero();
++
++  printf_stderr(
++      "avPlayer: metadata player=%llu duration=%.3f size=%dx%d\n",
++      (unsigned long long)aPlayerId, aDurationSeconds, aWidth, aHeight);
++
++  entry->second->NotifyMetadata(duration,
++                                mozilla::gfx::IntSize(aWidth, aHeight));
++}
