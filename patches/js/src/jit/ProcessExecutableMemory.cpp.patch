@@ -2,7 +2,7 @@ diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutab
 index cea7d764..4e912f86 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
-@@ -14,6 +14,13 @@
+@@ -14,6 +14,14 @@
  
  #include <errno.h>
  
@@ -11,6 +11,7 @@ index cea7d764..4e912f86 100644
 +#  include <mach/mach.h>
 +#  include <signal.h>
 +#  include <string.h>
++#  include <unistd.h>
 +#endif
 +
  #include "jsfriendapi.h"
@@ -308,7 +309,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +739,143 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +739,173 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -372,7 +373,37 @@ index cea7d764..4e912f86 100644
 +      // executes, trading a diagnosable fault loop for undiagnosable
 +      // corruption. If this counter is ever non-zero, that is the first
 +      // thing to suspect.
-+      sSkippedBusFaults++;
++      const uint64_t skipped = ++sSkippedBusFaults;
++
++      // REPORTED, not merely counted. The counter was write-only -
++      // incremented here and read nowhere - so five device captures of
++      // a browser degrading over ninety minutes (loads starting and
++      // never committing, content processes not answering queries, all
++      // of it cleared by a relaunch) carried no trace of whether this
++      // had fired even once. That is exactly the symptom the comment
++      // above predicts, and it was unfalsifiable without this.
++      //
++      // write(2) rather than printf_stderr: this is a signal handler,
++      // and printf_stderr allocates and takes a lock, neither of which
++      // is legal here. write is on the POSIX async-signal-safe list,
++      // and the digits are formatted by hand for the same reason.
++      // Emitted at powers of two so a fault storm cannot flood the log
++      // while growth stays visible.
++      if ((skipped & (skipped - 1)) == 0) {
++        static const char kMessage[] =
++            "jitSkip: SIGBUS skipped inside the JIT region - generated "
++            "code may now have a hole in it, count=";
++        char digits[24];
++        size_t at = sizeof(digits);
++        digits[--at] = '\n';
++        uint64_t remaining = skipped;
++        do {
++          digits[--at] = char('0' + (remaining % 10));
++          remaining /= 10;
++        } while (remaining);
++        (void)write(STDERR_FILENO, kMessage, sizeof(kMessage) - 1);
++        (void)write(STDERR_FILENO, digits + at, sizeof(digits) - at);
++      }
 +
 +      // Skip the faulting instruction rather than re-executing it.
 +      uc->uc_mcontext->__ss.__pc += 4;
