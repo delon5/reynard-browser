@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,141 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -84,6 +84,27 @@ new file mode 100644
 +  // visible frames come from the AVPlayer, not from this surface.
 +  // Main thread only.
 +  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay);
++
++  // Hooked purely to report that the pipeline got this far.
++  //
++  // Everything this decoder does was observable except the two things
++  // that decide whether anything paints. A device capture could show
++  // the placeholder published at the asset's real dimensions with
++  // planes=2, the metadata callback delivering duration and size, and
++  // a black screen - with no way to tell whether the element had ever
++  // reached HAVE_METADATA. ShouldComputeStartTime was then changed to
++  // make that promise resolve, and the result was unfalsifiable,
++  // because a header-only change produces no output at all.
++  //
++  // MetadataLoaded is where MediaFormatReader's resolved promise
++  // arrives; FirstFrameLoaded is what advances readyState far enough
++  // for nsVideoFrame to paint. Both delegate straight to MediaDecoder -
++  // this adds a line of output, not behaviour.
++  void MetadataLoaded(UniquePtr<MediaInfo> aInfo,
++                      UniquePtr<MetadataTags> aTags,
++                      MediaDecoderEventVisibility aEventVisibility) override;
++  void FirstFrameLoaded(UniquePtr<MediaInfo> aInfo,
++                        MediaDecoderEventVisibility aEventVisibility) override;
 +
 + private:
 +  explicit AVPlayerDecoder(MediaDecoderInit& aInit);

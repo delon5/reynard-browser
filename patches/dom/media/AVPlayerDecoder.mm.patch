@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,533 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -464,6 +464,28 @@ new file mode 100644
 +  printf_stderr("avPlayer: placeholder PUBLISHED %dx%d planes=%u\n",
 +                aDisplay.width, aDisplay.height,
 +                (unsigned)macSurface->GetPlaneCount());
++}
++
++void AVPlayerDecoder::MetadataLoaded(
++    UniquePtr<MediaInfo> aInfo, UniquePtr<MetadataTags> aTags,
++    MediaDecoderEventVisibility aEventVisibility) {
++  printf_stderr(
++      "avPlayer: MetadataLoaded hasVideo=%d display=%dx%d - element can "
++      "leave HAVE_NOTHING\n",
++      aInfo && aInfo->HasVideo() ? 1 : 0,
++      aInfo && aInfo->HasVideo() ? aInfo->mVideo.mDisplay.width : 0,
++      aInfo && aInfo->HasVideo() ? aInfo->mVideo.mDisplay.height : 0);
++  MediaDecoder::MetadataLoaded(std::move(aInfo), std::move(aTags),
++                               aEventVisibility);
++}
++
++void AVPlayerDecoder::FirstFrameLoaded(
++    UniquePtr<MediaInfo> aInfo, MediaDecoderEventVisibility aEventVisibility) {
++  printf_stderr(
++      "avPlayer: FirstFrameLoaded hasVideo=%d - readyState can now reach "
++      "HAVE_CURRENT_DATA\n",
++      aInfo && aInfo->HasVideo() ? 1 : 0);
++  MediaDecoder::FirstFrameLoaded(std::move(aInfo), aEventVisibility);
 +}
 +
 +void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& aDuration,
