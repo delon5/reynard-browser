@@ -21,10 +21,10 @@ final class JITController {
     // long past the five seconds each content process waits before
     // calling JS::DisableJitBackend() permanently.
     //
-    // attachQueue stays SERIAL and keeps protecting attachedPIDs,
-    // rejectedPIDs, preflightWatchdogs and
-    // isProcessingHelperAttachRequests exactly as before. Only the slow
-    // enableJIT call moves here, so no locking is needed and no
+    // attachQueue stays SERIAL and remains the confining queue for the
+    // attach bookkeeping (now owned by AttachLedger, which asserts it)
+    // and isProcessingHelperAttachRequests exactly as before. Only the
+    // slow enableJIT call moves here, so no locking is needed and no
     // existing invariant changes.
     private let attachWorkQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.AttachWorkQueue", qos: .userInitiated, attributes: .concurrent)
     
@@ -46,16 +46,14 @@ final class JITController {
     private static var orphanedAttachPIDs: Set<Int32> = []
     private static let orphanedAttachLock = NSLock()
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
-    private var attachedPIDs: Set<Int32> = []
-    
-    // ADDED - see fix_dedupe_attach_paths.py's docstring. Processes
-    // shouldAttach(to:) has rejected by type - socket, gpu, rdd and so
-    // on, which never execute JavaScript. The Helper path has no idea
-    // what kind of process it is hosting and would otherwise
-    // self-enable for them anyway, burning a ~1012ms serialized attach
-    // each on processes that have no use for JIT. Only ever touched on
-    // attachQueue, same as attachedPIDs.
-    private var rejectedPIDs: Set<Int32> = []
+
+    // The attach bookkeeping - attached, rejected and deferred pids
+    // plus the application-active flag - lives in AttachLedger, which
+    // is confined to attachQueue and asserts that on every access. The
+    // per-set reasoning (fix_dedupe_attach_paths.py,
+    // fix_defer_attaches_while_inactive.py) is documented on the
+    // ledger's own fields.
+    private let ledger: AttachLedger
     // Guarded by preflightWatchdogLock, NOT attachQueue: scheduling
     // happens on attachQueue but cancellation happens from
     // attachToProcess, which mostly runs on the CONCURRENT
@@ -87,23 +85,13 @@ final class JITController {
     private var retriedWatchdogPIDs: Set<Int32> = []
     private var hasHandledFailure = false
     
-    // ADDED - see fix_defer_attaches_while_inactive.py's docstring.
-    //
-    // vAttach STOPS its target for the ~1012ms it takes, and a stopped
-    // extension cannot answer the synchronous XPC iOS sends every
-    // extension on a lifecycle transition. Three hang reports show the
-    // main thread blocked in
-    // __NSXPCCONNECTION_IS_WAITING_FOR_A_SYNCHRONOUS_REPLY__ - two at
-    // willResignActive, one at didEnterBackground - and the watchdog
-    // killing the app with 0x8BADF00D.
-    //
-    // So no attach is STARTED unless the app is active. Pids arriving
-    // meanwhile are held here and attached on return.
-    //
-    // Both are only ever touched on attachQueue, which is serial, so
-    // they need no locking - the same as attachedPIDs and rejectedPIDs.
-    private var isApplicationActive = true
-    private var pendingAttachPIDs = Set<Int32>()
+    // The deferred-attach state (see
+    // fix_defer_attaches_while_inactive.py: vAttach STOPS its target,
+    // and a stopped extension cannot answer the synchronous XPC iOS
+    // sends on a lifecycle transition - observed as 0x8BADF00D kills)
+    // also lives in the ledger: no attach is STARTED unless the app is
+    // active, and pids arriving meanwhile are held and attached on
+    // return.
     private(set) var isJITLessModeActive = false
     
     /// Whether the debugger tunnel currently looks dead.
@@ -123,7 +111,9 @@ final class JITController {
     private let preflightTimeoutSeconds: Int = 5
     private let failurePresentationRetryLimit = 12
     
-    private init() {}
+    private init() {
+        ledger = AttachLedger(confinedTo: attachQueue)
+    }
     
     // For TrollStore or jailbroken devices
     private func usePtraceJIT() -> Bool {
@@ -151,13 +141,14 @@ final class JITController {
             // was found, which made "attachedPIDs was cleared", "the
             // processes died" and "they still hold sessions" all look
             // identical - and only the middle one is benign.
-            let alive = self.attachedPIDs.filter { kill($0, 0) == 0 }
+            let attached = self.ledger.attachedSnapshot()
+            let alive = attached.filter { kill($0, 0) == 0 }
             let orphaned = alive.filter { pid in
                 // Alive, but its debug loop has gone.
                 !JITEnabler.hasActiveDebugSession(forPID: pid)
             }
-            
-            logger(String(format: "reattachOrphanedProcesses: %d attached, %d alive, %d orphaned", self.attachedPIDs.count, alive.count, orphaned.count))
+
+            logger(String(format: "reattachOrphanedProcesses: %d attached, %d alive, %d orphaned", attached.count, alive.count, orphaned.count))
             
             guard !orphaned.isEmpty else {
                 return
@@ -187,8 +178,7 @@ final class JITController {
     /// See fix_defer_attaches_while_inactive.py.
     func applicationWillResignActive() {
         attachQueue.async {
-            dispatchPrecondition(condition: .onQueue(self.attachQueue))
-            self.isApplicationActive = false
+            self.ledger.markApplicationInactive()
         }
     }
     
@@ -196,25 +186,24 @@ final class JITController {
     func applicationDidBecomeActive() {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
-            self.isApplicationActive = true
+            self.ledger.markApplicationActive()
 
-            let deferred = self.pendingAttachPIDs
-            self.pendingAttachPIDs.removeAll()
-            
+            let deferred = self.ledger.drainDeferredPIDs()
+
             // Dead ones are dropped rather than attached - a pid can
             // easily have gone during the interval.
             let stillAlive = deferred.filter { kill($0, 0) == 0 }
             guard !stillAlive.isEmpty else {
                 return
             }
-            
+
             logger(String(format: "applicationDidBecomeActive: attaching %d deferred process(es)", stillAlive.count))
-            
+
             for pid in stillAlive {
-                guard !self.attachedPIDs.contains(pid) else {
+                guard !self.ledger.isAttached(pid) else {
                     continue
                 }
-                self.attachedPIDs.insert(pid)
+                self.ledger.markAttached(pid)
                 self.schedulePreflightWatchdog(for: pid)
                 
                 self.attachWorkQueue.async {
@@ -393,8 +382,7 @@ final class JITController {
             // wastefully attach this process a second later - see
             // fix_dedupe_attach_paths.py's docstring.
             attachQueue.async {
-                dispatchPrecondition(condition: .onQueue(self.attachQueue))
-                self.rejectedPIDs.insert(pid)
+                self.ledger.markRejected(pid)
             }
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             return
@@ -404,7 +392,7 @@ final class JITController {
         
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
-            if self.attachedPIDs.contains(pid) {
+            if self.ledger.isAttached(pid) {
                 // Silent until now, and the liveness check that made it
                 // safe was reverted in f795d87, so a reused pid lands
                 // here and is dropped without ever being signalled.
@@ -435,16 +423,17 @@ final class JITController {
             // Which is how one attach took 117 seconds with its target
             // stopped throughout, and the app was killed on the next
             // foreground for failing to answer XPC.
-            let reallyActive = self.isApplicationActive && actualStateIsActive
-            
+            let flagActive = self.ledger.isApplicationActive
+            let reallyActive = flagActive && actualStateIsActive
+
             guard reallyActive else {
-                logger(String(format: "attachStall: pid %d DEFERRED, %ld now pending", pid, self.pendingAttachPIDs.count + 1))
-                self.pendingAttachPIDs.insert(pid)
-                logger(String(format: "childProcessDidStart: pid %d deferred - app is not active (flag=%@, state=%@), will attach on return", pid, self.isApplicationActive ? "active" : "inactive", actualStateIsActive ? "active" : "inactive"))
+                let pendingCount = self.ledger.deferAttach(pid)
+                logger(String(format: "attachStall: pid %d DEFERRED, %ld now pending", pid, pendingCount))
+                logger(String(format: "childProcessDidStart: pid %d deferred - app is not active (flag=%@, state=%@), will attach on return", pid, flagActive ? "active" : "inactive", actualStateIsActive ? "active" : "inactive"))
                 return
             }
-            
-            self.attachedPIDs.insert(pid)
+
+            self.ledger.markAttached(pid)
             self.schedulePreflightWatchdog(for: pid)
             
             // Bookkeeping above stays on the serial queue; only the
@@ -932,7 +921,7 @@ final class JITController {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.cancelAllPreflightWatchdogs()
-            self.attachedPIDs.removeAll()
+            self.ledger.clearAllAttached()
             JITEnabler.shared.detachAllJITSessions()
         }
         
@@ -1155,9 +1144,9 @@ extension JITController {
                     // for 12 processes, 12.2s of serialized queue time,
                     // only 9 of them necessary.
                     var skipReason: String? = nil
-                    if self.rejectedPIDs.contains(pid) {
+                    if self.ledger.isRejected(pid) {
                         skipReason = "process type was rejected by shouldAttach - does not need JIT"
-                    } else if self.attachedPIDs.contains(pid) {
+                    } else if self.ledger.isAttached(pid) {
                         skipReason = "already attached by the native path"
                     }
                     
@@ -1175,7 +1164,7 @@ extension JITController {
                         continue
                     }
                     
-                    self.attachedPIDs.insert(pid)
+                    self.ledger.markAttached(pid)
                     
                     // The insert above is the last shared-state access;
                     // everything below is the ~1012ms attach plus file
