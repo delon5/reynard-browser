@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
-index e68fca9..80ed533 100644
+index e68fca9..2de13df 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,14 +18,65 @@
+@@ -18,14 +18,73 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -12,6 +12,7 @@ index e68fca9..80ed533 100644
  
  @protocol SwiftEventDispatcher;
 +@protocol GeckoAVPlayerHost;
++@class AVContentKeySession;
 +
 +typedef NS_ENUM(NSInteger, GeckoInputHandling) {
 +  GeckoInputHandlingUnhandled = 0,
@@ -75,7 +76,7 @@ index e68fca9..80ed533 100644
  @end
  
  @protocol GeckoProcessExtension <NSObject>
-@@ -56,6 +107,19 @@
+@@ -56,6 +115,19 @@
  
  @protocol GeckoViewWindow <NSObject>
  - (UIView*)view;
@@ -95,7 +96,7 @@ index e68fca9..80ed533 100644
  - (void)close;
  @end
  
-@@ -65,6 +129,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +137,17 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
