@@ -227,7 +227,9 @@ new file mode 100644
 +
 +void AVPlayerDecoder::NotifyDataArrived() {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  DownloadProgressed();
++  // DownloadProgressed lives on MediaDecoderOwner, not MediaDecoder -
++  // same call HLSDecoder::NotifyDataArrived makes.
++  GetOwner()->DownloadProgressed();
 +}
 +
 +void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& aDuration,
