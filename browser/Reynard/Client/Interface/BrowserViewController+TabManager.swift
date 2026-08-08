@@ -44,6 +44,13 @@ extension BrowserViewController: TabManagerDelegate {
     
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?) {
         tabBar.setPendingExpansion(at: nil)
+
+        // The reservation is reported to whichever session is selected,
+        // but the "already reported this" caches live on this controller -
+        // so without forgetting them here, the incoming session keeps the
+        // outgoing one's inset whenever the computed values happen to
+        // match.
+        invalidateDynamicToolbarReport()
         
         guard let selectedTab = tabManager.activeTabs[safe: index] else {
             return

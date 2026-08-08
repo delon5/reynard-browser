@@ -616,6 +616,21 @@ final class BrowserViewController: UIViewController {
     // oscillation and no reflow storm. The settle window and
     // plausibility checks that existed to tame the measurement are gone
     // with it.
+    /// Forgets what was last reported, so the next call re-sends even if
+    /// the computed values are identical.
+    ///
+    /// Both caches live on this controller while the values they guard
+    /// are applied to whichever SESSION is selected. Switching tabs after
+    /// the chrome condensed leaves the incoming session holding the
+    /// previous session's inset, and the guard - seeing an unchanged
+    /// (target, reservation) - suppresses the resend, so that tab renders
+    /// with the wrong bottom reservation until some later flip happens to
+    /// fire. Invalidating on selection closes that.
+    func invalidateDynamicToolbarReport() {
+        dynamicToolbarMaxHeight = -1
+        lastReportedBottomReservation = nil
+    }
+
     // Not private: the tab-manager extension lives in another file and
     // re-reports when a page's reservation verdict changes.
     func updateDynamicToolbarMaxHeight() {

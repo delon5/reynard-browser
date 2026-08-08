@@ -1545,6 +1545,15 @@ extension TabManagerImplementation: NavigationDelegate {
         }
     }
 
+    /// Drops every remembered bottom-reservation verdict, on disk and in
+    /// memory. Keyed by host, so the store is a browsing-history-shaped
+    /// list and belongs with the history it was derived from - clearing
+    /// history must clear this too.
+    static func clearReservationCache() {
+        reservationByHost.removeAll()
+        UserDefaults.standard.removeObject(forKey: reservationStoreKey)
+    }
+
     private static func persistReservations() {
         let raw: [String: String] = reservationByHost.reduce(into: [:]) { result, entry in
             switch entry.value {
@@ -1600,7 +1609,19 @@ extension TabManagerImplementation: NavigationDelegate {
                 // Remember it for this origin, so the next load of the
                 // same site starts with the right reservation instead of
                 // discovering it after first paint.
-                if let host = tab.url.flatMap({ URL(string: $0)?.host }),
+                //
+                // NEVER for a private tab. This store is written to
+                // UserDefaults and survives relaunch, so recording hosts
+                // from private browsing would leave a
+                // browsing-history-shaped list of them on disk - the one
+                // thing private mode exists to avoid. Not even kept in
+                // memory: the cache is process-wide and read by normal
+                // tabs, so a private-only host appearing there is still a
+                // leak. The cost is that private tabs resolve their
+                // verdict late, which is a layout nicety, not privacy.
+                let isPrivate = self.privateTabs.contains { $0 === tab }
+                if !isPrivate,
+                   let host = tab.url.flatMap({ URL(string: $0)?.host }),
                    Self.reservationByHost[host] != reservation {
                     Self.reservationByHost[host] = reservation
                     Self.persistReservations()
