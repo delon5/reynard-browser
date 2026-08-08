@@ -1373,6 +1373,17 @@ extension TabManagerImplementation: NavigationDelegate {
         // Cheap enough to repeat: the detector short-circuits on the
         // first matching stylesheet rule, and its fallback is three
         // elementFromPoint probes regardless of DOM size.
+        //
+        // Seed from what this origin did last time FIRST, so the
+        // reservation is already right while the page paints. Detection
+        // below then confirms or corrects it. Without this the verdict
+        // only lands after first paint and the page visibly jumps - the
+        // YouTube bounce that a refresh did not show, because a refresh
+        // still had the previous verdict in hand.
+        if applyRememberedReservation(to: tab, url: url), selectedTab === tab {
+            delegate?.tabManagerDidUpdateSafeAreaUsage(self)
+        }
+
         detectSafeAreaInsetUsage(for: tab, session: session, reason: "locationChange")
     }
 
@@ -1390,6 +1401,43 @@ extension TabManagerImplementation: NavigationDelegate {
     ///
     /// The pill reads the result lazily when it is about to condense, so
     /// this triggers no relayout by itself.
+    /// What each origin was last found to do about its bottom edge.
+    ///
+    /// Detection can only answer once the page has parsed its CSS, which
+    /// is after first paint, so a page whose reservation differs from the
+    /// default visibly jumps when the verdict lands. On device that was
+    /// YouTube "bouncing" on first load but being correct on refresh -
+    /// refresh works precisely because the tab still holds the previous
+    /// verdict and applies it before the page paints.
+    ///
+    /// This gives every tab that same head start: the origin's remembered
+    /// verdict is applied the moment navigation commits, and detection
+    /// only corrects it afterwards if the page really did change. The
+    /// first ever visit to a site still resolves late, once.
+    ///
+    /// Keyed by host rather than full URL: sites are consistent about
+    /// this across their own pages, and per-URL would almost never hit.
+    /// In-memory and process-wide - it is a latency optimisation, not
+    /// state worth persisting, and a wrong entry self-corrects on the
+    /// next detection.
+    private static var reservationByHost: [String: GeckoSession.BottomReservation] = [:]
+
+    /// Applies the remembered verdict for a newly committed URL, so the
+    /// reservation is right before the page paints rather than after.
+    /// Returns true when it changed the tab's current verdict.
+    @discardableResult
+    private func applyRememberedReservation(to tab: Tab, url: String?) -> Bool {
+        guard let host = url.flatMap({ URL(string: $0)?.host }),
+              let remembered = Self.reservationByHost[host],
+              tab.state.bottomReservation != remembered else {
+            return false
+        }
+        tab.state.bottomReservation = remembered
+        logger(String(format: "safeArea: tab %@ pre-seeded %@ for %@",
+                      tab.id.uuidString, String(describing: remembered), host))
+        return true
+    }
+
     private func detectSafeAreaInsetUsage(
         for tab: Tab,
         session: GeckoSession,
@@ -1411,6 +1459,13 @@ extension TabManagerImplementation: NavigationDelegate {
                               reason,
                               changed ? ", CHANGED" : ""))
                 tab.state.bottomReservation = reservation
+
+                // Remember it for this origin, so the next load of the
+                // same site starts with the right reservation instead of
+                // discovering it after first paint.
+                if let host = tab.url.flatMap({ URL(string: $0)?.host }) {
+                    Self.reservationByHost[host] = reservation
+                }
 
                 // Only relayout when the verdict actually moved, and
                 // only for the tab on screen - an SPA route change in a
