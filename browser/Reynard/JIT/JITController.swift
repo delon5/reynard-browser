@@ -64,9 +64,13 @@ final class JITController {
     // behind that would arrive after the watchdog had already fired
     // and burned the single-use ReportJITStatusForChild pipe with a
     // false FALSE. The lock keeps cancellation synchronous from any
-    // queue; DispatchWorkItem.cancel() itself is thread-safe.
+    // queue, and now also covers retriedWatchdogPIDs, which the
+    // scheduled closure reads and writes in the same critical section.
     private let preflightWatchdogLock = NSLock()
-    private var preflightWatchdogs: [Int32: DispatchWorkItem] = [:]
+    // Generation tokens, not DispatchWorkItems - see
+    // schedulePreflightWatchdog for why the work-item version leaked one
+    // item-plus-closure pair per scheduled watchdog.
+    private var preflightWatchdogs: [Int32: UUID] = [:]
     // Moved here from the Helper Process Attach Delegation extension
     // below - Swift extensions cannot contain stored properties, a
     // real compiler error caught building this for the first time.
@@ -78,10 +82,14 @@ final class JITController {
     // thread too once the queued work finishes, so this flag is only
     // ever touched from one thread - safe without needing a lock.
     private var isProcessingHelperAttachRequests = false
-    // Only ever touched from within the watchdog closure below, which
-    // always runs on watchdogQueue - single-queue access, no lock
-    // needed, consistent with how attachedPIDs is itself always
-    // touched only from attachQueue.
+    // Guarded by preflightWatchdogLock, alongside preflightWatchdogs.
+    //
+    // Previously watchdogQueue-confined and insert-only. Cancellation
+    // runs from any queue and now has to clear this too: a pid whose
+    // attach succeeded kept its "already retried" mark forever, so when
+    // the number was recycled onto a new process that process silently
+    // lost its one retry. The two collections are written together
+    // under one lock so they cannot disagree about a pid.
     private var retriedWatchdogPIDs: Set<Int32> = []
     private var hasHandledFailure = false
     
@@ -700,19 +708,58 @@ final class JITController {
     }
     
     private func schedulePreflightWatchdog(for pid: Int32) {
-        var watchdog: DispatchWorkItem?
-        watchdog = DispatchWorkItem { [weak self] in
+        // A generation token, not a DispatchWorkItem.
+        //
+        // The work-item version tested its own cancellation by reading
+        // the `var watchdog` it was assigned to, from inside its own
+        // closure. That read is what leaked it: with no capture-list
+        // entry the closure captured the variable's box strongly, the
+        // box held the item, and a DispatchWorkItem holds its block for
+        // its whole lifetime because it can be perform()ed again. One
+        // item-plus-closure pair leaked per scheduled watchdog -
+        // including every cancelled one, so the leak was at its worst
+        // when nothing was going wrong. Assigning nil at the end of the
+        // block would not have helped: a cancelled item never runs it.
+        //
+        // This closure captures a UUID and an Int32 by value and self
+        // weakly, so there is no cycle to break. "Cancelled" becomes
+        // "the map no longer holds my token", which covers being
+        // superseded by the retry below as well as a real cancel.
+        let token = UUID()
+
+        preflightWatchdogLock.lock()
+        preflightWatchdogs[pid] = token
+        preflightWatchdogLock.unlock()
+
+        watchdogQueue.asyncAfter(
+            deadline: .now() + .seconds(preflightTimeoutSeconds)
+        ) { [weak self] in
             guard let self else {
                 return
             }
-
-            // retriedWatchdogPIDs below is confined to watchdogQueue.
             dispatchPrecondition(condition: .onQueue(self.watchdogQueue))
 
-            guard let watchdog, !watchdog.isCancelled else {
+            // Claim the entry and remove it on the way through. The old
+            // timeout path returned without removing anything, so a
+            // timed-out pid sat in the map until that number came round
+            // again - the only bulk cleanup is
+            // cancelAllPreflightWatchdogs, which runs solely from
+            // activateJITLessMode.
+            self.preflightWatchdogLock.lock()
+            guard self.preflightWatchdogs[pid] == token else {
+                self.preflightWatchdogLock.unlock()
                 return
             }
-            
+            self.preflightWatchdogs.removeValue(forKey: pid)
+            let shouldRetry = !self.retriedWatchdogPIDs.contains(pid)
+            if shouldRetry {
+                self.retriedWatchdogPIDs.insert(pid)
+            } else {
+                // Giving up on this pid - drop the mark with it.
+                self.retriedWatchdogPIDs.remove(pid)
+            }
+            self.preflightWatchdogLock.unlock()
+
             // One retry before giving up - covers the confirmed,
             // intermittent (~8-10% background rate) stall on
             // lockdownd_connect_rsd inside ensureDDIMounted, which
@@ -729,15 +776,14 @@ final class JITController {
             // single-attempt success rate, that's expected to help in
             // practice - it is not a complete fix for a true
             // indefinite hang.
-            guard self.retriedWatchdogPIDs.contains(pid) else {
-                self.retriedWatchdogPIDs.insert(pid)
+            if shouldRetry {
                 self.attachQueue.async {
                     self.schedulePreflightWatchdog(for: pid)
                     self.attachToProcess(pid: pid)
                 }
                 return
             }
-            
+
             // DIAGNOSTIC - prime suspect. cancelPreflightWatchdog is
             // called only from attachToProcess, never from
             // attachToHelperProcess, so when the Helper path performs
@@ -748,32 +794,24 @@ final class JITController {
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             self.handleJITFailure(error: NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: nil))
         }
-        
-        guard let watchdog else {
-            return
-        }
-        
-        preflightWatchdogLock.lock()
-        preflightWatchdogs[pid] = watchdog
-        preflightWatchdogLock.unlock()
-        watchdogQueue.asyncAfter(deadline: .now() + .seconds(preflightTimeoutSeconds), execute: watchdog)
     }
 
     private func cancelPreflightWatchdog(for pid: Int32) {
         preflightWatchdogLock.lock()
-        let watchdog = preflightWatchdogs.removeValue(forKey: pid)
+        // Dropping the token IS the cancel: the scheduled closure wakes,
+        // finds the map no longer holds it, and returns.
+        preflightWatchdogs.removeValue(forKey: pid)
+        // Cleared with it, so a later attach on a recycled pid number
+        // gets its own retry rather than inheriting a spent one.
+        retriedWatchdogPIDs.remove(pid)
         preflightWatchdogLock.unlock()
-        watchdog?.cancel()
     }
 
     private func cancelAllPreflightWatchdogs() {
         preflightWatchdogLock.lock()
-        let watchdogs = Array(preflightWatchdogs.values)
         preflightWatchdogs.removeAll()
+        retriedWatchdogPIDs.removeAll()
         preflightWatchdogLock.unlock()
-        for watchdog in watchdogs {
-            watchdog.cancel()
-        }
     }
     
     private func handleJITFailure(error: NSError) {
