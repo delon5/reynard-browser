@@ -59,6 +59,10 @@ final class TabManagerImplementation: NSObject, TabManager {
     private let historyStore: HistoryStore
     let sessionManager: SessionManager
     private var faviconTasks: [UUID: Task<Void, Never>] = [:]
+    // Main-thread confined, like the tab arrays: armed from browse and
+    // cleared from the engine delegate callbacks, all of which arrive
+    // on the main thread.
+    private var loadWatchdogs: [UUID: DispatchWorkItem] = [:]
     private var selectionCounter = 0
     
     private lazy var lenientURLExpression: NSRegularExpression = {
@@ -967,13 +971,78 @@ final class TabManagerImplementation: NSObject, TabManager {
         
         if shouldNavigateDirectly {
             loadURL(navigationInput, in: tab)
+            armLoadWatchdog(for: tab, pendingInput: navigationInput, retryURL: navigationInput)
             return
         }
-        
+
         let searchDestination = SearchEngine.destination(for: navigationInput)
         loadURL(searchDestination, in: tab)
+        armLoadWatchdog(for: tab, pendingInput: navigationInput, retryURL: searchDestination)
     }
-    
+
+    // MARK: - Load Watchdog
+
+    /// One automatic retry for a user-initiated load the engine never
+    /// acknowledges.
+    ///
+    /// A tab whose content process died silently swallows the next
+    /// LoadUri whole: no pageStart, no pageStop, no location change.
+    /// Captured directly on device - the process behind a tab exited
+    /// (Target exited, packet W00) without onCrash/onKill ever firing,
+    /// so recoverTabAfterSessionLoss never ran; a load into that tab a
+    /// minute later produced nothing for six seconds, and an identical
+    /// second load then forced the engine to rebuild, spawn a fresh
+    /// process and commit within 1.5s. This automates that second press.
+    ///
+    /// A live session always answers well within the window - a
+    /// pageStop for the outgoing page arrives in ~100ms, and even a
+    /// freshly created session commits its initial about:blank inside a
+    /// second - so total silence for the full window is taken as "the
+    /// load went nowhere" and it is reissued once. The retry calls
+    /// loadURL, not browse, so it cannot re-arm itself: one retry per
+    /// user action.
+    private static let loadWatchdogSeconds: TimeInterval = 3.0
+
+    private func armLoadWatchdog(for tab: Tab, pendingInput: String, retryURL: String) {
+        let tabID = tab.id
+        loadWatchdogs[tabID]?.cancel()
+
+        let armedAt = CFAbsoluteTimeGetCurrent()
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self else {
+                return
+            }
+            self.loadWatchdogs.removeValue(forKey: tabID)
+
+            guard let location = self.tabLocation(for: tabID) else {
+                return
+            }
+            let tab = self.tabs(for: location.mode)[location.index]
+
+            // Anything that happened in the meantime - a commit, a
+            // back/forward transition, another browse - moves the tab
+            // off this exact pending state, and the retry is then not
+            // ours to make.
+            guard tab.state.displayState == .pending(pendingInput) else {
+                return
+            }
+
+            logger(String(format: "loadRetry: tab %@ got no engine response %.1fs after loading %@ - reissuing the load once", tabID.uuidString, CFAbsoluteTimeGetCurrent() - armedAt, retryURL))
+            self.loadURL(retryURL, in: tab)
+        }
+
+        loadWatchdogs[tabID] = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadWatchdogSeconds, execute: watchdog)
+    }
+
+    private func clearLoadWatchdog(for tab: Tab, signal: String) {
+        guard let watchdog = loadWatchdogs.removeValue(forKey: tab.id) else {
+            return
+        }
+        watchdog.cancel()
+        logger(String(format: "loadRetry: tab %@ engine responded (%@) - watchdog cleared", tab.id.uuidString, signal))
+    }
+
     func goBack() {
         guard let tab = selectedTab else {
             return
@@ -1315,7 +1384,12 @@ extension TabManagerImplementation: NavigationDelegate {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
-        
+
+        // Cleared even for a suppressed about:blank below - any
+        // location change at all proves the session is alive and the
+        // pending load will be handled, which is all the watchdog asks.
+        clearLoadWatchdog(for: tab, signal: "locationChange")
+
         let normalizedURL = url?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         
         let shouldPreserveDisplayedURL = hasDisplayURL(for: tab)
@@ -1766,7 +1840,9 @@ extension TabManagerImplementation: ProgressDelegate {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
-        
+
+        clearLoadWatchdog(for: tab, signal: "pageStart")
+
         if url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("about:blank"),
            hasDisplayURL(for: tab) {
             tab.state.isSuppressingInitialBlankPageLoad = true
@@ -1792,7 +1868,9 @@ extension TabManagerImplementation: ProgressDelegate {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
-        
+
+        clearLoadWatchdog(for: tab, signal: "pageStop")
+
         if tab.state.isSuppressingInitialBlankPageLoad {
             tab.state.isSuppressingInitialBlankPageLoad = false
             return
