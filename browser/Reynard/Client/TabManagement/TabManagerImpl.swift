@@ -1417,10 +1417,46 @@ extension TabManagerImplementation: NavigationDelegate {
     ///
     /// Keyed by host rather than full URL: sites are consistent about
     /// this across their own pages, and per-URL would almost never hit.
-    /// In-memory and process-wide - it is a latency optimisation, not
-    /// state worth persisting, and a wrong entry self-corrects on the
-    /// next detection.
-    private static var reservationByHost: [String: GeckoSession.BottomReservation] = [:]
+    /// Persisted, deliberately. An in-memory cache is empty at every
+    /// launch, so the first load of a site after starting the app - the
+    /// load anyone actually notices - still resolved late and still
+    /// jumped. Remembering across launches is what makes the very first
+    /// load of a known site correct.
+    ///
+    /// A wrong entry is applied immediately and then corrected by the
+    /// next detection, so the worst case is one stale frame rather than
+    /// a persistent error; UserDefaults is the right weight for that.
+    private static let reservationStoreKey = "Reynard.SafeArea.ReservationByHost"
+
+    private static var reservationByHost: [String: GeckoSession.BottomReservation] = loadReservations()
+
+    private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: reservationStoreKey) as? [String: String] else {
+            return [:]
+        }
+        return raw.reduce(into: [:]) { result, entry in
+            switch entry.value {
+            case "readsSafeAreaInset": result[entry.key] = .readsSafeAreaInset
+            case "hasBottomBar": result[entry.key] = .hasBottomBar
+            case "none": result[entry.key] = GeckoSession.BottomReservation.none
+            default: break
+            }
+        }
+    }
+
+    private static func persistReservations() {
+        let raw: [String: String] = reservationByHost.reduce(into: [:]) { result, entry in
+            switch entry.value {
+            case GeckoSession.BottomReservation.readsSafeAreaInset:
+                result[entry.key] = "readsSafeAreaInset"
+            case GeckoSession.BottomReservation.hasBottomBar:
+                result[entry.key] = "hasBottomBar"
+            case GeckoSession.BottomReservation.none:
+                result[entry.key] = "none"
+            }
+        }
+        UserDefaults.standard.set(raw, forKey: reservationStoreKey)
+    }
 
     /// Applies the remembered verdict for a newly committed URL, so the
     /// reservation is right before the page paints rather than after.
@@ -1463,8 +1499,10 @@ extension TabManagerImplementation: NavigationDelegate {
                 // Remember it for this origin, so the next load of the
                 // same site starts with the right reservation instead of
                 // discovering it after first paint.
-                if let host = tab.url.flatMap({ URL(string: $0)?.host }) {
+                if let host = tab.url.flatMap({ URL(string: $0)?.host }),
+                   Self.reservationByHost[host] != reservation {
                     Self.reservationByHost[host] = reservation
+                    Self.persistReservations()
                 }
 
                 // Only relayout when the verdict actually moved, and
