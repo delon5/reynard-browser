@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,114 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -76,6 +76,14 @@ new file mode 100644
 +  // Main thread only.
 +  void NotifyMetadata(const media::TimeUnit& aDuration,
 +                      const gfx::IntSize& aDisplay);
++
++  // Publishes a blank IOSurface-backed frame so the page has a video
++  // layer of the right geometry. AVPlayerDemuxer never produces a
++  // sample, so without this nothing reaches the compositor and there
++  // is no layer for NativeLayerCA to host an AVPlayerLayer in. The
++  // visible frames come from the AVPlayer, not from this surface.
++  // Main thread only.
++  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay);
 +
 + private:
 +  explicit AVPlayerDecoder(MediaDecoderInit& aInit);

@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,301 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,6 +25,11 @@ new file mode 100644
 +// /widget/uikit in LOCAL_INCLUDES, so the bare name does not resolve.
 +// This header includes GeckoView/GeckoViewSwiftSupport.h itself.
 +#include "mozilla/widget/GeckoViewSupport.h"
++#include "MacIOSurfaceImage.h"
++#include "VideoFrameContainer.h"
++#include "mozilla/gfx/MacIOSurface.h"
++
++#import <CoreVideo/CoreVideo.h>
 +
 +
 +namespace mozilla {
@@ -109,6 +114,10 @@ new file mode 100644
 +  if (!mPlayerId) {
 +    return NS_ERROR_FAILURE;
 +  }
++
++  // A layer has to exist before the first metadata callback, or there is
++  // nothing on screen while the asset resolves.
++  PublishPlaceholderFrame(kInitialDisplay);
 +
 +  rv = MediaShutdownManager::Instance().Register(this);
 +  if (NS_WARN_IF(NS_FAILED(rv))) {
@@ -232,12 +241,66 @@ new file mode 100644
 +  GetOwner()->DownloadProgressed();
 +}
 +
++// Puts a layer on screen for AVFoundation's video.
++//
++// Nothing reaches the compositor otherwise: AVPlayerDemuxer answers
++// end-of-stream for every sample request, deliberately, so no VideoData
++// is ever produced and the page has no video layer at all. The frames
++// the user eventually sees come from the AVPlayer, not from here - this
++// only establishes a layer of the right size, in the right place in the
++// page, for NativeLayerCA to later host an AVPlayerLayer in.
++//
++// Pushed straight into the VideoFrameContainer rather than through the
++// demuxer/decoder pipeline. That pipeline expects real encoded samples
++// and a platform decoder to turn them into frames; there is no encoded
++// data here, because AVFoundation owns the decode end to end.
++//
++// The surface is deliberately blank NV12 - the same bi-planar format
++// IsEligiblePictureInPictureSurface already accepts - so the compositor
++// path handling it is the one video normally takes.
++void AVPlayerDecoder::PublishPlaceholderFrame(const gfx::IntSize& aDisplay) {
++  MOZ_ASSERT(NS_IsMainThread());
++
++  VideoFrameContainer* container = GetVideoFrameContainer();
++  if (!container || aDisplay.width <= 0 || aDisplay.height <= 0) {
++    return;
++  }
++
++  NSDictionary* properties = @{
++    (__bridge NSString*)kIOSurfaceWidth : @(aDisplay.width),
++    (__bridge NSString*)kIOSurfaceHeight : @(aDisplay.height),
++    (__bridge NSString*)kIOSurfacePixelFormat :
++        @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
++    (__bridge NSString*)kIOSurfaceBytesPerElement : @(1),
++  };
++
++  CFTypeRefPtr<IOSurfaceRef> surface =
++      CFTypeRefPtr<IOSurfaceRef>::WrapUnderCreateRule(
++          IOSurfaceCreate((__bridge CFDictionaryRef)properties));
++  if (!surface) {
++    return;
++  }
++
++  RefPtr<MacIOSurface> macSurface = new MacIOSurface(
++      std::move(surface), gfx::YUVColorSpace::BT709,
++      gfx::TransferFunction::BT709, MacIOSurface::AllowAlpha::No);
++  macSurface->SetYUVColorSpace(gfx::YUVColorSpace::BT709);
++
++  RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(macSurface);
++  container->SetCurrentFrame(aDisplay, image, TimeStamp::Now());
++  container->Invalidate();
++}
++
 +void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& aDuration,
 +                                     const gfx::IntSize& aDisplay) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (mDemuxer) {
 +    mDemuxer->SetDuration(aDuration);
 +  }
++
++  // Now that the asset's real dimensions are known, republish at the
++  // correct size - the initial frame used kInitialDisplay.
++  PublishPlaceholderFrame(aDisplay);
 +}
 +
 +}  // namespace mozilla
