@@ -128,6 +128,29 @@ final class JITController {
         getEntitlementValue("com.apple.private.security.no-sandbox")
     }
     
+    /// Whether `pid` is still running, judged the way a sandboxed app
+    /// has to judge its own content-process extensions.
+    ///
+    /// kill(pid, 0) delivers no signal - it runs only the error checks
+    /// and reports what a real signal would have found. A content
+    /// process is an app extension in a different coalition, and the
+    /// app is not permitted to signal it, so for a LIVE child the call
+    /// returns -1 with errno == EPERM. Only ESRCH means the pid is
+    /// genuinely gone.
+    ///
+    /// The previous `kill(pid, 0) == 0` test therefore read every live
+    /// tab as dead: reattachOrphanedProcesses logged "0 alive" for 25
+    /// running processes and re-attached none of them, leaving them to
+    /// run with no W^X mediation. See
+    /// fix_reattach_treats_eperm_as_alive.py.
+    private static func pidIsAlive(_ pid: pid_t) -> Bool {
+        if kill(pid, 0) == 0 {
+            return true
+        }
+        // errno still refers to the kill above - nothing has run since.
+        return errno == EPERM
+    }
+
     /// Re-attaches content processes that lost their debug session
     /// during suspension. See
     /// fix_reattach_orphaned_sessions_on_foreground.py.
@@ -150,7 +173,7 @@ final class JITController {
             // processes died" and "they still hold sessions" all look
             // identical - and only the middle one is benign.
             let attached = self.ledger.attachedSnapshot()
-            let alive = attached.filter { kill($0, 0) == 0 }
+            let alive = attached.filter { Self.pidIsAlive($0) }
             let orphaned = alive.filter { pid in
                 // Alive, but its debug loop has gone.
                 !JITEnabler.hasActiveDebugSession(forPID: pid)
@@ -200,7 +223,7 @@ final class JITController {
 
             // Dead ones are dropped rather than attached - a pid can
             // easily have gone during the interval.
-            let stillAlive = deferred.filter { kill($0, 0) == 0 }
+            let stillAlive = deferred.filter { Self.pidIsAlive($0) }
             guard !stillAlive.isEmpty else {
                 return
             }

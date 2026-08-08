@@ -309,7 +309,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +739,173 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +739,219 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -403,6 +403,52 @@ index cea7d764..4e912f86 100644
 +        } while (remaining);
 +        (void)write(STDERR_FILENO, kMessage, sizeof(kMessage) - 1);
 +        (void)write(STDERR_FILENO, digits + at, sizeof(digits) - at);
++      }
++
++      // This chunk's prepared bit is cleared before anything else.
++      // sPreparedChunkMask was a one-way latch: a bit, once set, said
++      // "prepared" for the life of the process, though the prepared
++      // state actually died with the debug session that created it. A
++      // fault inside a "prepared" chunk is the TXM saying the mask is
++      // wrong, so the mask is corrected - then, once a debug session
++      // exists again, the next PrepareExecutableRegionForWriting
++      // re-traps and re-prepares this chunk instead of skipping it as
++      // already done. Atomic &= is async-signal-safe.
++      const uint8_t* regionBase =
++          inExecutableRegion ? sExecutableMemoryBase
++                             : sWritableExecutableMemoryBase;
++      const size_t faultChunk =
++          static_cast<size_t>(fault - regionBase) / kPrepareChunkBytes;
++      if (faultChunk < kMaxPrepareChunks) {
++        sPreparedChunkMask &= ~(uint64_t(1) << faultChunk);
++      }
++
++      // CAPPED. Skipping exists for a rare W^X quirk on an otherwise
++      // healthy page. A revoked region - debugger detached, TXM pulled
++      // the mapping - faults on EVERY touch, and a device capture
++      // showed what skip-forever does with that: count=1 to
++      // count=33554432 between 22:15:09 and 22:28:54, a core pinned in
++      // this handler for fourteen minutes while the tab sat dead and
++      // nothing restarted it.
++      //
++      // Healthy sessions log count=0 and the storm passed 262,144
++      // within its first second, so 4096 separates the two cleanly -
++      // and is already 16KB of holes, past which keeping the process
++      // alive stops being a favour. At the cap the handler hands
++      // SIGBUS back to whoever was installed before it - the same
++      // hand-back the foreign-fault path uses, so a registered crash
++      // reporter still runs - and returns without advancing PC. The
++      // instruction re-executes and the process dies with the real
++      // faulting PC and address in the report; the parent sees the
++      // exit and restarts the tab.
++      constexpr uint64_t kMaxSkippedBusFaults = 4096;
++      if (skipped >= kMaxSkippedBusFaults) {
++        static const char kGiveUpMessage[] =
++            "jitSkip: cap reached - restoring previous SIGBUS handler "
++            "and letting the process fault for real\n";
++        (void)write(STDERR_FILENO, kGiveUpMessage, sizeof(kGiveUpMessage) - 1);
++        sigaction(SIGBUS, &sPreviousBusAction, nullptr);
++        return;
 +      }
 +
 +      // Skip the faulting instruction rather than re-executing it.
