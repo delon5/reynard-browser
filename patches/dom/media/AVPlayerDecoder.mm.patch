@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,318 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -21,6 +21,7 @@ new file mode 100644
 +#include "nsIURI.h"
 +#include "nsNetUtil.h"
 +#include "MediaContainerType.h"
++#include "mozilla/Debug.h"  // printf_stderr
 +// Exported to dist/include as mozilla/widget/...; dom/media has no
 +// /widget/uikit in LOCAL_INCLUDES, so the bare name does not resolve.
 +// This header includes GeckoView/GeckoViewSwiftSupport.h itself.
@@ -61,6 +62,7 @@ new file mode 100644
 +}
 +
 +RefPtr<AVPlayerDecoder> AVPlayerDecoder::Create(MediaDecoderInit& aInit) {
++  printf_stderr("avPlayer: Create() pref=%d\n", IsEnabled() ? 1 : 0);
 +  if (!IsEnabled()) {
 +    return nullptr;
 +  }
@@ -72,17 +74,27 @@ new file mode 100644
 +}
 +
 +bool AVPlayerDecoder::IsSupportedType(const MediaContainerType& aType) {
-+  if (!IsEnabled()) {
-+    return false;
-+  }
++  // DIAGNOSTIC - device testing loaded Apple's bipbop .m3u8 and this
++  // decoder was never invoked at all: navigation committed to the URL
++  // and not one avPlayer line appeared. "Nothing happened" cannot
++  // distinguish the pref never reaching the engine from DecoderTraits
++  // resolving the type before it asks us, so both are reported here.
++  const bool enabled = IsEnabled();
++  const MediaMIMEType& mimeType = aType.Type();
++  const bool claimed =
++      enabled && (mimeType == MEDIAMIMETYPE("application/vnd.apple.mpegurl") ||
++                  mimeType == MEDIAMIMETYPE("application/x-mpegurl") ||
++                  mimeType == MEDIAMIMETYPE("audio/mpegurl") ||
++                  mimeType == MEDIAMIMETYPE("audio/x-mpegurl"));
++
++  printf_stderr("avPlayer: IsSupportedType(%s) pref=%d claimed=%d\n",
++                mimeType.AsString().BeginReading(), enabled ? 1 : 0,
++                claimed ? 1 : 0);
++
 +  // The HLS family. FairPlay is only ever delivered this way, and it is
 +  // also the container Gecko has no demuxer for on this platform - so
 +  // handing it to AVFoundation loses nothing.
-+  const MediaMIMEType& mimeType = aType.Type();
-+  return mimeType == MEDIAMIMETYPE("application/vnd.apple.mpegurl") ||
-+         mimeType == MEDIAMIMETYPE("application/x-mpegurl") ||
-+         mimeType == MEDIAMIMETYPE("audio/mpegurl") ||
-+         mimeType == MEDIAMIMETYPE("audio/x-mpegurl");
++  return claimed;
 +}
 +
 +nsresult AVPlayerDecoder::Load(nsIChannel* aChannel) {
