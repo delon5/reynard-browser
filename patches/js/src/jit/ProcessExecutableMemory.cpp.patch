@@ -24,7 +24,7 @@ index cea7d764..4e912f86 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +55,274 @@
+@@ -47,6 +55,283 @@
  using namespace js;
  using namespace js::jit;
  
@@ -107,6 +107,15 @@ index cea7d764..4e912f86 100644
 +static constexpr size_t kPrepareChunkBytes = 4 * 1024 * 1024;
 +static constexpr size_t kMaxPrepareChunks = 64;
 +static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPreparedChunkMask(0);
++
++// Saved so a foreign fault can be handed back to whoever was
++// installed before us instead of being forced to SIG_DFL.
++static struct sigaction sPreviousBusAction;
++static struct sigaction sPreviousTrapAction;
++
++// How many times a SIGBUS inside the JIT region was skipped. Non-zero
++// means generated code may have a hole in it - see the handler.
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sSkippedBusFaults(0);
 +
 +// ADDED - see fix_guard_brk_without_debugger.py's docstring.
 +//
@@ -299,7 +308,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +739,139 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +739,143 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -350,19 +359,26 @@ index cea7d764..4e912f86 100644
 +          fault >= sWritableExecutableMemoryBase &&
 +          fault < sWritableExecutableMemoryBase + MaxCodeBytesPerProcess;
 +      if (!inExecutableRegion && !inWritableAlias) {
-+        struct sigaction dfl;
-+        memset(&dfl, 0, sizeof(dfl));
-+        dfl.sa_handler = SIG_DFL;
-+        sigemptyset(&dfl.sa_mask);
-+        sigaction(SIGBUS, &dfl, nullptr);
++        // Hand back to whoever was installed before us, not SIG_DFL.
++        // Clobbering to default silently disables any POSIX crash
++        // handler the process registered, so its reports vanish.
++        sigaction(SIGBUS, &sPreviousBusAction, nullptr);
 +        return;
 +      }
++
++      // Counted, because skipping an arbitrary load/store inside the JIT
++      // region is NOT as safe as skipping our own brk: a skipped store
++      // into the writable alias leaves a hole in code that later
++      // executes, trading a diagnosable fault loop for undiagnosable
++      // corruption. If this counter is ever non-zero, that is the first
++      // thing to suspect.
++      sSkippedBusFaults++;
 +
 +      // Skip the faulting instruction rather than re-executing it.
 +      uc->uc_mcontext->__ss.__pc += 4;
 +    };
 +    sigemptyset(&sa.sa_mask);
-+    sigaction(SIGBUS, &sa, nullptr);
++    sigaction(SIGBUS, &sa, &sPreviousBusAction);
 +  }
 +
 +  // The backstop for brk #0xf00d executing with nobody listening.
@@ -411,14 +427,11 @@ index cea7d764..4e912f86 100644
 +          ((esr >> 26) & 0x3f) == 0x3c && (esr & 0xffff) == 0xf00d;
 +
 +      if (!isOurBreakpoint) {
-+        // Restore the default and return: the instruction re-executes
-+        // and terminates the way it would have without us, so real
-+        // breakpoints and debugger traps keep their semantics.
-+        struct sigaction dfl;
-+        memset(&dfl, 0, sizeof(dfl));
-+        dfl.sa_handler = SIG_DFL;
-+        sigemptyset(&dfl.sa_mask);
-+        sigaction(SIGTRAP, &dfl, nullptr);
++        // Restore whatever was installed before us and return: the
++        // instruction re-executes and behaves the way it would have
++        // without this backstop, so real breakpoints, debugger traps and
++        // any other handler's reporting keep their semantics.
++        sigaction(SIGTRAP, &sPreviousTrapAction, nullptr);
 +        return;
 +      }
 +
@@ -427,7 +440,7 @@ index cea7d764..4e912f86 100644
 +      uc->uc_mcontext->__ss.__pc += 4;
 +    };
 +    sigemptyset(&trapAction.sa_mask);
-+    sigaction(SIGTRAP, &trapAction, nullptr);
++    sigaction(SIGTRAP, &trapAction, &sPreviousTrapAction);
 +  }
 +
 +  void* p = reynard_mmap(randomAddr, bytes, protection, flags, -1, 0);
