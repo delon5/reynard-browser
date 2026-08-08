@@ -2,12 +2,36 @@ diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.cpp
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,127 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +#include "AVPlayerDemuxer.h"
++
++#include "mozilla/Debug.h"  // printf_stderr
++
++// Every function here logs, because this file is the blind half of the
++// metadata stall. The last capture proved Load() completed - the
++// metadata callback found a live, registered decoder - and proved
++// MetadataLoaded never fired. Everything between those two points is
++// async machinery with no output of its own, and each line below cuts
++// it at a different joint:
++//
++//   Init                    - MediaFormatReader engaged this demuxer at
++//                             all (AsyncReadMetadata ran)
++//   GetTrackDemuxer/GetInfo - DemuxerProxy::Init's resolve lambda ran
++//   ShouldComputeStartTime  - that lambda ran to completion: the value
++//                             is snapshotted immediately before it
++//                             flips mInitDone
++//   GetSamples              - the start-time branch was taken anyway,
++//                             i.e. the false above was NOT honoured -
++//                             this line before MetadataLoaded means the
++//                             running build predates 900e242
++//
++// All prints and still no MetadataLoaded narrows the stall to
++// OnDemuxerInitDone's tail or the resolve's hops back through
++// ReaderProxy and MDSM to the main thread.
 +
 +namespace mozilla {
 +
@@ -22,6 +46,7 @@ new file mode 100644
 +}
 +
 +RefPtr<AVPlayerDemuxer::InitPromise> AVPlayerDemuxer::Init() {
++  printf_stderr("avPlayer: demuxer Init - MediaFormatReader engaged\n");
 +  return InitPromise::CreateAndResolve(NS_OK, __func__);
 +}
 +
@@ -34,7 +59,10 @@ new file mode 100644
 +
 +already_AddRefed<MediaTrackDemuxer> AVPlayerDemuxer::GetTrackDemuxer(
 +    TrackInfo::TrackType aType, uint32_t aTrackNumber) {
-+  if (aType != TrackInfo::kVideoTrack || aTrackNumber != 0) {
++  const bool granted = aType == TrackInfo::kVideoTrack && aTrackNumber == 0;
++  printf_stderr("avPlayer: demuxer GetTrackDemuxer type=%d n=%u granted=%d\n",
++                static_cast<int>(aType), aTrackNumber, granted ? 1 : 0);
++  if (!granted) {
 +    return nullptr;
 +  }
 +  return MakeAndAddRef<AVPlayerTrackDemuxer>(mVideoInfo);
@@ -46,6 +74,12 @@ new file mode 100644
 +  return true;
 +}
 +
++bool AVPlayerDemuxer::ShouldComputeStartTime() const {
++  // See the header for why false; see the file comment for why it logs.
++  printf_stderr("avPlayer: demuxer ShouldComputeStartTime -> false\n");
++  return false;
++}
++
 +void AVPlayerDemuxer::SetDuration(const media::TimeUnit& aDuration) {
 +  mDuration = aDuration;
 +}
@@ -54,6 +88,8 @@ new file mode 100644
 +    : mInfo(aInfo) {}
 +
 +UniquePtr<TrackInfo> AVPlayerTrackDemuxer::GetInfo() const {
++  printf_stderr("avPlayer: track GetInfo %dx%d\n", mInfo.mDisplay.width,
++                mInfo.mDisplay.height);
 +  return mInfo.Clone();
 +}
 +
@@ -66,6 +102,8 @@ new file mode 100644
 +
 +RefPtr<AVPlayerTrackDemuxer::SamplesPromise> AVPlayerTrackDemuxer::GetSamples(
 +    int32_t aNumSamples) {
++  printf_stderr("avPlayer: track GetSamples(%d) -> END_OF_STREAM\n",
++                aNumSamples);
 +  // Always end of stream. The state machine stops asking, and the frames
 +  // the compositor shows come from the AVPlayerLayer rather than from any
 +  // sample that passed through here.
