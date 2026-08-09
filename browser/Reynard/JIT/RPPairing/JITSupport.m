@@ -97,15 +97,39 @@ static NSURL *activeJITSessionsFileURL(void) {
     return [containerURL URLByAppendingPathComponent:@"active-jit-sessions.txt" isDirectory:NO];
 }
 
+// Whether pid is still running, judged the way a sandboxed app has to
+// judge its own content-process extensions.
+//
+// The C counterpart of JITController.pidIsAlive - see
+// fix_reattach_treats_eperm_as_alive.py. kill(pid, 0) sends no signal;
+// it runs the error checks and reports what a real signal would have
+// found. A content process is an app extension in a different
+// coalition and the app may not signal it, so for a LIVE child the
+// call returns -1 with errno == EPERM. Only ESRCH means the pid is
+// genuinely gone.
+//
+// fb0ee00 fixed the `== 0` test in JITController.swift and left this
+// one, so every reader below still pruned live sessions as dead. It
+// was masked rather than harmless: hasAnyDebuggedJITSessionAcrossProcesses
+// returns early on the debuggedAcquisitionTimestamp fast path in the
+// success case, so the under-count rarely surfaced.
+static BOOL pidIsAlive(pid_t pid) {
+    if (kill(pid, 0) == 0) {
+        return YES;
+    }
+    // errno still refers to the kill above - nothing has run since.
+    return errno == EPERM;
+}
+
 // Reads the shared file, returns only entries whose PID is still
-// genuinely alive right now (kill(pid, 0) == 0 - no signal sent, just
-// checks whether a process with this PID currently exists). Not a
-// time-based expiry deliberately - a JIT session can legitimately run
-// for a tab's entire lifetime, so a fixed short window would
-// incorrectly age out a genuinely active one. This handles a crashed
-// or force-killed process's stale entry without needing that process
-// to have cooperated. PID reuse is a rare, brief-window edge case not
-// worth guarding against for an informational display row.
+// genuinely alive right now - no signal sent, just whether a process
+// with this PID currently exists. Not a time-based expiry deliberately
+// - a JIT session can legitimately run for a tab's entire lifetime, so
+// a fixed short window would incorrectly age out a genuinely active
+// one. This handles a crashed or force-killed process's stale entry
+// without needing that process to have cooperated. PID reuse is a
+// rare, brief-window edge case not worth guarding against for an
+// informational display row.
 static NSArray<NSNumber *> *readLiveJITSessionPIDs(int fd) {
     NSMutableArray<NSNumber *> *live = [NSMutableArray array];
     off_t fileSize = lseek(fd, 0, SEEK_END);
@@ -121,7 +145,7 @@ static NSArray<NSNumber *> *readLiveJITSessionPIDs(int fd) {
             if (parts.count < 1) continue;
             int32_t pid = (int32_t)[parts[0] intValue];
             if (pid <= 0) continue;
-            if (kill((pid_t)pid, 0) == 0) {
+            if (pidIsAlive((pid_t)pid)) {
                 [live addObject:@(pid)];
             }
         }
