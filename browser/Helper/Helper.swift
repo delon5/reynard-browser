@@ -112,7 +112,18 @@ open class BrowserHelper: NSObject, GeckoProcessExtension, NSExtensionRequestHan
 		}
 	}
 
-	open func lockdownSandbox(_ revision: String!) {}
+	// Gecko asks the child to seal its sandbox after bootstrap
+	// (LockdownNSExtensionProcess -> lockdownSandbox:"1.0"). In the
+	// NSExtension-based child path there is no public platform API to
+	// tighten the sandbox further at runtime — that requires the
+	// BrowserEngineKit extension types and the web-browser
+	// entitlement. Until then, surface the request instead of silently
+	// dropping it, so logs show whether lockdown was requested and
+	// with which revision. NOTE: this is visibility, not enforcement —
+	// the sandbox is NOT tightened here.
+	open func lockdownSandbox(_ revision: String!) {
+		NSLog("[ReynardHelper] lockdownSandbox(revision: \(revision ?? "nil")) requested — not enforced: no platform lockdown API in the NSExtension child path")
+	}
 }
 
 @objc(ReynardHelperMain)

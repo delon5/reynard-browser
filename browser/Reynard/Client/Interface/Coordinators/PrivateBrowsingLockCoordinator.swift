@@ -24,6 +24,14 @@ final class PrivateBrowsingLockCoordinator {
 
     private(set) var isLocked = false
     private var presentedLockViewController: PrivateBrowsingLockViewController?
+
+    /// One authentication at a time. LAContext cancels an in-flight
+    /// evaluation when a new one starts, so overlapping requests cancel
+    /// each other and produce a prompt that reappears after succeeding.
+    /// The log showed five Face ID requests in three seconds, two of them
+    /// overlapping, with a "cancelled" that was one evaluation being
+    /// killed by the next.
+    private var isAuthenticating = false
     
     /// A simple, non-interactive curtain shown the instant locking
     /// begins and kept up until real, successful authentication — not
@@ -208,9 +216,41 @@ final class PrivateBrowsingLockCoordinator {
             self?.switchToRegularTabsAndDismissLock()
         }
 
+        // Presenting on a controller that is already presenting something
+        // is a silent no-op in UIKit, and the log caught exactly that:
+        // hostAlreadyPresenting=Optional<UIViewController>. The lock never
+        // appeared, but presentedLockViewController was assigned anyway, so
+        // every later presentLockIfNeeded returned early on the belief that
+        // a lock was up - the state that needs a force quit to clear. Walk
+        // to the topmost presented controller so the presentation actually
+        // happens.
+        var presenter: UIViewController = host
+        while let presented = presenter.presentedViewController, !presented.isBeingDismissed {
+            presenter = presented
+        }
+        if presenter !== host {
+            logger(String(
+                format: "privateLock: presenting on top of %@ rather than the host",
+                String(describing: type(of: presenter))
+            ))
+        }
+
+        // Assigned BEFORE the present call, not inside its completion.
+        // This property is the guard above that refuses a second
+        // presentation, and the completion does not run until the
+        // animation finishes - assigning it there would leave a window of
+        // a few hundred milliseconds in which a second call sees nil and
+        // presents a second lock screen. The completion instead CLEARS it
+        // if the presentation turned out not to take, which covers the
+        // stale-state case without opening the double-present one.
         presentedLockViewController = lockViewController
-        host.present(lockViewController, animated: animated) { [weak self, weak lockViewController] in
+        presenter.present(lockViewController, animated: animated) { [weak self, weak lockViewController] in
             guard let self, let lockViewController else {
+                return
+            }
+            guard lockViewController.presentingViewController != nil else {
+                logger("privateLock: presentation did not take - clearing the recorded lock")
+                self.presentedLockViewController = nil
                 return
             }
             let window = lockViewController.viewIfLoaded?.window
@@ -231,6 +271,14 @@ final class PrivateBrowsingLockCoordinator {
     }
 
     private func authenticateAndUnlock() {
+        // hasRequestedAutomaticUnlock only covers the view controller's own
+        // automatic request; the manual button, a re-presentation and a
+        // foreground can each start another concurrently.
+        guard !isAuthenticating else {
+            logger("privateLock: authenticate SKIPPED - one is already in flight")
+            return
+        }
+        isAuthenticating = true
         logger("privateLock: authenticate requested")
         os_log("authenticateAndUnlock: starting authentication request", log: lockLog, type: .debug)
         PrivateBrowsingAuthenticator.shared.authenticate(
@@ -242,6 +290,10 @@ final class PrivateBrowsingLockCoordinator {
                 detail += String(format: " domain=%@ code=%ld", nsError.domain, nsError.code)
             }
             logger("privateLock: authenticate result " + detail)
+            // Cleared on every result. PrivateBrowsingAuthenticator invokes
+            // its completion on all four paths (unavailable, success,
+            // cancelled, failed), so this cannot latch on.
+            self?.isAuthenticating = false
             switch result {
             case .success, .unavailable:
                 self?.dismissLockScreen(unlocked: true)

@@ -1,9 +1,9 @@
 diff --git a/ipc/glue/NSExtensionUtils.h b/ipc/glue/NSExtensionUtils.h
 new file mode 100644
-index 000000000000..330a56fbb02b
+index 000000000000..c27181a9c7c1
 --- /dev/null
 +++ b/ipc/glue/NSExtensionUtils.h
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,78 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -40,11 +40,15 @@ index 000000000000..330a56fbb02b
 +      const std::function<void(Result<NSExtensionProcess, LaunchError>&&)>&
 +          aCompletion);
 +
-+  // Make an xpc_connection_t to this process. If an error is encountered,
-+  // `aError` will be populated with the error.
++  // Return a retained (+1) reference to this process's underlying libxpc
++  // connection, or nullptr if it is unavailable (e.g. the NSXPC bridge
++  // failed or Invalidate() already ran). There is no error out-parameter.
 +  //
-+  // Ownership over the newly created connection is returned to the caller.
-+  // The connection is returned in a suspended state, and must be resumed.
++  // The returned connection is NSXPC's own, already-active connection: it
++  // must NOT be resumed by the caller — an unbalanced resume on an active
++  // connection is undefined behavior. Cancellation is coordinated through
++  // Invalidate(); the caller's only ownership obligation is releasing the
++  // returned reference (DarwinObjectPtr does so automatically).
 +  DarwinObjectPtr<xpc_connection_t> MakeLibXPCConnection();
 +
 +  UniqueBEProcessCapabilityGrant GrantForegroundCapability();
