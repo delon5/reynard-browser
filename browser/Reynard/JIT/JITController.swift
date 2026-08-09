@@ -175,11 +175,30 @@ final class JITController {
             let attached = self.ledger.attachedSnapshot()
             let alive = attached.filter { Self.pidIsAlive($0) }
             let orphaned = alive.filter { pid in
+                // An attach that has been dispatched but has not
+                // finished is NOT an orphan - it is a pid partway
+                // through the very thing this pass would start again.
+                //
+                // markAttached runs before the attach is dispatched and
+                // hasActiveDebugSession only becomes true once it
+                // completes, so every pid queued behind the attach
+                // slots sits in that gap: attached, alive, sessionless.
+                // Re-attaching one lands a second vAttach on a process
+                // the first attach has already stopped; the second
+                // connection dies on its next command, the detach is
+                // skipped as "transport already dead", and the child is
+                // left STOPPED forever. A frozen extension cannot
+                // answer the synchronous XPC ExtensionKit sends on the
+                // next foreground, which is a guaranteed 0x8BADF00D
+                // watchdog kill - the crash this filter exists to stop.
+                guard !self.ledger.isAttachInFlight(pid) else {
+                    return false
+                }
                 // Alive, but its debug loop has gone.
-                !JITEnabler.hasActiveDebugSession(forPID: pid)
+                return !JITEnabler.hasActiveDebugSession(forPID: pid)
             }
 
-            logger(String(format: "reattachOrphanedProcesses: %d attached, %d alive, %d orphaned", attached.count, alive.count, orphaned.count))
+            logger(String(format: "reattachOrphanedProcesses: %d attached, %d alive, %d in flight, %d orphaned", attached.count, alive.count, self.ledger.attachInFlightCount(), orphaned.count))
             
             guard !orphaned.isEmpty else {
                 return
@@ -196,15 +215,19 @@ final class JITController {
                 // The real guard against a duplicate is
                 // boundedEnableJIT's per-pid in-flight check, which
                 // still applies.
+                self.ledger.markAttachInFlight(pid)
                 self.attachWorkQueue.async {
                     self.attachSlots.wait()
-                    defer { self.attachSlots.signal() }
+                    defer {
+                        self.attachSlots.signal()
+                        self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
+                    }
                     self.attachToProcess(pid: pid)
                 }
             }
         }
     }
-    
+
     /// No further attaches are started until the app is active again.
     /// See fix_defer_attaches_while_inactive.py.
     func applicationWillResignActive() {
@@ -236,10 +259,14 @@ final class JITController {
                 }
                 self.ledger.markAttached(pid)
                 self.schedulePreflightWatchdog(for: pid)
-                
+
+                self.ledger.markAttachInFlight(pid)
                 self.attachWorkQueue.async {
                     self.attachSlots.wait()
-                    defer { self.attachSlots.signal() }
+                    defer {
+                        self.attachSlots.signal()
+                        self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
+                    }
                     self.attachToProcess(pid: pid)
                 }
             }
@@ -466,7 +493,8 @@ final class JITController {
 
             self.ledger.markAttached(pid)
             self.schedulePreflightWatchdog(for: pid)
-            
+            self.ledger.markAttachInFlight(pid)
+
             // Bookkeeping above stays on the serial queue; only the
             // ~1012ms attach itself runs concurrently. See
             // fix_concurrent_attach_slots.py.
@@ -482,6 +510,7 @@ final class JITController {
                 defer {
                     logger(String(format: "attachStall: pid %d releasing its attach slot", pid))
                     self.attachSlots.signal()
+                    self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
                 }
                 self.attachToProcess(pid: pid)
             }
@@ -1287,18 +1316,22 @@ extension JITController {
                     }
                     
                     self.ledger.markAttached(pid)
-                    
-                    // The insert above is the last shared-state access;
-                    // everything below is the ~1012ms attach plus file
-                    // I/O and a notification post, none of which touch
-                    // state protected by attachQueue. pid and token are
-                    // value types captured per iteration, so each
-                    // dispatched block writes its own result file. See
-                    // fix_concurrent_attach_slots.py.
+                    self.ledger.markAttachInFlight(pid)
+
+                    // The inserts above are the last shared-state
+                    // access; everything below is the ~1012ms attach
+                    // plus file I/O and a notification post, none of
+                    // which touch state protected by attachQueue. pid
+                    // and token are value types captured per iteration,
+                    // so each dispatched block writes its own result
+                    // file. See fix_concurrent_attach_slots.py.
                     self.attachWorkQueue.async {
                         self.attachSlots.wait()
-                        defer { self.attachSlots.signal() }
-                        
+                        defer {
+                            self.attachSlots.signal()
+                            self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
+                        }
+
                         let (success, errorDescription) = self.attachToHelperProcess(pid: pid)
                         
                         let resultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")

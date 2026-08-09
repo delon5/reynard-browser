@@ -44,6 +44,40 @@ final class AttachLedger {
     private var pendingAttachPIDs: Set<Int32> = []
     private var applicationActive = true
 
+    /// PIDs whose attach has been dispatched but has not finished -
+    /// queued behind the attach slots, or running right now.
+    ///
+    /// Unlike attachedPIDs this IS removed when the attach completes,
+    /// because it answers a different question: not "was an attach ever
+    /// started for this pid" but "is one outstanding for it at this
+    /// instant".
+    ///
+    /// reattachOrphanedProcesses needs that distinction. Its orphan
+    /// test is `!hasActiveDebugSession(forPID:)`, and a pid only enters
+    /// that set once its attach COMPLETES - but markAttached runs
+    /// before the attach is dispatched, so a pid waiting in the queue
+    /// is simultaneously "attached", alive, and sessionless. It was
+    /// therefore declared orphaned and given a second, duplicate
+    /// attach.
+    ///
+    /// A device capture caught the whole chain: at cold launch 15
+    /// children spawn, attaches serialize three at a time at ~1.2s
+    /// each, and the reattach pass fires 3s in - "13 attached, 13
+    /// alive, 10 orphaned". The partition was exact: every child whose
+    /// attach had completed stayed healthy, every child still in the
+    /// queue was doomed. The duplicate vAttach landed on a process the
+    /// first attach had already stopped, the second connection died on
+    /// its next command ("transport already dead"), the detach was
+    /// skipped by design - and the child was left STOPPED with nobody
+    /// to continue it. Nine such children then could not answer the
+    /// synchronous XPC ExtensionKit sends on the next foreground, and
+    /// FrontBoard killed the app with 0x8BADF00D.
+    ///
+    /// boundedEnableJIT's per-pid in-flight check could not catch it:
+    /// the duplicate was not concurrent with the original, it was
+    /// queued behind it.
+    private var attachInFlightPIDs: Set<Int32> = []
+
     init(confinedTo queue: DispatchQueue) {
         self.queue = queue
     }
@@ -102,6 +136,30 @@ final class AttachLedger {
     func attachedSnapshot() -> Set<Int32> {
         dispatchPrecondition(condition: .onQueue(queue))
         return attachedPIDs
+    }
+
+    // MARK: - Outstanding attaches
+
+    /// Called on the confining queue immediately before an attach is
+    /// dispatched to the work queue, and cleared once it returns.
+    func markAttachInFlight(_ pid: Int32) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        attachInFlightPIDs.insert(pid)
+    }
+
+    func clearAttachInFlight(_ pid: Int32) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        attachInFlightPIDs.remove(pid)
+    }
+
+    func isAttachInFlight(_ pid: Int32) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return attachInFlightPIDs.contains(pid)
+    }
+
+    func attachInFlightCount() -> Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return attachInFlightPIDs.count
     }
 
     // MARK: - Rejections
