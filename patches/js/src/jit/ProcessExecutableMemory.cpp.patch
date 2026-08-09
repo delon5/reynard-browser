@@ -25,7 +25,7 @@ index cea7d764..4e912f86 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +55,283 @@
+@@ -47,6 +55,329 @@
  using namespace js;
  using namespace js::jit;
  
@@ -203,6 +203,52 @@ index cea7d764..4e912f86 100644
 +  return (flags & REYNARD_CS_DEBUGGED) != 0;
 +}
 +
++// Set the first time a W^X fault is skipped, so the skip is reported
++// once rather than never or constantly.
++static mozilla::Atomic<bool, mozilla::Relaxed> sReportedWXFaultSkip(false);
++
++// Hand a fault to whoever held the signal before this file installed its
++// own handler, WITHOUT changing the disposition.
++//
++// The foreign-fault paths used to do `sigaction(SIG, &sPrevious, nullptr)`
++// and return. That does deliver the fault to the previous handler, but it
++// also uninstalls ours - and sInstalledBusHandler/sInstalledTrapHandler
++// are latched while ReserveProcessExecutableMemory runs once, so nothing
++// ever puts it back. One foreign fault permanently removed W^X mediation
++// or the brk #0xf00d backstop for the rest of the process's life. The
++// backstop has to survive the first foreign fault to be worth having: the
++// race it covers - the debug session dying between DebuggerIsListening()
++// and the brk three instructions later - can happen at any point
++// afterwards.
++static void ForwardToPreviousHandler(int aSignal,
++                                     const struct sigaction* aPrevious,
++                                     siginfo_t* aInfo, void* aContext) {
++  if (aPrevious->sa_flags & SA_SIGINFO) {
++    if (aPrevious->sa_sigaction) {
++      aPrevious->sa_sigaction(aSignal, aInfo, aContext);
++      return;
++    }
++  } else if (aPrevious->sa_handler != SIG_DFL &&
++             aPrevious->sa_handler != SIG_IGN) {
++    aPrevious->sa_handler(aSignal);
++    return;
++  }
++
++  if (aPrevious->sa_handler == SIG_IGN) {
++    return;
++  }
++
++  // Nothing was there. Restore the default and return so the faulting
++  // instruction re-executes into it. The disposition is left at SIG_DFL,
++  // but only on the path that was always going to terminate the process -
++  // there is no handler left to lose.
++  struct sigaction dfl;
++  memset(&dfl, 0, sizeof(dfl));
++  dfl.sa_handler = SIG_DFL;
++  sigemptyset(&dfl.sa_mask);
++  sigaction(aSignal, &dfl, nullptr);
++}
++
 +static void PrepareExecutableRegionForWriting(void* aAddress, size_t aSize) {
 +  if (!aAddress || !aSize) {
 +    return;
@@ -309,7 +355,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +739,219 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +785,246 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -337,7 +383,7 @@ index cea7d764..4e912f86 100644
 +    struct sigaction sa;
 +    memset(&sa, 0, sizeof(sa));
 +    sa.sa_flags = SA_SIGINFO;
-+    sa.sa_sigaction = [](int, siginfo_t* info, void* context) {
++    sa.sa_sigaction = [](int aSignal, siginfo_t* info, void* context) {
 +      auto* uc = static_cast<ucontext_t*>(context);
 +      if (!uc || !uc->uc_mcontext) {
 +        return;
@@ -360,10 +406,17 @@ index cea7d764..4e912f86 100644
 +          fault >= sWritableExecutableMemoryBase &&
 +          fault < sWritableExecutableMemoryBase + MaxCodeBytesPerProcess;
 +      if (!inExecutableRegion && !inWritableAlias) {
-+        // Hand back to whoever was installed before us, not SIG_DFL.
-+        // Clobbering to default silently disables any POSIX crash
-+        // handler the process registered, so its reports vanish.
-+        sigaction(SIGBUS, &sPreviousBusAction, nullptr);
++        // Hand to whoever was installed before us, not SIG_DFL:
++        // clobbering to default silently disables any POSIX crash
++        // handler the process registered, so its reports vanish. Call
++        // it rather than install it - installing it uninstalls THIS
++        // handler permanently, and nothing reinstalls it, so the first
++        // foreign SIGBUS would end W^X mediation for good. A wasm
++        // out-of-bounds access lands here, and SpiderMonkey's own
++        // handler is the one that turns it into a JS exception instead
++        // of a kill.
++        ForwardToPreviousHandler(aSignal, &sPreviousBusAction, info,
++                                 context);
 +        return;
 +      }
 +
@@ -451,6 +504,22 @@ index cea7d764..4e912f86 100644
 +        return;
 +      }
 +
++      // Skipping a store leaves the generated code buffer missing an
++      // instruction; skipping a load leaves a stale value in the
++      // destination register. Either way the process carries on over
++      // corrupt state and the eventual crash lands somewhere unrelated,
++      // so the first skip is worth knowing about even when skipping is
++      // the right call. Only the cap reported before, which made "does
++      // this ever happen?" unanswerable until 4096 had already gone by.
++      // write(2) is async-signal-safe, unlike notify_post, and stderr is
++      // already collected alongside the "[JIT]: Ready" lines.
++      if (!sReportedWXFaultSkip.exchange(true)) {
++        static const char kSkipMessage[] =
++            "jitSkip: first W^X fault skipped - JIT state may be "
++            "corrupt from here\\n";
++        (void)write(STDERR_FILENO, kSkipMessage, sizeof(kSkipMessage) - 1);
++      }
++
 +      // Skip the faulting instruction rather than re-executing it.
 +      uc->uc_mcontext->__ss.__pc += 4;
 +    };
@@ -491,7 +560,7 @@ index cea7d764..4e912f86 100644
 +    struct sigaction trapAction;
 +    memset(&trapAction, 0, sizeof(trapAction));
 +    trapAction.sa_flags = SA_SIGINFO;
-+    trapAction.sa_sigaction = [](int, siginfo_t*, void* context) {
++    trapAction.sa_sigaction = [](int aSignal, siginfo_t* aInfo, void* context) {
 +      auto* uc = static_cast<ucontext_t*>(context);
 +      if (!uc || !uc->uc_mcontext) {
 +        return;
@@ -504,11 +573,15 @@ index cea7d764..4e912f86 100644
 +          ((esr >> 26) & 0x3f) == 0x3c && (esr & 0xffff) == 0xf00d;
 +
 +      if (!isOurBreakpoint) {
-+        // Restore whatever was installed before us and return: the
-+        // instruction re-executes and behaves the way it would have
-+        // without this backstop, so real breakpoints, debugger traps and
-+        // any other handler's reporting keep their semantics.
-+        sigaction(SIGTRAP, &sPreviousTrapAction, nullptr);
++        // Somebody else's brk - __builtin_trap() is brk #1,
++        // SpiderMonkey's masm.breakpoint() is brk #0. Hand it on so real
++        // breakpoints, debugger traps and any other handler's reporting
++        // keep their semantics - but WITHOUT uninstalling this handler
++        // on the way past, which is what restoring the disposition here
++        // used to do. Nothing reinstalls it, so one foreign trap
++        // permanently removed the backstop.
++        ForwardToPreviousHandler(aSignal, &sPreviousTrapAction, aInfo,
++                                 context);
 +        return;
 +      }
 +
@@ -529,7 +602,7 @@ index cea7d764..4e912f86 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +916,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +989,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -557,7 +630,7 @@ index cea7d764..4e912f86 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +971,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +1044,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -589,7 +662,7 @@ index cea7d764..4e912f86 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +1002,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +1075,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -607,7 +680,7 @@ index cea7d764..4e912f86 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +1019,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +1092,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -663,7 +736,7 @@ index cea7d764..4e912f86 100644
  #  endif
  }
  #endif
-@@ -722,8 +1177,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1250,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -706,7 +779,7 @@ index cea7d764..4e912f86 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1232,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1305,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -727,7 +800,7 @@ index cea7d764..4e912f86 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1404,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1477,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -745,7 +818,7 @@ index cea7d764..4e912f86 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1434,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1507,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -765,7 +838,7 @@ index cea7d764..4e912f86 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1496,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1569,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
