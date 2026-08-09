@@ -26,6 +26,11 @@ final class ScrollbarHapticCoordinator: NSObject {
         /// narrow enough to avoid firing on ordinary taps/scrolls
         /// elsewhere in the content.
         static let edgeStripWidth: CGFloat = 24
+        /// Vertical movement (points) that turns a touch-down in the
+        /// strip into an "activated the scrollbar" drag. Small enough
+        /// to feel instant on a real grab, large enough that a plain
+        /// tap's jitter never crosses it.
+        static let dragActivationThreshold: CGFloat = 6
     }
     
     /// Consulted on every touch-down within the strip. Return `false`
@@ -35,6 +40,35 @@ final class ScrollbarHapticCoordinator: NSObject {
     var isEnabled: () -> Bool = { true }
     
     private let feedbackGenerator = UIImpactFeedbackGenerator(style: .light)
+    /// Set on touch-down inside the strip, cleared once the haptic has
+    /// fired (or the touch ends without dragging). Non-nil means armed.
+    private var pendingActivationStart: CGPoint?
+    /// Latched the first time the engine's scrollbar-touch event
+    /// arrives. From then on the drag heuristic in handleTouch stays
+    /// silent: the engine signal is the compositor's own thumb hit
+    /// test - pixel-accurate and earlier - and double-buzzing is worse
+    /// than either signal alone. The heuristic remains as the fallback
+    /// for builds whose engine predates the APZCTreeManager haptics
+    /// patch.
+    private var engineSignalObserved = false
+
+    /// The pixel-perfect activation. Chain: APZ thumb hit test
+    /// (APZCTreeManager patch) -> "reynard-scrollbar-touch-begin"
+    /// observer topic -> GeckoViewStartup relay ->
+    /// GeckoView:ScrollbarTouchBegin ->
+    /// GeckoRuntime.setScrollbarTouchBeginHandler -> here, on main.
+    func activateFromEngineSignal() {
+        guard isEnabled() else {
+            return
+        }
+        engineSignalObserved = true
+        pendingActivationStart = nil
+        // Usually already prepared by the .began arm below (a thumb
+        // grab necessarily begins inside the strip); preparing again
+        // is a cheap no-op that covers the remaining cases.
+        feedbackGenerator.prepare()
+        feedbackGenerator.impactOccurred()
+    }
     
     /// Attaches the observing gesture recognizer to `view` (typically the
     /// content view hosting the web page). Safe to call once.
@@ -50,19 +84,49 @@ final class ScrollbarHapticCoordinator: NSObject {
     }
     
     @objc private func handleTouch(_ recognizer: UILongPressGestureRecognizer) {
-        guard recognizer.state == .began, isEnabled(), let view = recognizer.view else {
+        guard let view = recognizer.view else {
             return
         }
-        
-        let location = recognizer.location(in: view)
-        guard location.x >= view.bounds.width - UX.edgeStripWidth else {
-            return
+
+        switch recognizer.state {
+        case .began:
+            guard isEnabled() else {
+                return
+            }
+            let location = recognizer.location(in: view)
+            guard location.x >= view.bounds.width - UX.edgeStripWidth else {
+                return
+            }
+            // Arm, and spin the taptic engine up NOW - so when the drag
+            // engages a few points later the tick lands with zero
+            // latency - but do not fire yet: a bare touch-down in the
+            // strip is just as likely a tap on nearby content, and the
+            // buzz is meant to say "you have activated the scrollbar",
+            // which only a drag demonstrates.
+            pendingActivationStart = location
+            feedbackGenerator.prepare()
+
+        case .changed:
+            guard !engineSignalObserved, let start = pendingActivationStart else {
+                return
+            }
+            let location = recognizer.location(in: view)
+            guard abs(location.y - start.y) >= UX.dragActivationThreshold else {
+                return
+            }
+            // The touch is dragging vertically from inside the strip -
+            // the closest observable signal to "the scrollbar thumb
+            // engaged" (see this file's fix script docstring for why
+            // the compositor's own thumb-drag state is not reachable).
+            // Fire once per touch.
+            pendingActivationStart = nil
+            feedbackGenerator.impactOccurred()
+
+        default:
+            // Ended, cancelled, or failed without ever dragging: an
+            // edge tap. Disarm silently - no buzz for taps.
+            pendingActivationStart = nil
         }
-        
-        // Prepare right before firing, not earlier — keeps the taptic
-        // engine from staying spun up between touches for no reason.
-        feedbackGenerator.prepare()
-        feedbackGenerator.impactOccurred()
     }
 }
 

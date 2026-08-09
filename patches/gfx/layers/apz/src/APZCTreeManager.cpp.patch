@@ -1,0 +1,33 @@
+diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTreeManager.cpp
+--- a/gfx/layers/apz/src/APZCTreeManager.cpp
++++ b/gfx/layers/apz/src/APZCTreeManager.cpp
+@@ -2171,6 +2171,29 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
+         hitScrollbarNode->IsScrollThumbNode() &&
+         hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable;
+ 
++#ifdef MOZ_WIDGET_UIKIT
++    if (mInScrollbarTouchDrag) {
++      // Reynard: the embedder fires a haptic the moment the user's
++      // finger lands on the scrollbar thumb, and this is the only
++      // place in the process that knows that happened - the hit test
++      // against the scrollthumb node lives here in APZ. Relayed as an
++      // observer topic from the main thread; GeckoViewStartup turns it
++      // into the GeckoView:ScrollbarTouchBegin embedder event.
++      // Fire-and-forget and off the input path, so touch handling
++      // never waits on it.
++      NS_DispatchToMainThread(NS_NewRunnableFunction(
++          "reynard::NotifyScrollbarTouchBegin", []() {
++            nsCOMPtr<nsIObserverService> obsSvc =
++                mozilla::services::GetObserverService();
++            if (obsSvc) {
++              obsSvc->NotifyObservers(nullptr,
++                                      "reynard-scrollbar-touch-begin",
++                                      nullptr);
++            }
++          }));
++    }
++#endif
++
+     MOZ_ASSERT(touchBehaviors.Length() == aInput.mTouches.Length());
+     for (size_t i = 0; i < touchBehaviors.Length(); i++) {
+       APZCTM_LOG("Touch point has allowed behaviours 0x%02x\n",

@@ -1,0 +1,20 @@
+diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+--- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
++++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
+@@ -304,6 +304,16 @@ export class GeckoViewStartup {
+           }
+         );
+ 
++        // Reynard: APZ notifies this topic when a touch lands on a
++        // scrollbar thumb (see the APZCTreeManager patch); relay it to
++        // the embedder, which uses it for native haptic feedback the
++        // moment the thumb is grabbed.
++        Services.obs.addObserver(() => {
++          lazy.EventDispatcher.instance.sendRequest(
++            "GeckoView:ScrollbarTouchBegin"
++          );
++        }, "reynard-scrollbar-touch-begin");
++
+         // Initialize the cookie service early so the DB is loaded by
+         // the time we make the first HTTP request. Skip in xpcshell tests,
+         // which expect to control when (and against which DB file) the

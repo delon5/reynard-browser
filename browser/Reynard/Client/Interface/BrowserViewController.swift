@@ -188,6 +188,13 @@ final class BrowserViewController: UIViewController {
         }
         
         scrollbarHapticCoordinator.attach(to: contentView)
+        // Pixel-perfect activation: APZ reports the exact moment a
+        // touch lands on the scrollbar thumb (APZCTreeManager patch).
+        // The coordinator silences its own edge-strip drag heuristic
+        // once this signal proves live.
+        GeckoRuntime.setScrollbarTouchBeginHandler { [weak self] in
+            self?.scrollbarHapticCoordinator.activateFromEngineSignal()
+        }
         scrollbarHapticCoordinator.isEnabled = { [weak self] in
             guard let self else {
                 return false
