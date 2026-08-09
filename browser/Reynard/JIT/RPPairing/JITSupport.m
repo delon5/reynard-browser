@@ -1344,24 +1344,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // same reason: unconditional logging would flood, silence already
     // cost a session.
     NSInteger nonBreakpointStops = 0;
-
-    // ADDED - the escape half of fix_log_and_escape_silent_stop_spin.py
-    // (its logging half already landed above in 80b9d14). Stepping a
-    // thread stopped ON a faulting instruction re-runs it, which
-    // re-faults at the same pc forever: capture 19 caught pid 73432 in
-    // exactly this loop - 6707 steps over 64 seconds at one pc, an
-    // EXC_BAD_ACCESS the debugger swallowed so no crash report was ever
-    // written. After 50 consecutive stops on the SAME pc (about half a
-    // second, zero forward progress) the loop detaches, so the fault is
-    // delivered natively: a symbolicated crash report in seconds, and
-    // the tab restarts instead of hanging. A new pc resets the streak,
-    // so the benign background interrupt signal - which hits each
-    // process only 1-3 times before moving on - never reaches the
-    // threshold.
-    uint64_t lastNonBreakpointStopPC = 0;
-    uint64_t consecutiveSamePCStops = 0;
-    static const uint64_t kMaxConsecutiveSamePCStops = 50;
-
+    
     while (YES) {
         @autoreleasepool {
             debugServiceIteration++;
@@ -1511,28 +1494,6 @@ void runDebugService(int32_t pid, DebugSession *session) {
                             packetField(stopResponse, @"medata") ?: @"<none>",
                             pc, x0, threadID ?: @"<none>",
                             (long)debugServiceIteration]);
-                }
-
-                // A streak is consecutive stops on one pc. pc == 0
-                // (field missing) is tracked as its own streak rather
-                // than resetting - repeated unparseable stops are just
-                // as stuck.
-                if (pc == lastNonBreakpointStopPC) {
-                    consecutiveSamePCStops++;
-                } else {
-                    lastNonBreakpointStopPC = pc;
-                    consecutiveSamePCStops = 1;
-                }
-
-                // vCont;S re-executes the stopped instruction, so a
-                // fault at this pc faults here again; a streak this long
-                // can only be suppressed by this session, never
-                // resolved. Detach so the fault is handled natively - a
-                // real crash report, and the tab restarts.
-                if (consecutiveSamePCStops >= kMaxConsecutiveSamePCStops) {
-                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) stepping is not advancing pc 0x%llx - detaching after %llu identical stops so the fault is handled natively", pid, pc, (unsigned long long)consecutiveSamePCStops]);
-                    detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
-                    break;
                 }
 
                 // continue with signal
