@@ -1,9 +1,9 @@
 diff --git a/ipc/glue/NSExtensionUtils.mm b/ipc/glue/NSExtensionUtils.mm
 new file mode 100644
-index 000000000000..aae5c6b21c43
+index 000000000000..5991eb32846d
 --- /dev/null
 +++ b/ipc/glue/NSExtensionUtils.mm
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,628 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -86,7 +86,7 @@ index 000000000000..aae5c6b21c43
 +@end
 +
 +@interface ExtensionConnectionDelegate : NSObject <NSXPCListenerDelegate>
-+@property(copy, nullable) void (^connectionHandler)(NSXPCConnection* connection)
++@property(copy, nullable) BOOL (^connectionHandler)(NSXPCConnection* connection)
 +    ;
 +@end
 +
@@ -94,8 +94,13 @@ index 000000000000..aae5c6b21c43
 +
 +- (BOOL)listener:(NSXPCListener*)listener
 +    shouldAcceptNewConnection:(NSXPCConnection*)newConnection {
-+  if (self.connectionHandler) {
-+    self.connectionHandler(newConnection);
++  // Read the atomic handler property exactly once, and only
++  // resume/accept when the handler takes the connection. The old
++  // code resumed and accepted every connection unconditionally —
++  // including ones the handler had just rejected and invalidated.
++  BOOL (^handler)(NSXPCConnection*) = self.connectionHandler;
++  if (!handler || !handler(newConnection)) {
++    return NO;
 +  }
 +  [newConnection resume];
 +  return YES;
@@ -103,14 +108,33 @@ index 000000000000..aae5c6b21c43
 +
 +@end
 +
++static char sExtensionLaunchQueueSpecific;
++
 +static dispatch_queue_t ExtensionLaunchQueue() {
 +  static dispatch_queue_t queue;
 +  static dispatch_once_t onceToken;
 +  dispatch_once(&onceToken, ^{
 +    queue = dispatch_queue_create("me.minh-ton.Reynard.ExtensionLaunchQueue",
 +                                  DISPATCH_QUEUE_SERIAL);
++    dispatch_queue_set_specific(queue, &sExtensionLaunchQueueSpecific,
++                                &sExtensionLaunchQueueSpecific, NULL);
 +  });
 +  return queue;
++}
++
++// All ExtensionProcess mutable state (mStarted, mInvalidated,
++// mConnection, mExtensionBootstrapPingTarget, mLibXPCConnection) is
++// confined to ExtensionLaunchQueue. This helper runs a block on that
++// queue, executing inline when already on it so -invalidate can be
++// called from completion blocks the queue itself runs. The block is a
++// stack block (dispatch_sync never copies), so wrapping ivar access
++// does not retain self — required for the dealloc->invalidate path.
++static void RunOnExtensionLaunchQueueSync(dispatch_block_t block) {
++  if (dispatch_get_specific(&sExtensionLaunchQueueSpecific)) {
++    block();
++  } else {
++    dispatch_sync(ExtensionLaunchQueue(), block);
++  }
 +}
 +
 +static NSString* _Nullable GetExtensionIdentifier() {
@@ -247,7 +271,15 @@ index 000000000000..aae5c6b21c43
 +    (void (^_Nonnull)(NSError* _Nullable error))aCompletion {
 +  void (^completion)(NSError* _Nullable) = [aCompletion copy];
 +
-+  if (mStarted) {
++  __block bool alreadyStarted = false;
++  RunOnExtensionLaunchQueueSync(^{
++    if (mStarted) {
++      alreadyStarted = true;
++    } else {
++      mStarted = true;
++    }
++  });
++  if (alreadyStarted) {
 +    completion([NSError errorWithDomain:@"ReynardExtension"
 +                                   code:100
 +                               userInfo:@{
@@ -257,7 +289,6 @@ index 000000000000..aae5c6b21c43
 +    [completion release];
 +    return;
 +  }
-+  mStarted = true;
 +
 +  dispatch_async(ExtensionLaunchQueue(), ^{
 +    __block bool completed = false;
@@ -286,57 +317,82 @@ index 000000000000..aae5c6b21c43
 +    mListenerDelegate = [[ExtensionConnectionDelegate alloc] init];
 +    mListener = [[NSXPCListener anonymousListener] retain];
 +
-+    __block ExtensionProcess* process = self;
-+    [mListenerDelegate setConnectionHandler:^(NSXPCConnection* connection) {
-+      if (process->mInvalidated || process->mConnection) {
-+        [connection invalidate];
-+        return;
-+      }
-+
-+      process->mConnection = [connection retain];
-+      process->mExtensionBootstrapPingTarget =
-+          [[ExtensionBootstrapPingTarget alloc] initWithPingHandler:^{
-+            completeOnce(nil);
-+          }];
-+      [process->mConnection
-+          setExportedInterface:
-+              [NSXPCInterface
-+                  interfaceWithProtocol:@protocol(ExtensionBootstrapPing)]];
-+      [process->mConnection
-+          setExportedObject:process->mExtensionBootstrapPingTarget];
-+      [process->mConnection setInterruptionHandler:^{
-+      }];
-+      [process->mConnection setInvalidationHandler:^{
-+        if (process->mLibXPCConnection) {
-+          xpc_connection_cancel(process->mLibXPCConnection);
++    // Deliberately NOT __block: copied blocks retain plain object
++    // captures under manual retain/release, keeping this object
++    // alive for as long as the listener delegate or NSXPC can still
++    // invoke these handlers. The previous unretained __block capture
++    // was a use-after-free race on teardown. The resulting retain
++    // cycle is broken by -invalidate: it clears the connection
++    // handler and invalidates the connection, which drops NSXPC's
++    // handler blocks.
++    ExtensionProcess* process = self;
++    [mListenerDelegate setConnectionHandler:^BOOL(NSXPCConnection* connection) {
++      __block BOOL accepted = NO;
++      RunOnExtensionLaunchQueueSync(^{
++        if (process->mInvalidated || process->mConnection) {
++          return;
 +        }
-+        completeOnce([NSError
-+            errorWithDomain:@"ReynardExtension"
-+                       code:108
-+                   userInfo:@{
-+                     NSLocalizedDescriptionKey :
-+                         @"NSXPC connection invalidated before bootstrap"
-+                   }]);
-+      }];
 +
-+      SEL xpcSelector = @selector(_xpcConnection);
-+      if ([process->mConnection respondsToSelector:xpcSelector]) {
-+        xpc_connection_t libXPC = [process->mConnection _xpcConnection];
-+        if (libXPC) {
-+          process->mLibXPCConnection = xpc_retain(libXPC);
++        process->mConnection = [connection retain];
++        process->mExtensionBootstrapPingTarget =
++            [[ExtensionBootstrapPingTarget alloc] initWithPingHandler:^{
++              completeOnce(nil);
++            }];
++        [process->mConnection
++            setExportedInterface:
++                [NSXPCInterface
++                    interfaceWithProtocol:@protocol(ExtensionBootstrapPing)]];
++        [process->mConnection
++            setExportedObject:process->mExtensionBootstrapPingTarget];
++        [process->mConnection setInterruptionHandler:^{
++        }];
++        [process->mConnection setInvalidationHandler:^{
++          RunOnExtensionLaunchQueueSync(^{
++            if (process->mLibXPCConnection) {
++              xpc_connection_cancel(process->mLibXPCConnection);
++            }
++          });
++          completeOnce([NSError
++              errorWithDomain:@"ReynardExtension"
++                         code:108
++                     userInfo:@{
++                       NSLocalizedDescriptionKey :
++                           @"NSXPC connection invalidated before bootstrap"
++                     }]);
++        }];
++
++        SEL xpcSelector = @selector(_xpcConnection);
++        if ([process->mConnection respondsToSelector:xpcSelector]) {
++          xpc_connection_t libXPC = [process->mConnection _xpcConnection];
++          if (libXPC) {
++            process->mLibXPCConnection = xpc_retain(libXPC);
++          }
 +        }
-+      }
 +
-+      if (!process->mLibXPCConnection) {
-+        completeOnce([NSError
-+            errorWithDomain:@"ReynardExtension"
-+                       code:102
-+                   userInfo:@{
-+                     NSLocalizedDescriptionKey :
-+                         @"Failed to get libxpc connection from NSXPCConnection"
-+                   }]);
-+        return;
++        if (!process->mLibXPCConnection) {
++          completeOnce([NSError
++              errorWithDomain:@"ReynardExtension"
++                         code:102
++                     userInfo:@{
++                       NSLocalizedDescriptionKey :
++                           @"Failed to get libxpc connection from NSXPCConnection"
++                     }]);
++          return;
++        }
++
++        accepted = YES;
++      });
++
++      if (accepted) {
++        // The listener only ever vends one connection; once it is
++        // accepted this handler has done its job. Clearing it here
++        // breaks the delegate->block->process retain edge at the
++        // earliest safe moment instead of waiting for -invalidate.
++        RunOnExtensionLaunchQueueSync(^{
++          [process->mListenerDelegate setConnectionHandler:nil];
++        });
 +      }
++      return accepted;
 +    }];
 +
 +    [mListener setDelegate:mListenerDelegate];
@@ -358,13 +414,18 @@ index 000000000000..aae5c6b21c43
 +    mExtension =
 +        [CreateNSExtension(extensionIdentifier, &extensionError) retain];
 +    if (!mExtension) {
-+      completeOnce([NSError
-+          errorWithDomain:@"ReynardExtension"
-+                     code:104
-+                 userInfo:@{
-+                   NSLocalizedDescriptionKey : @"Failed to create NSExtension",
-+                   NSUnderlyingErrorKey : extensionError ?: [NSNull null],
-+                 }]);
++      NSMutableDictionary* errorInfo = [NSMutableDictionary
++          dictionaryWithObject:@"Failed to create NSExtension"
++                        forKey:NSLocalizedDescriptionKey];
++      if (extensionError) {
++        // Never store NSNull under NSUnderlyingErrorKey: anything
++        // that fetches the key and messages it as an NSError crashes
++        // on an unrecognized selector. Omit the key instead.
++        [errorInfo setObject:extensionError forKey:NSUnderlyingErrorKey];
++      }
++      completeOnce([NSError errorWithDomain:@"ReynardExtension"
++                                       code:104
++                                   userInfo:errorInfo]);
 +      return;
 +    }
 +
@@ -419,58 +480,63 @@ index 000000000000..aae5c6b21c43
 +}
 +
 +- (xpc_connection_t _Nullable)copyLibXPCConnection {
-+  if (!mLibXPCConnection) {
-+    return nullptr;
-+  }
-+  return xpc_retain(mLibXPCConnection);
++  __block xpc_connection_t result = nullptr;
++  RunOnExtensionLaunchQueueSync(^{
++    if (mLibXPCConnection) {
++      result = xpc_retain(mLibXPCConnection);
++    }
++  });
++  return result;
 +}
 +
 +- (void)invalidate {
-+  mInvalidated = true;
++  RunOnExtensionLaunchQueueSync(^{
++    mInvalidated = true;
 +
-+  if (mLibXPCConnection) {
-+    xpc_connection_cancel(mLibXPCConnection);
-+    xpc_release(mLibXPCConnection);
-+    mLibXPCConnection = nullptr;
-+  }
-+
-+  if (mConnection) {
-+    [mConnection invalidate];
-+    [mConnection release];
-+    mConnection = nil;
-+  }
-+
-+  if (mExtensionBootstrapPingTarget) {
-+    [mExtensionBootstrapPingTarget release];
-+    mExtensionBootstrapPingTarget = nil;
-+  }
-+
-+  if (mExtension) {
-+    if (mRequestIdentifier &&
-+        [mExtension respondsToSelector:@selector(_kill:)]) {
-+      [mExtension _kill:9];
++    if (mLibXPCConnection) {
++      xpc_connection_cancel(mLibXPCConnection);
++      xpc_release(mLibXPCConnection);
++      mLibXPCConnection = nullptr;
 +    }
-+    [mExtension release];
-+    mExtension = nil;
-+  }
 +
-+  if (mRequestIdentifier) {
-+    [mRequestIdentifier release];
-+    mRequestIdentifier = nil;
-+  }
++    if (mConnection) {
++      [mConnection invalidate];
++      [mConnection release];
++      mConnection = nil;
++    }
 +
-+  if (mListener) {
-+    [mListener setDelegate:nil];
-+    [mListener invalidate];
-+    [mListener release];
-+    mListener = nil;
-+  }
++    if (mExtensionBootstrapPingTarget) {
++      [mExtensionBootstrapPingTarget release];
++      mExtensionBootstrapPingTarget = nil;
++    }
 +
-+  if (mListenerDelegate) {
-+    [mListenerDelegate setConnectionHandler:nil];
-+    [mListenerDelegate release];
-+    mListenerDelegate = nil;
-+  }
++    if (mExtension) {
++      if (mRequestIdentifier &&
++          [mExtension respondsToSelector:@selector(_kill:)]) {
++        [mExtension _kill:9];
++      }
++      [mExtension release];
++      mExtension = nil;
++    }
++
++    if (mRequestIdentifier) {
++      [mRequestIdentifier release];
++      mRequestIdentifier = nil;
++    }
++
++    if (mListener) {
++      [mListener setDelegate:nil];
++      [mListener invalidate];
++      [mListener release];
++      mListener = nil;
++    }
++
++    if (mListenerDelegate) {
++      [mListenerDelegate setConnectionHandler:nil];
++      [mListenerDelegate release];
++      mListenerDelegate = nil;
++    }
++  });
 +}
 +
 +- (void)dealloc {
@@ -505,6 +571,14 @@ index 000000000000..aae5c6b21c43
 +
 +  [process startWithCompletion:^(NSError* error) {
 +    if (error) {
++      // Log the real failure before collapsing it: nine distinct
++      // ReynardExtension error codes previously vanished into one
++      // opaque LaunchError, making launch failures undiagnosable.
++      NSLog(@"[Reynard] NSExtensionProcess::StartProcess failed: %@", error);
++      // Invalidate before the final release: the handler blocks now
++      // retain this object, and -invalidate is what breaks that
++      // retain cycle.
++      [process invalidate];
 +      [process release];
 +      (*ownedCompletion)(Err(LaunchError("NSExtensionProcess::StartProcess")));
 +      return;
