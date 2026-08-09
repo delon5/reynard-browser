@@ -161,7 +161,11 @@ final class JITController {
     /// handles the same reality by expecting the tunnel to die and
     /// reconnecting on return rather than trying to keep it alive; this
     /// applies that to attaches.
-    func reattachOrphanedProcesses() {
+    /// `completion` runs once every attach this call dispatched has
+    /// finished. The caller re-enables trapping from there: the
+    /// sessions are what make a brk safe, and until they exist a
+    /// child that traps has nothing to service it.
+    func reattachOrphanedProcesses(completion: (() -> Void)? = nil) {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             // CHANGED - the three counts are computed and logged
@@ -201,8 +205,23 @@ final class JITController {
             logger(String(format: "reattachOrphanedProcesses: %d attached, %d alive, %d in flight, %d orphaned", attached.count, alive.count, self.ledger.attachInFlightCount(), orphaned.count))
             
             guard !orphaned.isEmpty else {
+                // Still signal - the caller gates trapping on this,
+                // and "nothing to reattach" must not leave it off.
+                completion?()
                 return
             }
+
+            // The window this closes: setDebuggerListening(true) ran
+            // synchronously before this function, while the attaches
+            // it depends on are asynchronous - three slots at ~1.2s
+            // each. With 15 orphans that told every child "a debugger
+            // is listening, brk away" a full six seconds before most
+            // had a session able to service the trap. A process still
+            // executing across the transition - Picture in Picture is
+            // the obvious one - traps into nothing, and a child
+            // stopped at an unserviced brk cannot answer the
+            // synchronous XPC iOS sends on the foreground transition.
+            let batch = DispatchGroup()
             
             for pid in orphaned {
                 // attachedPIDs is deliberately left alone. Its dedup
@@ -216,14 +235,22 @@ final class JITController {
                 // boundedEnableJIT's per-pid in-flight check, which
                 // still applies.
                 self.ledger.markAttachInFlight(pid)
+                batch.enter()
                 self.attachWorkQueue.async {
                     self.attachSlots.wait()
                     defer {
                         self.attachSlots.signal()
                         self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
+                        batch.leave()
                     }
                     self.attachToProcess(pid: pid)
                 }
+            }
+
+            batch.notify(queue: .main) {
+                logger("reattachOrphanedProcesses: batch complete - "
+                       + "trapping is safe to re-enable")
+                completion?()
             }
         }
     }
