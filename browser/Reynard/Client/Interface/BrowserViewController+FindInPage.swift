@@ -137,8 +137,12 @@ extension BrowserViewController {
             modifierFlags: .command
         )
         // Let the command fire even while web content has first-responder
-        // status inside the same responder chain.
-        command.wantsPriorityOverSystemBehavior = true
+        // status inside the same responder chain. iOS 15+; below that the
+        // command still works, it just loses to any system binding on the
+        // same key.
+        if #available(iOS 15.0, *) {
+            command.wantsPriorityOverSystemBehavior = true
+        }
         addKeyCommand(command)
     }
 

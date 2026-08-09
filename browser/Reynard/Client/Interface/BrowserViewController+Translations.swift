@@ -61,19 +61,28 @@ final class TranslateBar: UIView {
         dismissButton.setContentHuggingPriority(.required, for: .horizontal)
 
         optionsButton.setImage(UIImage(systemName: "ellipsis.circle"), for: .normal)
-        optionsButton.showsMenuAsPrimaryAction = true
         optionsButton.setContentHuggingPriority(.required, for: .horizontal)
-        // Rebuilt on every presentation of the menu: always/never state
-        // is engine-owned and can change from elsewhere.
-        optionsButton.menu = UIMenu(children: [
-            UIDeferredMenuElement.uncached { [weak self] completion in
-                guard let build = self?.makeOptionsMenu else {
-                    completion([])
-                    return
+        // The deployment target is iOS 13, and this whole mechanism is
+        // newer: UIButton.menu and UIDeferredMenuElement are 14+,
+        // .uncached is 15+. Below 15 the button is simply hidden - the
+        // bar still translates and restores, it just cannot offer the
+        // always/never toggles, and a stale cached menu (the 14-only
+        // UIDeferredMenuElement.init) would be worse than none, since
+        // these toggles must reflect live engine state.
+        if #available(iOS 15.0, *) {
+            optionsButton.showsMenuAsPrimaryAction = true
+            optionsButton.menu = UIMenu(children: [
+                UIDeferredMenuElement.uncached { [weak self] completion in
+                    guard let build = self?.makeOptionsMenu else {
+                        completion([])
+                        return
+                    }
+                    build(completion)
                 }
-                build(completion)
-            }
-        ])
+            ])
+        } else {
+            optionsButton.isHidden = true
+        }
 
         spinner.hidesWhenStopped = true
 
