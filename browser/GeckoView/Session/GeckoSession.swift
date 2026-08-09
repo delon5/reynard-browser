@@ -111,6 +111,12 @@ public class GeckoSession {
         get { mediaSessionHandler.delegate(as: MediaSessionDelegate.self) }
         set { mediaSessionHandler.setDelegate(newValue) }
     }
+
+    lazy var translationsHandler = newTranslationsHandler(self)
+    public var translationsDelegate: TranslationsDelegate? {
+        get { translationsHandler.delegate(as: TranslationsDelegate.self) }
+        set { translationsHandler.setDelegate(newValue) }
+    }
     public lazy var mediaSession = MediaSession(session: self)
     private lazy var autofillHandler = GeckoAutofillHandler(session: self)
     private lazy var pictureInPictureHandler = newPictureInPictureHandler(self)
@@ -135,6 +141,7 @@ public class GeckoSession {
         promptHandler,
         selectionActionHandler,
         mediaSessionHandler,
+        translationsHandler,
         autofillHandler,
         pictureInPictureHandler,
     ]
@@ -263,6 +270,7 @@ public class GeckoSession {
         selectionActionDelegate = nil
         mediaSessionDelegate?.onDeactivated(session: self)
         mediaSessionDelegate = nil
+        translationsDelegate = nil
         pictureInPictureDelegate = nil
         
         guard let window else {

@@ -318,6 +318,11 @@ final class BrowserViewController: UIViewController {
         // Tracking Protection
         TrackingProtectionPolicyController.applyEnhancedTrackingProtection()
         TrackingProtectionPolicyController.applyGlobalPrivacyControl()
+
+        // Find in page (Cmd+F). Lives here because this is the app's
+        // verified once-per-launch bootstrap; the install itself guards
+        // against duplicates if this ever runs again.
+        setUpFindInPageKeyCommand()
     }
     
     // MARK: - Browser Layout
