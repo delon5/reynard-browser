@@ -1,9 +1,9 @@
 diff --git a/media/libcubeb/src/cubeb_audiounit_ios.mm b/media/libcubeb/src/cubeb_audiounit_ios.mm
 new file mode 100644
-index 000000000000..39461c54048a
+index 000000000000..a4e03a8eca38
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_audiounit_ios.mm
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,436 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,6 +11,7 @@ index 000000000000..39461c54048a
 +/* This source code is introduced during the work of an iOS 13+ browser
 + * https://github.com/minh-ton/reynard-browser in Feb 2026. */
 +
++#include <atomic>
 +#include <string.h>
 +
 +#if defined(__IPHONE_14_0) && (__IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_14_0)
@@ -248,7 +249,12 @@ index 000000000000..39461c54048a
 +  return 2;
 +}
 +
-+extern "C" uint32_t cubeb_ios_output_latency_frames(void) {
++// Cached so the render callback can read it without touching
++// AVAudioSession, which is Objective-C and may allocate or take locks -
++// neither is legal on a realtime audio thread.
++static std::atomic<uint32_t> sCachedOutputLatencyFrames{0};
++
++static uint32_t cubeb_ios_query_output_latency_frames(void) {
 +  AVAudioSession* session = [AVAudioSession sharedInstance];
 +  double sampleRate = session.sampleRate;
 +  if (sampleRate <= 0) {
@@ -259,6 +265,59 @@ index 000000000000..39461c54048a
 +    return 0;
 +  }
 +  return static_cast<uint32_t>(latency * sampleRate);
++}
++
++// Output latency is a property of the CURRENT ROUTE, and it changes by an
++// order of magnitude when one is swapped underneath a running stream: a
++// built-in speaker is a few milliseconds, CarPlay and Bluetooth are
++// hundreds.
++//
++// It used to be sampled once, during audiounit_setup_stream, and never
++// again. Nothing on iOS updated it: audiounit_install_device_changed_callback
++// is compiled out (#if !TARGET_OS_IPHONE), and the only reinit trigger is
++// in the INPUT render path, which a video playback stream never reaches
++// because it has no input unit.
++//
++// That matters because audiounit_stream_get_position reports
++// `frames_played - current_latency_frames`, and that is the clock the
++// media state machine syncs video to. Holding a stale, too-small latency
++// across a switch to CarPlay makes the audio look further along than it
++// is, so video is driven ahead of the sound actually coming out of the
++// speakers.
++static void cubeb_ios_refresh_output_latency(void) {
++  sCachedOutputLatencyFrames.store(cubeb_ios_query_output_latency_frames(),
++                                   std::memory_order_relaxed);
++}
++
++static void cubeb_ios_install_route_change_observer(void) {
++  static dispatch_once_t onceToken;
++  dispatch_once(&onceToken, ^{
++    [[NSNotificationCenter defaultCenter]
++        addObserverForName:AVAudioSessionRouteChangeNotification
++                    object:[AVAudioSession sharedInstance]
++                     queue:nil
++                usingBlock:^(NSNotification* note) {
++                  // Deliberately unconditional on the reason code. Every
++                  // reason that reaches here - new device available, old
++                  // device unavailable, category or override change - can
++                  // move the latency, and re-reading it is cheap.
++                  cubeb_ios_refresh_output_latency();
++                }];
++  });
++}
++
++extern "C" uint32_t cubeb_ios_output_latency_frames(void) {
++  // Called from stream setup, off the realtime thread, so the live query
++  // is safe here. Also the point where the observer gets installed.
++  cubeb_ios_install_route_change_observer();
++  uint32_t frames = cubeb_ios_query_output_latency_frames();
++  sCachedOutputLatencyFrames.store(frames, std::memory_order_relaxed);
++  return frames;
++}
++
++// Realtime-safe: a plain atomic load, no Objective-C.
++extern "C" uint32_t cubeb_ios_cached_output_latency_frames(void) {
++  return sCachedOutputLatencyFrames.load(std::memory_order_relaxed);
 +}
 +
 +extern "C" bool cubeb_ios_copy_current_device_names(char** aInputName,
@@ -361,6 +420,12 @@ index 000000000000..39461c54048a
 +extern "C" uint32_t cubeb_ios_max_output_channel_count(void) { return 2; }
 +
 +extern "C" uint32_t cubeb_ios_output_latency_frames(void) { return 0; }
++// Same symbol set as the iOS 14+ branch above - the caller in
++// cubeb_audiounit.cpp is not conditional on the deployment target,
++// so omitting this would be a link error on the fallback path.
++extern "C" uint32_t cubeb_ios_cached_output_latency_frames(void) {
++  return 0;
++}
 +
 +extern "C" bool cubeb_ios_copy_current_device_names(char** aInputName,
 +                                                    char** aOutputName) {
