@@ -1166,6 +1166,20 @@ static BOOL readOneDebugResponse(DebugProxyHandle *debugProxy, NSString **respon
     return YES;
 }
 
+// A GDB remote error reply is "E" followed by two hex digits. It is three
+// characters long, so it survives a `length < 2` check, and its first two
+// characters parse as a perfectly good hex byte - which is how error
+// replies were being echoed back into the target's own code pages as
+// 0xE0. It is not data and must never be treated as such. runDebugService
+// already screens the _M allocation response this way.
+static BOOL gdbResponseIsError(NSString *response) {
+    if (response.length < 3 || ![response hasPrefix:@"E"]) return NO;
+    NSCharacterSet *hexDigits =
+        [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"];
+    return [hexDigits characterIsMember:[response characterAtIndex:1]] &&
+           [hexDigits characterIsMember:[response characterAtIndex:2]];
+}
+
 // CHANGED - pipelined rather than one serialised round trip per packet.
 // See fix_batch_prepare_memory_region.py's docstring. This loop reads
 // and rewrites one byte per 16KB page, so a 4MB region is 256 pages and
@@ -1204,23 +1218,48 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
         return NO;
     }
 
+    NSMutableArray<NSNumber *> *writablePageAddresses = [NSMutableArray array];
     NSMutableArray<NSString *> *existingBytes = [NSMutableArray array];
+    NSUInteger unreadablePageCount = 0;
     for (NSUInteger index = 0; index < pageAddresses.count; index++) {
         NSString *response = nil;
         if (!readOneDebugResponse(debugProxy, &response, error)) return NO;
+
+        // A page that cannot be read is skipped rather than written back.
+        // Echoing the "E0" of an "Exx" error reply stores 0xE0 into the
+        // first byte of that page, which changes whatever AArch64
+        // instruction lives there. Chunks are prepared 4MB at a time
+        // regardless of which pages are currently committed, and
+        // DecommitPages leaves decommitted pages PROT_NONE - so a failed
+        // read here is expected, not exceptional. Skipping one page is
+        // also much better than returning NO: that breaks the debug loop
+        // and ends W^X mediation for the whole process.
+        if (gdbResponseIsError(response)) {
+            unreadablePageCount++;
+            continue;
+        }
 
         if (response.length < 2) {
             if (error && !*error) *error = MakeError(MemoryPrepareReadFailed);
             return NO;
         }
+        [writablePageAddresses addObject:pageAddresses[index]];
         [existingBytes addObject:[response substringToIndex:2]];
+    }
+
+    if (unreadablePageCount > 0) {
+        logger([NSString stringWithFormat:@"prepareMemoryRegion: %lu of %lu page(s) at 0x%llx+0x%llx were unreadable and were left untouched", (unsigned long)unreadablePageCount, (unsigned long)pageAddresses.count, startAddress, size]);
+    }
+
+    if (writablePageAddresses.count == 0) {
+        return YES;
     }
 
     // Pass 2 - write each byte straight back, again in a single write.
     NSMutableString *writeBatch = [NSMutableString string];
-    for (NSUInteger index = 0; index < pageAddresses.count; index++) {
+    for (NSUInteger index = 0; index < writablePageAddresses.count; index++) {
         [writeBatch appendString:gdbFramedPacket([NSString stringWithFormat:@"M%llx,1:%@",
-                                                  pageAddresses[index].unsignedLongLongValue,
+                                                  writablePageAddresses[index].unsignedLongLongValue,
                                                   existingBytes[index]])];
     }
 
@@ -1232,7 +1271,7 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
         return NO;
     }
 
-    for (NSUInteger index = 0; index < pageAddresses.count; index++) {
+    for (NSUInteger index = 0; index < writablePageAddresses.count; index++) {
         NSString *response = nil;
         if (!readOneDebugResponse(debugProxy, &response, error)) return NO;
 
@@ -1469,16 +1508,22 @@ void runDebugService(int32_t pid, DebugSession *session) {
             // subsequent traps at the same pc skip the round trip
             // entirely. Falls back to reading on a miss, so a
             // different pc simply produces a new entry.
-            static NSMutableDictionary<NSNumber *, NSNumber *> *cachedInstructionByPC = nil;
+            static NSMutableDictionary<NSString *, NSNumber *> *cachedInstructionByPC = nil;
             static dispatch_once_t instructionCacheOnce;
             dispatch_once(&instructionCacheOnce, ^{
                 cachedInstructionByPC = [NSMutableDictionary dictionary];
             });
             
             uint32_t instruction = 0;
+            // Keyed by pid as well as pc. This dictionary is a file-scope
+            // static shared by every runDebugService loop for every pid and
+            // never evicted, and on a hit the loop advances PC and writes x0
+            // WITHOUT reading target memory - so a pc-only key lets one
+            // process's classification drive register writes into another.
+            NSString *instructionCacheKey = [NSString stringWithFormat:@"%d:%llx", pid, pc];
             NSNumber *cachedInstruction = nil;
             @synchronized (cachedInstructionByPC) {
-                cachedInstruction = cachedInstructionByPC[@(pc)];
+                cachedInstruction = cachedInstructionByPC[instructionCacheKey];
             }
             
             if (cachedInstruction) {
@@ -1492,7 +1537,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 
                 if (instructionResponse.length > 0) {
                     @synchronized (cachedInstructionByPC) {
-                        cachedInstructionByPC[@(pc)] = @(instruction);
+                        cachedInstructionByPC[instructionCacheKey] = @(instruction);
                     }
                 }
             }
@@ -1619,6 +1664,24 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // Return the region address to the caller in x0.
                 if (!writeRegisterValue(session->debugProxy, @"00", jitPageAddress, threadID, &commandError)) break;
             } else {
+                // A brk that is not ours: __builtin_trap() is brk #1 and
+                // SpiderMonkey's masm.breakpoint() is brk #0. PC is still
+                // sitting on the trapping instruction here, and debugserver
+                // does not step over a target-embedded brk, so a bare
+                // `continue` resumes onto the same instruction and traps
+                // again - forever.
+                //
+                // That is strictly worse than the crash it hides. Content
+                // processes are app extensions; one spinning like this stops
+                // answering the synchronous XPC iOS sends on a lifecycle
+                // transition, and the watchdog kills the whole app with
+                // nothing in the log to explain it.
+                //
+                // Forwarding SIGTRAP (0x05 - the signal field is hex) lets
+                // the target die exactly the way it would with no debugger
+                // attached, so the crash report names the real trap site.
+                logger([NSString stringWithFormat:@"runDebugService: (pid %d) foreign breakpoint brk #0x%x at pc=0x%llx - forwarding SIGTRAP", pid, breakpointImmediate, pc]);
+                if (!forwardSignalStop(session->debugProxy, @"05", threadID, &commandError)) break;
                 continue;
             }
         }
