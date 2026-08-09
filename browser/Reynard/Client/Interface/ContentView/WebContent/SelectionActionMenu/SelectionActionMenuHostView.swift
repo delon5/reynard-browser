@@ -126,6 +126,10 @@ final class SelectionActionMenuHostView: UIView {
         // once: another responder may have replaced it in between.
         UIMenuController.shared.menuItems = [
             UIMenuItem(
+                // "Find", matching what iOS itself puts in this callout.
+                // It searches the highlighted text immediately; the page
+                // menu's "Find in Page" is the type-your-own entry
+                // point.
                 title: NSLocalizedString("Find", comment: ""),
                 action: #selector(findSelection(_:))
             )
