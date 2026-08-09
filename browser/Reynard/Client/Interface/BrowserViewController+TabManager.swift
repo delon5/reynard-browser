@@ -9,6 +9,10 @@ import GeckoView
 import UIKit
 
 extension BrowserViewController: TabManagerDelegate {
+    func tabManager(_ tabManager: TabManager, didRequestFindInPage text: String) {
+        presentFindInPage(prefill: text)
+    }
+
     func tabManagerDidChangeTabs(_ tabManager: TabManager) {
         if let selectedTab = tabManager.selectedTab {
             if !contentView.isDisplaying(session: selectedTab.session) {

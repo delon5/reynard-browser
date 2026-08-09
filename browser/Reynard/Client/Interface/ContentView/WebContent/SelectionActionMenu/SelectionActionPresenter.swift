@@ -10,6 +10,10 @@ import UIKit
 
 @MainActor
 final class SelectionActionPresenter: SelectionActionPresenting {
+    /// Raised when the user picks "Find" from the selection
+    /// callout. The browser owns the find bar, so the text is passed
+    /// up rather than acted on here.
+    var onFindSelection: ((String) -> Void)?
     private enum UX {
         static let modernMenuVerticalOffset: CGFloat = 40
     }
@@ -33,12 +37,16 @@ final class SelectionActionPresenter: SelectionActionPresenting {
         
         let host = menuHost(for: session)
         let anchorRect = anchorRect(for: selectionRect, in: targetView.bounds)
+        host.onFindSelection = { [weak self] text in
+            self?.onFindSelection?(text)
+        }
         host.present(
             on: targetView,
             session: session,
             actionId: request.actionId,
             anchorRect: anchorRect,
-            actions: request.actions
+            actions: request.actions,
+            selection: request.selection
         )
     }
     

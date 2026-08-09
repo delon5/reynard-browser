@@ -27,8 +27,9 @@ final class TabManagerImplementation: NSObject, TabManager {
     private let promptCoordinator = PromptCoordinator(
         presenter: PromptPresenter()
     )
-    private let selectionActionCoordinator = SelectionActionCoordinator(
-        presenter: SelectionActionPresenter()
+    private let selectionActionPresenter = SelectionActionPresenter()
+    private lazy var selectionActionCoordinator = SelectionActionCoordinator(
+        presenter: selectionActionPresenter
     )
     private let permissionCoordinator = PermissionCoordinator(
         promptPresenter: PermissionPromptPresenter()
@@ -106,7 +107,15 @@ final class TabManagerImplementation: NSObject, TabManager {
         self.faviconStore = faviconStore
         self.historyStore = historyStore
         super.init()
-        
+
+        // "Find" in the text-selection callout. Routed up rather than
+        // handled here: the presenter knows the selected text, the
+        // browser owns the find bar.
+        selectionActionPresenter.onFindSelection = { [weak self] text in
+            guard let self else { return }
+            self.delegate?.tabManager(self, didRequestFindInPage: text)
+        }
+
         hangWatchdog.start()
         
         // Defensive safety net alongside the explicit backgrounding

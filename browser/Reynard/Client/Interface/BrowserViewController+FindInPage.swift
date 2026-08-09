@@ -146,8 +146,12 @@ extension BrowserViewController {
         presentFindInPage()
     }
 
-    public func presentFindInPage() {
+    public func presentFindInPage(prefill: String? = nil) {
         if let bar = findInPageBar {
+            if let prefill, !prefill.isEmpty {
+                bar.textField.text = prefill
+                performFindInPage(prefill, backwards: false)
+            }
             bar.textField.becomeFirstResponder()
             return
         }
@@ -169,6 +173,12 @@ extension BrowserViewController {
         }
 
         findInPageBar = bar
+        // Seeded from a selection: search immediately so the match count
+        // is right there, rather than making the user re-trigger it.
+        if let prefill, !prefill.isEmpty {
+            bar.textField.text = prefill
+            performFindInPage(prefill, backwards: false)
+        }
         bar.textField.becomeFirstResponder()
     }
 

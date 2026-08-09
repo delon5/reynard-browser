@@ -71,6 +71,9 @@ enum TabManagerUpdateReason {
 }
 
 protocol TabManagerDelegate: AnyObject {
+    /// The user picked "Find" from the text-selection callout. The
+    /// browser owns the find bar, so it decides how to present it.
+    func tabManager(_ tabManager: TabManager, didRequestFindInPage text: String)
     func tabManagerDidChangeTabs(_ tabManager: TabManager)
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?)
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession)

@@ -13,6 +13,12 @@ final class SelectionActionMenuHostView: UIView {
     private weak var session: GeckoSession?
     private var actionId: String?
     private var availableActions = Set<String>()
+    /// The text the callout is showing for, kept so "Find" can seed the
+    /// find bar with it.
+    private var selectedText = ""
+    /// Set by the presenter; routes "Find" up to the browser, which owns
+    /// the find bar.
+    var onFindSelection: ((String) -> Void)?
     
     override var canBecomeFirstResponder: Bool {
         true
@@ -30,7 +36,11 @@ final class SelectionActionMenuHostView: UIView {
         if action == #selector(selectAll(_:)) {
             return availableActions.contains(SelectionActionCommand.selectAll) ? self : nil
         }
-        
+
+        if action == #selector(findSelection(_:)) {
+            return selectedText.isEmpty ? nil : self
+        }
+
         return nil
     }
     
@@ -46,8 +56,26 @@ final class SelectionActionMenuHostView: UIView {
         if action == #selector(selectAll(_:)) {
             return availableActions.contains(SelectionActionCommand.selectAll)
         }
-        
+
+        if action == #selector(findSelection(_:)) {
+            // Not gated on the engine's action list - this one is the
+            // embedder's, and it only needs text to search for.
+            return !selectedText.isEmpty
+        }
+
         return false
+    }
+
+    @objc private func findSelection(_ sender: Any?) {
+        let text = selectedText
+        // Dismiss first: the find bar takes first responder, and
+        // handing that over while the callout is still up drops the
+        // keyboard.
+        hideMenu()
+        guard !text.isEmpty else {
+            return
+        }
+        onFindSelection?(text)
     }
     
     override func copy(_ sender: Any?) {
@@ -84,11 +112,24 @@ final class SelectionActionMenuHostView: UIView {
         session: GeckoSession,
         actionId: String,
         anchorRect: CGRect,
-        actions: [String]
+        actions: [String],
+        selection: String
     ) {
         self.session = session
         self.actionId = actionId
+        self.selectedText = selection
         availableActions = Set(actions)
+
+        // "Find" is ours, not the engine's - Gecko's action list only
+        // ever offers COPY and SELECT_ALL here. menuItems is global to
+        // UIMenuController, so it is set on every present rather than
+        // once: another responder may have replaced it in between.
+        UIMenuController.shared.menuItems = [
+            UIMenuItem(
+                title: NSLocalizedString("Find", comment: ""),
+                action: #selector(findSelection(_:))
+            )
+        ]
         
         if superview !== view {
             removeFromSuperview()
@@ -120,6 +161,7 @@ final class SelectionActionMenuHostView: UIView {
         }
         
         actionId = nil
+        selectedText = ""
         availableActions.removeAll()
     }
     
