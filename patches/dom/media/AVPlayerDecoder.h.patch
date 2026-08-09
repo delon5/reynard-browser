@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,158 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -128,7 +128,24 @@ new file mode 100644
 +  // instead cannot see AVFoundation's redirects.
 +  already_AddRefed<nsIPrincipal> GetContentPrincipal(nsIURI* aMediaUri);
 +
-+  RefPtr<MediaFormatReader> mReader;
++  // NO mReader HERE. MediaDecoder already declares
++  // `RefPtr<MediaFormatReader> mReader` (protected), and re-declaring it
++  // here shadowed it: CreateStateMachine's `mReader = ...` filled THIS
++  // one and left the base class's null.
++  //
++  // MediaDecoder::SetStateMachineParameters, which runs immediately
++  // after, ends with three connects on the base member -
++  // mReader->OnEncrypted(), OnWaitingForKey(), OnDecodeWarning(). On a
++  // null mReader those resolve to a member address a fixed offset from
++  // zero, and Connect() locks that event's mutex, so the process died
++  // in pthread_mutex_lock with x0 = 0xd68 - the exact fault every
++  // capture from 16 onward showed on Gecko's main thread, always
++  // between "mdsmInit: MDSM Init returned" and "parameters set", and
++  // only ever for this decoder. Nothing else here is wrong: the
++  // placeholder, the demuxer and the metadata callback were all doing
++  // their jobs into an element whose decoder was about to die.
++  //
++  // mDemuxer has no counterpart in MediaDecoder, so it stays.
 +  RefPtr<AVPlayerDemuxer> mDemuxer;
 +
 +  // Kept for the principal and for security checks. Never read from.
