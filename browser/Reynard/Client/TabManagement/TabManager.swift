@@ -39,6 +39,7 @@ protocol TabManager: AnyObject {
     /// same way a tab restored from a previous app launch already
     /// works.
     func sleepBackgroundedTabs()
+    func reloadEvictedThumbnails()
     @discardableResult
     func restoreRecentlyClosedTab(id: UUID) -> Bool
     func browse(to term: String)

@@ -108,8 +108,16 @@ final class TabManagementStore {
         stateQueue.sync {
             let state = persistedStateLocked()
             return Snapshot(
-                regularTabs: fetchTabsLocked(isPrivate: false),
-                privateTabs: fetchTabsLocked(isPrivate: true),
+                // Deliberately skipped at restore: decoding every
+                // tab's thumbnail serially on the startup path cost
+                // launch time and peak memory proportional to tab
+                // count, for images nothing renders until the tab
+                // overview opens. reloadEvictedThumbnails() - the same
+                // on-demand path that repopulates thumbnails dropped
+                // under memory pressure - fills them in asynchronously
+                // right after restore instead.
+                regularTabs: fetchTabsLocked(isPrivate: false, includeThumbnails: false),
+                privateTabs: fetchTabsLocked(isPrivate: true, includeThumbnails: false),
                 selectedRegularTabID: state.selectedRegularTabID,
                 selectedPrivateTabID: state.selectedPrivateTabID,
                 selectedTabMode: state.selectedTabMode,
@@ -284,14 +292,39 @@ final class TabManagementStore {
                 return
             }
             
-            guard let data = image.pngData() else {
+            // JPEG rather than PNG, deliberately. These are
+            // photographic page screenshots - PNG's lossless encoding
+            // costs several MB per tab on disk and a slow encode per
+            // capture, where JPEG at 0.7 is typically 10-30x smaller
+            // and much faster, with no visible difference at the sizes
+            // the overview cards display. The file KEEPS its
+            // historical .png name: loading goes through
+            // UIImage(data:), which sniffs the actual bytes and
+            // ignores the extension, so old PNG files keep loading and
+            // new JPEG bytes load the same way - renaming would have
+            // needed a migration for zero benefit.
+            guard let data = image.jpegData(compressionQuality: 0.7) else {
                 return
             }
-            
+
             try? data.write(to: fileURL, options: .atomic)
         }
     }
     
+    /// Reloads one tab's persisted thumbnail off the state queue and
+    /// delivers it on main. Exists for the memory-residency side of
+    /// the thumbnail pipeline: thumbnails dropped from memory under
+    /// pressure are reloaded through here on demand, which is what
+    /// makes dropping them safe in the first place.
+    func loadThumbnail(for tabID: UUID, completion: @escaping (UIImage?) -> Void) {
+        stateQueue.async {
+            let image = self.loadThumbnailLocked(for: tabID)
+            DispatchQueue.main.async {
+                completion(image)
+            }
+        }
+    }
+
     func tabs(matching query: String, limit: Int, isPrivate: Bool) -> [TabSnapshot] {
         stateQueue.sync {
             searchTabsLocked(matching: query, limit: limit, isPrivate: isPrivate)
@@ -559,7 +592,16 @@ final class TabManagementStore {
     
     // MARK: - Tab Queries
     
-    private func fetchTabsLocked(isPrivate: Bool) -> [TabSnapshot] {
+    // includeThumbnails exists for the search path. tabs(matching:)
+    // funnels through here, and it used to inherit a full
+    // loadThumbnailLocked - a disk read plus image decode - for EVERY
+    // tab in the store, per call. UserDataSearch calls tabs(matching:)
+    // twice per query (best match, then results) and queries follow
+    // the address bar keystroke by keystroke, so a user with 50 tabs
+    // paid ~100 thumbnail decodes per typed character - and search
+    // never displays a thumbnail at all (confirmed: nothing in
+    // Client/Search or the search UI touches TabSnapshot.thumbnail).
+    private func fetchTabsLocked(isPrivate: Bool, includeThumbnails: Bool = true) -> [TabSnapshot] {
         guard let statement = prepareStatementLocked(
             """
             SELECT id, title, url
@@ -588,7 +630,7 @@ final class TabManagementStore {
                     id: id,
                     title: string(from: statement, at: 1),
                     url: optionalString(from: statement, at: 2),
-                    thumbnail: loadThumbnailLocked(for: id),
+                    thumbnail: includeThumbnails ? loadThumbnailLocked(for: id) : nil,
                     isPrivate: isPrivate
                 )
             )
@@ -604,7 +646,7 @@ final class TabManagementStore {
         }
         
         let strippedQuery = URLUtils.normalizedURLMatchString(from: normalizedQuery)
-        let tabs = fetchTabsLocked(isPrivate: isPrivate)
+        let tabs = fetchTabsLocked(isPrivate: isPrivate, includeThumbnails: false)
         var matches: [TabSnapshot] = []
         matches.reserveCapacity(min(limit, tabs.count))
         

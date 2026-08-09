@@ -173,7 +173,21 @@ final class WebContentView: UIView, UIScrollViewDelegate {
             return nil
         }
         
-        let renderer = UIGraphicsImageRenderer(size: visibleSize)
+        // Capped at 2x, deliberately. The default format renders at
+        // the device's native scale - 3x on every modern iPhone -
+        // which makes a full-screen capture roughly 1179x2556 pixels,
+        // ~12MB decompressed. One of these lives in memory PER TAB
+        // (Tab.thumbnail) and is what gets encoded to disk, so the
+        // capture scale multiplies through the entire thumbnail
+        // pipeline's memory and I/O. 2x is still Retina-sharp for the
+        // overview cards these draw into (which display far smaller
+        // than full screen) and even for the full-screen transition
+        // frames, while cutting the pixel count - and every downstream
+        // cost - by 2.25x on 3x devices. 1x/2x devices are unaffected:
+        // the cap only ever lowers scale, never raises it.
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.scale = min(format.scale, 2)
+        let renderer = UIGraphicsImageRenderer(size: visibleSize, format: format)
         return renderer.image { context in
             layer.render(in: context.cgContext)
         }

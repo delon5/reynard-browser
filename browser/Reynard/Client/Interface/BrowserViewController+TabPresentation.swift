@@ -137,6 +137,11 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
             contentView.resetFocusedInputRelocation()
             homepageOverlayCoordinator.tabOverviewWillPresent()
             searchOverlayCoordinator.tabOverviewWillPresent()
+            // The overview is the only surface that renders
+            // Tab.thumbnail, so its presentation is the reload point
+            // for thumbnails dropped under memory pressure. Async, and
+            // a no-op scan when nothing was dropped.
+            tabManager.reloadEvictedThumbnails()
         }
         tabOverview.setPresented(visible, animated: animated)
         if !visible {

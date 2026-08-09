@@ -121,6 +121,7 @@ final class TabManagerImplementation: NSObject, TabManager {
             queue: .main
         ) { [weak self] _ in
             self?.sleepBackgroundedTabs()
+            self?.dropBackgroundThumbnails()
         }
     }
     
@@ -140,6 +141,58 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         for tab in privateTabs {
             evictSessionIfNeeded(for: tab, isPrivate: true)
+        }
+    }
+
+    /// Releases the in-memory thumbnail of every tab except the
+    /// selected one. Companion to sleepBackgroundedTabs for the other
+    /// big per-tab allocation - a full-screen decompressed screenshot
+    /// per tab - which session eviction never touched. Strictly safe:
+    /// every thumbnail was persisted to disk by updateThumbnail at
+    /// capture time, and reloadEvictedThumbnails() brings them back on
+    /// demand. Cells currently on screen keep the bitmap their image
+    /// view already holds, so nothing visibly blanks at the moment of
+    /// the drop.
+    func dropBackgroundThumbnails() {
+        NSLog("[TabMemory] Dropping in-memory thumbnails for background tabs")
+        for tab in regularTabs where tab !== selectedTab {
+            tab.thumbnail = nil
+        }
+        for tab in privateTabs where tab !== selectedTab {
+            tab.thumbnail = nil
+        }
+    }
+
+    /// Asynchronously restores any thumbnails dropped by
+    /// dropBackgroundThumbnails (or never loaded). Cheap when nothing
+    /// is missing - one array scan - so callers can invoke it
+    /// unconditionally.
+    func reloadEvictedThumbnails() {
+        let evicted = (regularTabs + privateTabs).filter { $0.thumbnail == nil }
+        guard !evicted.isEmpty else {
+            return
+        }
+
+        for tab in evicted {
+            let tabID = tab.id
+            store.loadThumbnail(for: tabID) { [weak self] image in
+                guard let self, let image else {
+                    return
+                }
+                // Looked up again by id on delivery - the tab can have
+                // been closed, moved, or captured a fresh thumbnail
+                // while the load was in flight, and a fresh capture
+                // must never be clobbered by this stale disk copy.
+                guard let location = self.tabLocation(for: tabID) else {
+                    return
+                }
+                let tab = self.tabs(for: location.mode)[location.index]
+                guard tab.thumbnail == nil else {
+                    return
+                }
+                tab.thumbnail = image
+                self.notifyUpdate(at: location.index, mode: location.mode, reason: .thumbnail)
+            }
         }
     }
     
@@ -619,8 +672,14 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         
         delegate?.tabManagerDidChangeTabs(self)
-        
+
         selectTab(at: max(selectedIndex(for: selectedTabMode), 0), mode: selectedTabMode)
+
+        // Restore seeds every tab with thumbnail: nil (see
+        // currentSnapshot) - fill them in off the startup path. Runs
+        // after selection so the selected tab's session work is not
+        // competing with a burst of image decodes.
+        reloadEvictedThumbnails()
         return true
     }
     
