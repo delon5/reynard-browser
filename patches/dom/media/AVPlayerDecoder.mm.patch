@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,734 @@
+@@ -0,0 +1,748 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -438,6 +438,16 @@ new file mode 100644
 +  // blank screen with nothing in between to explain it - the Swift side
 +  // proved the AVPlayer existed and said nothing about whether a frame
 +  // was ever built.
++  // Never paint over real video. NotifyMetadata republishes the
++  // placeholder once the asset's true size is known, and on a stream
++  // whose metadata resolves after playback has begun that landed on top
++  // of frames already being decoded - a flash of picture, then magenta.
++  if (mHasPublishedRealFrame) {
++    printf_stderr(
++        "avPlayer: placeholder SKIPPED - real frames are already flowing\n");
++    return;
++  }
++
 +  VideoFrameContainer* container = GetVideoFrameContainer();
 +  if (!container) {
 +    printf_stderr(
@@ -728,6 +738,10 @@ new file mode 100644
 +              (unsigned long long)aPlayerId, size.width, size.height,
 +              (unsigned)macSurface->GetPlaneCount());
 +        }
++
++        // Latched before publishing, so a metadata callback that runs
++        // between this and the next frame cannot slip a placeholder in.
++        entry->second->mHasPublishedRealFrame = true;
 +
 +        RefPtr<mozilla::layers::Image> image =
 +            new mozilla::layers::MacIOSurfaceImage(macSurface);

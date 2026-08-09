@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,166 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -84,6 +84,14 @@ new file mode 100644
 +  // visible frames come from the AVPlayer, not from this surface.
 +  // Main thread only.
 +  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay);
++
++  // Latched by ReynardAVPlayerNotifyFrame the first time a real
++  // decoded frame reaches the container. Once true the placeholder
++  // must never publish again: NotifyMetadata republishes it at the
++  // asset's real size, and metadata can resolve AFTER frames have
++  // started flowing - which repainted magenta over working video,
++  // seen as a frame of picture that flashes and vanishes.
++  bool mHasPublishedRealFrame = false;
 +
 +  // Hooked purely to report that the pipeline got this far.
 +  //
