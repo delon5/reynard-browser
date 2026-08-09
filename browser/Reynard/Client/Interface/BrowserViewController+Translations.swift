@@ -23,12 +23,17 @@ final class TranslateBar: UIView {
     private let label = UILabel()
     private let actionButton = UIButton(type: .system)
     private let dismissButton = UIButton(type: .system)
+    private let optionsButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     /// Translate, or restore the original once a page has been
     /// translated. One button, because the two are never both offered.
     var onAction: (() -> Void)?
     var onDismiss: (() -> Void)?
+    /// Built lazily by the browser each time the menu opens. Async,
+    /// because the current always/never state has to be read back from
+    /// the engine - it is engine-owned and can change from elsewhere.
+    var makeOptionsMenu: ((@escaping ([UIMenuElement]) -> Void) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -55,9 +60,24 @@ final class TranslateBar: UIView {
         dismissButton.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
         dismissButton.setContentHuggingPriority(.required, for: .horizontal)
 
+        optionsButton.setImage(UIImage(systemName: "ellipsis.circle"), for: .normal)
+        optionsButton.showsMenuAsPrimaryAction = true
+        optionsButton.setContentHuggingPriority(.required, for: .horizontal)
+        // Rebuilt on every presentation of the menu: always/never state
+        // is engine-owned and can change from elsewhere.
+        optionsButton.menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] completion in
+                guard let build = self?.makeOptionsMenu else {
+                    completion([])
+                    return
+                }
+                build(completion)
+            }
+        ])
+
         spinner.hidesWhenStopped = true
 
-        let stack = UIStackView(arrangedSubviews: [label, spinner, actionButton, dismissButton])
+        let stack = UIStackView(arrangedSubviews: [label, spinner, actionButton, optionsButton, dismissButton])
         stack.axis = .horizontal
         stack.spacing = 12
         stack.alignment = .center
@@ -130,6 +150,22 @@ extension BrowserViewController: TranslationsDelegate {
         static let stateKey = UnsafeRawPointer(
             UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
         )
+        static let langKey = UnsafeRawPointer(
+            UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
+        )
+    }
+
+    /// The document language the engine detected, kept for as long as
+    /// the bar is up. offeredLanguagePair is cleared once a translation
+    /// starts, but the options menu still needs to name the language.
+    private var detectedDocumentLanguage: String? {
+        get { objc_getAssociatedObject(self, TranslationsAssociation.langKey) as? String }
+        set {
+            objc_setAssociatedObject(
+                self, TranslationsAssociation.langKey, newValue,
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        }
     }
 
     private var translateBar: TranslateBar? {
@@ -204,6 +240,7 @@ extension BrowserViewController: TranslationsDelegate {
         }
 
         offeredLanguagePair = (from: docLang, to: userLang)
+        detectedDocumentLanguage = docLang
         presentTranslateBarIfNeeded().showOffer(from: docLang, to: userLang)
     }
 
@@ -229,6 +266,9 @@ extension BrowserViewController: TranslationsDelegate {
         bar.onDismiss = { [weak self] in
             self?.dismissTranslateBar()
         }
+        bar.makeOptionsMenu = { [weak self] completion in
+            self?.buildTranslationOptions(completion) ?? completion([])
+        }
         translateBar = bar
         return bar
     }
@@ -237,6 +277,88 @@ extension BrowserViewController: TranslationsDelegate {
         translateBar?.removeFromSuperview()
         translateBar = nil
         offeredLanguagePair = nil
+        detectedDocumentLanguage = nil
+    }
+
+    /// Always / never for the detected language, and the site
+    /// blacklist. Current state is read back from the engine each time
+    /// the menu opens rather than cached, so it stays right if it was
+    /// changed from somewhere else.
+    ///
+    /// Site level is never-only on purpose: Gecko models an
+    /// always-translate list per LANGUAGE, not per site, so there is no
+    /// "always translate this site" to offer.
+    private func buildTranslationOptions(
+        _ completion: @escaping ([UIMenuElement]) -> Void
+    ) {
+        guard let language = detectedDocumentLanguage,
+              let session = tabManager.selectedTab?.session else {
+            completion([])
+            return
+        }
+        let name = Locale.current.localizedString(forLanguageCode: language) ?? language
+
+        Task { @MainActor [weak self] in
+            let setting = await GeckoRuntime.translationLanguageSetting(for: language)
+            let neverSite = await session.neverTranslateSite()
+            guard let self else {
+                completion([])
+                return
+            }
+
+            let always = UIAction(
+                title: String(format: NSLocalizedString("Always Translate %@", comment: ""), name),
+                state: setting == .always ? .on : .off
+            ) { [weak self] _ in
+                // Selecting an active option clears it back to "offer",
+                // so the pair behaves like a three-way toggle rather
+                // than a trap you cannot leave from the menu.
+                self?.applyLanguageSetting(setting == .always ? .offer : .always, for: language)
+            }
+
+            let never = UIAction(
+                title: String(format: NSLocalizedString("Never Translate %@", comment: ""), name),
+                state: setting == .never ? .on : .off
+            ) { [weak self] _ in
+                self?.applyLanguageSetting(setting == .never ? .offer : .never, for: language)
+            }
+
+            let site = UIAction(
+                title: NSLocalizedString("Never Translate This Site", comment: ""),
+                state: neverSite ? .on : .off
+            ) { [weak self] _ in
+                self?.applySiteSetting(!neverSite)
+            }
+
+            completion([
+                UIMenu(title: "", options: .displayInline, children: [always, never]),
+                UIMenu(title: "", options: .displayInline, children: [site]),
+            ])
+        }
+    }
+
+    private func applyLanguageSetting(
+        _ setting: TranslationLanguageSetting, for language: String
+    ) {
+        Task { @MainActor [weak self] in
+            try? await GeckoRuntime.setTranslationLanguageSetting(setting, for: language)
+            // "never" means this page should stop offering right now.
+            if setting == .never {
+                self?.dismissTranslateBar()
+            }
+        }
+    }
+
+    private func applySiteSetting(_ neverTranslate: Bool) {
+        guard let session = tabManager.selectedTab?.session else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            try? await session.setNeverTranslateSite(neverTranslate)
+            if neverTranslate {
+                self?.dismissTranslateBar()
+            }
+        }
     }
 
     private func performTranslateAction() {
