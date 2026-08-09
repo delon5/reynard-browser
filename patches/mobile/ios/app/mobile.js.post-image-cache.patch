@@ -1,0 +1,26 @@
+diff --git a/mobile/ios/app/mobile.js b/mobile/ios/app/mobile.js
+--- a/mobile/ios/app/mobile.js
++++ b/mobile/ios/app/mobile.js
+@@ -115,4 +115,22 @@ pref("security.sandbox.content.level", 1);
+ // 2 complete progressbar at first MozAfterPaint after DOMContentLoaded
+ pref("page_load.progressbar_completion", 2);
+ 
++// Reynard: size the decoded-image (surface) cache to the iOS content-
++// process memory budget instead of to device RAM, and stop a single
++// memory-pressure signal from dumping the ENTIRE decoded-image cache.
++// Without these, long image-heavy pages (e.g. IGN) blank their images
++// while scrolling: SurfaceCache sizes itself from PR_GetPhysicalMemory-
++// Size (whole-device RAM, min(RAM/4, ~2GB)), which is far above a
++// content process's iOS memory budget, so it never evicts gracefully -
++// the process rides the OS memory ceiling and every
++// DISPATCH_MEMORYPRESSURE_WARN calls DiscardForMemoryPressure, which
++// with a discard_factor of 1 discards EVERY discardable surface. A
++// smaller cap makes the cache evict the furthest-offscreen images by
++// LRU well before OS pressure hits, and a discard_factor of 2 keeps
++// near-viewport images across a pressure event instead of dropping all
++// of them. 256 MB is a starting point; tune against os_proc_available_
++// memory (the Helper already logs it).
++pref("image.mem.surfacecache.max_size_kb", 262144);
++pref("image.mem.surfacecache.discard_factor", 2);
++
+ pref("toolkit.defaultChromeURI", "chrome://geckoview/content/geckoview.xhtml");
