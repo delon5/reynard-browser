@@ -462,7 +462,12 @@ final class TabManagerImplementation: NSObject, TabManager {
             progress: self,
             prompt: promptCoordinator,
             selectionAction: selectionActionCoordinator,
-            mediaSession: systemMediaSession
+            mediaSession: systemMediaSession,
+            // The translate bar lives on BrowserViewController, which
+            // is this manager's delegate - the engine offers a
+            // translation per session and the bar follows the
+            // selected tab.
+            translations: delegate as? TranslationsDelegate
         )
     }
     

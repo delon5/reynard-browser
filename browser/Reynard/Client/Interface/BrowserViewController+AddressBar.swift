@@ -147,6 +147,16 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         refreshAddressBar()
     }
     
+    func addressBarDidRequestFindInPage(_ addressBar: AddressBar) {
+        // Deferred until the menu has gone, like the Settings entry
+        // below: presenting the find bar and making its field first
+        // responder while the menu is still dismissing loses the
+        // keyboard.
+        browserChrome.performAfterAddressBarMenuDismissal { [weak self] in
+            self?.presentFindInPage()
+        }
+    }
+
     func addressBarDidRequestWebsiteSettings(_ addressBar: AddressBar) {
         presentWebsiteSettings()
     }

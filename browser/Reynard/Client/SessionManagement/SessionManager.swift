@@ -101,6 +101,7 @@ final class SessionManager {
         session.promptDelegate = delegates.prompt
         session.selectionActionDelegate = delegates.selectionAction
         session.mediaSessionDelegate = delegates.mediaSession
+        session.translationsDelegate = delegates.translations
     }
     
     func adopt(

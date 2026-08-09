@@ -26,6 +26,7 @@ enum AddressBarMenu {
         usesDesktopWebsite: Bool?,
         onShowAddons: @escaping () -> Void,
         onChangeWebsiteMode: @escaping () -> Void,
+        onFindInPage: @escaping () -> Void,
         onWebsiteSettings: @escaping () -> Void,
         onSettings: @escaping () -> Void,
         onBookmark: @escaping (Bool) -> Void
@@ -59,6 +60,20 @@ enum AddressBarMenu {
                 image: UIImage(named: isDesktop ? "reynard.smartphone" : "reynard.desktopcomputer"),
                 startsSection: false,
                 action: onChangeWebsiteMode
+            ))
+        }
+        // Find in Page. Placed for a loaded page only - there is nothing
+        // to search on the homepage - and gated on the same url?.host
+        // check the website-specific items below use.
+        //
+        // Without this the feature is unreachable on a phone: the only
+        // other entry point is Cmd+F, which needs a hardware keyboard.
+        if url?.host != nil {
+            items.append(Item(
+                title: NSLocalizedString("Find in Page", comment: ""),
+                image: UIImage(named: "reynard.magnifyingglass"),
+                startsSection: true,
+                action: onFindInPage
             ))
         }
         if url?.host != nil {

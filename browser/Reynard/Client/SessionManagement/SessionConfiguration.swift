@@ -22,6 +22,7 @@ struct SessionDelegates {
     var prompt: PromptDelegate?
     var selectionAction: SelectionActionDelegate?
     var mediaSession: MediaSessionDelegate?
+    var translations: TranslationsDelegate?
     
     init(
         content: ContentDelegate? = nil,
@@ -31,7 +32,8 @@ struct SessionDelegates {
         progress: ProgressDelegate? = nil,
         prompt: PromptDelegate? = nil,
         selectionAction: SelectionActionDelegate? = nil,
-        mediaSession: MediaSessionDelegate? = nil
+        mediaSession: MediaSessionDelegate? = nil,
+        translations: TranslationsDelegate? = nil
     ) {
         self.content = content
         self.navigation = navigation
@@ -41,5 +43,6 @@ struct SessionDelegates {
         self.prompt = prompt
         self.selectionAction = selectionAction
         self.mediaSession = mediaSession
+        self.translations = translations
     }
 }

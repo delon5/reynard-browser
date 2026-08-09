@@ -15,6 +15,7 @@ protocol AddressBarDelegate: AnyObject {
     func addressBarMaximumPageZoomLevel(_ addressBar: AddressBar) -> Int
     func addressBar(_ addressBar: AddressBar, didRequestPageZoomLevel level: Int)
     func addressBarDidRequestWebsiteModeChange(_ addressBar: AddressBar)
+    func addressBarDidRequestFindInPage(_ addressBar: AddressBar)
     func addressBarDidRequestWebsiteSettings(_ addressBar: AddressBar)
     func addressBarDidRequestSettings(_ addressBar: AddressBar)
     func addressBar(_ addressBar: AddressBar, didRequestBookmarkInFavorites favorites: Bool)
@@ -331,6 +332,10 @@ final class AddressBar: UIView {
             onChangeWebsiteMode: { [weak self] in
                 guard let self else { return }
                 self.delegate?.addressBarDidRequestWebsiteModeChange(self)
+            },
+            onFindInPage: { [weak self] in
+                guard let self else { return }
+                self.delegate?.addressBarDidRequestFindInPage(self)
             },
             onWebsiteSettings: { [weak self] in
                 guard let self else { return }
