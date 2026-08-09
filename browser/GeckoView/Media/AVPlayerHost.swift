@@ -141,6 +141,9 @@ public final class AVPlayerHost: NSObject {
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary,
         ])
         var displayLink: CADisplayLink?
+        /// Diagnostics for the pull loop - see pullFrames.
+        var pullTicks: UInt64 = 0
+        var reportedFirstPull = false
 
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
@@ -245,6 +248,10 @@ public final class AVPlayerHost: NSObject {
         withState { frameLinkIDs[ObjectIdentifier(link)] = id }
         link.add(to: .main, forMode: .common)
         entry.displayLink = link
+        // Proves the link was installed and the output attached,
+        // separating "never started" from "started but blocked".
+        avLog("frameDelivery[\(id)] display link installed, "
+              + "outputs=\(entry.item.outputs.count)")
     }
 
     /// Display-link target. Non-private because CADisplayLink resolves it
@@ -262,20 +269,48 @@ public final class AVPlayerHost: NSObject {
             return
         }
 
+        // Every gate below used to be a bare `return`. At 60fps a stuck
+        // one looks exactly like the link never firing, which is why
+        // "still magenta" came with nothing in the log to explain it.
+        // Reported at powers of two - the same scheme the JIT code uses,
+        // because unconditional logging here would be its own outage.
+        entry.pullTicks += 1
+        let tick = entry.pullTicks
+        let shouldReport = (tick & (tick &- 1)) == 0
+
+        func report(_ reason: String) {
+            guard shouldReport else { return }
+            let player = entry.player
+            avLog("framePull[\(id)] tick=\(tick) BLOCKED: \(reason)"
+                  + " rate=\(player.rate)"
+                  + " timeControl=\(player.timeControlStatus.rawValue)"
+                  + " itemStatus=\(entry.item.status.rawValue)"
+                  + " outputs=\(entry.item.outputs.count)")
+        }
+
         let output = entry.videoOutput
         let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         guard itemTime.isValid, itemTime.isNumeric else {
+            // An item with no timebase is what an AVPlayer that was never
+            // told to play looks like.
+            report("itemTime invalid (no timebase)")
             return
         }
         guard output.hasNewPixelBuffer(forItemTime: itemTime) else {
+            report("no new pixel buffer at t=\(CMTimeGetSeconds(itemTime))")
             return
         }
         guard let buffer = output.copyPixelBuffer(forItemTime: itemTime,
                                                   itemTimeForDisplay: nil)
         else {
+            report("copyPixelBuffer returned nil")
             return
         }
 
+        if !entry.reportedFirstPull {
+            entry.reportedFirstPull = true
+            avLog("framePull[\(id)] FIRST BUFFER after \(tick) ticks - handing to Gecko")
+        }
         ReynardAVPlayerNotifyFrame(id, buffer)
     }
 
