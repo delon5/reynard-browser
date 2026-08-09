@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,634 @@
+@@ -0,0 +1,734 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -635,5 +635,105 @@ new file mode 100644
 +
 +        entry->second->NotifyMetadata(duration,
 +                                      mozilla::gfx::IntSize(aWidth, aHeight));
++      }));
++}
++
++// Real frames, replacing the magenta placeholder as soon as the first
++// one lands.
++//
++// The placeholder proved the compositor path end to end - container,
++// two-plane surface, layer - but it is a synthetic fill. This publishes
++// what AVFoundation actually decoded, taken straight from the video
++// output's CVPixelBuffer.
++//
++// No pixels are copied. The buffer is IOSurface-backed by construction
++// (the Swift side creates the output with
++// kCVPixelBufferIOSurfacePropertiesKey), and an IOSurface is exactly
++// what MacIOSurfaceImage wraps, so the same surface AVFoundation
++// decoded into is handed to the compositor.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyFrame(
++    uintptr_t aPlayerId, CVPixelBufferRef aPixelBuffer) {
++  if (!aPixelBuffer) {
++    return;
++  }
++
++  IOSurfaceRef ioSurface = CVPixelBufferGetIOSurface(aPixelBuffer);
++  if (!ioSurface) {
++    // Only possible if the output was created without the IOSurface
++    // attribute. Logged once rather than per frame - at 30fps an
++    // unconditional printf here is its own outage.
++    static bool sWarnedNoIOSurface = false;
++    if (!sWarnedNoIOSurface) {
++      sWarnedNoIOSurface = true;
++      printf_stderr(
++          "avPlayer: frame has no IOSurface - dropping every frame\n");
++    }
++    return;
++  }
++
++  // Retained across the thread hop and adopted by the CFTypeRefPtr on
++  // the far side. The caller's buffer may be released the moment this
++  // returns, and the runnable outlives that.
++  CFRetain(ioSurface);
++
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyFrame", [aPlayerId, ioSurface]() {
++        MOZ_ASSERT(NS_IsMainThread());
++
++        // WrapUnderCreateRule: takes the reference added above rather
++        // than adding another, so the surface is released when this
++        // runnable finishes even on the early-return paths below.
++        auto surfaceRef =
++            CFTypeRefPtr<IOSurfaceRef>::WrapUnderCreateRule(ioSurface);
++
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          // Same teardown race as the metadata callback - the decoder
++          // erases itself before the player dies, so frames already in
++          // flight land here and are dropped.
++          return;
++        }
++
++        mozilla::VideoFrameContainer* container =
++            entry->second->GetVideoFrameContainer();
++        if (!container) {
++          return;
++        }
++
++        // BT.709 to match the placeholder and the overwhelming majority
++        // of streamed H.264/HEVC. A real implementation would read the
++        // colour attachments off the pixel buffer; getting that wrong
++        // shifts colour, it does not stop a frame appearing, so it is
++        // deliberately left for after the pipeline is proven.
++        RefPtr<MacIOSurface> macSurface = new MacIOSurface(
++            surfaceRef, mozilla::gfx::YUVColorSpace::BT709,
++            mozilla::gfx::TransferFunction::BT709,
++            MacIOSurface::AllowAlpha::No);
++
++        const mozilla::gfx::IntSize size(
++            static_cast<int32_t>(macSurface->GetDevicePixelWidth()),
++            static_cast<int32_t>(macSurface->GetDevicePixelHeight()));
++        if (size.width <= 0 || size.height <= 0) {
++          return;
++        }
++
++        // Logged once. The interesting question is whether a real frame
++        // ever replaces the placeholder at all; after that it is noise.
++        static bool sReportedFirstFrame = false;
++        if (!sReportedFirstFrame) {
++          sReportedFirstFrame = true;
++          printf_stderr(
++              "avPlayer: FIRST REAL FRAME player=%llu %dx%d planes=%u\n",
++              (unsigned long long)aPlayerId, size.width, size.height,
++              (unsigned)macSurface->GetPlaneCount());
++        }
++
++        RefPtr<mozilla::layers::Image> image =
++            new mozilla::layers::MacIOSurfaceImage(macSurface);
++        container->SetCurrentFrame(size, image, mozilla::TimeStamp::Now(),
++                                   mozilla::media::TimeUnit::Zero(),
++                                   mozilla::media::TimeUnit::Zero());
++        container->Invalidate();
 +      }));
 +}

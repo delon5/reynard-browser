@@ -39,6 +39,8 @@
 
 import AVFoundation
 import Foundation
+// CADisplayLink, which drives the frame pull below.
+import QuartzCore
 
 /// Unbuffered stderr, matching the C++ side's printf_stderr - see the
 /// file comment for why this is not NSLog. Flushed every time: a
@@ -57,6 +59,10 @@ public final class AVPlayerHost: NSObject {
     /// outliving its decoder - or the reverse - cannot dereference
     /// anything freed.
     private var players: [UInt: Player] = [:]
+    // Display link -> player id. Kept out of the Player so the link never
+    // holds a strong reference back to the object whose lifetime it is
+    // supposed to follow.
+    private var frameLinkIDs: [ObjectIdentifier: UInt] = [:]
     private var nextID: UInt = 1
 
     /// The AVContentKeySession the EME licence exchange is bound to,
@@ -101,6 +107,25 @@ public final class AVPlayerHost: NSObject {
         var reportedDuration: Double?
         var reportedSize: CGSize?
 
+        // Pulls decoded frames back out of AVFoundation so Gecko can
+        // composite them itself. Without this the decoder had nothing to
+        // show but the synthetic placeholder: AVPlayer decodes into its
+        // own layer, and a layer Gecko does not own cannot take part in
+        // its scene graph.
+        //
+        // IOSurface-backed deliberately. MacIOSurfaceImage wraps an
+        // IOSurface, so the very surface AVFoundation decoded into
+        // reaches the compositor with no copy. NV12 video-range is what
+        // MacIOSurfaceTextureHostOGL expects for a two-plane surface -
+        // the same format the placeholder builds, and it hard-requires
+        // exactly two planes.
+        let videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String:
+                Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary,
+        ])
+        var displayLink: CADisplayLink?
+
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
             self.player = player
@@ -108,6 +133,13 @@ public final class AVPlayerHost: NSObject {
             self.asset = asset
             self.keySession = keySession
             self.delegate = delegate
+        }
+
+        deinit {
+            // Invalidate releases the display link's strong reference to
+            // its target. Without it the link keeps this Player alive and
+            // keeps firing against a destroyed item.
+            displayLink?.invalidate()
         }
     }
 
@@ -161,9 +193,64 @@ public final class AVPlayerHost: NSObject {
                              keySession: keySession, delegate: delegate)
 
         observeMetadata(of: item, playerId: id, storingInto: players[id]!)
+        startFrameDelivery(for: id)
 
         avLog("created \(id) for \(parsed.absoluteString)")
         return id
+    }
+
+    /// Feeds decoded frames to Gecko for compositing.
+    ///
+    /// A CADisplayLink rather than a timer, so pulls land on the display
+    /// refresh AVFoundation is itself targeting: asking for a frame at an
+    /// arbitrary phase either repeats one or misses one, and the seam is
+    /// visible as judder.
+    ///
+    /// copyPixelBuffer hands over a +1 reference. Gecko's callback takes
+    /// its own reference on the underlying IOSurface for the hop to its
+    /// main thread, so releasing here as soon as the call returns is
+    /// correct - and required, because holding these would exhaust the
+    /// output's buffer pool within seconds and stall decoding.
+    private func startFrameDelivery(for id: UInt) {
+        guard let entry = players[id] else {
+            return
+        }
+        entry.item.add(entry.videoOutput)
+
+        let link = CADisplayLink(target: self,
+                                 selector: #selector(pullFrames(_:)))
+        // The id travels through the display link rather than a captured
+        // closure so the link never holds a Player.
+        link.preferredFramesPerSecond = 0  // match the display
+        frameLinkIDs[ObjectIdentifier(link)] = id
+        link.add(to: .main, forMode: .common)
+        entry.displayLink = link
+    }
+
+    /// Display-link target. Non-private because CADisplayLink resolves it
+    /// by selector.
+    @objc private func pullFrames(_ link: CADisplayLink) {
+        guard let id = frameLinkIDs[ObjectIdentifier(link)],
+              let entry = players[id] else {
+            link.invalidate()
+            return
+        }
+
+        let output = entry.videoOutput
+        let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
+        guard itemTime.isValid, itemTime.isNumeric else {
+            return
+        }
+        guard output.hasNewPixelBuffer(forItemTime: itemTime) else {
+            return
+        }
+        guard let buffer = output.copyPixelBuffer(forItemTime: itemTime,
+                                                  itemTimeForDisplay: nil)
+        else {
+            return
+        }
+
+        ReynardAVPlayerNotifyFrame(id, buffer)
     }
 
     /// Reports duration and dimensions back to AVPlayerDecoder once the
@@ -254,6 +341,16 @@ public final class AVPlayerHost: NSObject {
         guard let entry = players.removeValue(forKey: id) else {
             return
         }
+        // Before anything else, and taken from the entry rather than by
+        // id - the removeValue above already means a lookup would find
+        // nothing. A link left running fires against a torn-down item and
+        // keeps the Player alive through its target reference.
+        if let link = entry.displayLink {
+            frameLinkIDs.removeValue(forKey: ObjectIdentifier(link))
+            link.invalidate()
+            entry.displayLink = nil
+        }
+        entry.item.remove(entry.videoOutput)
         entry.observers.forEach { $0.invalidate() }
         entry.player.pause()
         entry.player.replaceCurrentItem(with: nil)
