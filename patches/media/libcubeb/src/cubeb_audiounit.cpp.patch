@@ -20,7 +20,29 @@ index d1a217687acd..116f138a4549 100644
  };
  
  bool
-@@ -756,9 +767,65 @@ audiounit_output_callback(void * user_ptr,
+@@ -614,4 +614,21 @@
+ }
+ 
++#if TARGET_OS_IPHONE
++/* Defined in cubeb_audiounit_ios.mm */
++extern "C" void cubeb_ios_activate_audio_session(
++    bool aRecording, uint32_t aPreferredOutputChannels);
++extern "C" uint32_t cubeb_ios_session_sample_rate(void);
++extern "C" uint32_t cubeb_ios_copy_available_inputs(
++    cubeb_device_info ** aDevices);
++extern "C" uint32_t cubeb_ios_copy_available_outputs(
++    cubeb_device_info ** aDevices);
++extern "C" uint32_t cubeb_ios_max_output_channel_count(void);
++extern "C" uint32_t cubeb_ios_output_latency_frames(void);
++extern "C" uint32_t cubeb_ios_cached_output_latency_frames(void);
++extern "C" bool cubeb_ios_copy_current_device_names(char ** aInputName,
++                                                    char ** aOutputName);
++extern "C" bool cubeb_ios_set_preferred_input(cubeb_devid aDeviceId);
++#endif
++
+ static OSStatus
+ audiounit_output_callback(void * user_ptr,
+@@ -756,9 +784,48 @@ audiounit_output_callback(void * user_ptr,
                                  outBufferList->mBuffers[0].mDataByteSize);
    }
  
@@ -66,23 +88,6 @@ index d1a217687acd..116f138a4549 100644
    return noErr;
  }
  
-+#if TARGET_OS_IPHONE
-+/* Defined in cubeb_audiounit_ios.mm */
-+extern "C" void cubeb_ios_activate_audio_session(
-+    bool aRecording, uint32_t aPreferredOutputChannels);
-+extern "C" uint32_t cubeb_ios_session_sample_rate(void);
-+extern "C" uint32_t cubeb_ios_copy_available_inputs(
-+    cubeb_device_info ** aDevices);
-+extern "C" uint32_t cubeb_ios_copy_available_outputs(
-+    cubeb_device_info ** aDevices);
-+extern "C" uint32_t cubeb_ios_max_output_channel_count(void);
-+extern "C" uint32_t cubeb_ios_output_latency_frames(void);
-+extern "C" uint32_t cubeb_ios_cached_output_latency_frames(void);
-+extern "C" bool cubeb_ios_copy_current_device_names(char ** aInputName,
-+                                                    char ** aOutputName);
-+extern "C" bool cubeb_ios_set_preferred_input(cubeb_devid aDeviceId);
-+#endif
-+
  extern "C" {
  int
  audiounit_init(cubeb ** context, char const * /* context_name */)
