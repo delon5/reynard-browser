@@ -516,7 +516,7 @@ index cea7d764..4e912f86 100644
 +      if (!sReportedWXFaultSkip.exchange(true)) {
 +        static const char kSkipMessage[] =
 +            "jitSkip: first W^X fault skipped - JIT state may be "
-+            "corrupt from here\\n";
++            "corrupt from here\n";
 +        (void)write(STDERR_FILENO, kSkipMessage, sizeof(kSkipMessage) - 1);
 +      }
 +

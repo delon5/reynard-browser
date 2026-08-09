@@ -64,6 +64,22 @@ public final class AVPlayerHost: NSObject {
     // supposed to follow.
     private var frameLinkIDs: [ObjectIdentifier: UInt] = [:]
     private var nextID: UInt = 1
+    /// Guards players, frameLinkIDs and nextID. They are reached from
+    /// TWO different threads: every decoder entry point (createPlayer,
+    /// destroy, play, seek, ...) runs on GECKO's main thread - which
+    /// in a content process is a spawned thread, not the GCD main
+    /// queue; see ReynardAVPlayerNotifyMetadata's comment in
+    /// AVPlayerDecoder.mm for the capture that proved they differ -
+    /// while pullFrames fires on the GCD main queue's display link.
+    /// Swift dictionaries corrupt under concurrent read/write, so
+    /// every touch of these maps goes through withState.
+    private let stateLock = NSLock()
+
+    private func withState<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
 
     /// The AVContentKeySession the EME licence exchange is bound to,
     /// published by FairPlayCDMProxy the moment it creates one.
@@ -187,12 +203,16 @@ public final class AVPlayerHost: NSObject {
         let player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
 
-        let id = nextID
-        nextID += 1
-        players[id] = Player(player: player, item: item, asset: asset,
-                             keySession: keySession, delegate: delegate)
+        let entry = Player(player: player, item: item, asset: asset,
+                           keySession: keySession, delegate: delegate)
+        let id = withState { () -> UInt in
+            let id = nextID
+            nextID += 1
+            players[id] = entry
+            return id
+        }
 
-        observeMetadata(of: item, playerId: id, storingInto: players[id]!)
+        observeMetadata(of: item, playerId: id, storingInto: entry)
         startFrameDelivery(for: id)
 
         avLog("created \(id) for \(parsed.absoluteString)")
@@ -212,7 +232,7 @@ public final class AVPlayerHost: NSObject {
     /// correct - and required, because holding these would exhaust the
     /// output's buffer pool within seconds and stall decoding.
     private func startFrameDelivery(for id: UInt) {
-        guard let entry = players[id] else {
+        guard let entry = withState({ players[id] }) else {
             return
         }
         entry.item.add(entry.videoOutput)
@@ -222,7 +242,7 @@ public final class AVPlayerHost: NSObject {
         // The id travels through the display link rather than a captured
         // closure so the link never holds a Player.
         link.preferredFramesPerSecond = 0  // match the display
-        frameLinkIDs[ObjectIdentifier(link)] = id
+        withState { frameLinkIDs[ObjectIdentifier(link)] = id }
         link.add(to: .main, forMode: .common)
         entry.displayLink = link
     }
@@ -230,8 +250,14 @@ public final class AVPlayerHost: NSObject {
     /// Display-link target. Non-private because CADisplayLink resolves it
     /// by selector.
     @objc private func pullFrames(_ link: CADisplayLink) {
-        guard let id = frameLinkIDs[ObjectIdentifier(link)],
-              let entry = players[id] else {
+        let state = withState { () -> (id: UInt, entry: Player)? in
+            guard let id = frameLinkIDs[ObjectIdentifier(link)],
+                  let entry = players[id] else {
+                return nil
+            }
+            return (id, entry)
+        }
+        guard let (id, entry) = state else {
             link.invalidate()
             return
         }
@@ -268,7 +294,20 @@ public final class AVPlayerHost: NSObject {
     /// arrive at all.
     private func observeMetadata(of item: AVPlayerItem, playerId: UInt,
                                  storingInto entry: Player) {
-        let report: (AVPlayerItem) -> Void = { item in
+        // [weak entry] is load-bearing. The three observations below
+        // live in entry.observers, so the Player retains them; each of
+        // their handlers calls this closure. A strong capture here
+        // closes a cycle (Player -> observers -> handler -> report ->
+        // Player) that invalidate() does NOT break - an invalidated
+        // NSKeyValueObservation keeps its handler until it deallocates,
+        // and deallocating is exactly what the cycle prevents. Every
+        // destroy(_:) leaked the whole Player graph: AVPlayer, item,
+        // asset, video output and key-session reference, per protected
+        // video ever played.
+        let report: (AVPlayerItem) -> Void = { [weak entry] item in
+            guard let entry else {
+                return
+            }
             guard item.status == .readyToPlay else {
                 return
             }
@@ -320,25 +359,25 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func play(_ id: UInt) {
-        players[id]?.player.play()
+        withState({ players[id] })?.player.play()
     }
 
     @objc public func pause(_ id: UInt) {
-        players[id]?.player.pause()
+        withState({ players[id] })?.player.pause()
     }
 
     /// Backgrounding. Playback stops but the item is kept, so resuming
     /// does not re-fetch or re-negotiate keys.
     @objc public func suspend(_ id: UInt) {
-        players[id]?.player.pause()
+        withState({ players[id] })?.player.pause()
     }
 
     @objc public func resume(_ id: UInt) {
-        players[id]?.player.play()
+        withState({ players[id] })?.player.play()
     }
 
     @objc public func destroy(_ id: UInt) {
-        guard let entry = players.removeValue(forKey: id) else {
+        guard let entry = withState({ players.removeValue(forKey: id) }) else {
             return
         }
         // Before anything else, and taken from the entry rather than by
@@ -346,7 +385,7 @@ public final class AVPlayerHost: NSObject {
         // nothing. A link left running fires against a torn-down item and
         // keeps the Player alive through its target reference.
         if let link = entry.displayLink {
-            frameLinkIDs.removeValue(forKey: ObjectIdentifier(link))
+            _ = withState { frameLinkIDs.removeValue(forKey: ObjectIdentifier(link)) }
             link.invalidate()
             entry.displayLink = nil
         }
@@ -362,7 +401,7 @@ public final class AVPlayerHost: NSObject {
     /// AVPlayerLayer for the DRM-marked surface. Until that lands the
     /// player renders nowhere, which is expected.
     @objc public func attachLayer(_ layer: AVPlayerLayer, to id: UInt) {
-        guard let entry = players[id] else {
+        guard let entry = withState({ players[id] }) else {
             return
         }
         layer.player = entry.player
@@ -371,7 +410,7 @@ public final class AVPlayerHost: NSObject {
 
     /// Seconds, or -1 when not yet known.
     @objc public func currentTime(_ id: UInt) -> Double {
-        guard let entry = players[id] else {
+        guard let entry = withState({ players[id] }) else {
             return -1
         }
         let time = entry.player.currentTime()
@@ -379,7 +418,7 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func duration(_ id: UInt) -> Double {
-        guard let entry = players[id] else {
+        guard let entry = withState({ players[id] }) else {
             return -1
         }
         let duration = entry.item.duration
@@ -387,7 +426,7 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func seek(_ id: UInt, to seconds: Double) {
-        guard let entry = players[id] else {
+        guard let entry = withState({ players[id] }) else {
             return
         }
         entry.player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
