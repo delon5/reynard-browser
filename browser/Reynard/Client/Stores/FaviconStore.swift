@@ -14,6 +14,13 @@ final class FaviconStore {
     static let shared = FaviconStore()
     
     private static let expirationDays = 30
+    /// How often the expiry sweep may actually run. It used to run
+    /// inside EVERY cache lookup - DELETE passes over three tables per
+    /// favicon check, on paths that can do dozens of lookups in one
+    /// screen render - to enforce an expiry measured in DAYS. Hourly
+    /// is still absurdly frequent relative to that horizon, and it
+    /// takes the sweep off the per-lookup cost entirely.
+    private static let pruneMinimumInterval: TimeInterval = 60 * 60
     private static let databaseName = "Favicons"
     private static let imageFilePrefix = "img-"
     private static let maxHTMLBytes = 768 * 1024
@@ -69,6 +76,10 @@ final class FaviconStore {
     )
     
     private var activeRequests: [String: Task<UIImage?, Never>] = [:]
+    /// stateQueue-confined, like the rest of the mutable state. Starts
+    /// at .distantPast so the very first sweep - the one init runs -
+    /// always executes.
+    private var lastPruneAt: Date = .distantPast
     
     // MARK: - Lifecycle
     
@@ -123,24 +134,48 @@ final class FaviconStore {
         }
         
         let requestKey = requestScopeKey(for: pageURL)
-        if let activeRequest = stateQueue.sync(execute: { activeRequests[requestKey] }) {
-            return await activeRequest.value
-        }
-        
-        let task = Task<UIImage?, Never>(priority: .utility) { [weak self] in
-            guard let self else {
-                return nil
+
+        // The lookup, the Task's creation and its registration all
+        // happen inside ONE critical section, deliberately. They used
+        // to be three separate steps, which had two failure modes:
+        //
+        // 1. Two callers arriving together both found no active
+        //    request and both fetched - wasted duplicate work, with
+        //    the second registration silently replacing the first.
+        //
+        // 2. Far worse: the Task starts running the moment it is
+        //    created, and its self-removal below is an ASYNC hop onto
+        //    stateQueue. A fetch that failed fast - airplane mode
+        //    fails in milliseconds, well before the caller's separate
+        //    registration hop ran - enqueued its removal FIRST, so the
+        //    registration then re-inserted a Task that had already
+        //    finished with nil. Every later request for that site
+        //    found the stale completed Task, awaited it, and got nil
+        //    without ever retrying - favicons for that site were dead
+        //    until relaunch.
+        //
+        // Registering inside the same serial-queue block that creates
+        // the Task guarantees the registration is ordered BEFORE the
+        // Task's own async removal, which closes (2); doing the lookup
+        // in that same block closes (1).
+        let task = stateQueue.sync { () -> Task<UIImage?, Never> in
+            if let activeRequest = activeRequests[requestKey] {
+                return activeRequest
             }
-            
-            let image = await self.fetchAndCacheFavicon(for: pageURL)
-            self.stateQueue.async {
-                self.activeRequests[requestKey] = nil
+
+            let newTask = Task<UIImage?, Never>(priority: .utility) { [weak self] in
+                guard let self else {
+                    return nil
+                }
+
+                let image = await self.fetchAndCacheFavicon(for: pageURL)
+                self.stateQueue.async {
+                    self.activeRequests[requestKey] = nil
+                }
+                return image
             }
-            return image
-        }
-        
-        stateQueue.sync {
-            activeRequests[requestKey] = task
+            activeRequests[requestKey] = newTask
+            return newTask
         }
         return await task.value
     }
@@ -336,6 +371,13 @@ final class FaviconStore {
     // MARK: - Cache Maintenance
     
     private func pruneExpiredEntriesLocked(now: Date) {
+        // Throttled here rather than at the call sites, so every
+        // current and future caller inherits it and none can forget.
+        guard now.timeIntervalSince(lastPruneAt) >= Self.pruneMinimumInterval else {
+            return
+        }
+        lastPruneAt = now
+
         let imageKeysBeforePruning = Set(fetchImageKeysLocked())
         let startOfToday = Calendar.current.startOfDay(for: now)
         let cutoff = (Calendar.current.date(byAdding: .day, value: 1 - Self.expirationDays, to: startOfToday) ?? startOfToday).timeIntervalSince1970

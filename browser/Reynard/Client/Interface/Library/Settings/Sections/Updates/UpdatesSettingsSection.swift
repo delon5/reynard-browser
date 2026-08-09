@@ -169,6 +169,15 @@ final class UpdatesSettingsSection {
         
         let session = URLSession(configuration: .default)
         let task = session.downloadTask(with: url) { [weak self, weak viewController, weak alert] location, _, error in
+            // A URLSession holds itself (and its delegate machinery,
+            // worker thread and caches) alive until it is explicitly
+            // invalidated - creating one per download and never
+            // invalidating it leaked a whole session each time the
+            // user downloaded an update. This completion runs exactly
+            // once per task, on both the success and the cancel path,
+            // and this session only ever carries this one task - so
+            // invalidating here reclaims the session in every case.
+            session.finishTasksAndInvalidate()
             DispatchQueue.main.async {
                 guard let self,
                       let viewController,

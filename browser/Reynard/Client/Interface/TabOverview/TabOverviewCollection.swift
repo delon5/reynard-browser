@@ -505,8 +505,19 @@ final class TabOverviewCollection: NSObject {
     }
     
     @objc private func handleTabCardReorderAutoScroll(_ displayLink: CADisplayLink) {
+        // The window check is the teardown backstop. The display link
+        // retains its target (self), so as long as it runs, deinit can
+        // never fire - the only things that stop it are this handler
+        // noticing it should stop, or an explicit
+        // stopTabCardReorderAutoScroll from the gesture paths. If a
+        // dismissal ever tears the collection view out of the
+        // hierarchy while reorderState is still .active and the
+        // gesture callbacks never arrive, this is what keeps the link
+        // from auto-scrolling a detached view forever while pinning
+        // self alive.
         guard case .active = reorderState,
-              let collectionView = reorderAutoScrollCollectionView else {
+              let collectionView = reorderAutoScrollCollectionView,
+              collectionView.window != nil else {
             stopTabCardReorderAutoScroll()
             return
         }

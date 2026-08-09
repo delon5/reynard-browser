@@ -55,6 +55,17 @@ final class MainThreadHangWatchdog {
     /// so an explicit stop() is never undone by a later foreground
     /// transition.
     private var resumeOnForeground = false
+    /// Incremented by every start(). Each recursive ping chain carries
+    /// the generation it was started with and terminates when the
+    /// current generation no longer matches. The isRunning check alone
+    /// could not guarantee that: a stop() followed by a start() within
+    /// one checkInterval (a sub-quarter-second background/foreground
+    /// bounce) flipped isRunning back to true before the old chain's
+    /// next hop observed it false, so the superseded chain survived
+    /// alongside the new one — and each such bounce could add another
+    /// permanent chain bouncing between the main and watchdog queues
+    /// every checkInterval for the rest of the process lifetime.
+    private var pingGeneration = 0
 
     private var timer: DispatchSourceTimer?
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.MainThreadHangWatchdog", qos: .utility)
@@ -113,6 +124,8 @@ final class MainThreadHangWatchdog {
         isRunning = true
         lastMainThreadResponseUptime = ProcessInfo.processInfo.systemUptime
         hasFiredForCurrentHang = false
+        pingGeneration += 1
+        let generation = pingGeneration
         lock.unlock()
 
         let timer = DispatchSource.makeTimerSource(queue: watchdogQueue)
@@ -123,7 +136,7 @@ final class MainThreadHangWatchdog {
         timer.resume()
         self.timer = timer
 
-        pingMainThread()
+        pingMainThread(generation: generation)
     }
 
     func stop() {
@@ -166,14 +179,17 @@ final class MainThreadHangWatchdog {
         start()
     }
 
-    private func pingMainThread() {
-        // Bail out of the recursive ping cycle once stopped — otherwise
-        // this keeps bouncing between the main and watchdog queues every
-        // checkInterval forever (until self deallocs), even after stop().
+    private func pingMainThread(generation: Int) {
+        // Bail out of the recursive ping cycle once stopped or
+        // superseded — otherwise this keeps bouncing between the main
+        // and watchdog queues every checkInterval forever (until self
+        // deallocs), even after stop(). The generation comparison is
+        // what makes a stop()-then-start() bounce kill the old chain
+        // at its next hop; see pingGeneration's own comment.
         lock.lock()
-        let running = isRunning
+        let current = isRunning && generation == pingGeneration
         lock.unlock()
-        guard running else {
+        guard current else {
             return
         }
 
@@ -183,7 +199,7 @@ final class MainThreadHangWatchdog {
             }
             self.recordMainThreadResponse()
             self.watchdogQueue.asyncAfter(deadline: .now() + self.checkInterval) { [weak self] in
-                self?.pingMainThread()
+                self?.pingMainThread(generation: generation)
             }
         }
     }
