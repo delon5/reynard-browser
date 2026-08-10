@@ -95,22 +95,21 @@ final class ToolbarController {
             self.maxToolbarOffset = maxToolbarOffset
             self.maxTopToolbarOffset = maxTopToolbarOffset
         }
-        // The condensed pill is this fork's, not upstream's, and while it
-        // is showing the full toolbar is not on screen. Reserving the
-        // toolbar's height there ends page content where the EXPANDED
-        // toolbar would be, leaving a gap; reserving nothing sends it to
-        // the true window bottom, underneath the pill. Content has to
-        // clear whatever chrome is ACTUALLY on screen, so the pill's own
-        // occupied height is the number - it already spans the home
-        // indicator band, since the pill is constrained to the view's
-        // real bottomAnchor rather than the safe-area guide.
-        //
-        // Only what Gecko is told changes; the offset limits above still
-        // describe the real toolbar, so the slide animation is untouched.
+        // The condensed pill is this fork's, not upstream's, and the view
+        // stays full-screen so the pill floats over the page. That makes
+        // this the only lever: content has to clear whatever chrome is
+        // ACTUALLY on screen, so while condensed the reservation is the
+        // pill's own occupied height - which already spans the home
+        // indicator band, the pill being constrained to the view's real
+        // bottomAnchor rather than the safe-area guide.
+        let maxHeight = browserChrome.isScrollCondensed
+            ? BrowserChrome.condensedPillOccupiedHeight
+            : maxToolbarOffset
+        NSLog("dynToolbar: limits max=%.1f top=%.1f condensed=%@",
+              maxHeight, maxTopToolbarOffset,
+              browserChrome.isScrollCondensed ? "YES" : "NO")
         contentView.setToolbarLimits(
-            maxHeight: browserChrome.isScrollCondensed
-                ? BrowserChrome.condensedPillOccupiedHeight
-                : maxToolbarOffset,
+            maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset
         )
     }
