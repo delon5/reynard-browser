@@ -144,12 +144,24 @@ static void ReynardRotateLogIfNeeded(void) {
         gReynardLogFileDescriptor >= 0 && gReynardLogURL) {
         NSString *previousPath = [gReynardLogURL.path stringByAppendingPathExtension:@"1"];
         // rename replaces any existing .1, so exactly two generations
-        // survive. Both are closed/reopened rather than truncated, so a
-        // reader holding the old file keeps a coherent one.
+        // survive, and it is atomic - a reader holding the old file
+        // keeps a coherent one.
         if (rename(gReynardLogURL.fileSystemRepresentation, previousPath.fileSystemRepresentation) == 0) {
-            close(gReynardLogFileDescriptor);
-            gReynardLogFileDescriptor = open(gReynardLogURL.fileSystemRepresentation,
-                                             O_WRONLY | O_CREAT | O_APPEND, 0644);
+            int rotated = open(gReynardLogURL.fileSystemRepresentation,
+                               O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (rotated >= 0) {
+                // dup2, NOT close-then-open. Writers do not take this
+                // lock - they read the descriptor and write - so closing
+                // first leaves the descriptor NUMBER free, and in a
+                // browser something else opens a file constantly: the
+                // number gets reused and log lines land inside an
+                // unrelated file. dup2 atomically retargets the existing
+                // number, so a racing writer always holds a valid
+                // descriptor and at worst writes into whichever
+                // generation is current.
+                dup2(rotated, gReynardLogFileDescriptor);
+                close(rotated);
+            }
             atomic_store(&gReynardLogBytes, 0);
         } else {
             // Rotation failed - do not retry on every subsequent line.
