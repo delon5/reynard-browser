@@ -695,45 +695,90 @@ final class BrowserViewController: UIViewController {
         }
         lastReportedBottomReservation = reservation
 
-        logger(String(format: "dynToolbar: %@ %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@ reservation=%@)",
-                      reservation == .readsSafeAreaInset ? "env" : "fixedMargin",
+        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@ reservation=%@)",
                       dynamicToolbarMaxHeight, target,
                       hasBottomToolbar ? "YES" : "NO",
                       browserChrome.isScrollCondensed ? "YES" : "NO",
                       reservation.map { String(describing: $0) } ?? "unknown"))
-        // Two mechanisms after all, chosen per page - because they do
-        // NOT reach the same set of elements.
+        // Two mechanisms, and only one of them works per page - reporting
+        // both reserves the same strip twice.
         //
-        // The compositor margin lifts position:fixed and sticky-bottom
-        // layers in the ROOT CONTENT document. env() moved anything that
-        // read it, wherever it sat. The second set is strictly larger,
-        // and the difference is where content goes missing: Twitch's
-        // "Open in App" sheet reads env() but is not a fixed root-content
-        // layer, so with env() at 0 nothing reached it and its "Keep
-        // using web" button became unreachable behind the chrome.
+        // env(safe-area-inset-bottom) only moves a page that actually
+        // reads it. Device evidence: with the inset arriving correctly,
+        // YouTube (which reads env) responded, while Facebook's composer
+        // did not move at all, because it never consults the variable.
         //
-        // So a page the engine has told us honours env() gets env() and
-        // NO margin - it positions itself, keeps the background bleed
-        // behind the pill, and elements the compositor cannot see are
-        // handled too. Everything else gets the margin, which needs no
-        // cooperation and is what made Facebook work.
+        // Shortening the layout viewport moves any page: the dynamic
+        // toolbar max makes ResizeReflow subtract it from the window
+        // dimensions, so the ICB ends higher and both document flow and -
+        // while the state stays Expanded, which updateDynamicToolbarOffset
+        // guarantees by always sending 0 - position:fixed content follow
+        // it.
         //
-        // Never both. That is the Phase 0 double-lift, and it is worse
-        // now than the 60pt it was then: the excess scales with the
-        // chrome height, so an expanded toolbar would put an env-reading
-        // page 142pt too high.
+        // The inset is the gentler of the two, since the page keeps the
+        // full viewport and paints its own background behind the pill, so
+        // it is preferred wherever the page is known to read env().
+        // Three cases, not two. An earlier revision wrote this as "is it
+        // an env() reader, yes or no", which put BOTH the not-yet-detected
+        // case (nil, every page while it is still loading) and the
+        // nothing-pinned case into the viewport-shortening branch - so it
+        // silently turned viewport shortening on for the entire web, where
+        // before the max was always 0. On device that stopped YouTube
+        // rendering at all.
         //
-        // A misclassified env-reader still lands on the margin, which is
-        // correct for anything fixed - it just loses the background
-        // bleed. That is the accepted trade-off, not a regression.
-        if reservation == .readsSafeAreaInset {
-            contentView.setSafeAreaInsetBottom(target)
-            contentView.setFixedBottomMargin(0)
-        } else {
-            contentView.setSafeAreaInsetBottom(0)
-            contentView.setFixedBottomMargin(target)
+        // Unknown and none therefore reserve NOTHING, which is this app's
+        // established behaviour: the page keeps the full viewport and the
+        // pill floats over it.
+        let reservationMode = tabManager.selectedTab?.state.bottomReservation
+        let insetTarget: CGFloat
+        let maxTarget: CGFloat
+        switch reservationMode {
+        case .some(.readsSafeAreaInset):
+            insetTarget = target
+            maxTarget = 0
+        case .some(.hasBottomBar):
+            // The INSET, not viewport shortening - see the device
+            // evidence below.
+            //
+            // This case means "something is pinned to the bottom edge,
+            // and the readable CSS does not mention env()". It does NOT
+            // mean the page ignores env(): most large sites serve their
+            // CSS from a CDN, and a cross-origin stylesheet throws on
+            // .cssRules, so the scan cannot see usage that is really
+            // there. YouTube is exactly that - it lands here, yet it
+            // demonstrably responds to the inset (it moved, and was
+            // over-reserved, before the +38 double-count was removed).
+            //
+            // Shortening the viewport for this case rendered YouTube into
+            // a box smaller than the window: a black band above the page
+            // header and the page ending short of the pill, with window
+            // background showing through at both ends.
+            //
+            // So the inset is the default for any detected page. It is
+            // the gentler mechanism - the page keeps the full viewport and
+            // paints its own background behind the pill - and a page that
+            // genuinely does not read env() is simply left where it was
+            // rather than being mis-rendered.
+            insetTarget = target
+            maxTarget = 0
+        default:
+            // Not detected yet, or nothing pinned at the bottom.
+            insetTarget = 0
+            maxTarget = 0
         }
-        contentView.setDynamicToolbarMaxHeight(0)
+
+        // NO device inset added. env(safe-area-inset-bottom) is measured
+        // from the window's bottom edge, and so is the chrome: the pill is
+        // constrained to the view's real bottomAnchor, not the safe area
+        // guide, so condensedPillOccupiedHeight already spans the home
+        // indicator band. Adding the device inset on top double-counted it
+        // and pushed content ~38pt too high, which is what the device
+        // showed on YouTube. The previous "+ deviceInset + 4" was tuned
+        // while the inset never reached the content process at all (see
+        // the BrowserChild.cpp safe-area patch), so it was compensating
+        // for that bug rather than for real geometry.
+        contentView.setSafeAreaInsetBottom(insetTarget)
+        contentView.setDynamicToolbarMaxHeight(maxTarget)
 
         // Store the target rather than what was sent, so the guard above
         // converges - storing 0 meant it never tripped and this ran on

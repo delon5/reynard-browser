@@ -586,18 +586,6 @@ public class GeckoSession {
         window?.setDynamicToolbarOffset(min(0, offset))
     }
     
-    /// Height of the browser chrome overlapping the bottom of the web
-    /// view. The compositor holds the page's position:fixed and
-    /// sticky-bottom elements above it every composited frame.
-    ///
-    /// This is the mechanism that works on every site: unlike
-    /// setSafeAreaInsets it needs no cooperation from the page's CSS, and
-    /// unlike setDynamicToolbarMaxHeight it never resizes the viewport.
-    /// Pages with nothing pinned to the bottom are untouched.
-    public func setFixedBottomMargin(_ margin: CGFloat) {
-        window?.setFixedBottomMargin(max(0, margin))
-    }
-
     /// Reported to web content as env(safe-area-inset-*), so a page can
     /// reserve the space the chrome occupies itself instead of the
     /// viewport being shortened or a view drawn over it.
