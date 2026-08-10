@@ -111,6 +111,16 @@ extension BrowserViewController {
         static var barKey: UInt8 = 0
     }
 
+    private enum FindUX {
+        /// Where a match should sit below the top of the visual
+        /// viewport, in CSS pixels - clear of the find bar itself.
+        static let matchTargetOffset: CGFloat = 140
+        /// Below this the match is close enough to where it should be;
+        /// moving anyway would jerk the page while stepping between two
+        /// matches that are both already on screen.
+        static let matchDeadBand: CGFloat = 60
+    }
+
     private var findInPageBar: FindInPageBar? {
         get { objc_getAssociatedObject(self, &FindInPageAssociation.barKey) as? FindInPageBar }
         set {
@@ -196,6 +206,32 @@ extension BrowserViewController {
         findInPageBar = nil
     }
 
+    /// Brings the current match into view.
+    ///
+    /// The engine's own scroll-into-view moves the LAYOUT viewport, and
+    /// APZ holds the VISUAL viewport separately - so on this port the
+    /// selection steps from match to match while the page stays exactly
+    /// where it was. GeckoView:ScrollBy is the path that moves what is
+    /// composited: it reads the visual offset and re-issues it through
+    /// scrollToVisual with UPDATE_TYPE_MAIN_THREAD.
+    ///
+    /// clientRect is relative to the visual viewport, so the delta needed
+    /// is simply "where the match is" minus "where we want it", entirely
+    /// in CSS pixels - no viewport height required, which is just as well
+    /// since it is not available here. The dead band keeps stepping
+    /// between two matches that are already both on screen from jerking
+    /// the page for a few pixels.
+    private func scrollToFindMatch(_ result: FindInPageResult, in session: GeckoSession) {
+        guard result.found, let rect = result.clientRect else {
+            return
+        }
+        let delta = rect.minY - FindUX.matchTargetOffset
+        guard abs(delta) > FindUX.matchDeadBand else {
+            return
+        }
+        session.scrollBy(CGPoint(x: 0, y: delta))
+    }
+
     private func performFindInPage(_ query: String, backwards: Bool) {
         guard let session = tabManager.selectedTab?.session else {
             return
@@ -216,6 +252,7 @@ extension BrowserViewController {
                 return
             }
             self?.findInPageBar?.updateCount(current: result.current, total: result.total)
+            self?.scrollToFindMatch(result, in: session)
         }
     }
 }

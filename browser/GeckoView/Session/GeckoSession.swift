@@ -332,6 +332,23 @@ public class GeckoSession {
             ])
     }
     
+    /// Scrolls by a delta relative to the current VISUAL viewport
+    /// offset. The engine side reads the visual offset and re-issues it
+    /// through scrollToVisual with UPDATE_TYPE_MAIN_THREAD, which is the
+    /// path APZ honours - a layout-viewport scroll alone does not move
+    /// what is composited.
+    public func scrollBy(_ delta: CGPoint, animated: Bool = true) {
+        dispatcher.dispatch(
+            type: "GeckoView:ScrollBy",
+            message: [
+                "widthValue": delta.x,
+                "widthType": 0,
+                "heightValue": delta.y,
+                "heightType": 0,
+                "behavior": animated ? 0 : 1,
+            ])
+    }
+
     public func scrollTo(_ position: CGPoint, animated: Bool = true) {
         dispatcher.dispatch(
             type: "GeckoView:ScrollTo",

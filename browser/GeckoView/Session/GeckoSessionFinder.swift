@@ -10,6 +10,7 @@
 //  Swift surface was missing.
 //
 
+import CoreGraphics
 import Foundation
 
 public struct FindInPageResult {
@@ -17,6 +18,16 @@ public struct FindInPageResult {
     public let wrapped: Bool
     public let current: Int
     public let total: Int
+    /// The match's bounds in CLIENT coordinates - relative to the visual
+    /// viewport, in CSS pixels. Nil when the engine reported no rect.
+    ///
+    /// Needed because the engine's own scroll-into-view moves the LAYOUT
+    /// viewport, and with APZ holding the visual viewport separately that
+    /// does not move what is on screen: the selection steps through
+    /// matches while the page stays put. Scrolling to this rect through
+    /// GeckoView:ScrollBy - which goes via scrollToVisual with
+    /// UPDATE_TYPE_MAIN_THREAD - is what actually moves the view.
+    public let clientRect: CGRect?
 
     init(response: Any?) {
         let dictionary = response as? [String: Any] ?? [:]
@@ -24,6 +35,17 @@ public struct FindInPageResult {
         wrapped = dictionary["wrapped"] as? Bool ?? false
         current = dictionary["current"] as? Int ?? 0
         total = dictionary["total"] as? Int ?? -1
+
+        if let rect = dictionary["clientRect"] as? [String: Any],
+           let left = rect["left"] as? Double,
+           let top = rect["top"] as? Double,
+           let right = rect["right"] as? Double,
+           let bottom = rect["bottom"] as? Double {
+            clientRect = CGRect(x: left, y: top,
+                                width: right - left, height: bottom - top)
+        } else {
+            clientRect = nil
+        }
     }
 }
 
