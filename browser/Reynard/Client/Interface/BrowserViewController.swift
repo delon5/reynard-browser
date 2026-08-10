@@ -349,6 +349,9 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         // HTTPS-only mode
         HTTPSOnlyModePolicyController.applyHTTPSOnlyMode()
         
+        // HLS/FairPlay through AVFoundation
+        AVPlayerPolicyController.applyAVPlayerHLS()
+        
         // Tracking Protection
         TrackingProtectionPolicyController.applyEnhancedTrackingProtection()
         TrackingProtectionPolicyController.applyGlobalPrivacyControl()

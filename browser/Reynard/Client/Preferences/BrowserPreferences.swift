@@ -64,6 +64,7 @@ final class BrowserPreferences {
             
             // Experimental
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
+            key("ExperimentalSettings", "isAVPlayerHLSEnabled"): false,
             key("ExperimentalSettings", "isJITDebugLogEnabled"): true,
             key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
@@ -1073,6 +1074,19 @@ final class BrowserPreferences {
     
     // MARK: - Experimental
     struct ExperimentalSettings {
+        /// Hands HLS (and therefore FairPlay, which is only ever
+        /// delivered that way) to AVFoundation instead of Gecko, which
+        /// has no HLS demuxer on this platform. Mirrored into the engine
+        /// as media.reynard.avplayer.enabled by AVPlayerPolicyController.
+        static var isAVPlayerHLSEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isAVPlayerHLSEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isAVPlayerHLSEnabled")
+            }
+        }
+        
         static var isVideoPictureInPictureEnabled: Bool {
             get {
                 return prefs.bool(forSetting: "ExperimentalSettings", key: "isVideoPictureInPictureEnabled")

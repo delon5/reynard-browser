@@ -54,6 +54,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private enum Row: CaseIterable {
         case videoPictureInPicture
+        case avPlayerHLS
         case hideUpdateNotification
         case hideUpdateAvailableBanner
         case carPlayScriptsEnabled
@@ -67,7 +68,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         var section: Section {
             switch self {
-            case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner:
+            case .videoPictureInPicture, .avPlayerHLS, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
             case .carPlayScriptsEnabled, .manageCarPlayScripts:
                 return .carPlayScripts
@@ -82,6 +83,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     }
     
     private let videoPictureInPictureSwitch = UISwitch()
+    private let avPlayerHLSSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
     private let carPlayScriptsSwitch = UISwitch()
@@ -146,6 +148,12 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             return switchCell(
                 title: "Video Picture-in-Picture",
                 accessoryView: videoPictureInPictureSwitch
+            )
+        case .avPlayerHLS:
+            return switchCell(
+                title: NSLocalizedString("HLS Playback (AVPlayer)", comment: ""),
+                subtitle: NSLocalizedString("Plays HLS streams, including FairPlay, through AVFoundation", comment: ""),
+                accessoryView: avPlayerHLSSwitch
             )
         case .hideUpdateNotification:
             // Same underlying preference as the "New updates" toggle
@@ -252,6 +260,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private func configureSwitch() {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
+        avPlayerHLSSwitch.addTarget(self, action: #selector(avPlayerHLSSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
         carPlayScriptsSwitch.addTarget(self, action: #selector(carPlayScriptsSwitchDidChange(_:)), for: .valueChanged)
@@ -264,6 +273,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private func refreshDisplayedState() {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
+        avPlayerHLSSwitch.isOn = Prefs.ExperimentalSettings.isAVPlayerHLSEnabled
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
         carPlayScriptsSwitch.isOn = Prefs.ExperimentalSettings.isCarPlayScriptsEnabled
@@ -315,6 +325,15 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     @objc private func videoPictureInPictureSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled = sender.isOn
+        showRestartAlert()
+    }
+    
+    // Pushed to the engine immediately as well as at startup, so a
+    // restart is only needed for pages already loaded under the old
+    // setting - DecoderTraits asks IsSupportedType per media element.
+    @objc private func avPlayerHLSSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isAVPlayerHLSEnabled = sender.isOn
+        AVPlayerPolicyController.applyAVPlayerHLS()
         showRestartAlert()
     }
     
@@ -413,10 +432,19 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         present(alert, animated: true)
     }
     
-    private func switchCell(title: String, accessoryView: UISwitch) -> UITableViewCell {
-        let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+    private func switchCell(
+        title: String,
+        subtitle: String? = nil,
+        accessoryView: UISwitch
+    ) -> UITableViewCell {
+        let cell = UITableViewCell(style: subtitle == nil ? .default : .subtitle, reuseIdentifier: nil)
         cell.selectionStyle = .none
         cell.textLabel?.text = title
+        if let subtitle {
+            cell.detailTextLabel?.text = subtitle
+            cell.detailTextLabel?.textColor = .secondaryLabel
+            cell.detailTextLabel?.numberOfLines = 0
+        }
         cell.accessoryView = accessoryView
         return cell
     }

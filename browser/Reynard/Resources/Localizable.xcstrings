@@ -5623,6 +5623,16 @@
         }
       }
     },
+    "HLS Playback (AVPlayer)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HLS Playback (AVPlayer)"
+          }
+        }
+      }
+    },
     "History" : {
       "localizations" : {
         "en" : {
@@ -8058,6 +8068,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Медиатека\n"
+          }
+        }
+      }
+    },
+    "Plays HLS streams, including FairPlay, through AVFoundation" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plays HLS streams, including FairPlay, through AVFoundation"
           }
         }
       }
