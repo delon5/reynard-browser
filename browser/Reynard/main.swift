@@ -47,7 +47,16 @@ private func configureUnsandboxedAppDataDirectories(_ directories: ReynardDirect
 /// calling dump() in the first place - the crash report carries no
 /// symbolicated JS frames.
 ///
-/// Truncated per launch so it stays bounded.
+/// APPENDED across launches, not truncated. Truncating meant the
+/// force-quit that clears a wedged tab also destroyed the only record of
+/// what wedged it - the failure and the evidence were erased by the same
+/// action. Bounded instead by rotating at open: past the cap the file
+/// becomes reynard_stdout.prev.txt and a fresh one starts, so at most one
+/// previous launch's worth is carried plus the current session.
+///
+/// Rotation only happens here, at open. Gecko writes to this descriptor
+/// with write(2) directly, so there is no interception point to count
+/// bytes against mid-session - which is also why the cap is generous.
 ///
 /// The Experimental "Standard Output Log" toggle chooses the DESTINATION,
 /// never whether to redirect: with it off the streams go to /dev/null.
@@ -84,8 +93,20 @@ private func redirectStandardStreamsToFile() {
         return
     }
 
-    let path = documents.appendingPathComponent("reynard_stdout.txt", isDirectory: false).path
-    let descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+    let logURL = documents.appendingPathComponent("reynard_stdout.txt", isDirectory: false)
+    let path = logURL.path
+
+    let maximumBytes: UInt64 = 8 * 1024 * 1024
+    if let size = try? FileManager.default.attributesOfItem(atPath: path)[.size] as? UInt64,
+       size > maximumBytes {
+        let previousPath = documents
+            .appendingPathComponent("reynard_stdout.prev.txt", isDirectory: false).path
+        // rename replaces any existing .prev, so exactly two generations
+        // survive.
+        _ = rename(path, previousPath)
+    }
+
+    let descriptor = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
     guard descriptor >= 0 else {
         return
     }
@@ -96,6 +117,12 @@ private func redirectStandardStreamsToFile() {
     if descriptor != STDOUT_FILENO, descriptor != STDERR_FILENO {
         close(descriptor)
     }
+
+    // Appending means a capture can span several launches, so each needs
+    // to say where it began - otherwise the pid is the only clue that the
+    // lines above came from a different process.
+    let banner = "\n===== SESSION START: pid \(getpid()) \(Date()) =====\n"
+    FileHandle.standardError.write(Data(banner.utf8))
 }
 
 // First, before anything can write to stdout.

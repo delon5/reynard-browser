@@ -73,6 +73,18 @@ final class TabManagerImplementation: NSObject, TabManager {
         let armedAt: CFAbsoluteTime
     }
     private var loadWatchdogs: [UUID: LoadWatchdog] = [:]
+    /// Tabs that have begun a load and not yet composited a frame, with
+    /// when and for what. The LoadWatchdog only proves the ENGINE
+    /// answered - a tab can report pageStart within 70ms and then never
+    /// paint, which is indistinguishable in the logs from a load that
+    /// failed outright. Device capture 2026-08-10 19:13:32: twitch.tv
+    /// committed on a fresh tab, produced pageStart, and its content
+    /// process then emitted nothing at all for the 22 seconds until the
+    /// tab was abandoned - two log lines for the tab's entire life.
+    private var paintWaits: [UUID: (startedAt: CFAbsoluteTime, url: String, workItem: DispatchWorkItem)] = [:]
+    /// Long enough that a slow page is not reported as a failure; short
+    /// enough to land before a user gives up and force-quits.
+    private static let paintWatchdogSeconds: TimeInterval = 8.0
     private var selectionCounter = 0
     
     private lazy var lenientURLExpression: NSRegularExpression = {
@@ -1105,9 +1117,36 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// press is itself a load, now backed by a working ladder.
     private static let loadWatchdogSeconds: TimeInterval = 3.0
 
+    /// Starts the composite clock for a tab. Reported either as a
+    /// latency when the frame arrives, or as an explicit absence after
+    /// paintWatchdogSeconds - the case that previously left no trace.
+    private func armPaintWatch(for tabID: UUID, url: String) {
+        paintWaits[tabID]?.workItem.cancel()
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, let wait = self.paintWaits[tabID] else {
+                return
+            }
+            self.paintWaits.removeValue(forKey: tabID)
+            // A tab closed inside the window never had to paint, and
+            // reporting it would be a false lead in exactly the logs
+            // this exists to make readable.
+            guard self.tabLocation(for: tabID) != nil else {
+                return
+            }
+            NSLog("[PaintWatch] tab %@ NO FIRST COMPOSITE %.1fs after load committed (%@) - engine accepted the navigation but never painted",
+                  tabID.uuidString,
+                  CFAbsoluteTimeGetCurrent() - wait.startedAt,
+                  wait.url)
+        }
+        paintWaits[tabID] = (startedAt: startedAt, url: url, workItem: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintWatchdogSeconds, execute: workItem)
+    }
+
     private func armLoadWatchdog(for tab: Tab, pendingInput: String, retryURL: String, attempt: Int = 0) {
         let tabID = tab.id
         loadWatchdogs[tabID]?.workItem.cancel()
+        armPaintWatch(for: tabID, url: retryURL)
 
         let armedAt = CFAbsoluteTimeGetCurrent()
         let workItem = DispatchWorkItem { [weak self] in
@@ -1453,6 +1492,13 @@ extension TabManagerImplementation: ContentDelegate {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
+        if let wait = paintWaits.removeValue(forKey: tab.id) {
+            wait.workItem.cancel()
+            NSLog("[PaintWatch] tab %@ first composite after %.2fs (%@)",
+                  tab.id.uuidString,
+                  CFAbsoluteTimeGetCurrent() - wait.startedAt,
+                  wait.url)
+        }
         tab.state.hasFirstComposite = true
         delegate?.tabManager(self, didFirstCompositeFor: tab.id)
     }
