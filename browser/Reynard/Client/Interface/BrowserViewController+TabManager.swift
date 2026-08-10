@@ -55,7 +55,14 @@ extension BrowserViewController: TabManagerDelegate {
         // outgoing one's inset whenever the computed values happen to
         // match.
         invalidateDynamicToolbarReport()
-        
+
+        // Condensed chrome is a property of how far the user scrolled the
+        // page they were on, so it must not follow them to a different
+        // one: without this the incoming tab shows the pill at the top of
+        // its own document, and only a downward drag there restores the
+        // toolbar. Not animated - the tab switch is its own transition.
+        scrollChromeCoordinator.resetVisible()
+
         guard let selectedTab = tabManager.activeTabs[safe: index] else {
             return
         }
@@ -162,6 +169,10 @@ extension BrowserViewController: TabManagerDelegate {
             
         case .location:
             if index == tabManager.selectedTabIndex {
+                // A new document starts at the top, so the chrome should
+                // be expanded to match rather than staying condensed from
+                // the previous page's scroll position.
+                scrollChromeCoordinator.resetVisible(animated: true)
                 contentView.noteHistoryLocationChange()
                 refreshAddressBar()
                 syncSelectedPageZoomControls()
