@@ -98,14 +98,19 @@ final class ToolbarController {
         // The condensed pill is this fork's, not upstream's, and while it
         // is showing the full toolbar is not on screen. Reserving the
         // toolbar's height there ends page content where the EXPANDED
-        // toolbar would be, which both leaves a gap above the pill and
-        // stops content passing behind it - this app's established
-        // behaviour is that the pill floats over a full-viewport page.
+        // toolbar would be, leaving a gap; reserving nothing sends it to
+        // the true window bottom, underneath the pill. Content has to
+        // clear whatever chrome is ACTUALLY on screen, so the pill's own
+        // occupied height is the number - it already spans the home
+        // indicator band, since the pill is constrained to the view's
+        // real bottomAnchor rather than the safe-area guide.
         //
         // Only what Gecko is told changes; the offset limits above still
         // describe the real toolbar, so the slide animation is untouched.
         contentView.setToolbarLimits(
-            maxHeight: browserChrome.isScrollCondensed ? 0 : maxToolbarOffset,
+            maxHeight: browserChrome.isScrollCondensed
+                ? BrowserChrome.condensedPillOccupiedHeight
+                : maxToolbarOffset,
             topOffset: maxTopToolbarOffset
         )
     }
