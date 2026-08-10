@@ -121,7 +121,22 @@ static void jitHangBacktraceHandler(int signalNumber) {
             : nil;
         if (logURL) {
             const char *logPath = logURL.path.UTF8String;
-            enum IdeviceLoggerError loggerResult = idevice_init_logger(IdeviceLogInfo, IdeviceLogTrace, (char *)logPath);
+            // File level is Info, NOT Trace. At Trace the idevice layer
+            // prints the decoded pairing record, and the pairing
+            // record's private_key bytes land verbatim in a file under
+            // Documents that exists to be handed to someone for support.
+            // Anyone holding that log can impersonate the pairing.
+            //
+            // Confirmed in a shared capture: `private_key": Data(` in
+            // idevice_native_log.txt. The second argument is the FILE
+            // level and it is ours to choose, so this is fixable here
+            // even though the printing itself is submodule behaviour.
+            //
+            // Info keeps everything the log is actually read for - the
+            // tunnel RST storms, RemoteServer exits, connection
+            // lifecycle. What Trace added beyond that was per-packet
+            // keep-alive noise and the pairing dump.
+            enum IdeviceLoggerError loggerResult = idevice_init_logger(IdeviceLogInfo, IdeviceLogInfo, (char *)logPath);
             logger([NSString stringWithFormat:@"idevice_init_logger result: %d, writing to: %@", loggerResult, logURL.path]);
         }
         
