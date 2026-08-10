@@ -156,6 +156,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             // Restored alongside the re-attach, not before it: the
             // sessions it creates are what make trapping safe again.
             // See fix_stop_trapping_on_background.py.
+            // Before trapping is restored, so the census describes the
+            // state the foreground handshake actually saw.
+            JITController.shared.dumpChildCensus(labelled: "childCensus at foreground")
+
             JITEnabler.setDebuggerListening(true)
             
             JITController.shared.reattachOrphanedProcesses()

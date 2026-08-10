@@ -36,6 +36,15 @@ final class AttachLedger {
     /// fix_dedupe_attach_paths.py.
     private var rejectedPIDs: Set<Int32> = []
 
+    /// Type of every child ever announced, attached or not.
+    ///
+    /// socket, gpu and rdd children are rejected by type and never
+    /// attached, so they appear in no loopState dump and no hangDump -
+    /// they are invisible to every JIT-side instrument. They are equally
+    /// valid candidates for the extension that fails to answer the
+    /// foreground handshake, and nothing would ever have shown it.
+    private var childTypes: [Int32: String] = [:]
+
     /// PIDs that arrived while the app was not active, held for the
     /// drain on return. No attach is started while inactive: vAttach
     /// stops its target, and a stopped extension cannot answer the
@@ -167,6 +176,20 @@ final class AttachLedger {
     func markRejected(_ pid: Int32) {
         dispatchPrecondition(condition: .onQueue(queue))
         rejectedPIDs.insert(pid)
+    }
+
+    func noteChild(_ pid: Int32, type: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        childTypes[pid] = type
+    }
+
+    /// Every announced child, with its type and whether the JIT layer
+    /// ever attached it. Ordered by pid so successive dumps diff.
+    func childCensus() -> [(pid: Int32, type: String, attached: Bool)] {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return childTypes.keys.sorted().map {
+            (pid: $0, type: childTypes[$0] ?? "?", attached: attachedPIDs.contains($0))
+        }
     }
 
     func isRejected(_ pid: Int32) -> Bool {

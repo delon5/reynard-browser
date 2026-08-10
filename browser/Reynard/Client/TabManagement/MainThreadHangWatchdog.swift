@@ -91,17 +91,34 @@ final class MainThreadHangWatchdog {
 
         let center = NotificationCenter.default
         lifecycleObservationTokens = [
+            // queue: nil, NOT .main - and this is the difference between
+            // the watchdog working and silently never firing.
+            //
+            // Passing a queue ENQUEUES an operation. The hang this
+            // watchdog exists to catch parks the main thread in a
+            // dispatch_sync inside ExtensionFoundation's foreground
+            // handshake, which does not pump the runloop - so an
+            // enqueued resume block would sit there forever and the
+            // watchdog would never start. It did fire in the 07:14 crash
+            // only because Foundation short-circuited to inline
+            // execution, which is undocumented and not something the
+            // only in-app hang detector should depend on.
+            //
+            // nil posts synchronously on the notifying thread, which for
+            // UIApplication lifecycle notifications is the main thread.
+            // Both handlers are lock-based with no queue assumptions, so
+            // running inline is safe.
             center.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,
                 object: nil,
-                queue: .main
+                queue: nil
             ) { [weak self] _ in
                 self?.pauseForBackground()
             },
             center.addObserver(
                 forName: UIApplication.willEnterForegroundNotification,
                 object: nil,
-                queue: .main
+                queue: nil
             ) { [weak self] _ in
                 self?.resumeFromBackgroundIfNeeded()
             },

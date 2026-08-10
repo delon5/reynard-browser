@@ -228,6 +228,32 @@ final class JITController {
         }
     }
 
+    /// Logs every child the app knows about, with its type, whether the
+    /// JIT layer attached it, and whether it is still alive.
+    ///
+    /// Called at the foreground handshake because that is where the app
+    /// dies: ExtensionFoundation sends one synchronous XPC per hosted
+    /// extension INSTANCE, and if any of them fails to answer the main
+    /// thread parks forever. The crash report never names the peer, and
+    /// three child types were invisible to every existing instrument, so
+    /// this is the list to diff against a hang.
+    func dumpChildCensus(labelled label: String) {
+        attachQueue.async {
+            let census = self.ledger.childCensus()
+            let live = census.filter { Self.pidIsAlive($0.pid) }
+            logger("\(label): \(census.count) child(ren) announced, \(live.count) alive")
+            for entry in live {
+                let session = JITEnabler.hasActiveDebugSession(forPID: entry.pid)
+                logger(String(
+                    format: "  %@: pid %d type=%@ attached=%@ session=%@",
+                    label, entry.pid, entry.type,
+                    entry.attached ? "yes" : "NO",
+                    session ? "yes" : "NO"
+                ))
+            }
+        }
+    }
+
     /// No further attaches are started until the app is active again.
     /// See fix_defer_attaches_while_inactive.py.
     func applicationWillResignActive() {
@@ -397,6 +423,11 @@ final class JITController {
     }
     
     func childProcessDidStart(pid: Int32, processType: String) {
+        // Recorded for EVERY child, before any decision about
+        // attaching - socket/gpu/rdd are rejected below and would
+        // otherwise never appear in any diagnostic.
+        attachQueue.async { self.ledger.noteChild(pid, type: processType) }
+
         // Read here because applicationState is main-thread only, and the
         // decision below runs on the attach queue. See
         // fix_check_real_app_state_before_attach.py.
