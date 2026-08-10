@@ -150,6 +150,9 @@ public final class AVPlayerHost: NSObject {
         /// Diagnostics for the pull loop - see pullFrames.
         var pullTicks: UInt64 = 0
         var reportedFirstPull = false
+        /// Consecutive ticks that delivered nothing while the player was
+        /// not playing - drives the auto-repause in pullFrames.
+        var idlePullTicks: Int = 0
 
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
@@ -294,25 +297,50 @@ public final class AVPlayerHost: NSObject {
                   + " outputs=\(entry.item.outputs.count)")
         }
 
+        // The link was installed at createPlayer and only invalidated at
+        // destroy, so it ran at full display refresh - 120Hz here, with
+        // CADisableMinimumFrameDurationOnPhone set in Info.plist - for
+        // the entire life of every player, paused and backgrounded
+        // included, computing an item time and querying the output every
+        // tick. A player that is not playing and has delivered nothing
+        // for ~2s at 120Hz cannot need that. play, resume, seek and the
+        // readiness replay all restart delivery.
+        func noteIdleTick() {
+            guard entry.player.timeControlStatus != .playing else {
+                entry.idlePullTicks = 0
+                return
+            }
+            entry.idlePullTicks += 1
+            if entry.idlePullTicks >= 240 {
+                entry.idlePullTicks = 0
+                link.isPaused = true
+                avLog("framePull[\(id)] idle while not playing - pausing pull link")
+            }
+        }
+
         let output = entry.videoOutput
         let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         guard itemTime.isValid, itemTime.isNumeric else {
             // An item with no timebase is what an AVPlayer that was never
             // told to play looks like.
             report("itemTime invalid (no timebase)")
+            noteIdleTick()
             return
         }
         guard output.hasNewPixelBuffer(forItemTime: itemTime) else {
             report("no new pixel buffer at t=\(CMTimeGetSeconds(itemTime))")
+            noteIdleTick()
             return
         }
         guard let buffer = output.copyPixelBuffer(forItemTime: itemTime,
                                                   itemTimeForDisplay: nil)
         else {
             report("copyPixelBuffer returned nil")
+            noteIdleTick()
             return
         }
 
+        entry.idlePullTicks = 0
         if !entry.reportedFirstPull {
             entry.reportedFirstPull = true
             avLog("framePull[\(id)] FIRST BUFFER after \(tick) ticks - handing to Gecko")
@@ -404,6 +432,13 @@ public final class AVPlayerHost: NSObject {
                 return
             }
             avLog("play re-applied for \(playerId) - item reached readyToPlay while paused")
+            // Delivery too, not just playback. The item can take long
+            // enough to become ready that the idle backstop below has
+            // already parked the pull link, and starting the player
+            // against a paused link would resume a video that still
+            // never showed a second frame - the very symptom this
+            // replay exists to fix.
+            self.resumeFrameDelivery(for: entry)
             entry.player.play()
         }
 
@@ -444,6 +479,7 @@ public final class AVPlayerHost: NSObject {
         }) else {
             return
         }
+        resumeFrameDelivery(for: entry)
         entry.player.play()
     }
 
@@ -455,6 +491,8 @@ public final class AVPlayerHost: NSObject {
             return
         }
         entry.player.pause()
+        // A paused player produces no frames.
+        entry.displayLink?.isPaused = true
     }
 
     /// Backgrounding. Playback stops but the item is kept, so resuming
@@ -462,7 +500,11 @@ public final class AVPlayerHost: NSObject {
     @objc public func suspend(_ id: UInt) {
         // wantsPlayback deliberately left alone: this is not the user
         // pausing, and resume has to be able to tell the two apart.
-        withState({ players[id] })?.player.pause()
+        guard let entry = withState({ players[id] }) else {
+            return
+        }
+        entry.player.pause()
+        entry.displayLink?.isPaused = true
     }
 
     @objc public func resume(_ id: UInt) {
@@ -473,7 +515,16 @@ public final class AVPlayerHost: NSObject {
               withState({ entry.wantsPlayback }) else {
             return
         }
+        resumeFrameDelivery(for: entry)
         entry.player.play()
+    }
+
+    /// Un-pauses the pull link and resets the idle counter. Every path
+    /// that can make frames flow again routes through here: play,
+    /// resume, seek, and the readiness replay in observeMetadata.
+    private func resumeFrameDelivery(for entry: Player) {
+        entry.idlePullTicks = 0
+        entry.displayLink?.isPaused = false
     }
 
     @objc public func destroy(_ id: UInt) {
@@ -529,6 +580,11 @@ public final class AVPlayerHost: NSObject {
         guard let entry = withState({ players[id] }) else {
             return
         }
+        // A seek while PAUSED still has to repaint at the new position,
+        // and the link may be parked. The idle backstop parks it again
+        // once the frame has been shown and nothing further arrives, so
+        // this does not leave it running.
+        resumeFrameDelivery(for: entry)
         entry.player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
     }
 }
