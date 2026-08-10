@@ -12,6 +12,7 @@ private let pipLog = OSLog(subsystem: "com.minh-ton.Reynard", category: "PiPDebu
 import AVKit
 import Foundation
 import GeckoView
+import UIKit
 
 protocol PictureInPictureCoordinating: AnyObject {
     func selectedSessionDidChange()
@@ -79,6 +80,7 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     private var state = State.idle
     private weak var observedSession: GeckoSession?
     private var isAwaitingAutomaticStart = false
+    private var backgroundObservationToken: NSObjectProtocol?
     
     init?(
         delegate: PictureInPictureCoordinatorDelegate,
@@ -95,6 +97,22 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
         mediaSession.observer = self
         sessionManager.applicationStateObserver = self
         sessionManager.pictureInPictureHandler = self
+        // Auto-start that never happens must not keep a session fully
+        // active for the whole background stay - see
+        // disarmAutomaticStartIfItNeverHappened().
+        backgroundObservationToken = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.disarmAutomaticStartIfItNeverHappened()
+        }
+    }
+
+    deinit {
+        if let backgroundObservationToken {
+            NotificationCenter.default.removeObserver(backgroundObservationToken)
+        }
     }
     
     func selectedSessionDidChange() {
@@ -274,6 +292,37 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
         ) == noErr
     }
     
+    /// willResignActive arms automatic PiP: it marks the prepared
+    /// session as THE Picture in Picture session, which keeps it fully
+    /// active - compositing, unthrottled - while the app is
+    /// backgrounded, on the assumption iOS is about to start PiP for
+    /// it. When iOS declines (auto-PiP has its own eligibility rules
+    /// and frequently does), willStart never fires and nothing cleared
+    /// the arming until the next foreground: the session spent the
+    /// entire background stay fully active, with the audio session
+    /// held alongside it. Give auto-start a grace period after the
+    /// background transition, then stand down via the same call the
+    /// foreground path already uses for this exact stale state. See
+    /// fix_disarm_pip_autostart_when_pip_never_starts.py.
+    ///
+    /// .prepared + the flag still set can only mean "never started":
+    /// willStart clears the flag and moves the state to .starting
+    /// before anything else happens.
+    private func disarmAutomaticStartIfItNeverHappened() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self,
+                  self.isAwaitingAutomaticStart,
+                  case let .prepared(presentation) = self.state,
+                  !self.sessionManager.isForeground,
+                  !presentation.controller.isPictureInPictureActive else {
+                return
+            }
+            logger("pipLife: auto-start never happened - standing down, releasing the session")
+            self.isAwaitingAutomaticStart = false
+            self.sessionManager.pictureInPicturePresentationDidEnd(presentation.session)
+        }
+    }
+
     private func stopPresentation() {
         isAwaitingAutomaticStart = false
         switch state {
