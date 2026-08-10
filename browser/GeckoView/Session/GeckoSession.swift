@@ -289,13 +289,19 @@ public class GeckoSession {
     // MARK: - Navigation
     
     public func load(_ url: String, flags: Int = GeckoSessionLoadFlags.none) {
-        dispatcher.dispatch(
+        let disposition = dispatcher.dispatch(
             type: "GeckoView:LoadUri",
             message: [
                 "uri": url,
                 "flags": flags,
                 "headerFilter": 1,
             ])
+        // NSLog rather than logger(): stdout captures carry NSLog, and
+        // this is the only record that a user's load left the app at
+        // all. One line per navigation. Deliberately no isOpen() guard
+        // - isOpen() staying true around a dead content process is the
+        // failure being made visible here, not a precondition.
+        NSLog("[GeckoSession] LoadUri %@ -> %@ (open=%d)", url, disposition.rawValue, isOpen() ? 1 : 0)
     }
     
     public func reload() {

@@ -61,6 +61,12 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     var queue: [QueuedMessage]? = []
     var listeners: [String: [GeckoEventListenerInternal]] = [:]
     var name: String?
+
+    /// Set when the engine called activate() before attach(). The old
+    /// code discarded every queued message in that order - including a
+    /// user's LoadUri - and permanently disabled queueing; attach() now
+    /// flushes the held queue the moment the endpoint arrives.
+    private var awaitingAttachFlush = false
     
     override init() {}
     
@@ -81,18 +87,43 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
         listeners[type, default: []] += [listener]
     }
     
+    /// How an outbound message left (or failed to leave) this
+    /// dispatcher. GeckoView:LoadUri is fire-and-forget, so this
+    /// disposition is the only record of whether a user's load ever
+    /// reached the engine.
+    enum DispatchDisposition: String {
+        case handledLocally
+        case queued
+        case delivered
+        case dropped
+    }
+
+    @discardableResult
     public func dispatch(
         type: String, message: [String: Any?]? = nil, callback: EventCallback? = nil
-    ) {
+    ) -> DispatchDisposition {
         if let registeredListeners = listeners[type] {
             for listener in registeredListeners {
                 listener.handleMessage(type: type, message: message, callback: callback)
             }
-        } else if queue != nil {
-            queue?.append(QueuedMessage(type: type, message: message, callback: callback))
-        } else {
-            gecko?.dispatch(toGecko: type, message: message, callback: callback)
+            return .handledLocally
         }
+        if queue != nil {
+            queue?.append(QueuedMessage(type: type, message: message, callback: callback))
+            return .queued
+        }
+        guard let gecko else {
+            // A detached endpoint used to swallow the message with no
+            // trace anywhere - a dropped LoadUri is exactly "pressed Go
+            // and nothing happened". Failing the callback also lets
+            // query() error immediately instead of burning its full
+            // timeout waiting for a reply that can never come.
+            NSLog("[EventDispatcher] DROPPED %@ - no Gecko endpoint attached (name=%@)", type, name ?? "session")
+            callback?.sendError("no gecko endpoint attached")
+            return .dropped
+        }
+        gecko.dispatch(toGecko: type, message: message, callback: callback)
+        return .delivered
     }
     
     /// Asks the content process a question and waits for its answer.
@@ -169,6 +200,11 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     
     public func attach(_ dispatcher: (any GeckoEventDispatcher)?) {
         gecko = dispatcher
+        if let dispatcher, awaitingAttachFlush {
+            awaitingAttachFlush = false
+            NSLog("[EventDispatcher] attach() arrived after activate() - flushing deferred queue (name=%@)", name ?? "session")
+            flush(to: dispatcher)
+        }
     }
     
     public func dispatch(toSwift type: String!, message: Any!, callback: EventCallback?) {
@@ -189,11 +225,27 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     }
     
     public func activate() {
-        if let queue = self.queue {
-            self.queue = nil
-            for event in queue {
-                gecko?.dispatch(toGecko: event.type, message: event.message, callback: event.callback)
-            }
+        guard let gecko else {
+            // The engine activated this endpoint before attaching its
+            // native dispatcher. Nilling the queue here used to discard
+            // every parked message - including a user's LoadUri - and
+            // permanently disabled queueing for the session. Hold the
+            // queue instead; attach() flushes it when the endpoint
+            // arrives.
+            awaitingAttachFlush = true
+            NSLog("[EventDispatcher] activate() before attach - holding %d queued message(s) (name=%@)", queue?.count ?? 0, name ?? "session")
+            return
+        }
+        flush(to: gecko)
+    }
+
+    private func flush(to endpoint: any GeckoEventDispatcher) {
+        guard let queue = self.queue else {
+            return
+        }
+        self.queue = nil
+        for event in queue {
+            endpoint.dispatch(toGecko: event.type, message: event.message, callback: event.callback)
         }
     }
     

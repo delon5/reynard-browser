@@ -63,7 +63,16 @@ final class TabManagerImplementation: NSObject, TabManager {
     // Main-thread confined, like the tab arrays: armed from browse and
     // cleared from the engine delegate callbacks, all of which arrive
     // on the main thread.
-    private var loadWatchdogs: [UUID: DispatchWorkItem] = [:]
+    private struct LoadWatchdog {
+        let workItem: DispatchWorkItem
+        /// 0 = armed by browse(); 1 = armed by the first retry. The
+        /// second rung rebuilds the session instead of re-dispatching.
+        let attempt: Int
+        let pendingInput: String
+        let retryURL: String
+        let armedAt: CFAbsoluteTime
+    }
+    private var loadWatchdogs: [UUID: LoadWatchdog] = [:]
     private var selectionCounter = 0
     
     private lazy var lenientURLExpression: NSRegularExpression = {
@@ -401,9 +410,6 @@ final class TabManagerImplementation: NSObject, TabManager {
     private func loadURL(_ url: String, in tab: Tab) {
         tab.state.showsStartupHomepage = false
         tab.state.loadingState = .loading(progress: 0)
-        if let location = tabLocation(for: tab.id) {
-            notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
-        }
         // A slept tab has had its session closed by
         // evictSessionIfNeeded, and load() on a closed session goes
         // nowhere - which is why a restored tab stayed blank until it was
@@ -411,14 +417,28 @@ final class TabManagerImplementation: NSObject, TabManager {
         //
         // Replaced rather than reopened: SessionManager owns creation,
         // and a closed GeckoSession is not documented as reusable.
+        //
+        // The swap happens BEFORE the .loading notify below: the
+        // contentView rebind check runs on that notify and used to see
+        // the old session, leaving the replacement off screen until
+        // some later update. The replacement is activated when it
+        // belongs to the on-screen tab - createSession(.immediate)
+        // deliberately deactivates - and seeded with the real URL so
+        // UA/viewport settings are right from the first load.
         if !tab.session.isOpen() {
-            logger(String(format: "tabRestore: session for tab %@ was closed - creating a new one before loading", tab.id.uuidString))
+            NSLog("[TabRestore] session for tab %@ was closed - creating a new one before loading", tab.id.uuidString)
             tab.session = createSession(
                 tabID: tab.id,
-                url: nil,
+                url: url,
                 windowId: nil,
                 isPrivate: tab.isPrivate
             )
+            if tab === selectedTab {
+                sessionManager.activate(tab.session)
+            }
+        }
+        if let location = tabLocation(for: tab.id) {
+            notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
         }
         
         sessionManager.updateSettings(of: tab.session, for: url, tabID: tab.id)
@@ -1055,7 +1075,7 @@ final class TabManagerImplementation: NSObject, TabManager {
 
     // MARK: - Load Watchdog
 
-    /// One automatic retry for a user-initiated load the engine never
+    /// A self-healing ladder for a user-initiated load the engine never
     /// acknowledges.
     ///
     /// A tab whose content process died silently swallows the next
@@ -1065,23 +1085,32 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// so recoverTabAfterSessionLoss never ran; a load into that tab a
     /// minute later produced nothing for six seconds, and an identical
     /// second load then forced the engine to rebuild, spawn a fresh
-    /// process and commit within 1.5s. This automates that second press.
+    /// process and commit within 1.5s.
     ///
-    /// A live session always answers well within the window - a
-    /// pageStop for the outgoing page arrives in ~100ms, and even a
-    /// freshly created session commits its initial about:blank inside a
-    /// second - so total silence for the full window is taken as "the
-    /// load went nowhere" and it is reissued once. The retry calls
-    /// loadURL, not browse, so it cannot re-arm itself: one retry per
-    /// user action.
+    /// Acknowledgment is deliberately narrow: only a pageStart or
+    /// locationChange for something other than about:blank counts. The
+    /// previous rule - "any engine callback for the tab" - was wrong in
+    /// exactly the reported way: the OUTGOING page's pageStop arrives
+    /// ~100ms after the submit, and a rebuilt session's initial
+    /// about:blank commits inside a second, so on any non-idle tab the
+    /// watchdog was disarmed by evidence that had nothing to do with
+    /// the requested load - which is how "press Go twice" survived the
+    /// first version of this watchdog.
+    ///
+    /// The ladder: silence for 3s reissues the load on the same session
+    /// (attempt 0 -> 1); silence for another 3s closes the session,
+    /// builds a fresh one and loads into that (attempt 1, final). One
+    /// re-dispatch plus one rebuild per user action, never more. A new
+    /// browse() for the same tab replaces the ladder - the user's own
+    /// press is itself a load, now backed by a working ladder.
     private static let loadWatchdogSeconds: TimeInterval = 3.0
 
-    private func armLoadWatchdog(for tab: Tab, pendingInput: String, retryURL: String) {
+    private func armLoadWatchdog(for tab: Tab, pendingInput: String, retryURL: String, attempt: Int = 0) {
         let tabID = tab.id
-        loadWatchdogs[tabID]?.cancel()
+        loadWatchdogs[tabID]?.workItem.cancel()
 
         let armedAt = CFAbsoluteTimeGetCurrent()
-        let watchdog = DispatchWorkItem { [weak self] in
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self else {
                 return
             }
@@ -1100,20 +1129,50 @@ final class TabManagerImplementation: NSObject, TabManager {
                 return
             }
 
-            logger(String(format: "loadRetry: tab %@ got no engine response %.1fs after loading %@ - reissuing the load once", tabID.uuidString, CFAbsoluteTimeGetCurrent() - armedAt, retryURL))
+            if attempt == 0 {
+                NSLog("[LoadWatchdog] tab %@ silent %.1fs after LoadUri %@ - re-dispatching (retry 1 of 1)", tabID.uuidString, CFAbsoluteTimeGetCurrent() - armedAt, retryURL)
+                self.loadURL(retryURL, in: tab)
+                self.armLoadWatchdog(for: tab, pendingInput: pendingInput, retryURL: retryURL, attempt: 1)
+                return
+            }
+
+            // Re-dispatching down the same channel changed nothing, so
+            // the session itself is presumed unrecoverable - the same
+            // conclusion recoverTabAfterSessionLoss draws, but keyed on
+            // the resolved retryURL rather than displayedURL (which for
+            // a search-term browse is the raw typed input, not a
+            // loadable URL) and without the restoreState detour.
+            NSLog("[LoadWatchdog] tab %@ still silent after retry - rebuilding session and reloading (final)", tabID.uuidString)
+            let oldSession = tab.session
+            self.sessionManager.close(oldSession)
+            tab.session = self.createSession(tabID: tab.id, url: retryURL, windowId: nil, isPrivate: tab.isPrivate)
+            if tab === self.selectedTab {
+                // createSession(.immediate) deliberately deactivates;
+                // the on-screen tab needs its replacement live.
+                self.sessionManager.activate(tab.session)
+                self.delegate?.tabManager(self, didReplaceSelectedSession: oldSession, with: tab.session)
+            }
+            self.notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
             self.loadURL(retryURL, in: tab)
         }
 
-        loadWatchdogs[tabID] = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadWatchdogSeconds, execute: watchdog)
+        loadWatchdogs[tabID] = LoadWatchdog(
+            workItem: workItem,
+            attempt: attempt,
+            pendingInput: pendingInput,
+            retryURL: retryURL,
+            armedAt: armedAt
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadWatchdogSeconds, execute: workItem)
+        NSLog("[LoadWatchdog] tab %@ armed (attempt %d) for %@", tabID.uuidString, attempt, retryURL)
     }
 
     private func clearLoadWatchdog(for tab: Tab, signal: String) {
         guard let watchdog = loadWatchdogs.removeValue(forKey: tab.id) else {
             return
         }
-        watchdog.cancel()
-        logger(String(format: "loadRetry: tab %@ engine responded (%@) - watchdog cleared", tab.id.uuidString, signal))
+        watchdog.workItem.cancel()
+        NSLog("[LoadWatchdog] tab %@ engine responded (%@) - watchdog cleared", tab.id.uuidString, signal)
     }
 
     func goBack() {
@@ -1356,6 +1415,11 @@ extension TabManagerImplementation: ContentDelegate {
         
         let tab = tabs(for: location.mode)[location.index]
         let isPrivate = location.mode == .private
+
+        // Recovery replaces the session and reloads on its own; a
+        // watchdog left armed here would fire against the fresh session
+        // and double-load.
+        clearLoadWatchdog(for: tab, signal: "sessionRecovery")
         
         // Nothing to reload to - keeping it would leave a permanently
         // blank entry, so removal is still right here.
@@ -1458,12 +1522,17 @@ extension TabManagerImplementation: NavigationDelegate {
         }
         let tab = tabs(for: location.mode)[location.index]
 
-        // Cleared even for a suppressed about:blank below - any
-        // location change at all proves the session is alive and the
-        // pending load will be handled, which is all the watchdog asks.
-        clearLoadWatchdog(for: tab, signal: "locationChange")
-
         let normalizedURL = url?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // Only a location change for something other than about:blank
+        // clears the watchdog. "The session is alive" is NOT proof the
+        // pending load will be handled - a rebuilt window's initial
+        // about:blank commits within a second while the requested load
+        // can still have been swallowed, which is precisely the failure
+        // the watchdog exists to catch.
+        if let normalizedURL, !normalizedURL.isEmpty, !normalizedURL.hasPrefix("about:blank") {
+            clearLoadWatchdog(for: tab, signal: "locationChange")
+        }
         
         let shouldPreserveDisplayedURL = hasDisplayURL(for: tab)
         
@@ -1755,6 +1824,21 @@ extension TabManagerImplementation: NavigationDelegate {
         ))
         
         let decision: AllowOrDeny = disposition == .opened ? .deny : .allow
+
+        if decision == .deny {
+            // The external-app router took this navigation: Gecko will
+            // never load it, which under the stricter acknowledgment
+            // rule would read as silence and re-trigger the router 3s
+            // later - a second bounce out of the browser. A DENY is an
+            // answer, so it clears the watchdog.
+            await MainActor.run {
+                guard let location = self.tabLocation(for: session) else {
+                    return
+                }
+                let tab = self.tabs(for: location.mode)[location.index]
+                self.clearLoadWatchdog(for: tab, signal: "loadDenied")
+            }
+        }
         
         // A .deny means Gecko never loads the page and nothing else
         // records that it happened - from outside it looks like the
@@ -1935,9 +2019,16 @@ extension TabManagerImplementation: ProgressDelegate {
         }
         let tab = tabs(for: location.mode)[location.index]
 
-        clearLoadWatchdog(for: tab, signal: "pageStart")
+        let normalizedPageStartURL = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        if url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("about:blank"),
+        // A pageStart for about:blank is a rebuilt window settling, not
+        // the requested load being taken - it must not disarm the
+        // watchdog.
+        if !normalizedPageStartURL.hasPrefix("about:blank") {
+            clearLoadWatchdog(for: tab, signal: "pageStart")
+        }
+
+        if normalizedPageStartURL.hasPrefix("about:blank"),
            hasDisplayURL(for: tab) {
             tab.state.isSuppressingInitialBlankPageLoad = true
             return
@@ -1963,7 +2054,11 @@ extension TabManagerImplementation: ProgressDelegate {
         }
         let tab = tabs(for: location.mode)[location.index]
 
-        clearLoadWatchdog(for: tab, signal: "pageStop")
+        // No watchdog clear here, deliberately: a real load always
+        // emits pageStart first, and the pageStop seen right after a
+        // submit is dominated by the OUTGOING page finishing its
+        // teardown - the exact signal that used to disarm the watchdog
+        // while the new load had been swallowed.
 
         if tab.state.isSuppressingInitialBlankPageLoad {
             tab.state.isSuppressingInitialBlankPageLoad = false
