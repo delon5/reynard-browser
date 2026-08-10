@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/nsWindow.h b/widget/uikit/nsWindow.h
-index dd2d9e2be070..592c5faf2479 100644
+index dd2d9e2be070..73adc1e19cfb 100644
 --- a/widget/uikit/nsWindow.h
 +++ b/widget/uikit/nsWindow.h
 @@ -21,11 +21,14 @@ typedef struct objc_object ChildView;
@@ -30,7 +30,7 @@ index dd2d9e2be070..592c5faf2479 100644
    void Resize(const DesktopSize&, bool aRepaint) override;
    void Resize(const DesktopRect&, bool aRepaint) override;
    void DoResize(double aX, double aY, double aWidth, double aHeight,
-@@ -77,8 +83,24 @@ class nsWindow final : public nsIWidget {
+@@ -77,8 +83,40 @@ class nsWindow final : public nsIWidget {
      // XXX: terrible
      return 326.0f;
    }
@@ -45,6 +45,22 @@ index dd2d9e2be070..592c5faf2479 100644
 +  // widget/android/nsWindow.cpp's method of the same name.
 +  void UpdateDynamicToolbarOffset(mozilla::ScreenIntCoord aOffset);
 +
++  // How much browser chrome currently overlaps the bottom of the window.
++  //
++  // Distinct from the dynamic-toolbar max-height/offset pair above, which
++  // goes to LAYOUT (nsIWidgetListener -> PresShell) and is inert on this
++  // port because the max height stays 0. This goes to the COMPOSITOR
++  // (nsIWidget::DynamicToolbarOffsetChanged -> PCompositorBridge ->
++  // CompositorBridgeParent::SetFixedLayerMargins) and lifts the page's
++  // position:fixed / sticky-bottom root-content layers by the given
++  // amount, per composited frame, without restyle or reflow. Pages with
++  // nothing pinned to the bottom are unaffected.
++  void UpdateFixedBottomMargin(mozilla::ScreenIntCoord aMargin);
++
++  // Re-sends the cached fixed bottom margin, which lives on the
++  // compositor and is therefore lost with the session.
++  void CreateCompositor(int aWidth, int aHeight) override;
++
 +  // env(safe-area-inset-*). nsIWidget's default returns an empty margin,
 +  // and only Android and PuppetWidget override it - so on this port
 +  // Gecko has always believed the insets were zero and every page saw
@@ -55,7 +71,7 @@ index dd2d9e2be070..592c5faf2479 100644
  
    nsresult SetTitle(const nsAString& aTitle) override { return NS_OK; }
  
-@@ -93,6 +115,9 @@ class nsWindow final : public nsIWidget {
+@@ -93,6 +131,9 @@ class nsWindow final : public nsIWidget {
    void SetInputContext(const InputContext& aContext,
                         const InputContextAction& aAction) override;
    InputContext GetInputContext() override;
@@ -65,7 +81,7 @@ index dd2d9e2be070..592c5faf2479 100644
    TextEventDispatcherListener* GetNativeTextEventDispatcherListener() override;
  
    mozilla::widget::TextInputHandler* GetTextInputHandler() const {
-@@ -109,6 +134,11 @@ class nsWindow final : public nsIWidget {
+@@ -109,6 +150,11 @@ class nsWindow final : public nsIWidget {
    */
  
    mozilla::layers::NativeLayerRoot* GetNativeLayerRoot() override;
@@ -77,7 +93,7 @@ index dd2d9e2be070..592c5faf2479 100644
  
    void HandleMainThreadCATransaction();
  
-@@ -129,6 +159,14 @@ class nsWindow final : public nsIWidget {
+@@ -129,6 +175,14 @@ class nsWindow final : public nsIWidget {
    // and we can start modifying CALayers from the compositor thread again.
    void UnsuspendAsyncCATransactions();
  
@@ -92,7 +108,7 @@ index dd2d9e2be070..592c5faf2479 100644
    mozilla::widget::EventDispatcher* GetEventDispatcher() const;
  
    static already_AddRefed<nsWindow> From(nsPIDOMWindowOuter* aDOMWindow);
-@@ -139,6 +177,12 @@ class nsWindow final : public nsIWidget {
+@@ -139,6 +193,12 @@ class nsWindow final : public nsIWidget {
    }
    mozilla::widget::IOSView* GetIOSView() const { return mIOSView; }
  
@@ -105,7 +121,7 @@ index dd2d9e2be070..592c5faf2479 100644
   protected:
    virtual ~nsWindow();
    void BringToFront();
-@@ -147,6 +191,8 @@ class nsWindow final : public nsIWidget {
+@@ -147,6 +207,8 @@ class nsWindow final : public nsIWidget {
    nsresult GetCurrentOffset(uint32_t& aOffset, uint32_t& aLength);
    nsresult DeleteRange(int aOffset, int aLen);
  
@@ -114,7 +130,7 @@ index dd2d9e2be070..592c5faf2479 100644
    void TearDownView();
  
    ChildView* mNativeView;
-@@ -158,11 +204,25 @@ class nsWindow final : public nsIWidget {
+@@ -158,11 +220,28 @@ class nsWindow final : public nsIWidget {
    mozilla::widget::InputContext mInputContext;
    RefPtr<mozilla::widget::TextInputHandler> mTextInputHandler;
    RefPtr<mozilla::widget::IOSView> mIOSView;
@@ -130,6 +146,9 @@ index dd2d9e2be070..592c5faf2479 100644
    LayoutDeviceIntRect mBounds;
 +  mozilla::ScreenIntCoord mDynamicToolbarMaxHeight{0};
 +  mozilla::ScreenIntCoord mDynamicToolbarOffset{0};
++  // Cached so it can be re-sent after a compositor session is recreated,
++  // and so an unchanged margin costs no IPC.
++  mozilla::ScreenIntCoord mFixedBottomMargin{0};
 +  mozilla::LayoutDeviceIntMargin mSafeAreaInsets;
 +  // The window rect the last inset was sent against.
 +  // PresShellWidgetListener intersects the safe area with

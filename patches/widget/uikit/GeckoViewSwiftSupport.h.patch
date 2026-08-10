@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
-index e68fca9134c0..5f76bc9d5a00 100644
+index e68fca9134c0..716a83812612 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,14 +18,99 @@
+@@ -18,16 +18,101 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -50,8 +50,8 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +- (void)childProcessDidStartWithPID:(int32_t)pid
 +                        processType:(NSString*)processType;
 +- (id<GeckoAVPlayerHost>)avPlayerHost;
-+@end
-+
+ @end
+ 
 +// The app's AVPlayer host. FairPlay content is owned by AVFoundation end
 +// to end - only AVURLAsset conforms to AVContentKeyRecipient - so
 +// AVPlayerDecoder drives a player living in the app rather than decoding
@@ -75,7 +75,7 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// so the host must use this rather than create its own. Optional so an
 +// engine built without the EME patches still links.
 +- (void)useContentKeySession:(AVContentKeySession*)session;
- @end
++@end
 +
 +// The reverse direction, and the only one there is.
 +//
@@ -100,9 +100,11 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// resolves to nothing and is ignored rather than dereferenced.
 +//
 +// Main thread only. Declared with the other C entry points below.
-
++
  @protocol GeckoProcessExtension <NSObject>
-@@ -56,7 +117,30 @@
+ - (void)lockdownSandbox:(NSString*)revision;
+ @end
+@@ -56,7 +141,37 @@
  
  @protocol GeckoViewWindow <NSObject>
  - (UIView*)view;
@@ -113,6 +115,13 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// Tells Gecko how far the toolbar is currently displaced from fully
 +// visible: 0 while expanded, -maxHeight once condensed to the pill.
 +- (void)setDynamicToolbarOffset:(CGFloat)offset;
++// Height, in points, of the browser chrome currently overlapping the
++// bottom of the web view: the expanded toolbar, the condensed pill, or 0
++// in fullscreen. The compositor holds the page's position:fixed and
++// sticky-bottom elements above it. Unlike the safe-area inset below this
++// needs no cooperation from the page's CSS, and unlike the dynamic
++// toolbar max height above it never resizes the layout viewport.
++- (void)setFixedBottomMargin:(CGFloat)margin;
 +// Reported to web content as env(safe-area-inset-*), so a page can
 +// reserve the space the chrome occupies itself.
 +- (void)setSafeAreaInsetsTop:(CGFloat)top
@@ -133,7 +142,7 @@ index e68fca9134c0..5f76bc9d5a00 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +149,37 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +180,37 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

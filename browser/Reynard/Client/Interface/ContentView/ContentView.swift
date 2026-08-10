@@ -60,6 +60,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private var dynamicToolbarMaxHeight: CGFloat = 0
     private var dynamicToolbarOffset: CGFloat = 0
     private var safeAreaInsetBottom: CGFloat = 0
+    private var fixedBottomMargin: CGFloat = 0
     private var focusedInputTask: Task<Void, Never>?
     private var inputBottomRatio: CGFloat?
     private var focusedInputOffset: CGFloat = 0
@@ -208,6 +209,12 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         logger(String(format: "dynToolbar: ContentView safeAreaBottom=%.1f sessionAttached=%@", bottom, session != nil ? "YES" : "NO"))
         safeAreaInsetBottom = bottom
         session?.setSafeAreaInsets(bottom: bottom)
+    }
+
+    func setFixedBottomMargin(_ margin: CGFloat) {
+        logger(String(format: "dynToolbar: ContentView fixedMargin=%.1f sessionAttached=%@", margin, session != nil ? "YES" : "NO"))
+        fixedBottomMargin = margin
+        session?.setFixedBottomMargin(margin)
     }
     
     private func applyLayoutState(
@@ -408,6 +415,8 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // Order matters - nsWindow drops an offset while the max is zero.
         session?.setDynamicToolbarOffset(dynamicToolbarOffset)
         session?.setSafeAreaInsets(bottom: safeAreaInsetBottom)
+        // Compositor state, so it does not follow the swap on its own.
+        session?.setFixedBottomMargin(fixedBottomMargin)
         updatePullToRefreshAvailability()
     }
     

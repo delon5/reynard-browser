@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/nsWindow.mm b/widget/uikit/nsWindow.mm
-index ffb8da937efa..0ee0ce21795f 100644
+index ffb8da937efa..35cf784ca0c1 100644
 --- a/widget/uikit/nsWindow.mm
 +++ b/widget/uikit/nsWindow.mm
 @@ -26,6 +26,20 @@
@@ -930,7 +930,7 @@ index ffb8da937efa..0ee0ce21795f 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1431,193 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1117,10 +1431,227 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return 1;
  }
  
@@ -1038,6 +1038,40 @@ index ffb8da937efa..0ee0ce21795f 100644
 +  }
 +}
 +
++void nsWindow::UpdateFixedBottomMargin(ScreenIntCoord aMargin) {
++  ScreenIntCoord margin = std::max(ScreenIntCoord(0), aMargin);
++  if (margin == mFixedBottomMargin) {
++    return;
++  }
++  mFixedBottomMargin = margin;
++
++  // Explicitly nsIWidget's, NOT the identically named
++  // nsIWidgetListener::DynamicToolbarOffsetChanged called above: that one
++  // goes to PresShell and layout, this one sends
++  // PCompositorBridge::DynamicToolbarOffsetChanged, which lands in
++  // CompositorBridgeParent::SetFixedLayerMargins. Same name, different
++  // base class, opposite subsystem - qualify it so the two cannot be
++  // confused here.
++  //
++  // Positive lifts content up: the value becomes ScreenMargin::bottom in
++  // APZCTreeManager, the same field apz.fixed-margin-override.bottom
++  // substitutes for. Drops silently when no compositor bridge exists yet;
++  // the re-send below covers that.
++  nsIWidget::DynamicToolbarOffsetChanged(margin);
++}
++
++void nsWindow::CreateCompositor(int aWidth, int aHeight) {
++  nsIWidget::CreateCompositor(aWidth, aHeight);
++
++  // SetFixedLayerMargins state belongs to the compositor, so a session
++  // created after GPU-process loss starts at zero and the page's fixed
++  // bottom content silently drops back behind the chrome until something
++  // happens to change the margin. Re-send what the widget already knows.
++  if (mFixedBottomMargin > 0) {
++    nsIWidget::DynamicToolbarOffsetChanged(mFixedBottomMargin);
++  }
++}
++
  layers::NativeLayerRoot* nsWindow::GetNativeLayerRoot() {
    return mNativeLayerRoot;
  }
@@ -1124,7 +1158,7 @@ index ffb8da937efa..0ee0ce21795f 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1176,6 +1673,12 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1176,6 +1707,12 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
  }
  
  void nsWindow::MaybeScheduleUnsuspendAsyncCATransactions() {
@@ -1137,7 +1171,7 @@ index ffb8da937efa..0ee0ce21795f 100644
    if (mNativeLayerRoot->AreOffMainThreadCommitsSuspended() &&
        !mUnsuspendAsyncCATransactionsRunnable) {
      mUnsuspendAsyncCATransactionsRunnable = NewCancelableRunnableMethod(
-@@ -1198,6 +1701,51 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1198,6 +1735,51 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    }
  }
  
@@ -1189,7 +1223,7 @@ index ffb8da937efa..0ee0ce21795f 100644
  EventDispatcher* nsWindow::GetEventDispatcher() const {
    if (mIOSView) {
      return mIOSView->mEventDispatcher;
-@@ -1227,6 +1775,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1227,6 +1809,81 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return window.forget();
  }
  
@@ -1271,7 +1305,7 @@ index ffb8da937efa..0ee0ce21795f 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1870,39 @@ - (UIView*)view {
+@@ -1247,6 +1904,46 @@ - (UIView*)view {
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1308,10 +1342,17 @@ index ffb8da937efa..0ee0ce21795f 100644
 +  }
 +}
 +
++- (void)setFixedBottomMargin:(CGFloat)margin {
++  if (mWindow) {
++    mWindow->UpdateFixedBottomMargin(
++        ScreenIntCoord(lround(margin * mWindow->BackingScaleFactor())));
++  }
++}
++
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1916,16 @@ - (void)close {
+@@ -1260,6 +1957,16 @@ - (void)close {
      mOuterWindow = nullptr;
    }
  }
@@ -1328,7 +1369,7 @@ index ffb8da937efa..0ee0ce21795f 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +1968,7 @@ - (void)close {
+@@ -1302,6 +2009,7 @@ - (void)close {
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());

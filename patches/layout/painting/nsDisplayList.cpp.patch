@@ -1,0 +1,36 @@
+diff --git a/layout/painting/nsDisplayList.cpp b/layout/painting/nsDisplayList.cpp
+index f958ef7438a7..7ee2ce8791c8 100644
+--- a/layout/painting/nsDisplayList.cpp
++++ b/layout/painting/nsDisplayList.cpp
+@@ -5509,10 +5509,31 @@ bool nsDisplayOwnLayer::HasDynamicToolbar(nsIFrame* aFrame) {
+   if (!aFrame->PresContext()->IsRootContentDocumentCrossProcess()) {
+     return false;
+   }
++#ifdef MOZ_WIDGET_UIKIT
++  // The iOS browser chrome overlays the bottom of the window, and the
++  // compositor holds the page's fixed/sticky bottom content above it via
++  // APZ fixed-layer margins (nsWindow::UpdateFixedBottomMargin). That
++  // only reaches a layer that owns a WebRender animation id, which is
++  // what this gate hands out - so on this port it has to be granted
++  // unconditionally.
++  //
++  // The Android-style checks below cannot serve that: this port keeps the
++  // dynamic-toolbar max height at 0 permanently, so
++  // PresContext()->HasDynamicToolbar() is always false here. Shortening
++  // the layout viewport instead was tried and mis-rendered pages, which
++  // is exactly what the margin approach avoids - it never touches layout.
++  //
++  // The cost is an animation id for every fixed/sticky root-content layer
++  // even while the margin is 0 (fullscreen, or no bottom toolbar). That
++  // is a small amount of extra compositor bookkeeping on such pages, and
++  // it buys not having to plumb toolbar state back into layout.
++  return true;
++#else
+   return aFrame->PresContext()->HasDynamicToolbar() ||
+          // For tests on Android, this pref is set to simulate the dynamic
+          // toolbar
+          StaticPrefs::apz_fixed_margin_override_enabled();
++#endif
+ }
+ 
+ bool nsDisplayOwnLayer::HasDynamicToolbar() const {
