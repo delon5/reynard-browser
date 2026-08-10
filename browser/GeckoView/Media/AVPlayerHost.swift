@@ -122,6 +122,12 @@ public final class AVPlayerHost: NSObject {
         // load.
         var reportedDuration: Double?
         var reportedSize: CGSize?
+        /// Whether the element wants to be playing, as opposed to whether
+        /// AVPlayer currently is. The two diverge because play() arrives
+        /// before the item is ready; see resumeIfWanted in observeItem.
+        /// Guarded by stateLock - written from Gecko's main thread and
+        /// read from the GCD main queue.
+        var wantsPlayback = false
 
         // Pulls decoded frames back out of AVFoundation so Gecko can
         // composite them itself. Without this the decoder had nothing to
@@ -372,6 +378,35 @@ public final class AVPlayerHost: NSObject {
             )
         }
 
+        // Playback intent has to be RE-APPLIED here, not merely recorded.
+        // The element calls play() as soon as it wants playback, which is
+        // routinely before the item has finished loading; AVPlayer takes
+        // the rate, finds the item not ready, and settles back to 0.
+        //
+        // Device evidence, from the pull loop's own diagnostics:
+        //   framePull[12] tick=1  rate=1.0 timeControl=1 itemStatus=0
+        //   framePull[12] tick=16 rate=0.0 timeControl=0 itemStatus=1
+        // - ready, and paused, with nothing left to start it. Playback
+        // then never advances, so hasNewPixelBuffer keeps answering false
+        // against a frozen clock and only the frame decoded at t=0 ever
+        // reaches Gecko. That is the single still frame with a dead
+        // scrubber, and it happens on completely unencrypted streams -
+        // Apple's own bipbop test asset reproduces it.
+        let resumeIfWanted: () -> Void = { [weak self, weak entry] in
+            guard let self, let entry else {
+                return
+            }
+            // rate == 0 keeps this from fighting playback that is already
+            // running: several observations fire per load.
+            guard self.withState({ entry.wantsPlayback }),
+                  entry.item.status == .readyToPlay,
+                  entry.player.rate == 0 else {
+                return
+            }
+            avLog("play re-applied for \(playerId) - item reached readyToPlay while paused")
+            entry.player.play()
+        }
+
         // The main QUEUE is not Gecko's main THREAD in a content
         // process - Gecko runs "MainThread" on a spawned thread there,
         // and this queue drains on the extension's principal thread.
@@ -380,7 +415,13 @@ public final class AVPlayerHost: NSObject {
         // ordering and to get off AVFoundation's KVO queue.
         for observation in [
             item.observe(\.status, options: [.initial, .new]) { item, _ in
-                DispatchQueue.main.async { report(item) }
+                DispatchQueue.main.async {
+                    // Before report, which returns early whenever the
+                    // metadata is unchanged - playback must not depend on
+                    // whether the duration happened to move.
+                    resumeIfWanted()
+                    report(item)
+                }
             },
             item.observe(\.duration, options: [.new]) { item, _ in
                 DispatchQueue.main.async { report(item) }
@@ -393,22 +434,46 @@ public final class AVPlayerHost: NSObject {
         }
     }
 
+    /// Records the intent as well as issuing it, because the issue can be
+    /// lost: an item that is not ready yet drops the rate back to 0, and
+    /// resumeIfWanted replays this once it becomes ready.
     @objc public func play(_ id: UInt) {
-        withState({ players[id] })?.player.play()
+        guard let entry = withState({ () -> Player? in
+            players[id]?.wantsPlayback = true
+            return players[id]
+        }) else {
+            return
+        }
+        entry.player.play()
     }
 
     @objc public func pause(_ id: UInt) {
-        withState({ players[id] })?.player.pause()
+        guard let entry = withState({ () -> Player? in
+            players[id]?.wantsPlayback = false
+            return players[id]
+        }) else {
+            return
+        }
+        entry.player.pause()
     }
 
     /// Backgrounding. Playback stops but the item is kept, so resuming
     /// does not re-fetch or re-negotiate keys.
     @objc public func suspend(_ id: UInt) {
+        // wantsPlayback deliberately left alone: this is not the user
+        // pausing, and resume has to be able to tell the two apart.
         withState({ players[id] })?.player.pause()
     }
 
     @objc public func resume(_ id: UInt) {
-        withState({ players[id] })?.player.play()
+        // Only resume what was actually playing. Unconditionally calling
+        // play() here would start a video the user had paused before
+        // backgrounding.
+        guard let entry = withState({ players[id] }),
+              withState({ entry.wantsPlayback }) else {
+            return
+        }
+        entry.player.play()
     }
 
     @objc public func destroy(_ id: UInt) {
