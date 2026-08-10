@@ -39,6 +39,7 @@ protocol TabOverviewPresentationContext: AnyObject {
     func endEditing()
     func updateLayout(animated: Bool, duration: TimeInterval)
     func tabOverviewDidFinishDismissal()
+    func tabOverviewPresentationDidFinishTransition()
 }
 
 final class TabOverview: UIView {

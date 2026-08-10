@@ -961,7 +961,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     func makeWebThumbnail() -> UIImage? {
-        return webContentView.makeThumbnail(visibleSize: bounds.size)
+        return webContentView.makeThumbnail()
     }
     
     // MARK: - Overlay Hosting

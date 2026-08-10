@@ -235,7 +235,7 @@ extension BrowserViewController: TabManagerDelegate {
                 // pointer comparison on a path that already runs.
                 if !contentView.isDisplaying(session: tab.session) {
                     logger("tabRecovery: rebinding the view to the tab's new session")
-                    contentView.setSession(tab.session)
+                    contentView.setTab(tab)
                 }
                 
                 browserChrome.setAddressBarLoadingProgress(

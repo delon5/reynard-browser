@@ -22,6 +22,7 @@ final class FavoriteSiteIconView: UIView {
     
     private var representedBookmarkGUID: String?
     private var iconTask: Task<Void, Never>?
+    private var imageConstraints: [NSLayoutConstraint] = []
     
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -36,7 +37,7 @@ final class FavoriteSiteIconView: UIView {
         representedBookmarkGUID = bookmark.guid
         iconTask?.cancel()
         let cachedIcon = BookmarkIconProvider.shared.cachedIcon(for: bookmark)
-        applyIcon(cachedIcon.image, tintColor: cachedIcon.tintColor)
+        applyIcon(cachedIcon.image, tintColor: cachedIcon.tintColor, shouldInset: cachedIcon.tintColor != nil)
         iconTask = Task { [weak self] in
             let icon = await BookmarkIconProvider.shared.icon(for: bookmark)
             guard !Task.isCancelled else {
@@ -46,7 +47,7 @@ final class FavoriteSiteIconView: UIView {
                 guard self?.representedBookmarkGUID == bookmark.guid else {
                     return
                 }
-                self?.applyIcon(icon.image, tintColor: icon.tintColor)
+                self?.applyIcon(icon.image, tintColor: icon.tintColor, shouldInset: icon.tintColor != nil)
             }
         }
     }
@@ -55,7 +56,7 @@ final class FavoriteSiteIconView: UIView {
         representedBookmarkGUID = nil
         iconTask?.cancel()
         iconTask = nil
-        applyIcon(UIImage(named: "reynard.globe"), tintColor: .secondaryLabel)
+        applyIcon(UIImage(named: "reynard.globe"), tintColor: .secondaryLabel, shouldInset: true)
     }
     
     private func configureView() {

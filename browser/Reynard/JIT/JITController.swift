@@ -314,7 +314,7 @@ final class JITController {
     func startBackgroundAudioIfNeeded() {
         guard !usePtraceJIT(),
               Prefs.JITSettings.isJITEnabled,
-              hasTXMSupport(),
+              Self.hasTXMSupport(),
               !hasHandledFailure else {
             return
         }
