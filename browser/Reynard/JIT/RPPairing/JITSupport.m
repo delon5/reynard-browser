@@ -2335,6 +2335,18 @@ static void performEndpointMonitorTick(void) {
 }
 
 static void startEndpointMonitorLocked(void) {
+    // DISABLED - see fix_disable_unconsumed_endpoint_monitor.py.
+    //
+    // This monitor's entire output is one NSNotification,
+    // "me-minh-ton.jit.endpoint-monitor-failed", and nothing anywhere
+    // in the codebase observes it - the recovery it was built to
+    // trigger was never wired up. Its cost is real, though: a dispatch
+    // timer opening a TCP probe socket every single second for as long
+    // as any endpoint is registered, foreground and background alike.
+    // Flip the constant once a consumer actually registers for the
+    // notification; until then, starting the timer buys nothing.
+    static const BOOL kEndpointMonitorHasConsumer = NO;
+    if (!kEndpointMonitorHasConsumer) return;
     if (endpointMonitorTimer || endpointFailureLatched) return;
     
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, endpointMonitorQueue());
