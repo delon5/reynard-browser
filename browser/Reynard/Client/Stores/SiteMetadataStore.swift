@@ -125,24 +125,34 @@ final class SiteMetadataStore {
         }
         
         let requestKey = sanitizedURL.absoluteString
-        if let activeRequest = stateQueue.sync(execute: { activeRequests[requestKey] }) {
-            return await activeRequest.value
-        }
-        
-        let task = Task<SiteMetadataSnapshot?, Never>(priority: .utility) { [weak self] in
-            guard let self else {
-                return nil
+        // Check, create and register in ONE stateQueue block - the
+        // same shape FaviconStore uses, for the reason its own
+        // comment documents: with registration in a separate block,
+        // the task could start, finish and run its async self-removal
+        // BEFORE the registration executed, leaving a completed task
+        // registered forever - every later caller for this URL then
+        // awaited that stale, finished task instead of fetching fresh
+        // metadata. Two concurrent callers could also both see
+        // "nothing active" and fetch twice. See
+        // fix_sitemetadatastore_registration_race.py.
+        let task = stateQueue.sync { () -> Task<SiteMetadataSnapshot?, Never> in
+            if let activeRequest = activeRequests[requestKey] {
+                return activeRequest
             }
             
-            let snapshot = await self.fetchAndStoreMetadata(for: sanitizedURL)
-            self.stateQueue.async {
-                self.activeRequests[requestKey] = nil
+            let newTask = Task<SiteMetadataSnapshot?, Never>(priority: .utility) { [weak self] in
+                guard let self else {
+                    return nil
+                }
+                
+                let snapshot = await self.fetchAndStoreMetadata(for: sanitizedURL)
+                self.stateQueue.async {
+                    self.activeRequests[requestKey] = nil
+                }
+                return snapshot
             }
-            return snapshot
-        }
-        
-        stateQueue.sync {
-            activeRequests[requestKey] = task
+            activeRequests[requestKey] = newTask
+            return newTask
         }
         return await task.value
     }
