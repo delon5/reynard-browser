@@ -14,6 +14,9 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <stdatomic.h>
+#include <os/lock.h>
 
 // Was NSLog(@"[Reynard] %@", message) — the ENTIRE composed string can
 // get redacted to "<private>" in an exported Console capture, not just
@@ -68,6 +71,16 @@ BOOL ReynardIsJITHangBacktraceEnabled(void) {
 
 static int gReynardLogFileDescriptor = -1;
 
+// Rotation. This file had no bound at all: it lives in Documents, is
+// appended to for the whole life of the process, and one capture showed
+// 7243 polling ticks in a single run - on a device that is routinely
+// near full. One previous generation is kept so a crash still has the
+// run before it to compare against.
+static const off_t kReynardLogMaxBytes = 4 * 1024 * 1024;
+static NSURL *gReynardLogURL = nil;
+static _Atomic(off_t) gReynardLogBytes = 0;
+static os_unfair_lock gReynardLogRotateLock = OS_UNFAIR_LOCK_INIT;
+
 static void ReynardOpenLogFileIfNeeded(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -81,9 +94,18 @@ static void ReynardOpenLogFileIfNeeded(void) {
         }
 
         NSURL *logURL = [documentsURL URLByAppendingPathComponent:@"reynard_jit_log.txt" isDirectory:NO];
+        gReynardLogURL = logURL;
         gReynardLogFileDescriptor = open(logURL.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (gReynardLogFileDescriptor < 0) {
             return;
+        }
+
+        // Seeded from what is already on disk, not zero, so a file left
+        // oversized by an earlier build rotates on this launch rather
+        // than being allowed another full cap on top.
+        struct stat existing;
+        if (fstat(gReynardLogFileDescriptor, &existing) == 0) {
+            atomic_store(&gReynardLogBytes, existing.st_size);
         }
 
         // Session banner - proof that this process's logging began
@@ -106,6 +128,35 @@ static void ReynardOpenLogFileIfNeeded(void) {
             write(gReynardLogFileDescriptor, bannerBytes, strlen(bannerBytes));
         }
     });
+}
+
+// Called after each write. The common path is a single atomic load, so
+// the lock is only ever taken on the rare tick that actually rotates.
+static void ReynardRotateLogIfNeeded(void) {
+    if (atomic_load(&gReynardLogBytes) < kReynardLogMaxBytes) {
+        return;
+    }
+
+    os_unfair_lock_lock(&gReynardLogRotateLock);
+    // Re-checked under the lock: many threads log, so several can pass
+    // the test above at once and only the first should rotate.
+    if (atomic_load(&gReynardLogBytes) >= kReynardLogMaxBytes &&
+        gReynardLogFileDescriptor >= 0 && gReynardLogURL) {
+        NSString *previousPath = [gReynardLogURL.path stringByAppendingPathExtension:@"1"];
+        // rename replaces any existing .1, so exactly two generations
+        // survive. Both are closed/reopened rather than truncated, so a
+        // reader holding the old file keeps a coherent one.
+        if (rename(gReynardLogURL.fileSystemRepresentation, previousPath.fileSystemRepresentation) == 0) {
+            close(gReynardLogFileDescriptor);
+            gReynardLogFileDescriptor = open(gReynardLogURL.fileSystemRepresentation,
+                                             O_WRONLY | O_CREAT | O_APPEND, 0644);
+            atomic_store(&gReynardLogBytes, 0);
+        } else {
+            // Rotation failed - do not retry on every subsequent line.
+            atomic_store(&gReynardLogBytes, 0);
+        }
+    }
+    os_unfair_lock_unlock(&gReynardLogRotateLock);
 }
 
 void logger(NSString *message) {
@@ -142,7 +193,10 @@ void logger(NSString *message) {
         return;
     }
 
-    write(gReynardLogFileDescriptor, lineBytes, strlen(lineBytes));
+    size_t length = strlen(lineBytes);
+    write(gReynardLogFileDescriptor, lineBytes, length);
+    atomic_fetch_add(&gReynardLogBytes, (off_t)length);
+    ReynardRotateLogIfNeeded();
 }
 
 // MARK: - App Group Resolution
