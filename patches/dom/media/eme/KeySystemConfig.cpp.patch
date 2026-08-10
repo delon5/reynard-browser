@@ -1,11 +1,29 @@
 diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.cpp
 --- a/dom/media/eme/KeySystemConfig.cpp
 +++ b/dom/media/eme/KeySystemConfig.cpp
-@@ -30,6 +30,14 @@
+@@ -8,3 +8,4 @@
+ #include "GMPUtils.h"
+ #include "KeySystemNames.h"
++#include "mozilla/Debug.h"  // printf_stderr, for the emeKeySystem diagnostic
+ #include "mozilla/StaticPrefs_media.h"
+@@ -30,6 +30,27 @@
  
  /* static */
  bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
 +#ifdef MOZ_WIDGET_UIKIT
++  // DIAGNOSTIC. A device capture of a FairPlay demo showed EIGHT players
++  // created, every one falling back to the licence-less local session,
++  // with zero FairPlayCDMProxy activity and zero content key requests -
++  // so the licence exchange was never reached, and nothing said why.
++  //
++  // This is the decision point. IsFairPlayKeySystem matches the bare
++  // "com.apple.fps" exactly, while players in the wild commonly ask for
++  // the versioned legacy names ("com.apple.fps.1_0" and friends) that
++  // Safari accepts. If that is what arrives here, EME refuses before any
++  // of the FairPlay stack runs. Logging the string settles it.
++  printf_stderr("emeKeySystem: Supports(%s) -> fairplay=%d\n",
++                NS_ConvertUTF16toUTF8(aKeySystem).get(),
++                IsFairPlayKeySystem(aKeySystem) ? 1 : 0);
 +  // FairPlay is part of the OS rather than a downloadable CDM, so there
 +  // is nothing to check for having been installed - unlike Widevine and
 +  // Clearkey, which are fetched by the GMP downloader.
@@ -16,7 +34,7 @@ diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.c
  #ifdef MOZ_WIDGET_ANDROID
    // Check if we can use MediaDrm for this keysystem.
    if (mozilla::java::MediaDrmProxy::IsSchemeSupported(
-@@ -119,6 +127,44 @@
+@@ -119,6 +140,44 @@
    }
  }
  
@@ -61,7 +79,7 @@ diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.c
  /* static */ void KeySystemConfig::CreateWivineL3KeySystemConfigs(
      const KeySystemConfigRequest& aRequest,
      nsTArray<KeySystemConfig>& aOutConfigs) {
-@@ -232,6 +278,11 @@
+@@ -232,6 +291,11 @@
      } else if (IsWidevineKeySystem(keySystem)) {
        CreateWivineL3KeySystemConfigs(request, outConfigs);
      }
