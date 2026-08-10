@@ -95,6 +95,20 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     ) {
         logger("carPlayLife: scene DISCONNECTING - session discarded, audio released")
         self.interfaceController = nil
+        // Close the session BEFORE dropping the references to it.
+        // currentSession is weak and GeckoSession has no deinit-side
+        // close, so clearing references only ORPHANED the open engine
+        // window: an active, unthrottled content process - it was
+        // deliberately setActive(true)/setFocused(true) at connect,
+        // and it never goes through SessionManager, so no
+        // backgrounding sweep or tab sleep ever touches it - kept
+        // running until the next app relaunch, once per disconnect.
+        // See fix_close_carplay_session_on_disconnect.py.
+        if let session = CarPlaySceneDelegate.currentSession {
+            session.setFocused(false)
+            session.setActive(false)
+            session.close()
+        }
         CarPlaySceneDelegate.currentSession = nil
         
         // Released with notifyOthersOnDeactivation, so whatever was
