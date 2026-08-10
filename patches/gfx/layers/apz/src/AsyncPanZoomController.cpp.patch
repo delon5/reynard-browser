@@ -1,0 +1,67 @@
+diff --git a/gfx/layers/apz/src/AsyncPanZoomController.cpp b/gfx/layers/apz/src/AsyncPanZoomController.cpp
+index e0c930d19dde..c75449ed84e6 100644
+--- a/gfx/layers/apz/src/AsyncPanZoomController.cpp
++++ b/gfx/layers/apz/src/AsyncPanZoomController.cpp
+@@ -2809,6 +2809,7 @@ nsEventStatus AsyncPanZoomController::OnPanMayBegin(
+   APZC_LOG_DETAIL("got a pan-maybegin in state %s\n", this,
+                   ToString(mState).c_str());
+ 
++  mPanGestureMayStartTime = Some(aEvent.mTimeStamp);
+   StartTouch(aEvent.mLocalPanStartPoint, aEvent.mTimeStamp);
+   MOZ_ASSERT(GetCurrentPanGestureBlock());
+   GetCurrentPanGestureBlock()->GetOverscrollHandoffChain()->CancelAnimations(
+@@ -2824,6 +2825,7 @@ nsEventStatus AsyncPanZoomController::OnPanCancelled(
+ 
+   mX.CancelGesture();
+   mY.CancelGesture();
++  mPanGestureMayStartTime = Nothing();
+ 
+   MOZ_ASSERT(GetCurrentPanGestureBlock());
+   GetCurrentPanGestureBlock()
+@@ -2845,6 +2847,14 @@ nsEventStatus AsyncPanZoomController::OnPanBegin(
+   GetCurrentPanGestureBlock()->GetOverscrollHandoffChain()->CancelAnimations(
+       ExcludeOverscroll);
+ 
++  if (aEvent.mType == PanGestureInput::PANGESTURE_START) {
++    mTouchStartRestingTimeBeforePan =
++        mPanGestureMayStartTime
++            ? aEvent.mTimeStamp - *mPanGestureMayStartTime
++            : TimeDuration();
++    mPanGestureMayStartTime = Nothing();
++    mMinimumVelocityDuringPan = Nothing();
++  }
+   StartTouch(aEvent.mLocalPanStartPoint, aEvent.mTimeStamp);
+ 
+   if (!UsingStatefulAxisLock()) {
+@@ -3105,6 +3115,13 @@ nsEventStatus AsyncPanZoomController::OnPan(
+                                     aEvent.mTimeStamp);
+   }
+ 
++  auto currentVelocity = GetVelocityVector().Length();
++  if (aFingersOnTouchpad == FingersOnTouchpad::Yes &&
++      currentVelocity > ParentLayerCoord(0)) {
++    mMinimumVelocityDuringPan = Some(std::min(
++        mMinimumVelocityDuringPan.valueOr(currentVelocity), currentVelocity));
++  }
++
+   if (aFingersOnTouchpad == FingersOnTouchpad::No) {
+     if (IsOverscrolled() && GetState() != OVERSCROLL_ANIMATION) {
+       StartOverscrollAnimation(velocity, GetOverscrollSideBits());
+@@ -3146,6 +3163,9 @@ nsEventStatus AsyncPanZoomController::OnPanEnd(const PanGestureInput& aEvent) {
+   // Use HandleEndOfPan for fling on platforms that don't
+   // emit momentum events (Gtk).
+   if (aEvent.mSimulateMomentum) {
++    if (!aEvent.mAllowFlingAcceleration) {
++      mFlingAccelerator.Reset();
++    }
+     return HandleEndOfPan();
+   }
+ 
+@@ -3264,6 +3284,7 @@ nsEventStatus AsyncPanZoomController::OnPanInterrupted(
+   APZC_LOG_DETAIL("got a pan-interrupted in state %s\n", this,
+                   ToString(mState).c_str());
+ 
++  mPanGestureMayStartTime = Nothing();
+   CancelAnimation();
+ 
+   return nsEventStatus_eIgnore;

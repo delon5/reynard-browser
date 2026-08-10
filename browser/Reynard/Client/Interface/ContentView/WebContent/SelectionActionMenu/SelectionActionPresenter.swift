@@ -19,10 +19,13 @@ final class SelectionActionPresenter: SelectionActionPresenting {
     }
     
     private var menuHosts: [ObjectIdentifier: SelectionActionMenuHostView] = [:]
+    private let onMenuDismissed: (GeckoSession) -> Void
     
     // MARK: - Lifecycle
     
-    init() {}
+    init(onMenuDismissed: @escaping (GeckoSession) -> Void) {
+        self.onMenuDismissed = onMenuDismissed
+    }
     
     func show(_ request: SelectionActionRequest, for session: GeckoSession) {
         guard request.editable == false,
@@ -66,7 +69,7 @@ final class SelectionActionPresenter: SelectionActionPresenting {
             return host
         }
         
-        let host = SelectionActionMenuHostView()
+        let host = SelectionActionMenuHostView(onDismissed: onMenuDismissed)
         menuHosts[key] = host
         return host
     }

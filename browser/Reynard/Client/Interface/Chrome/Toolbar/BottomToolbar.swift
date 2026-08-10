@@ -30,6 +30,7 @@ final class BottomToolbar: UIView {
         static let bottomToolbarButtonStackHorizontalInset = BottomToolbarLayoutPolicy.horizontalInset
         static let bottomToolbarButtonStackTopSpacing: CGFloat = 7
         static let bottomToolbarButtonSpacing = BottomToolbarLayoutPolicy.spacing
+        static let backgroundViewHorizontalExtension: CGFloat = 16
     }
     
     enum LayoutState {
@@ -57,6 +58,18 @@ final class BottomToolbar: UIView {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
         view.backgroundColor = .clear
+        return view
+    }()
+    
+    private let backgroundView: UIVisualEffectView = {
+        let effect: UIVisualEffect
+        if #available(iOS 26.0, *) {
+            effect = UIGlassEffect.nonAdaptive(style: .regular)
+        } else {
+            effect = UIBlurEffect(style: .systemChromeMaterial)
+        }
+        let view = UIVisualEffectView(effect: effect)
+        view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
     
@@ -198,7 +211,7 @@ final class BottomToolbar: UIView {
             topConstraint.constant = verticalOffset - contentHeight
             contentHeightConstraint.constant = contentHeight
             isHidden = state == .hidden || state == .collapsed
-            backgroundColor = state == .focused ? .clear : .toolbarBackground
+            backgroundView.isHidden = state == .focused
             
             let isCompact = state == .compact || state == .collapsed
             standardButtonsTopConstraint?.isActive = !isCompact
@@ -221,6 +234,10 @@ final class BottomToolbar: UIView {
     func setVerticalOffset(_ offset: CGFloat) {
         verticalOffset = offset
         topConstraint.constant = offset - contentHeightConstraint.constant
+    }
+    
+    func setContentAlpha(_ alpha: CGFloat) {
+        contentView.alpha = alpha
     }
     
     func updateDownload(_ summary: DownloadStoreSummary) {
@@ -284,10 +301,11 @@ final class BottomToolbar: UIView {
     
     private func configureAppearance() {
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = .toolbarBackground
+        backgroundColor = .clear
     }
     
     private func configureHierarchy() {
+        addSubview(backgroundView)
         addSubview(contentView)
         contentView.addSubview(buttons)
         applyConfiguredActions()
@@ -299,6 +317,11 @@ final class BottomToolbar: UIView {
         compactButtonsTopConstraint = buttons.topAnchor.constraint(equalTo: contentView.topAnchor, constant: UX.bottomToolbarButtonStackTopSpacing)
         
         NSLayoutConstraint.activate([
+            backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -UX.backgroundViewHorizontalExtension),
+            backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: UX.backgroundViewHorizontalExtension),
+            backgroundView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            
             contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
             contentView.topAnchor.constraint(equalTo: topAnchor),

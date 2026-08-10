@@ -14,6 +14,7 @@ final class UserDataSuggestionCell: UITableViewCell {
         static let textTopInset: CGFloat = 11
         static let textBottomInset: CGFloat = 11
         static let subtitleTopSpacing: CGFloat = 1
+        static let faviconCornerRadius: CGFloat = 4
     }
     
     static let reuseIdentifier = "UserDataSuggestionCell"
@@ -28,6 +29,8 @@ final class UserDataSuggestionCell: UITableViewCell {
         imageView.contentMode = .scaleAspectFit
         imageView.tintColor = .label
         imageView.image = UIImage(named: "reynard.globe")
+        imageView.clipsToBounds = true
+        imageView.layer.cornerRadius = UX.faviconCornerRadius
         return imageView
     }()
     

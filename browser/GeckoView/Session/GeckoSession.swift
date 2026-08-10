@@ -128,6 +128,10 @@ public class GeckoSession {
         return pictureInPictureHandler.displayLayer
     }
     
+    public func notifyScreenOrientationChanged(to orientation: UIInterfaceOrientation) {
+        window?.updateScreenOrientation(orientation.rawValue)
+    }
+    
     // MARK: - Session Handlers
     
     lazy var sessionHandlers: [GeckoSessionHandlerCommon] = [
@@ -465,6 +469,7 @@ public class GeckoSession {
         return GeckoSessionState(state: sessionStateCache)
     }
     
+    // Keyboard
     public func focusedInputBottomRatio() async -> CGFloat? {
         let response = try? await dispatcher.query(type: "GeckoView:GetFocusedInputMetrics")
         guard let values = response as? [AnyHashable: Any],
@@ -561,6 +566,15 @@ public class GeckoSession {
         return (values["error"] as? String) ?? "unknown error"
     }
     
+    @discardableResult
+    public func focusForHardwareKeyboard() -> Bool {
+        return window?.focusForHardwareKeyboard() ?? false
+    }
+    
+    public func isInHardwareKeyboardMode() -> Bool {
+        return window?.isInHardwareKeyboardMode() ?? false
+    }
+    
     // MARK: - Selection Actions
     
     public func executeSelectionAction(actionId: String, commandId: String) {
@@ -573,23 +587,12 @@ public class GeckoSession {
         )
     }
     
-    // Toolbar
+    // MARK: - Toolbar
     public func setDynamicToolbarMaxHeight(_ height: CGFloat) {
         window?.setDynamicToolbarMaxHeight(max(0, height))
     }
     
-    /// How far the toolbar is displaced from fully visible. Zero while
-    /// expanded; -maxHeight once condensed, which is the only value that
-    /// reaches Gecko's Collapsed state and lets fixed-position content
-    /// drop to the window bottom.
-    public func setDynamicToolbarOffset(_ offset: CGFloat) {
-        window?.setDynamicToolbarOffset(min(0, offset))
-    }
-    
-    /// Reported to web content as env(safe-area-inset-*), so a page can
-    /// reserve the space the chrome occupies itself instead of the
-    /// viewport being shortened or a view drawn over it.
-    public func setSafeAreaInsets(bottom: CGFloat) {
-        window?.setSafeAreaInsetsTop(0, right: 0, bottom: max(0, bottom), left: 0)
+    public func setContentBottomOffset(_ offset: CGFloat) {
+        window?.setFixedBottomOffset(offset)
     }
 }

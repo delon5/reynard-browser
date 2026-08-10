@@ -10,6 +10,7 @@ import UIKit
 final class SitePermissionsViewController: SettingsTableViewController {
     private enum Section {
         case availability
+        case media
         case access
         case advanced
         case websiteActions
@@ -18,6 +19,8 @@ final class SitePermissionsViewController: SettingsTableViewController {
             switch self {
             case .availability:
                 return SettingsSectionText()
+            case .media:
+                return SettingsSectionText(headerTitle: NSLocalizedString("Media", comment: ""))
             case .access:
                 return SettingsSectionText(headerTitle: NSLocalizedString("Access", comment: ""))
             case .advanced:
@@ -38,6 +41,7 @@ final class SitePermissionsViewController: SettingsTableViewController {
     }
     
     private enum Row {
+        case autoplay
         case camera
         case microphone
         case location
@@ -49,6 +53,8 @@ final class SitePermissionsViewController: SettingsTableViewController {
         
         var title: String {
             switch self {
+            case .autoplay:
+                return NSLocalizedString("Autoplay", comment: "")
             case .camera:
                 return NSLocalizedString("Camera", comment: "")
             case .microphone:
@@ -70,6 +76,8 @@ final class SitePermissionsViewController: SettingsTableViewController {
         
         var permission: SitePermission {
             switch self {
+            case .autoplay:
+                return .autoplay
             case .camera:
                 return .camera
             case .microphone:
@@ -110,6 +118,7 @@ final class SitePermissionsViewController: SettingsTableViewController {
             sections.append(.availability)
         }
         
+        sections.append(.media)
         sections.append(.access)
         sections.append(.advanced)
         sections.append(.websiteActions)
@@ -142,6 +151,8 @@ final class SitePermissionsViewController: SettingsTableViewController {
         switch displayedSections[section] {
         case .availability:
             return AvailabilityRow.allCases.count
+        case .media:
+            return 1
         case .access:
             return accessPermissionOptions.count
         case .advanced:
@@ -173,7 +184,7 @@ final class SitePermissionsViewController: SettingsTableViewController {
                 cell.accessoryType = .none
                 return cell
             }
-        case .access, .advanced:
+        case .media, .access, .advanced:
             guard let row = permissionOption(at: indexPath) else {
                 return UITableViewCell()
             }
@@ -230,7 +241,7 @@ final class SitePermissionsViewController: SettingsTableViewController {
             if AvailabilityRow.allCases[indexPath.row] == .openSettings {
                 SiteSettingsUtils.openAppSettings()
             }
-        case .access, .advanced:
+        case .media, .access, .advanced:
             guard let row = permissionOption(at: indexPath) else {
                 return
             }
@@ -271,17 +282,21 @@ final class SitePermissionsViewController: SettingsTableViewController {
     
     private func permissionOption(at indexPath: IndexPath) -> Row? {
         guard displayedSections.indices.contains(indexPath.section),
-              displayedSections[indexPath.section] == .access || displayedSections[indexPath.section] == .advanced else {
+              displayedSections[indexPath.section] == .media
+                || displayedSections[indexPath.section] == .access
+                || displayedSections[indexPath.section] == .advanced else {
             return nil
         }
         
         switch displayedSections[indexPath.section] {
+        case .availability, .websiteActions:
+            return nil
+        case .media:
+            return indexPath.row == 0 ? .autoplay : nil
         case .access:
             return accessPermissionOptions[safe: indexPath.row]
         case .advanced:
             return advancedPermissionOptions[safe: indexPath.row]
-        case .availability, .websiteActions:
-            return nil
         }
     }
     

@@ -18,6 +18,7 @@ final class SidebarViewController: UISplitViewController, UISplitViewControllerD
     
     private let contentController: SidebarContentController
     private var sidebarVisible = false
+    private weak var activeSidebarTextField: UITextField?
     
     var contentBrowser: SidebarContentController {
         return contentController
@@ -66,6 +67,7 @@ final class SidebarViewController: UISplitViewController, UISplitViewControllerD
         }
         configureSplitView()
         observeApplicationActivation()
+        observeTextInput()
     }
     
     required init?(coder: NSCoder) {
@@ -151,6 +153,9 @@ final class SidebarViewController: UISplitViewController, UISplitViewControllerD
     func splitViewController(_ svc: UISplitViewController, willChangeTo displayMode: UISplitViewController.DisplayMode) {
         sidebarVisible = displayMode != .secondaryOnly
         updateBrowserLayoutIfNeeded()
+        if !sidebarVisible {
+            menuNavigationController.view.endEditing(true)
+        }
     }
     
     // MARK: - Notifications
@@ -162,6 +167,30 @@ final class SidebarViewController: UISplitViewController, UISplitViewControllerD
     
     @objc private func applicationWillResignActive() {
         menuController.refreshSidebarButton()
+    }
+    
+    @objc private func sidebarTextInputDidBeginEditing(_ notification: Notification) {
+        guard let textField = notification.object as? UITextField,
+              menuNavigationController.isViewLoaded,
+              textField.isDescendant(of: menuNavigationController.view) else {
+            return
+        }
+        activeSidebarTextField = textField
+    }
+    
+    @objc private func sidebarTextInputDidEndEditing(_ notification: Notification) {
+        guard let textField = notification.object as? UITextField,
+              activeSidebarTextField === textField else {
+            return
+        }
+        activeSidebarTextField = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  activeSidebarTextField == nil else {
+                return
+            }
+            contentController.sidebarDidEndEditing()
+        }
     }
     
     // MARK: - View Setup
@@ -199,6 +228,21 @@ final class SidebarViewController: UISplitViewController, UISplitViewControllerD
             self,
             selector: #selector(applicationWillResignActive),
             name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+    }
+    
+    private func observeTextInput() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sidebarTextInputDidBeginEditing(_:)),
+            name: UITextField.textDidBeginEditingNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sidebarTextInputDidEndEditing(_:)),
+            name: UITextField.textDidEndEditingNotification,
             object: nil
         )
     }

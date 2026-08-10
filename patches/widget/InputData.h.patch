@@ -1,0 +1,23 @@
+diff --git a/widget/InputData.h b/widget/InputData.h
+index 1eea32d9fac1..2243bbcf0eea 100644
+--- a/widget/InputData.h
++++ b/widget/InputData.h
+@@ -438,6 +438,9 @@ class PanGestureInput : public InputData {
+     mOverscrollBehaviorAllowsSwipe = aAllows;
+   }
+   void SetSimulateMomentum(bool aSimulate) { mSimulateMomentum = aSimulate; }
++  void SetAllowFlingAcceleration(bool aAllow) {
++    mAllowFlingAcceleration = aAllow;
++  }
+   void SetIsNoLineOrPageDelta(bool aIsNoLineOrPageDelta) {
+     mIsNoLineOrPageDelta = aIsNoLineOrPageDelta;
+   }
+@@ -494,6 +497,8 @@ class PanGestureInput : public InputData {
+   // events.)
+   bool mSimulateMomentum : 1;
+ 
++  bool mAllowFlingAcceleration : 1;
++
+   // true if the creator of this object does not set the mLineOrPageDeltaX/Y
+   // fields and when/if WidgetWheelEvent's are generated from this object wants
+   // the corresponding mLineOrPageDeltaX/Y fields in the WidgetWheelEvent to be

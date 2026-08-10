@@ -1,9 +1,9 @@
 diff --git a/widget/uikit/GeckoEditableSupport.h b/widget/uikit/GeckoEditableSupport.h
 new file mode 100644
-index 000000000000..0a3a80e87777
+index 000000000000..49b28ff9b19e
 --- /dev/null
 +++ b/widget/uikit/GeckoEditableSupport.h
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,226 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -60,6 +60,8 @@ index 000000000000..0a3a80e87777
 +
 +struct GeckoEditableState {
 +  UITextInputStringTokenizer* mTokenizer;
++  id mTextInputTraits;
++  BOOL mSeenHardwareKeyDownInNonEditableContent;
 +  id<UITextInputDelegate> mTextInputDelegate;
 +  id<ChildViewCredentialDelegate> mCredentialDelegate;
 +  BOOL mWaitingForPasswordAutofillFocus;
@@ -69,6 +71,8 @@ index 000000000000..0a3a80e87777
 +  id mSelectionDisplayInteraction;
 +  UIPanGestureRecognizer* mSelectionHandlePanRecognizer;
 +  BOOL mTextInteractionInProgress;
++  BOOL mSelectionHandlesVisibleForTouchInput;
++  id mSelectionHandleSuppressionAssertion;
 +  BOOL mPendingSelectionGeometryRefresh;
 +  BOOL mCaretMenuActive;
 +  BOOL mPendingCaretMenu;

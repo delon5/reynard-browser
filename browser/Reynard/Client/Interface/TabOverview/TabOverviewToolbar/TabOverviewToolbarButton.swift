@@ -27,6 +27,9 @@ final class TabOverviewToolbarButton: UIButton {
     init(action: Action) {
         self.action = action
         super.init(frame: .zero)
+        if #available(iOS 13.4, *) {
+            isPointerInteractionEnabled = true
+        }
         configureAppearance()
         configureImage()
         configureConstraints()

@@ -1,0 +1,46 @@
+diff --git a/layout/base/PresShell.cpp b/layout/base/PresShell.cpp
+index 5b52c35994ce..20af49957bf3 100644
+--- a/layout/base/PresShell.cpp
++++ b/layout/base/PresShell.cpp
+@@ -47,6 +47,7 @@
+ #include "mozilla/IntegerRange.h"
+ #include "mozilla/Likely.h"
+ #include "mozilla/Logging.h"
++#include "mozilla/LookAndFeel.h"
+ #include "mozilla/MemoryReporting.h"
+ #include "mozilla/MouseEvents.h"
+ #include "mozilla/PerfStats.h"
+@@ -5657,7 +5658,32 @@ nscolor PresShell::GetDefaultBackgroundColorToDraw() const {
+ }
+ 
+ void PresShell::UpdateCanvasBackground() {
+-  mCanvasBackground = ComputeCanvasBackground();
++  CanvasBackground canvasBackground = ComputeCanvasBackground();
++
++#ifdef XP_IOS
++  const auto& oldViewportBackground = mCanvasBackground.mViewport;
++  const auto& newViewportBackground = canvasBackground.mViewport;
++  const bool backgroundChanged =
++      oldViewportBackground.mColor != newViewportBackground.mColor ||
++      oldViewportBackground.mCSSSpecified !=
++          newViewportBackground.mCSSSpecified;
++  if (backgroundChanged && this == GetRootPresShell() &&
++      mDocument->GetBrowsingContext() &&
++      mDocument->GetBrowsingContext()->IsTopContent()) {
++    nscolor backgroundColor = newViewportBackground.mColor;
++    if (!newViewportBackground.mCSSSpecified) {
++      backgroundColor = LookAndFeel::Color(
++          LookAndFeel::ColorID::Window, LookAndFeel::SystemColorScheme(),
++          LookAndFeel::UseStandins::No, NS_RGB(255, 255, 255));
++    }
++    if (BrowserChild* browserChild =
++            BrowserChild::GetFrom(mDocument->GetDocShell())) {
++      browserChild->UpdateBackgroundColor(backgroundColor);
++    }
++  }
++#endif
++
++  mCanvasBackground = canvasBackground;
+ }
+ 
+ static SingleCanvasBackground ComputeSingleCanvasBackground(nsIFrame* aCanvas) {

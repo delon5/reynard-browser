@@ -16,10 +16,13 @@ extension BrowserViewController: TabManagerDelegate {
     func tabManagerDidChangeTabs(_ tabManager: TabManager) {
         if let selectedTab = tabManager.selectedTab {
             if !contentView.isDisplaying(session: selectedTab.session) {
-                contentView.setSession(selectedTab.session)
+                contentView.setTab(
+                    selectedTab,
+                    pageBackgroundColor: sessionManager.pageBackgroundColor(for: selectedTab.session)
+                )
             }
         } else {
-            contentView.setSession(nil)
+            contentView.setTab(nil)
         }
         refreshAddressBar()
         
@@ -31,6 +34,18 @@ extension BrowserViewController: TabManagerDelegate {
         updateBrowserLayout(animated: false)
         homepageOverlayCoordinator.updatePresentation(animated: false)
         tabBar.updateLayout()
+    }
+    
+    func tabManagerDidTerminateSelectedTab(_ tabManager: TabManager) {
+        guard let tab = tabManager.selectedTab else {
+            return
+        }
+        
+        contentView.showPageError(for: tab.url)
+        captureThumbnail(
+            forTabAt: tabManager.selectedTabIndex,
+            mode: tabManager.selectedTabMode
+        )
     }
     
     func tabManager(_ tabManager: TabManager, didFinishLoading session: GeckoSession) {
@@ -47,14 +62,8 @@ extension BrowserViewController: TabManagerDelegate {
     }
     
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?) {
+        toolbarController.reset()
         tabBar.setPendingExpansion(at: nil)
-
-        // The reservation is reported to whichever session is selected,
-        // but the "already reported this" caches live on this controller -
-        // so without forgetting them here, the incoming session keeps the
-        // outgoing one's inset whenever the computed values happen to
-        // match.
-        invalidateDynamicToolbarReport()
 
         // Condensed chrome is a property of how far the user scrolled the
         // page they were on, so it must not follow them to a different
@@ -79,7 +88,10 @@ extension BrowserViewController: TabManagerDelegate {
         syncSelectedPageZoomControls()
         updateNavigationButtons()
         
-        contentView.setSession(selectedTab.session)
+        contentView.setTab(
+            selectedTab,
+            pageBackgroundColor: sessionManager.pageBackgroundColor(for: selectedTab.session)
+        )
         addonCoordinator.handleTabSelectionChange(selectedIndex: index, previousIndex: previousIndex)
         
         if !tabOverview.isPresented && !tabOverview.isTransitionRunning {
@@ -106,10 +118,17 @@ extension BrowserViewController: TabManagerDelegate {
         // not have changed. Only fires when the value actually changed, so
         // this is not a per-navigation relayout.
         applyBrowserLayout(animated: false)
-        updateDynamicToolbarMaxHeight()
     }
 
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession) {
+        if contentView.isDisplaying(session: previousSession) {
+            contentView.setTab(
+                tabManager.selectedTab,
+                pageBackgroundColor: tabManager.selectedTab.map {
+                    sessionManager.pageBackgroundColor(for: $0.session)
+                }
+            )
+        }
         addonCoordinator.handleSelectedTabSessionReplacement(from: previousSession, to: replacementSession)
     }
 
@@ -119,6 +138,10 @@ extension BrowserViewController: TabManagerDelegate {
         }
         isPendingNewTabContentReady = true
         fulfillPendingAutomaticKeyboardFocusIfPossible()
+    }
+    
+    func tabManager(_ tabManager: TabManager, didRequestContentKeyboardFocusFor session: GeckoSession) {
+        requestContentKeyboardFocus(for: session)
     }
     
     func tabManager(_ tabManager: TabManager, captureHistoryThumbnailForTabAt index: Int, mode: TabMode, url: String) {
@@ -133,7 +156,14 @@ extension BrowserViewController: TabManagerDelegate {
         if element.type == .image,
            let source = element.srcUri?.trimmingCharacters(in: .whitespacesAndNewlines),
            let url = URL(string: source) {
-            contextMenuCoordinator.present(at: point, target: .image(url))
+            let linkURL = element.linkUri
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .flatMap { URL(string: $0) }
+            contextMenuCoordinator.present(
+                at: point,
+                target: .image(url, linkURL: linkURL),
+                allowsPreview: !element.isMouseInput
+            )
             return
         }
         
@@ -142,7 +172,7 @@ extension BrowserViewController: TabManagerDelegate {
             return
         }
         
-        contextMenuCoordinator.present(at: point, target: .link(url))
+        contextMenuCoordinator.present(at: point, target: .link(url), allowsPreview: !element.isMouseInput)
     }
     
     func tabManager(_ tabManager: TabManager, didChangeFullscreen fullScreen: Bool, for session: GeckoSession) {
@@ -230,6 +260,13 @@ extension BrowserViewController: TabManagerDelegate {
             tabOverview.isPresented
             ? tabOverview.refreshTab(at: index, mode: tabManager.selectedTabMode)
             : tabOverview.reloadTabs()
+            
+        case .pageBackgroundColor:
+            guard index == tabManager.selectedTabIndex else {
+                return
+            }
+            let tab = tabManager.activeTabs[index]
+            contentView.setPageBackgroundColor(sessionManager.pageBackgroundColor(for: tab.session))
         }
     }
     
@@ -291,6 +328,16 @@ extension BrowserViewController: TabManagerDelegate {
             succeeded: succeeded
         )
     }
+    
+    func reloadTerminatedTab() {
+        guard tabManager.selectedTab?.session.isOpen() == false else {
+            return
+        }
+        
+        let index = tabManager.selectedTabIndex
+        let mode = tabManager.selectedTabMode
+        tabManager.selectTab(at: index, mode: mode)
+    }
 }
 
 extension BrowserViewController {
@@ -317,7 +364,7 @@ extension BrowserViewController {
         
         let targetTabID = targetTab.id
         if homepageOverlayCoordinator.needsHomepageThumbnail(for: targetTab) {
-            homepageOverlayCoordinator.captureHomepageThumbnail(targetTab, size: contentView.bounds.size) { [weak self] thumbnail in
+            homepageOverlayCoordinator.captureHomepageThumbnail(targetTab) { [weak self] thumbnail in
                 guard let self,
                       let thumbnail,
                       (mode == .private ? self.tabManager.privateTabs : self.tabManager.regularTabs)[safe: index]?.id == targetTabID else {

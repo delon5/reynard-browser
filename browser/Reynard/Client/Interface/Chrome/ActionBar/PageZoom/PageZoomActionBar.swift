@@ -37,7 +37,7 @@ final class PageZoomActionBar: UIView {
     var onReset: (() -> Void)?
     var onClose: (() -> Void)?
     
-    private(set) var zoomLevel = Prefs.AppearanceSettings.defaultPageZoomLevel
+    private(set) var zoomLevel = Prefs.BrowsingSettings.defaultPageZoomLevel
     private var maximumZoomLevel = PageZoomActionBar.zoomLevels.last!
     
     private let backgroundView: UIVisualEffectView = {
@@ -160,7 +160,7 @@ final class PageZoomActionBar: UIView {
     // MARK: - Updates
     
     func setZoomLevel(_ level: Int) {
-        zoomLevel = PageZoomActionBar.zoomLevels.contains(level) ? level : Prefs.AppearanceSettings.defaultPageZoomLevel
+        zoomLevel = PageZoomActionBar.zoomLevels.contains(level) ? level : Prefs.BrowsingSettings.defaultPageZoomLevel
         zoomLevel = min(zoomLevel, maximumZoomLevel)
         updateControls()
     }
@@ -183,7 +183,7 @@ final class PageZoomActionBar: UIView {
     
     func nextZoomLevel() -> Int {
         guard let index = PageZoomActionBar.zoomLevels.firstIndex(of: zoomLevel) else {
-            return Prefs.AppearanceSettings.defaultPageZoomLevel
+            return Prefs.BrowsingSettings.defaultPageZoomLevel
         }
         let maximumIndex = PageZoomActionBar.zoomLevels.firstIndex(of: maximumZoomLevel)
             ?? PageZoomActionBar.zoomLevels.index(before: PageZoomActionBar.zoomLevels.endIndex)
@@ -192,7 +192,7 @@ final class PageZoomActionBar: UIView {
     
     func previousZoomLevel() -> Int {
         guard let index = PageZoomActionBar.zoomLevels.firstIndex(of: zoomLevel) else {
-            return Prefs.AppearanceSettings.defaultPageZoomLevel
+            return Prefs.BrowsingSettings.defaultPageZoomLevel
         }
         return PageZoomActionBar.zoomLevels[max(index - 1, 0)]
     }

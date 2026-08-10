@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/GeckoEditableSupport.h b/widget/uikit/GeckoEditableSupport.h
-index 71fce485b971f89322fc3fc313f0dbee6ec1e268..7ab5f18382c3b5cd8f43592fa210b0436f8d7f11 100644
+index 49b28ff9b19e6af1cdd93fabdeac39f237239fa8..41bf70cc9784e2f015d63bd4e0148f9f492f646a 100644
 --- a/widget/uikit/GeckoEditableSupport.h
 +++ b/widget/uikit/GeckoEditableSupport.h
-@@ -66,6 +66,8 @@ struct GeckoEditableState {
+@@ -74,6 +74,8 @@ struct GeckoEditableState {
    GeckoSelectionHandle mActiveSelectionHandle;
    NSUInteger mSelectionHandleAnchorOffset;
    NSRange mShadowSelectedRange;
@@ -12,18 +12,18 @@ index 71fce485b971f89322fc3fc313f0dbee6ec1e268..7ab5f18382c3b5cd8f43592fa210b043
    NSUInteger mShadowActiveHandleOffset;
    NSUInteger mLineBoundaryStart;
 diff --git a/widget/uikit/GeckoEditableSupport.mm b/widget/uikit/GeckoEditableSupport.mm
-index 9d86127ada92d5fb95d45979ca3e15a006d299c2..590ea3eb4b23f542a575e413df5a1f61659ce6b4 100644
+index 24eeaa8bd3a62fd418478953d29bc157a6320acd..96db06f83d5fc7c046ca820a0ec07cfb100e7de5 100644
 --- a/widget/uikit/GeckoEditableSupport.mm
 +++ b/widget/uikit/GeckoEditableSupport.mm
-@@ -29,6 +29,7 @@ namespace {
-
+@@ -37,6 +37,7 @@ - (void)takeTraitsFrom:(id<UITextInputTraits>)aTraits;
+ 
  constexpr CGFloat kHandleHitRadius = 44.0;
  constexpr CGFloat kFallbackCharWidth = 8.0;
 +constexpr CFTimeInterval kPendingKeyboardEditLifetime = 0.5;
-
+ 
  struct EndpointRects {
    CGRect startRect;
-@@ -410,6 +411,10 @@ bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
+@@ -447,6 +448,10 @@ - (NSUInteger)findClosestOffsetToX:(CGFloat)aTargetX
                             lineEnd:(NSUInteger)aLineEnd
                             handler:(widget::TextInputHandler*)aHandler;
  - (NSRange)deleteBackwardRangeWithHandler:(widget::TextInputHandler*)aHandler;
@@ -31,29 +31,29 @@ index 9d86127ada92d5fb95d45979ca3e15a006d299c2..590ea3eb4b23f542a575e413df5a1f61
 +                             handler:(widget::TextInputHandler*)aHandler;
 +- (void)setPendingKeyboardEditSelection:(NSRange)aSelection;
 +- (void)clearPendingKeyboardEditSelection;
+ - (void)configureTextInteractionForTouchInput:(UITextInteraction*)aInteraction;
  - (void)updateTextInteractions;
  - (void)scheduleResponderBlur;
- - (void)cancelResponderBlur;
-@@ -505,6 +510,7 @@ bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
+@@ -606,6 +611,7 @@ - (void)setupTextInput {
    // The other Vietnamese fields are meaningful only while this buffer exists.
    mEditable.mVietnameseBufferText = nil;
    mEditable.mKoreanComposedText = nil;
 +  [self clearPendingKeyboardEditSelection];
    [self resetHandleState];
-
+ 
    mEditable.mEditableTextInteraction = [[UITextInteraction
-@@ -534,6 +540,7 @@ bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
+@@ -640,6 +646,7 @@ - (void)teardownTextInput {
    // Drop any temporary Vietnamese mirror before releasing UIKit interactions.
    [self clearVietnameseBuffer];
    [self clearKoreanCompositionState];
 +  [self clearPendingKeyboardEditSelection];
-
+ 
    [self teardownModernTextInput];
    [self resetHandleState];
-@@ -1118,10 +1125,49 @@ bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
+@@ -1281,10 +1288,49 @@ - (NSUInteger)findClosestOffsetToX:(CGFloat)aTargetX
    return bestOffset;
  }
-
+ 
 +// Keeps rapid keyboard replacement commands coherent while Gecko's DOM
 +// selection is still catching up to the preceding command.
 +- (BOOL)pendingKeyboardEditSelection:(NSRange*)aSelection
@@ -101,7 +101,7 @@ index 9d86127ada92d5fb95d45979ca3e15a006d299c2..590ea3eb4b23f542a575e413df5a1f61
        selection.location == NSNotFound) {
      return NSMakeRange(NSNotFound, 0);
    }
-@@ -2457,6 +2503,11 @@ bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
+@@ -2776,6 +2822,11 @@ - (void)insertText:(NSString*)aText {
    BOOL hasBuffer = [self ensureVietnameseBufferWithHandler:handler];
    mEditable.mCaretMenuActive = NO;
    if (!hasBuffer) {
@@ -113,9 +113,9 @@ index 9d86127ada92d5fb95d45979ca3e15a006d299c2..590ea3eb4b23f542a575e413df5a1f61
      [mEditable.mTextInputDelegate textWillChange:self];
      [mEditable.mTextInputDelegate selectionWillChange:self];
      if (![self isKoreanInputMode] || ![self handleKoreanInsertText:aText
-@@ -2512,7 +2563,9 @@ bool TextInputHandler::RunCommand(EventMessage aMessage, bool aOnlyEnabledCheck,
+@@ -2979,7 +3030,9 @@ - (void)deleteBackward {
      }
-
+ 
      [mEditable.mTextInputDelegate textWillChange:self];
 -    handler->ReplaceRange(deleteRange, @"");
 +    if (handler->ReplaceRange(deleteRange, @"")) {

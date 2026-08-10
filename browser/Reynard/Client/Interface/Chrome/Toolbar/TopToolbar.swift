@@ -9,12 +9,13 @@ import UIKit
 
 final class TopToolbar: UIView {
     private enum UX {
-        static let topToolbarContentHeight: CGFloat = 52
+        static let topToolbarContentHeight: CGFloat = 60
         static let topToolbarButtonStackHeight: CGFloat = 30
         static let topToolbarStandardButtonStackWidth: CGFloat = 126
         static let topToolbarHorizontalInset: CGFloat = 12
         static let topToolbarButtonSpacing: CGFloat = 10
         static let topToolbarAddressBarSpacing: CGFloat = 12
+        static let topToolbarAddressBarVerticalSpacing: CGFloat = 8
         static let topToolbarAddressBarWidthLimit: CGFloat = 650
     }
     
@@ -37,6 +38,18 @@ final class TopToolbar: UIView {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
         view.backgroundColor = .clear
+        return view
+    }()
+    
+    private let backgroundView: UIVisualEffectView = {
+        let effect: UIVisualEffect
+        if #available(iOS 26.0, *) {
+            effect = UIGlassEffect.nonAdaptive(style: .regular)
+        } else {
+            effect = UIBlurEffect(style: .systemChromeMaterial)
+        }
+        let view = UIVisualEffectView(effect: effect)
+        view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
     
@@ -150,19 +163,22 @@ final class TopToolbar: UIView {
             standardAddressBarConstraints = [
                 addressBar.leadingAnchor.constraint(equalTo: leadingButtons.trailingAnchor, constant: UX.topToolbarAddressBarSpacing),
                 addressBar.trailingAnchor.constraint(equalTo: trailingButtons.leadingAnchor, constant: -UX.topToolbarAddressBarSpacing),
-                addressBar.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+                addressBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: UX.topToolbarAddressBarVerticalSpacing),
+                addressBar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -UX.topToolbarAddressBarVerticalSpacing),
             ]
             widthLimitedStandardAddressBarConstraints = [
                 addressBar.centerXAnchor.constraint(equalTo: contentLayoutGuide.centerXAnchor),
                 addressBar.widthAnchor.constraint(equalToConstant: UX.topToolbarAddressBarWidthLimit),
                 addressBar.leadingAnchor.constraint(greaterThanOrEqualTo: leadingButtons.trailingAnchor, constant: UX.topToolbarAddressBarSpacing),
                 addressBar.trailingAnchor.constraint(lessThanOrEqualTo: trailingButtons.leadingAnchor, constant: -UX.topToolbarAddressBarSpacing),
-                addressBar.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+                addressBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: UX.topToolbarAddressBarVerticalSpacing),
+                addressBar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -UX.topToolbarAddressBarVerticalSpacing),
             ]
             compactAddressBarConstraints = [
                 addressBar.leadingAnchor.constraint(equalTo: contentLayoutGuide.leadingAnchor),
                 addressBar.trailingAnchor.constraint(equalTo: contentLayoutGuide.trailingAnchor),
-                addressBar.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+                addressBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: UX.topToolbarAddressBarVerticalSpacing),
+                addressBar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -UX.topToolbarAddressBarVerticalSpacing),
             ]
         }
     }
@@ -211,6 +227,10 @@ final class TopToolbar: UIView {
             }
             layoutIfNeeded()
         }
+    }
+    
+    func setContentAlpha(_ alpha: CGFloat) {
+        contentView.alpha = alpha
     }
     
     // MARK: - Updates
@@ -262,10 +282,11 @@ final class TopToolbar: UIView {
     
     private func configureAppearance() {
         translatesAutoresizingMaskIntoConstraints = false
-        backgroundColor = .toolbarBackground
+        backgroundColor = .clear
     }
     
     private func configureHierarchy() {
+        addSubview(backgroundView)
         addSubview(contentView)
         contentView.addSubview(leadingButtons)
         contentView.addSubview(trailingButtons)
@@ -278,6 +299,11 @@ final class TopToolbar: UIView {
         trailingWidthConstraint = trailingButtons.widthAnchor.constraint(equalToConstant: UX.topToolbarStandardButtonStackWidth)
         
         NSLayoutConstraint.activate([
+            backgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            backgroundView.topAnchor.constraint(equalTo: topAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            
             heightConstraint,
             contentTopConstraint,
             contentView.leadingAnchor.constraint(equalTo: leadingAnchor),

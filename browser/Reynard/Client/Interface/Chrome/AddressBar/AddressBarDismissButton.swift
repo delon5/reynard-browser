@@ -31,19 +31,12 @@ final class AddressBarDismissButton: UIButton {
     
     override func layoutSubviews() {
         super.layoutSubviews()
-        
+        layer.shadowOpacity = UX.dismissButtonShadowOpacity
         layer.cornerRadius = bounds.height / UX.dismissButtonCornerRadiusDivisor
-        layer.shadowPath = layer.shadowOpacity > 0
-        ? UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
-        : nil
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
     }
     
     // MARK: - Appearance
-    
-    func setShadowVisible(_ visible: Bool) {
-        layer.shadowOpacity = visible ? UX.dismissButtonShadowOpacity : 0
-        setNeedsLayout()
-    }
     
     private func configureAppearance() {
         translatesAutoresizingMaskIntoConstraints = false

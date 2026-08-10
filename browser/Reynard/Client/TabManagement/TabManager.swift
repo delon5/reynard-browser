@@ -21,6 +21,8 @@ protocol TabManager: AnyObject {
     var selectedTabIndex: Int { get }
     var selectedTab: Tab? { get }
     
+    func applicationWillResignActive()
+    func applicationDidBecomeActive()
     func createInitialTab(openingScreen: HomepageOpeningScreen)
     @discardableResult
     func addTab(selecting: Bool, windowId: String?, at index: Int?, isPrivate: Bool) -> Int
@@ -68,6 +70,7 @@ enum TabManagerUpdateReason {
     case navigationState
     case loading
     case thumbnail
+    case pageBackgroundColor
 }
 
 protocol TabManagerDelegate: AnyObject {
@@ -75,6 +78,7 @@ protocol TabManagerDelegate: AnyObject {
     /// browser owns the find bar, so it decides how to present it.
     func tabManager(_ tabManager: TabManager, didRequestFindInPage text: String)
     func tabManagerDidChangeTabs(_ tabManager: TabManager)
+    func tabManagerDidTerminateSelectedTab(_ tabManager: TabManager)
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?)
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession)
     func tabManager(_ tabManager: TabManager, didFirstCompositeFor tabID: UUID)
@@ -92,9 +96,11 @@ protocol TabManagerDelegate: AnyObject {
     /// already showing - an SPA route that added or removed a bottom bar.
     /// The content anchor depends on it, so the layout has to be redone.
     func tabManagerDidUpdateSafeAreaUsage(_ tabManager: TabManager)
+    func tabManager(_ tabManager: TabManager, didRequestContentKeyboardFocusFor session: GeckoSession)
 }
 
 extension TabManagerDelegate {
+    func tabManagerDidTerminateSelectedTab(_ tabManager: TabManager) {}
     func tabManager(_ tabManager: TabManager, didFinishLoading session: GeckoSession) {}
     func tabManager(_ tabManager: TabManager, captureHistoryThumbnailForTabAt index: Int, mode: TabMode, url: String) {}
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession) {}

@@ -16,6 +16,7 @@ struct LinkPreviewMenu {
         onPreviewCreated: @escaping (LinkPreviewViewController) -> Void,
         openInNewTab: @escaping () -> Void,
         openInNewPrivateTab: @escaping () -> Void,
+        openInBackground: @escaping () -> Void,
         shareLink: @escaping (URL) -> Void
     ) -> UIContextMenuConfiguration? {
         guard case .link(let url) = context.target else {
@@ -34,18 +35,25 @@ struct LinkPreviewMenu {
         
         return UIContextMenuConfiguration(identifier: url as NSURL, previewProvider: previewProvider) { _ in
             UIMenu(title: "", children: [
-                UIAction(title: NSLocalizedString("Open in New Tab", comment: ""), image: UIImage(named: "reynard.plus.square.on.square")) { _ in
-                    openInNewTab()
-                },
-                UIAction(title: NSLocalizedString("Open in New Private Tab", comment: ""), image: UIImage(named: "reynard.plus.square.fill.on.square.fill")) { _ in
-                    openInNewPrivateTab()
-                },
-                UIAction(title: NSLocalizedString("Copy Link", comment: ""), image: UIImage(named: "reynard.document.on.document")) { _ in
-                    UIPasteboard.general.string = url.absoluteString
-                },
-                UIAction(title: NSLocalizedString("Share Link", comment: ""), image: UIImage(named: "reynard.square.and.arrow.up")) { _ in
-                    shareLink(url)
-                },
+                UIMenu(title: "", options: .displayInline, children: [
+                    UIAction(title: NSLocalizedString("Open Link in New Tab", comment: ""), image: UIImage(named: "reynard.plus.square")) { _ in
+                        openInNewTab()
+                    },
+                    UIAction(title: NSLocalizedString("Open Link in New Private Tab", comment: ""), image: UIImage(named: "reynard.plus.square.fill")) { _ in
+                        openInNewPrivateTab()
+                    },
+                    UIAction(title: NSLocalizedString("Open Link in Background", comment: ""), image: UIImage(named: "reynard.plus.square.dashed")) { _ in
+                        openInBackground()
+                    },
+                ]),
+                UIMenu(title: "", options: .displayInline, children: [
+                    UIAction(title: NSLocalizedString("Copy Link", comment: ""), image: UIImage(named: "reynard.document.on.document")) { _ in
+                        UIPasteboard.general.string = url.absoluteString
+                    },
+                    UIAction(title: NSLocalizedString("Share Link", comment: ""), image: UIImage(named: "reynard.square.and.arrow.up")) { _ in
+                        shareLink(url)
+                    },
+                ]),
             ])
         }
     }

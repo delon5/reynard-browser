@@ -38,7 +38,7 @@ protocol TabOverviewPresentationContext: AnyObject {
     func setSearchFocused(_ focused: Bool, animated: Bool)
     func endEditing()
     func updateLayout(animated: Bool, duration: TimeInterval)
-    func tabOverviewPresentationDidFinishTransition()
+    func tabOverviewDidFinishDismissal()
 }
 
 final class TabOverview: UIView {
@@ -94,6 +94,15 @@ final class TabOverview: UIView {
         
         let width = max(contentView.bounds.width, 1)
         return max(contentView.bounds.height, 1) / width
+    }
+    
+    var visiblePreviewCropRect: CGRect? {
+        guard let context = presentationContext else {
+            return nil
+        }
+        return context.contentView
+            .thumbnailGeometry(in: context.containerView)?
+            .cropRect
     }
     
     let collection: TabOverviewCollection
@@ -235,8 +244,8 @@ final class TabOverview: UIView {
         collection.collectionView(for: mode)
     }
     
-    func itemIndex(forTabAt index: Int, mode: Mode? = nil) -> Int? {
-        collection.itemIndex(forTabAt: index, mode: mode)
+    func itemIndex(forTabAt index: Int) -> Int? {
+        collection.itemIndex(forTabAt: index)
     }
     
     func prepareDismissSelection(to index: Int, mode: TabMode, previewImage: UIImage?) {

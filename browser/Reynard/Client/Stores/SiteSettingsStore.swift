@@ -140,7 +140,7 @@ final class SiteSettingsStore {
         }
         
         return stateQueue.sync {
-            if value == Prefs.AppearanceSettings.defaultPageZoomLevel {
+            if value == Prefs.BrowsingSettings.defaultPageZoomLevel {
                 return clearSettingLocked(.pageZoom, for: host)
             }
             
@@ -226,7 +226,7 @@ final class SiteSettingsStore {
         }
         
         return stateQueue.sync {
-            if value == Prefs.AppearanceSettings.defaultPageZoomLevel {
+            if value == Prefs.BrowsingSettings.defaultPageZoomLevel {
                 return clearSettingLocked(.pageZoom, for: host)
             }
             

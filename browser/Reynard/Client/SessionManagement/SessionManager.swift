@@ -25,6 +25,7 @@ final class SessionManager {
     let trackingProtection: TrackingProtectionManager
     
     private var sessionsRequestedActive: [ObjectIdentifier: GeckoSession] = [:]
+    private var pageBackgroundColors: [ObjectIdentifier: UIColor] = [:]
     private var isApplicationForeground = true
     // Tracks the resign/become-active pair, which is narrower than
     // foreground/background: Control Centre, the app switcher and the
@@ -32,6 +33,7 @@ final class SessionManager {
     // latch keys on this because the compositor-vs-UIKit CA race lives
     // in exactly those transitions.
     private var isPhoneSceneActive = true
+    private(set) var isApplicationActive = true
     private weak var pictureInPictureSession: GeckoSession?
     
     /// Whether this session is the one Picture in Picture is rendering
@@ -193,11 +195,13 @@ final class SessionManager {
     
     func applicationWillResignActive() {
         setCommitsSuspendedForPhoneHostedSessions(true)
+        isApplicationActive = false
         applicationStateObserver?.sessionManagerWillResignActive(self)
     }
 
     func applicationDidBecomeActive() {
         setCommitsSuspendedForPhoneHostedSessions(false)
+        isApplicationActive = true
         applicationStateObserver?.sessionManagerDidChangeApplicationState(self)
     }
 
@@ -345,6 +349,7 @@ final class SessionManager {
         deactivate(session)
         trackingProtection.removeSession(session)
         permissionStore.removePrivateActions(for: session)
+        pageBackgroundColors.removeValue(forKey: ObjectIdentifier(session))
         session.close()
     }
     
@@ -358,6 +363,16 @@ final class SessionManager {
             history.removeHistory(for: tabID)
         }
         closeImmediately(session)
+    }
+    
+    // MARK: - Page Background Color
+    
+    func pageBackgroundColor(for session: GeckoSession) -> UIColor {
+        return pageBackgroundColors[ObjectIdentifier(session)] ?? .systemBackground
+    }
+    
+    func setPageBackgroundColor(_ color: UIColor, for session: GeckoSession) {
+        pageBackgroundColors[ObjectIdentifier(session)] = color
     }
     
     // MARK: - Addon Tab State

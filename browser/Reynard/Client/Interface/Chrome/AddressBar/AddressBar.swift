@@ -24,21 +24,19 @@ protocol AddressBarDelegate: AnyObject {
 
 final class AddressBar: UIView {
     private enum UX {
-        static let addressBarBackgroundCornerRadius: CGFloat = 16
+        static let addressBarBackgroundCornerRadius: CGFloat = 22
         static let addressBarContentHorizontalInset: CGFloat = 12
         static let addressBarButtonToTextSpacing: CGFloat = 8
         static let addressBarDismissButtonSpacing: CGFloat = 9
         static let addressBarButtonSize: CGFloat = 18
-        static let phoneAddressBarHeight: CGFloat = 42
-        static let compactAddressBarHeight: CGFloat = 38
-        static let padAddressBarHeight: CGFloat = 38
+        static let addressBarHeight: CGFloat = 44
         static let addressBarLoadingProgressHeight: CGFloat = 2
         static let addressBarAutocompleteTrailingInset: CGFloat = 30
         static let addressBarTextFontSize: CGFloat = 17
         static let addressBarDismissButtonAnimationDuration: TimeInterval = 0.2
         static let addressBarBackgroundDarkModeShadowAlpha: CGFloat = 0.3
-        static let addressBarBackgroundShadowOpacity: Float = 0.12
-        static let addressBarBackgroundShadowRadius: CGFloat = 10
+        static let addressBarBackgroundShadowOpacity: Float = 0.18
+        static let addressBarBackgroundShadowRadius: CGFloat = 14
         static let addressBarBackgroundShadowOffset = CGSize(width: 0, height: 2)
     }
     
@@ -144,6 +142,9 @@ final class AddressBar: UIView {
     
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)
+        if #available(iOS 13.4, *) {
+            button.isPointerInteractionEnabled = true
+        }
         button.translatesAutoresizingMaskIntoConstraints = false
         button.tintColor = .secondaryLabel
         if #available(iOS 14.0, *) {
@@ -178,6 +179,9 @@ final class AddressBar: UIView {
     
     private let trailingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)
+        if #available(iOS 13.4, *) {
+            button.isPointerInteractionEnabled = true
+        }
         button.translatesAutoresizingMaskIntoConstraints = false
         button.tintColor = .label
         button.isHidden = true
@@ -284,10 +288,10 @@ final class AddressBar: UIView {
     
     override func layoutSubviews() {
         super.layoutSubviews()
-        let showsShadow = chromeMode != .pad
-        addressBarBackground.layer.shadowPath = showsShadow
-        ? UIBezierPath(roundedRect: addressBarBackground.bounds, cornerRadius: UX.addressBarBackgroundCornerRadius).cgPath
-        : nil
+        addressBarBackground.layer.shadowPath = UIBezierPath(
+            roundedRect: addressBarBackground.bounds,
+            cornerRadius: UX.addressBarBackgroundCornerRadius
+        ).cgPath
     }
     
     // MARK: - Configuration
@@ -373,10 +377,9 @@ final class AddressBar: UIView {
     func updateLayout(position: BrowserChromePosition, chromeMode: BrowserChromeMode) {
         self.position = position
         self.chromeMode = chromeMode
-        backgroundHeightConstraint.constant = height(for: chromeMode)
-        dismissWidthConstraint.constant = height(for: chromeMode)
-        dismissHeightConstraint.constant = height(for: chromeMode)
-        dismissButton.setShadowVisible(chromeMode == .phone)
+        backgroundHeightConstraint.constant = UX.addressBarHeight
+        dismissWidthConstraint.constant = UX.addressBarHeight
+        dismissHeightConstraint.constant = UX.addressBarHeight
         applyState()
     }
     
@@ -555,9 +558,9 @@ final class AddressBar: UIView {
             equalTo: dismissButton.leadingAnchor,
             constant: -UX.addressBarDismissButtonSpacing
         )
-        backgroundHeightConstraint = addressBarBackground.heightAnchor.constraint(equalToConstant: UX.phoneAddressBarHeight)
-        dismissWidthConstraint = dismissButton.widthAnchor.constraint(equalToConstant: UX.phoneAddressBarHeight)
-        dismissHeightConstraint = dismissButton.heightAnchor.constraint(equalToConstant: UX.phoneAddressBarHeight)
+        backgroundHeightConstraint = addressBarBackground.heightAnchor.constraint(equalToConstant: UX.addressBarHeight)
+        dismissWidthConstraint = dismissButton.widthAnchor.constraint(equalToConstant: UX.addressBarHeight)
+        dismissHeightConstraint = dismissButton.heightAnchor.constraint(equalToConstant: UX.addressBarHeight)
         
         NSLayoutConstraint.activate([
             addressBarBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -664,7 +667,7 @@ final class AddressBar: UIView {
     private func applyState() {
         applyRenderModel(resolveRenderModel())
         applyLoadingState()
-        addressBarBackground.layer.shadowOpacity = chromeMode == .pad ? 0 : UX.addressBarBackgroundShadowOpacity
+        addressBarBackground.layer.shadowOpacity = UX.addressBarBackgroundShadowOpacity
         setNeedsLayout()
     }
     
@@ -820,14 +823,6 @@ final class AddressBar: UIView {
             return
         }
         trailingButton.setImage(UIImage(named: state == .stop ? "reynard.xmark" : "reynard.arrow.clockwise"), for: .normal)
-    }
-    
-    private func height(for chromeMode: BrowserChromeMode) -> CGFloat {
-        switch chromeMode {
-        case .phone: return UX.phoneAddressBarHeight
-        case .compact: return UX.compactAddressBarHeight
-        case .pad: return UX.padAddressBarHeight
-        }
     }
     
     // MARK: - Display Content

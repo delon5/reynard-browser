@@ -24,10 +24,20 @@ final class TabManagerImplementation: NSObject, TabManager {
         return tabs(for: selectedTabMode)[safe: selectedTabIndex]
     }
     
-    private let promptCoordinator = PromptCoordinator(
-        presenter: PromptPresenter()
+    private lazy var requestContentKeyboardFocus: (GeckoSession) -> Void = { [weak self] session in
+        guard let self else { return }
+        self.delegate?.tabManager(self, didRequestContentKeyboardFocusFor: session)
+    }
+    private lazy var promptCoordinator = PromptCoordinator(
+        presenter: PromptPresenter(),
+        onPromptFinished: requestContentKeyboardFocus
     )
-    private let selectionActionPresenter = SelectionActionPresenter()
+    // The merged presenter has no no-arg init any more; keep it stored
+    // (init wires onFindSelection through it) but make it lazy so it can
+    // hand over the keyboard-focus callback.
+    private lazy var selectionActionPresenter = SelectionActionPresenter(
+        onMenuDismissed: requestContentKeyboardFocus
+    )
     private lazy var selectionActionCoordinator = SelectionActionCoordinator(
         presenter: selectionActionPresenter
     )
@@ -86,6 +96,10 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// enough to land before a user gives up and force-quits.
     private static let paintWatchdogSeconds: TimeInterval = 8.0
     private var selectionCounter = 0
+    
+    // A background termination may be reported after the app becomes active.
+    // Keep the session eligible for silent recovery until a foreground composite confirms it survived.
+    private weak var sessionEligibleForSilentRecovery: GeckoSession?
     
     private lazy var lenientURLExpression: NSRegularExpression = {
         let pattern = "^\\s*(\\w+-+)*[\\w\\[]+(://[/]*|:|\\.)(\\w+-+)*[\\w\\[:]+([\\S&&[^\\w-]]\\S*)?\\s*$"
@@ -261,6 +275,20 @@ final class TabManagerImplementation: NSObject, TabManager {
         tab.state.restoreState = .pending(url)
         tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
         NSLog("[TabMemory] Slept background session for tab %@", tab.id.uuidString)
+    }
+    
+    // MARK: - Application Lifecycle
+    
+    func applicationWillResignActive() {
+        sessionEligibleForSilentRecovery = selectedTab?.session
+    }
+    
+    func applicationDidBecomeActive() {
+        guard selectedTab?.session.isOpen() == false else {
+            return
+        }
+        
+        selectTab(at: selectedTabIndex, mode: selectedTabMode)
     }
     
     // MARK: - Persistence And Lookup
@@ -735,8 +763,9 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         
         let tab = tabs(for: mode)[index]
-        guard case let .pending(url) = tab.state.restoreState else {
-            logger(String(format: "tabRestore: tab at index %d has no pending restore (restoreState=%@) - nothing to do", index, String(describing: tab.state.restoreState)))
+        guard tab.session.isOpen(),
+              case let .pending(url) = tab.state.restoreState else {
+            logger(String(format: "tabRestore: tab at index %d not restorable (open=%@, restoreState=%@) - nothing to do", index, String(tab.session.isOpen()), String(describing: tab.state.restoreState)))
             return
         }
         
@@ -784,6 +813,62 @@ final class TabManagerImplementation: NSObject, TabManager {
             self?.selectTab(at: index, mode: .regular)
         }
         return true
+    }
+    
+    // MARK: - Session Recovery
+    
+    private func recoverSelectedSessionIfNeeded() {
+        guard sessionManager.isForeground,
+              let tab = selectedTab,
+              !tab.session.isOpen() else {
+            return
+        }
+        
+        let previousSession = tab.session
+        let replacementSession = createSession(
+            tabID: tab.id,
+            url: tab.url,
+            windowId: nil,
+            isPrivate: tab.isPrivate
+        )
+        tab.session = replacementSession
+        tab.state.sessionNavigationAvailability = .unavailable
+        delegate?.tabManager(
+            self,
+            didReplaceSelectedSession: previousSession,
+            with: replacementSession
+        )
+    }
+    
+    private func handleSessionTermination(_ session: GeckoSession) {
+        guard let location = tabLocation(for: session) else {
+            return
+        }
+        
+        let wasAwaitingForegroundComposite =
+        sessionEligibleForSilentRecovery === session
+        if wasAwaitingForegroundComposite {
+            sessionEligibleForSilentRecovery = nil
+        }
+        
+        let didTerminateSelectedTab = selectedTab?.session === session
+        let tab = tabs(for: location.mode)[location.index]
+        sessionManager.close(session)
+        tab.state.restoreState = restoredURL(from: tab.url).map(TabRestoreState.pending) ?? .none
+        tab.state.loadingState = .idle
+        notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+        persistState()
+        
+        guard didTerminateSelectedTab,
+              sessionManager.isApplicationActive else {
+            return
+        }
+        
+        if wasAwaitingForegroundComposite {
+            selectTab(at: location.index, mode: location.mode)
+        } else {
+            delegate?.tabManagerDidTerminateSelectedTab(self)
+        }
     }
     
     // MARK: - Tab Lifecycle
@@ -931,6 +1016,7 @@ final class TabManagerImplementation: NSObject, TabManager {
            let previousSession = previousTab?.session {
             sessionManager.deactivate(previousSession)
         }
+        recoverSelectedSessionIfNeeded()
         sessionManager.activate(selectedTab.session)
         systemMediaSession.select(session: selectedTab.session)
         pictureInPictureCoordinator?.selectedSessionDidChange()
@@ -1073,6 +1159,14 @@ final class TabManagerImplementation: NSObject, TabManager {
             return
         }
         
+        if selectedTab === tab {
+            recoverSelectedSessionIfNeeded()
+        }
+        guard tab.session.isOpen() else {
+            return
+        }
+        
+        tab.state.restoreState = .none
         tab.state.suppressInitialNavigation = false
         tab.state.displayState = .pending(navigationInput)
         if let location = tabLocation(for: tab.id) {
@@ -1509,13 +1603,53 @@ extension TabManagerImplementation: ContentDelegate {
         }
         tab.state.hasFirstComposite = true
         delegate?.tabManager(self, didFirstCompositeFor: tab.id)
+        if sessionManager.isApplicationActive,
+           sessionEligibleForSilentRecovery === session {
+            sessionEligibleForSilentRecovery = nil
+        }
     }
     
     func onFirstContentfulPaint(session: GeckoSession) {}
     
     func onPaintStatusReset(session: GeckoSession) {}
     
-    func onWebAppManifest(session: GeckoSession, manifest: Any) {}
+    func onPageBackgroundColorChange(session: GeckoSession, color: UIColor) {
+        sessionManager.setPageBackgroundColor(color, for: session)
+        guard let location = tabLocation(for: session) else {
+            return
+        }
+        
+        guard location.mode == selectedTabMode else {
+            return
+        }
+        delegate?.tabManager(self, didUpdateTabAt: location.index, reason: .pageBackgroundColor)
+    }
+    
+    func onWebAppManifest(session: GeckoSession, manifest: Any) {
+        guard let location = tabLocation(for: session),
+              let url = remoteURL(from: tabs(for: location.mode)[location.index].url) else {
+            return
+        }
+        
+        let tab = tabs(for: location.mode)[location.index]
+        let tabID = tab.id
+        let expectedURL = url.absoluteString
+        cancelFaviconTask(for: tabID)
+        faviconTasks[tabID] = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            
+            let image = await self.faviconStore.favicon(for: url, webAppManifest: manifest)
+            guard !Task.isCancelled else {
+                return
+            }
+            
+            await MainActor.run {
+                self.applyResolvedFavicon(image, toTabWithID: tabID, expectedURL: expectedURL)
+            }
+        }
+    }
     
     func onSlowScript(session: GeckoSession, scriptFileName: String) async -> SlowScriptResponse {
         return .halt

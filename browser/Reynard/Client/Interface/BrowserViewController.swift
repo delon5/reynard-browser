@@ -8,7 +8,7 @@
 import GeckoView
 import UIKit
 
-final class BrowserViewController: UIViewController {
+final class BrowserViewController: UIViewController, GeckoScreenOrientationDelegate {
     private enum UX {
         static let layoutAnimationDuration: TimeInterval = 0.22
         static let fallbackTopInset: CGFloat = 24
@@ -38,8 +38,15 @@ final class BrowserViewController: UIViewController {
     var pendingNewTabKeyboardFocusTabID: UUID?
     var isPendingNewTabKeyboardFocusEventDispatchComplete = false
     var isPendingNewTabContentReady = false
+    private var lockedOrientations: UIInterfaceOrientationMask?
+    private var pendingOrientationRequest: (
+        id: UUID,
+        orientations: UIInterfaceOrientationMask,
+        completion: (GeckoOrientationLockResult) -> Void
+    )?
     weak var fullscreenSession: GeckoSession?
     private let allowsSidebarHosting: Bool
+    private var shouldRestoreContentFocus = false
     private(set) var browserLayout = BrowserLayout.initial(
         interfaceIdiom: UIDevice.current.userInterfaceIdiom
     )
@@ -71,15 +78,23 @@ final class BrowserViewController: UIViewController {
         ])
         return loadingView
     }()
+    private(set) lazy var toolbarController = ToolbarController(
+        browserChrome: browserChrome,
+        tabBar: tabBar,
+        contentView: contentView,
+        rootView: view
+    )
     
     lazy var overlayCoordinator = OverlayCoordinator(host: self)
     lazy var homepageOverlayCoordinator = HomepageOverlayCoordinator(
         delegate: self,
-        overlayCoordinator: overlayCoordinator
+        overlayCoordinator: overlayCoordinator,
+        toolbarController: toolbarController
     )
     lazy var searchOverlayCoordinator = SearchOverlayCoordinator(
         delegate: self,
-        overlayCoordinator: overlayCoordinator
+        overlayCoordinator: overlayCoordinator,
+        toolbarController: toolbarController
     )
     lazy var contextMenuCoordinator = ContextMenuCoordinator(host: self, sessionManager: sessionManager)
     lazy var downloadsCoordinator = DownloadsCoordinator(delegate: self)
@@ -111,19 +126,16 @@ final class BrowserViewController: UIViewController {
     }
     
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        if isShowingFullscreenMedia && browserLayout.interfaceIdiom == .phone {
-            return .landscape
+        if let lockedOrientations {
+            return lockedOrientations
         }
         
         return browserLayout.interfaceIdiom == .pad ? .all : .allButUpsideDown
     }
     
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-        if isShowingFullscreenMedia && browserLayout.interfaceIdiom == .phone {
-            return .landscapeRight
-        }
-        
-        return .portrait
+        let allowedOrientations = lockedOrientations ?? supportedInterfaceOrientations
+        return preferredInterfaceOrientation(allowedBy: allowedOrientations) ?? .portrait
     }
     
     init(canHostSidebar: Bool = true) {
@@ -136,6 +148,7 @@ final class BrowserViewController: UIViewController {
     }
     
     deinit {
+        stopScreenOrientationHandling()
         if isShowingFullscreenMedia {
             UIApplication.shared.isIdleTimerDisabled = false
         }
@@ -226,8 +239,6 @@ final class BrowserViewController: UIViewController {
             // instantly, before the (separately animated) chrome fade
             // begins, so GeckoView gets its real final size immediately
             // rather than a continuously-changing target.
-            self.updateDynamicToolbarMaxHeight()
-            self.updateDynamicToolbarOffset()
             self.applyBrowserLayout(animated: false)
         }
         
@@ -247,6 +258,7 @@ final class BrowserViewController: UIViewController {
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        toolbarController.unlock(for: .viewPresentation)
         performContentLifecycle {
             syncBrowserNavigationChrome(animated: animated)
         }
@@ -256,6 +268,9 @@ final class BrowserViewController: UIViewController {
         super.viewWillDisappear(animated)
         cancelAutomaticKeyboardFocusForNewTab()
         performContentLifecycle {
+            toolbarController.lock(for: .viewPresentation)
+            shouldRestoreContentFocus =
+            tabManager.selectedTab?.session.engineView?.isFirstResponder == true
             view.endEditing(true)
         }
     }
@@ -268,13 +283,20 @@ final class BrowserViewController: UIViewController {
             downloadsCoordinator.syncToolbarButtonState()
             updateBrowserLayout(animated: false)
             fulfillPendingAutomaticKeyboardFocusIfPossible()
+            if shouldRestoreContentFocus {
+                shouldRestoreContentFocus = false
+                requestContentKeyboardFocus()
+            }
         }
     }
     
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         syncSelectedPageZoomControls()
-        updateDynamicToolbarMaxHeight()
+        toolbarController.updateLayout(
+            chromeMode: browserLayout.chromeMode,
+            isToolbarEnabled: !isShowingFullscreenMedia
+        )
         invalidateNavigationThumbnailsIfNeeded()
     }
     
@@ -295,6 +317,7 @@ final class BrowserViewController: UIViewController {
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         performContentLifecycle {
+            toolbarController.reset(animated: false)
             coordinator.animate { _ in
                 self.syncBrowserNavigationChrome(animated: false)
                 self.browserChrome.syncSidebarButton(splitViewController: self.splitViewController)
@@ -362,14 +385,16 @@ final class BrowserViewController: UIViewController {
         view.addSubview(tabBar)
         view.addSubview(browserChrome)
         view.addSubview(tabOverview)
+        contentView.configureLayout(
+            topAnchor: view.topAnchor,
+            bottomAnchor: view.bottomAnchor
+        )
         
         NSLayoutConstraint.activate([
             contentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             contentView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor).withPriority(.defaultHigh),
             contentView.bottomAnchor.constraint(equalTo: browserChrome.bottomToolbarTopAnchor).withPriority(.defaultHigh),
-            contentView.webContentBottomAnchor.constraint(equalTo: view.bottomAnchor),
-            
             browserChrome.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             browserChrome.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             browserChrome.topAnchor.constraint(equalTo: view.topAnchor),
@@ -400,10 +425,12 @@ final class BrowserViewController: UIViewController {
             self?.sidebarCoordinator.toggle(animated: true)
         }
         browserChrome.onBack = { [weak self] in
+            self?.toolbarController.reset()
             self?.captureOutgoingHistoryThumbnail()
             self?.tabManager.goBack()
         }
         browserChrome.onForward = { [weak self] in
+            self?.toolbarController.reset()
             self?.captureOutgoingHistoryThumbnail()
             self?.tabManager.goForward()
         }
@@ -444,6 +471,7 @@ final class BrowserViewController: UIViewController {
             self?.setTabOverviewVisible(true, animated: true)
         }
         browserChrome.onOverlayDismiss = { [weak self] in
+            self?.toolbarController.reset()
             self?.dismissAddressBarEditingAndChromeOverlay()
         }
         browserChrome.onPageZoomOut = { [weak self] in
@@ -453,7 +481,7 @@ final class BrowserViewController: UIViewController {
             self?.setSelectedPageZoomToNextLevel()
         }
         browserChrome.onPageZoomReset = { [weak self] in
-            self?.setSelectedPageZoomLevel(Prefs.AppearanceSettings.defaultPageZoomLevel)
+            self?.setSelectedPageZoomLevel(Prefs.BrowsingSettings.defaultPageZoomLevel)
         }
     }
     
@@ -504,6 +532,7 @@ final class BrowserViewController: UIViewController {
         overlayCoordinator.dismiss(.homepage, on: .detached, animated: false)
         overlayCoordinator.dismiss(.search, on: .detached, animated: false)
         applyBrowserLayout(animated: false)
+        requestContentKeyboardFocus()
     }
     
     func updateBrowserLayoutIfNeeded(
@@ -606,220 +635,6 @@ final class BrowserViewController: UIViewController {
         setTabBarVisible(false)
     }
     
-    private var dynamicToolbarMaxHeight: CGFloat = 0
-
-    /// The reservation mode the last report was built for, so a mode flip
-    /// at an unchanged chrome height still re-sends. See
-    /// updateDynamicToolbarMaxHeight.
-    private var lastReportedBottomReservation: GeckoSession.BottomReservation?
-    
-    // CHANGED - the max is a CONSTANT, not a measurement.
-    //
-    // The 22:5x trace showed the whole offset chain working end to end:
-    //
-    //   nsWindow offset=-426 max=426 listener=1 attached=1
-    //   PresShellWidgetListener offset=-426 visited=1 delivered=1
-    //   nsPresContext RECEIVED offset=-426 max=426 height=426 shell=1
-    //   nsPresContext APPLIED height=0 state=3 mvm=1
-    //
-    // Collapsed reached, every time, and page content still sat exactly
-    // at the full toolbar's height. Because the offset was never what
-    // reserved that space - the MAX is.
-    // SetDynamicToolbarMaxHeight calls
-    // ForceResizeReflowWithCurrentDimensions(), and ResizeReflow
-    // subtracts the toolbar height from the window dimensions, so the
-    // ICB becomes viewHeight - max and ordinary document content ends
-    // there. The offset only moves position:fixed content and the
-    // visual viewport.
-    //
-    // So the max carries the pill's clearance instead of the toolbar's
-    // height. Content then ends just above the pill, and the expanded
-    // toolbar covers content rather than reserving space for it - which
-    // is what "underlay the bottom toolbar" means, and it hides on
-    // scroll anyway.
-    //
-    // A constant also makes it genuinely stable: never measured, so no
-    // oscillation and no reflow storm. The settle window and
-    // plausibility checks that existed to tame the measurement are gone
-    // with it.
-    /// Forgets what was last reported, so the next call re-sends even if
-    /// the computed values are identical.
-    ///
-    /// Both caches live on this controller while the values they guard
-    /// are applied to whichever SESSION is selected. Switching tabs after
-    /// the chrome condensed leaves the incoming session holding the
-    /// previous session's inset, and the guard - seeing an unchanged
-    /// (target, reservation) - suppresses the resend, so that tab renders
-    /// with the wrong bottom reservation until some later flip happens to
-    /// fire. Invalidating on selection closes that.
-    func invalidateDynamicToolbarReport() {
-        dynamicToolbarMaxHeight = -1
-        lastReportedBottomReservation = nil
-    }
-
-    // Not private: the tab-manager extension lives in another file and
-    // re-reports when a page's reservation verdict changes.
-    func updateDynamicToolbarMaxHeight() {
-        let hasBottomToolbar = !isShowingFullscreenMedia &&
-        browserLayout.chromeMode != .pad &&
-        !(searchOverlayCoordinator.isFocused && !tabOverview.isPresented)
-        
-        // Whichever chrome is actually on screen: the full toolbar while
-        // expanded, the pill once condensed. Content therefore clears
-        // whatever is actually covering it, rather than being hidden
-        // behind the expanded toolbar.
-        //
-        // This does mean the reported env(safe-area-inset-bottom) changes
-        // on a scroll direction flip, and each change costs a
-        // RecascadeSubtree in content. Accepted deliberately: it is one
-        // restyle per flip, not per frame, and it is the pre-existing
-        // behaviour that never drew a complaint - the scroll jank
-        // reported during this work traced to the viewport-shortening
-        // path (which forced a resize reflow on top), not to this.
-        let expandedHeight = BottomToolbar.expandedContentHeight + (view.window?.safeAreaInsets.bottom ?? 0)
-        let chromeHeight = browserChrome.isScrollCondensed
-            ? BrowserChrome.condensedPillOccupiedHeight
-            : expandedHeight
-        let target = hasBottomToolbar ? chromeHeight : 0
-
-        // The mode is part of the state, not just the height: a page can
-        // flip between reading env() and merely having a bar - an SPA
-        // route change does exactly that - while the chrome height stays
-        // identical. Guarding on the height alone would then leave the
-        // wrong mechanism engaged, with the other still at whatever it
-        // was last told.
-        let reservation = tabManager.selectedTab?.state.bottomReservation
-        guard abs(target - dynamicToolbarMaxHeight) > 0.5
-                || reservation != lastReportedBottomReservation else {
-            return
-        }
-        lastReportedBottomReservation = reservation
-
-        logger(String(format: "dynToolbar: max %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@ reservation=%@)",
-                      dynamicToolbarMaxHeight, target,
-                      hasBottomToolbar ? "YES" : "NO",
-                      browserChrome.isScrollCondensed ? "YES" : "NO",
-                      reservation.map { String(describing: $0) } ?? "unknown"))
-        // Two mechanisms, and only one of them works per page - reporting
-        // both reserves the same strip twice.
-        //
-        // env(safe-area-inset-bottom) only moves a page that actually
-        // reads it. Device evidence: with the inset arriving correctly,
-        // YouTube (which reads env) responded, while Facebook's composer
-        // did not move at all, because it never consults the variable.
-        //
-        // Shortening the layout viewport moves any page: the dynamic
-        // toolbar max makes ResizeReflow subtract it from the window
-        // dimensions, so the ICB ends higher and both document flow and -
-        // while the state stays Expanded, which updateDynamicToolbarOffset
-        // guarantees by always sending 0 - position:fixed content follow
-        // it.
-        //
-        // The inset is the gentler of the two, since the page keeps the
-        // full viewport and paints its own background behind the pill, so
-        // it is preferred wherever the page is known to read env().
-        // Three cases, not two. An earlier revision wrote this as "is it
-        // an env() reader, yes or no", which put BOTH the not-yet-detected
-        // case (nil, every page while it is still loading) and the
-        // nothing-pinned case into the viewport-shortening branch - so it
-        // silently turned viewport shortening on for the entire web, where
-        // before the max was always 0. On device that stopped YouTube
-        // rendering at all.
-        //
-        // Unknown and none therefore reserve NOTHING, which is this app's
-        // established behaviour: the page keeps the full viewport and the
-        // pill floats over it.
-        let reservationMode = tabManager.selectedTab?.state.bottomReservation
-        let insetTarget: CGFloat
-        let maxTarget: CGFloat
-        switch reservationMode {
-        case .some(.readsSafeAreaInset):
-            insetTarget = target
-            maxTarget = 0
-        case .some(.hasBottomBar):
-            // The INSET, not viewport shortening - see the device
-            // evidence below.
-            //
-            // This case means "something is pinned to the bottom edge,
-            // and the readable CSS does not mention env()". It does NOT
-            // mean the page ignores env(): most large sites serve their
-            // CSS from a CDN, and a cross-origin stylesheet throws on
-            // .cssRules, so the scan cannot see usage that is really
-            // there. YouTube is exactly that - it lands here, yet it
-            // demonstrably responds to the inset (it moved, and was
-            // over-reserved, before the +38 double-count was removed).
-            //
-            // Shortening the viewport for this case rendered YouTube into
-            // a box smaller than the window: a black band above the page
-            // header and the page ending short of the pill, with window
-            // background showing through at both ends.
-            //
-            // So the inset is the default for any detected page. It is
-            // the gentler mechanism - the page keeps the full viewport and
-            // paints its own background behind the pill - and a page that
-            // genuinely does not read env() is simply left where it was
-            // rather than being mis-rendered.
-            insetTarget = target
-            maxTarget = 0
-        default:
-            // Not detected yet, or nothing pinned at the bottom.
-            insetTarget = 0
-            maxTarget = 0
-        }
-
-        // NO device inset added. env(safe-area-inset-bottom) is measured
-        // from the window's bottom edge, and so is the chrome: the pill is
-        // constrained to the view's real bottomAnchor, not the safe area
-        // guide, so condensedPillOccupiedHeight already spans the home
-        // indicator band. Adding the device inset on top double-counted it
-        // and pushed content ~38pt too high, which is what the device
-        // showed on YouTube. The previous "+ deviceInset + 4" was tuned
-        // while the inset never reached the content process at all (see
-        // the BrowserChild.cpp safe-area patch), so it was compensating
-        // for that bug rather than for real geometry.
-        contentView.setSafeAreaInsetBottom(insetTarget)
-        contentView.setDynamicToolbarMaxHeight(maxTarget)
-
-        // Store the target rather than what was sent, so the guard above
-        // converges - storing 0 meant it never tripped and this ran on
-        // every layout pass, five IPC messages at a time.
-        dynamicToolbarMaxHeight = target
-        updateDynamicToolbarOffset()
-    }
-    
-    // The animation channel. Only -maxHeight exactly reaches
-    // DynamicToolbarState::Collapsed, the one state where
-    // PresShell::GetFixedViewportSize adds the toolbar height back and a
-    // page's position:fixed content drops to the true window bottom.
-    // Partial offsets are InTransition and move nothing.
-    //
-    // Condensed is therefore all-or-nothing: as far as Gecko is concerned
-    // the toolbar is gone, content underlays the pill, and the strip above
-    // the pill is reserved by the env(safe-area-inset-bottom) that
-    // updateDynamicToolbarMaxHeight reports, plus the content anchor in
-    // condensedContentBottomAnchor.
-    private func updateDynamicToolbarOffset() {
-        // Always 0, which keeps the state Expanded.
-        //
-        // -max would reach Collapsed, and Collapsed is the one state
-        // where PresShell::GetFixedViewportSize adds the toolbar height
-        // back - dropping a page's position:fixed content to the true
-        // window bottom, behind the pill, instead of leaving it at the
-        // boundary the max established. Expanded puts fixed content at
-        // the bottom of the ICB, which is the reservation itself, so
-        // document flow, hovering elements and the strip behind the pill
-        // all follow the same number.
-        //
-        // Collapsed is for a toolbar that scrolls away entirely. The pill
-        // is still on screen and still needs clearing, so the reservation
-        // shrinks rather than disappearing.
-        let offset: CGFloat = 0
-        logger(String(format: "dynToolbar: offset %.1f (condensed=%@ max=%.1f)",
-                      offset,
-                      browserChrome.isScrollCondensed ? "YES" : "NO",
-                      dynamicToolbarMaxHeight))
-        contentView.setDynamicToolbarOffset(offset)
-    }
     
     private func applyPadLayout() {
         contentView.applyLayout(
@@ -1067,6 +882,51 @@ final class BrowserViewController: UIViewController {
     
     // MARK: - Keyboard
     
+    func requestContentKeyboardFocus(for expectedSession: GeckoSession? = nil) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let presentedController = presentedControllerInHierarchy {
+                guard let transitionCoordinator = presentedController.transitionCoordinator else {
+                    return
+                }
+                transitionCoordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                    self?.requestContentKeyboardFocus(for: expectedSession)
+                }
+                return
+            }
+            restoreContentKeyboardFocus(for: expectedSession)
+        }
+    }
+    
+    private func restoreContentKeyboardFocus(for expectedSession: GeckoSession? = nil) {
+        guard !browserChrome.isAddressBarEditing,
+              let selectedSession = tabManager.selectedTab?.session else {
+            return
+        }
+        if let expectedSession, expectedSession !== selectedSession {
+            return
+        }
+        guard contentView.isDisplaying(session: selectedSession),
+              let engineView = selectedSession.engineView,
+              let window = engineView.window,
+              window.isKeyWindow,
+              window.windowScene?.activationState == .foregroundActive else {
+            return
+        }
+        selectedSession.focusForHardwareKeyboard()
+    }
+    
+    private var presentedControllerInHierarchy: UIViewController? {
+        var controller: UIViewController? = self
+        while let currentController = controller {
+            if let presentedController = currentController.presentedViewController {
+                return presentedController
+            }
+            controller = currentController.parent
+        }
+        return nil
+    }
+    
     @objc private func keyboardFrameWillChange(_ notification: Notification) {
         guard let frameValue = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else {
             return
@@ -1088,7 +948,11 @@ final class BrowserViewController: UIViewController {
               searchOverlayCoordinator.isFocused ? "YES" : "NO",
               tabOverview.isPresented ? "YES" : "NO")
 
-        if !searchOverlayCoordinator.isFocused && !tabOverview.isPresented && keyboardInset > 0 {
+        let isInHardwareKeyboardMode = tabManager.selectedTab?.session.isInHardwareKeyboardMode() == true
+        if !searchOverlayCoordinator.isFocused
+            && !tabOverview.isPresented
+            && keyboardInset > 0
+            && !isInHardwareKeyboardMode {
             contentView.relocateFocusedInput(
                 above: keyboardFrame,
                 animationDuration: animation.duration,
@@ -1195,40 +1059,185 @@ final class BrowserViewController: UIViewController {
         
         sidebarCoordinator.setFullscreen(fullScreen)
         isShowingFullscreenMedia = fullScreen
-        updateBrowserLayout(animated: true)
-        updateFullscreenOrientation(fullScreen)
+        updateBrowserLayout(animated: false)
         UIApplication.shared.isIdleTimerDisabled = fullScreen
+        requestContentKeyboardFocus(for: tabManager.selectedTab?.session)
     }
     
-    private func updateFullscreenOrientation(_ fullScreen: Bool) {
-        guard browserLayout.interfaceIdiom == .phone else {
+    // MARK: - Orientation
+    
+    func lockScreenOrientation(
+        to requestedOrientations: UIInterfaceOrientationMask,
+        completion: @escaping (GeckoOrientationLockResult) -> Void
+    ) {
+        guard !requestedOrientations.isEmpty else {
+            completion(.notSupported)
             return
         }
         
+        rejectPendingOrientationRequest()
+        
+        if #available(iOS 16.0, *) {
+            guard let windowScene = view.window?.windowScene else {
+                completion(.notSupported)
+                return
+            }
+            
+            lockedOrientations = requestedOrientations
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+            if let currentOrientationMask = orientationMask(
+                for: windowScene.interfaceOrientation
+            ), requestedOrientations.contains(currentOrientationMask) {
+                completion(.success)
+                return
+            }
+            
+            let requestID = UUID()
+            pendingOrientationRequest = (requestID, requestedOrientations, completion)
+            let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(
+                interfaceOrientations: requestedOrientations
+            )
+            windowScene.requestGeometryUpdate(geometryPreferences) { [weak self] error in
+                let geometryError = error as NSError
+                let lockResult: GeckoOrientationLockResult =
+                geometryError.domain == UISceneErrorDomain &&
+                geometryError.code == UISceneError.Code.geometryRequestUnsupported.rawValue
+                ? .notSupported
+                : .rejected
+                self?.completePendingOrientationRequest(id: requestID, with: lockResult)
+            }
+            return
+        }
+        
+        guard let preferredOrientation = preferredInterfaceOrientation(
+            allowedBy: requestedOrientations
+        ) else {
+            completion(.notSupported)
+            return
+        }
+        
+        lockedOrientations = requestedOrientations
+        forceInterfaceOrientation(preferredOrientation)
+        completion(.success)
+    }
+    
+    func unlockScreenOrientation() {
+        rejectPendingOrientationRequest()
+        lockedOrientations = nil
         if #available(iOS 16.0, *) {
             setNeedsUpdateOfSupportedInterfaceOrientations()
         }
+    }
+    
+    private func completePendingOrientationRequestIfSatisfied() {
+        guard let pendingOrientationRequest,
+              let interfaceOrientation = view.window?.windowScene?.interfaceOrientation,
+              let currentOrientationMask = orientationMask(for: interfaceOrientation),
+              pendingOrientationRequest.orientations.contains(currentOrientationMask) else {
+            return
+        }
         
-        if fullScreen {
-            if let currentOrientation = view.window?.windowScene?.interfaceOrientation,
-               currentOrientation != .unknown {
-                preFullscreenOrientation = currentOrientation
-            } else if preFullscreenOrientation == nil {
-                preFullscreenOrientation = .portrait
+        completePendingOrientationRequest(id: pendingOrientationRequest.id, with: .success)
+    }
+    
+    private func completePendingOrientationRequest(
+        id: UUID,
+        with result: GeckoOrientationLockResult
+    ) {
+        guard let pendingOrientationRequest,
+              pendingOrientationRequest.id == id else {
+            return
+        }
+        
+        self.pendingOrientationRequest = nil
+        if result != .success {
+            lockedOrientations = nil
+            if #available(iOS 16.0, *) {
+                setNeedsUpdateOfSupportedInterfaceOrientations()
             }
-            
-            let targetOrientation: UIInterfaceOrientation
-            if let currentOrientation = view.window?.windowScene?.interfaceOrientation,
-               currentOrientation.isLandscape {
-                targetOrientation = currentOrientation
-            } else {
-                targetOrientation = .landscapeRight
-            }
-            forceInterfaceOrientation(targetOrientation)
-        } else {
-            let targetOrientation = preFullscreenOrientation ?? .portrait
-            forceInterfaceOrientation(targetOrientation)
-            preFullscreenOrientation = nil
+        }
+        pendingOrientationRequest.completion(result)
+    }
+    
+    private func rejectPendingOrientationRequest() {
+        guard let pendingOrientationRequest else {
+            return
+        }
+        
+        self.pendingOrientationRequest = nil
+        pendingOrientationRequest.completion(.rejected)
+    }
+    
+    func startScreenOrientationHandling() {
+        guard allowsSidebarHosting else {
+            return
+        }
+        
+        GeckoRuntime.orientationController.delegate = self
+        guard let interfaceOrientation = view.window?.windowScene?.interfaceOrientation else {
+            return
+        }
+        screenOrientationChanged(to: interfaceOrientation)
+    }
+    
+    func stopScreenOrientationHandling() {
+        guard let registeredDelegate = GeckoRuntime.orientationController.delegate,
+              registeredDelegate === self else {
+            return
+        }
+        
+        rejectPendingOrientationRequest()
+        GeckoRuntime.orientationController.delegate = nil
+    }
+    
+    func screenOrientationChanged(to interfaceOrientation: UIInterfaceOrientation) {
+        guard interfaceOrientation != .unknown else {
+            return
+        }
+        
+        tabManager.selectedTab?.session.notifyScreenOrientationChanged(to: interfaceOrientation)
+        completePendingOrientationRequestIfSatisfied()
+    }
+    
+    private func preferredInterfaceOrientation(
+        allowedBy orientations: UIInterfaceOrientationMask
+    ) -> UIInterfaceOrientation? {
+        if let currentOrientation = view.window?.windowScene?.interfaceOrientation,
+           currentOrientation != .unknown,
+           let currentOrientationMask = orientationMask(for: currentOrientation),
+           orientations.contains(currentOrientationMask) {
+            return currentOrientation
+        }
+        
+        if orientations.contains(.portrait) {
+            return .portrait
+        }
+        if orientations.contains(.portraitUpsideDown) {
+            return .portraitUpsideDown
+        }
+        if orientations.contains(.landscapeRight) {
+            return .landscapeRight
+        }
+        if orientations.contains(.landscapeLeft) {
+            return .landscapeLeft
+        }
+        return nil
+    }
+    
+    private func orientationMask(
+        for orientation: UIInterfaceOrientation
+    ) -> UIInterfaceOrientationMask? {
+        switch orientation {
+        case .portrait:
+            return .portrait
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .landscapeLeft:
+            return .landscapeLeft
+        case .landscapeRight:
+            return .landscapeRight
+        default:
+            return nil
         }
     }
     

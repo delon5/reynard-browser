@@ -8,6 +8,16 @@
 import UIKit
 
 extension BrowserViewController {
+    func presentContentModal(_ rootViewController: UIViewController) {
+        let navigationController = ContentModalNavigationController(
+            rootViewController: rootViewController
+        ) { [weak self] in
+            self?.requestContentKeyboardFocus()
+        }
+        navigationController.modalPresentationStyle = .pageSheet
+        present(navigationController, animated: true)
+    }
+    
     func presentLibrary(initialSection: LibrarySection = .bookmarks) {
         if initialSection == .downloads {
             DownloadStore.shared.markCompletedAsViewed()
@@ -24,9 +34,7 @@ extension BrowserViewController {
         ) { [weak self] in
             self?.dismiss(animated: true)
         }
-        let navigationController = UINavigationController(rootViewController: libraryController)
-        navigationController.modalPresentationStyle = .pageSheet
-        present(navigationController, animated: true)
+        presentContentModal(libraryController)
     }
     
     func presentShareSheet(url urlString: String? = nil) {
@@ -60,6 +68,7 @@ extension BrowserViewController {
     }
     
     func createNewTab(intent: NewTabCreationIntent = .userInitiated) {
+        toolbarController.reset()
         dismissAddressBarEditingAndOverlays()
         
         if tabOverview.isPresented {

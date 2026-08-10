@@ -77,6 +77,11 @@ final class AddonPopupViewController: UIViewController, ContentDelegate, Navigat
         loadPopup()
     }
     
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        session.focusForHardwareKeyboard()
+    }
+    
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         guard isBeingDismissed || isMovingFromParent || navigationController?.isBeingDismissed == true else {

@@ -8,17 +8,17 @@
 import UIKit
 
 public class GeckoView: UIView {
-    public weak var inputResultDelegate: GeckoViewInputResultDelegate? {
+    public weak var interactionDelegate: GeckoViewInteractionDelegate? {
         didSet {
-            session?.window?.setInputResultDelegate(inputResultDelegate)
+            session?.window?.setInteractionDelegate(interactionDelegate)
         }
     }
     
     public var session: GeckoSession? {
         didSet {
-            oldValue?.window?.setInputResultDelegate(nil)
+            oldValue?.window?.setInteractionDelegate(nil)
             embedSessionView()
-            session?.window?.setInputResultDelegate(inputResultDelegate)
+            session?.window?.setInteractionDelegate(interactionDelegate)
         }
     }
     
@@ -31,7 +31,7 @@ public class GeckoView: UIView {
     }
     
     deinit {
-        session?.window?.setInputResultDelegate(nil)
+        session?.window?.setInteractionDelegate(nil)
     }
 
     public override func layoutSubviews() {

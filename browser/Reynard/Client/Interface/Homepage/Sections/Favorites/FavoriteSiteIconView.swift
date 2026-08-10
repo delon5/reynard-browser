@@ -8,6 +8,10 @@
 import UIKit
 
 final class FavoriteSiteIconView: UIView {
+    private enum UX {
+        static let transparentIconInset: CGFloat = 6
+    }
+    
     private let imageView: UIImageView = {
         let view = UIImageView()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -58,18 +62,24 @@ final class FavoriteSiteIconView: UIView {
         backgroundColor = .clear
         addSubview(imageView)
         
-        NSLayoutConstraint.activate([
+        imageConstraints = [
             imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
             imageView.topAnchor.constraint(equalTo: topAnchor),
             imageView.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
+        ]
+        NSLayoutConstraint.activate(imageConstraints)
         
         reset()
     }
     
-    private func applyIcon(_ image: UIImage?, tintColor: UIColor?) {
+    private func applyIcon(_ image: UIImage?, tintColor: UIColor?, shouldInset: Bool) {
         imageView.image = image
         imageView.tintColor = tintColor
+        let inset = shouldInset ? UX.transparentIconInset : 0
+        imageConstraints[0].constant = inset
+        imageConstraints[1].constant = -inset
+        imageConstraints[2].constant = inset
+        imageConstraints[3].constant = -inset
     }
 }

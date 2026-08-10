@@ -1,0 +1,13 @@
+diff --git a/mobile/shared/actors/ContentDelegateChild.sys.mjs b/mobile/shared/actors/ContentDelegateChild.sys.mjs
+index 5fb67eb19684..82cae4f6ce20 100644
+--- a/mobile/shared/actors/ContentDelegateChild.sys.mjs
++++ b/mobile/shared/actors/ContentDelegateChild.sys.mjs
+@@ -198,6 +198,8 @@ export class ContentDelegateChild extends GeckoViewActorChild {
+               (node.innerText &&
+                 node.innerText.substring(0, MAX_TEXT_LENGTH)) ||
+               null,
++            isMouseInput:
++              aEvent.mozInputSource === MouseEvent.MOZ_SOURCE_MOUSE,
+           };
+ 
+           this.sendAsyncMessage("GeckoView:ContextMenu", msg);

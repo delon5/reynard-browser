@@ -1,5 +1,5 @@
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 3d33f991..91e71e74 100644
+index 3d33f9916a24..7315821b5984 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
 @@ -5884,7 +5884,7 @@
@@ -311,6 +311,15 @@ index 3d33f991..91e71e74 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
+@@ -19296,7 +19355,7 @@
+ # Use 17 for Ctrl, 18 for Alt, 91 or 224 for Meta, 0 for none.
+ - name: ui.key.accelKey
+   type: uint32_t
+-#ifdef XP_MACOSX
++#if defined(XP_MACOSX) || defined(XP_IOS)
+   value: 224
+ #else
+   value: 17
 @@ -19938,7 +19997,7 @@
  # on a platform that supports the GPU process, else true.
  - name: webgl.allow-in-parent

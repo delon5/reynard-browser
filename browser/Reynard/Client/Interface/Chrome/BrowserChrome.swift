@@ -100,6 +100,7 @@ final class BrowserChrome: UIView {
     var onReload: (() -> Void)?
     var onTabOverview: (() -> Void)?
     var onOverlayDismiss: (() -> Void)?
+    var onActionBarVisibilityChanged: ((Bool) -> Void)?
     var onPageZoomOut: (() -> Void)?
     var onPageZoomIn: (() -> Void)?
     var onPageZoomReset: (() -> Void)?
@@ -276,6 +277,7 @@ final class BrowserChrome: UIView {
         
         let finish = {
             self.actionBar.setItem(nil)
+            self.onActionBarVisibilityChanged?(false)
         }
         
         guard animated else {
@@ -611,10 +613,24 @@ final class BrowserChrome: UIView {
         return topToolbar.convert(topToolbar.bounds, to: view)
     }
     
+    func setToolbarTransition(
+        topOffset: CGFloat,
+        bottomOffset: CGFloat,
+        topContentAlpha: CGFloat,
+        bottomContentAlpha: CGFloat
+    ) {
+        topToolbar.transform = CGAffineTransform(translationX: 0, y: topOffset)
+        topToolbar.setContentAlpha(topContentAlpha)
+        bottomToolbar.transform = CGAffineTransform(translationX: 0, y: bottomOffset)
+        bottomToolbar.setContentAlpha(bottomContentAlpha)
+        actionBar.transform = CGAffineTransform(translationX: 0, y: bottomOffset)
+    }
+    
     func setChromeTransition(topAlpha: CGFloat, bottomAlpha: CGFloat, bottomTranslationY: CGFloat = 0) {
         topToolbar.alpha = topAlpha
         bottomToolbar.alpha = bottomAlpha
         bottomToolbar.transform = CGAffineTransform(translationX: 0, y: bottomTranslationY)
+        actionBar.transform = CGAffineTransform(translationX: 0, y: bottomTranslationY)
     }
     
     func setBottomToolbarHidden(_ hidden: Bool) {
@@ -736,6 +752,7 @@ final class BrowserChrome: UIView {
     
     private func showActionBar(animated: Bool) {
         actionBar.isHidden = false
+        onActionBarVisibilityChanged?(true)
         let animations = {
             self.actionBar.alpha = 1
         }

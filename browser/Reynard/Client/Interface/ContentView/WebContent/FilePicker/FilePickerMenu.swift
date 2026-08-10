@@ -70,17 +70,17 @@ extension FilePicker {
             return
         }
         
-        let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        let alert = PromptAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        alert.onDismissed = { [weak self] in
+            self?.presentedController = nil
+            self?.handleMenuDismissed()
+        }
         for action in availableActions {
             alert.addAction(UIAlertAction(title: title(for: action), style: .default) { [weak self] _ in
-                self?.launchFollowupPicker {
-                    self?.performAction(action)
-                }
+                self?.pendingMenuAction = action
             })
         }
-        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { [weak self] _ in
-            self?.finish(with: nil)
-        })
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
         
         if let popover = alert.popoverPresentationController {
             popover.sourceView = geckoView
@@ -99,9 +99,7 @@ extension FilePicker {
             image: UIImage(named: symbol),
             attributes: canPerform(action) ? [] : .disabled
         ) { [weak self] _ in
-            self?.launchFollowupPicker {
-                self?.performAction(action)
-            }
+            self?.pendingMenuAction = action
         }
     }
     
@@ -165,17 +163,14 @@ extension FilePicker {
         }
     }
     
-    func launchFollowupPicker(_ action: @escaping @MainActor () -> Void) {
-        launchedFollowupPicker = true
-        DispatchQueue.main.async(execute: action)
-    }
-    
     func handleMenuDismissed() {
         anchorButton?.removeFromSuperview()
         anchorButton = nil
-        if launchedFollowupPicker {
-            return
+        if let action = pendingMenuAction {
+            pendingMenuAction = nil
+            performAction(action)
+        } else {
+            finish(with: nil)
         }
-        finish(with: nil)
     }
 }

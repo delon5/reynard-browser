@@ -9,7 +9,7 @@ import GeckoView
 import UIKit
 
 @MainActor
-final class SelectPicker {
+final class SelectPicker: NSObject, UIAdaptivePresentationControllerDelegate {
     private var mode: String
     private var choices: [PromptChoice]
     private let sourceRect: CGRect
@@ -18,12 +18,14 @@ final class SelectPicker {
     private var continuation: CheckedContinuation<[String]?, Never>?
     private var anchorButton: SelectPickerMenuAnchorButton?
     private var presentedController: UIViewController?
+    private var selectedMenuChoiceIds: [String]?
     
     init(mode: String, choices: [PromptChoice], sourceRect: CGRect, geckoView: UIView) {
         self.mode = mode
         self.choices = choices
         self.sourceRect = sourceRect
         self.geckoView = geckoView
+        super.init()
     }
     
     // MARK: - Presentation
@@ -51,6 +53,7 @@ final class SelectPicker {
     func cancelAndDismiss() {
         anchorButton?.removeFromSuperview()
         anchorButton = nil
+        selectedMenuChoiceIds = nil
         presentedController?.dismiss(animated: false)
         presentedController = nil
         if let continuation {
@@ -114,16 +117,18 @@ final class SelectPicker {
             return
         }
         
-        let alert = UIAlertController(title: NSLocalizedString("Select Option", comment: ""), message: nil, preferredStyle: .actionSheet)
+        var result: [String]?
+        let alert = PromptAlertController(title: NSLocalizedString("Select Option", comment: ""), message: nil, preferredStyle: .actionSheet)
+        alert.onDismissed = { [weak self] in
+            self?.finish(result)
+        }
         for item in selectableChoices(from: choices) {
             let title = item.label.isEmpty ? NSLocalizedString("Option", comment: "") : item.label
-            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                self?.finish([item.id])
+            alert.addAction(UIAlertAction(title: title, style: .default) { _ in
+                result = [item.id]
             })
         }
-        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { [weak self] _ in
-            self?.finish(nil)
-        })
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
         
         if let popover = alert.popoverPresentationController {
             popover.sourceView = geckoView
@@ -177,7 +182,7 @@ final class SelectPicker {
                     attributes: item.disabled ? .disabled : [],
                     state: item.selected ? .on : .off
                 ) { [weak self] _ in
-                    self?.finish([choiceId])
+                    self?.selectedMenuChoiceIds = [choiceId]
                 }
                 pendingItems.append(action)
             }
@@ -197,13 +202,9 @@ final class SelectPicker {
     // MARK: - Menu Dismissal
     
     private func handleMenuDismissed() {
-        anchorButton?.removeFromSuperview()
-        anchorButton = nil
-        // If no selection was made yet, resume with nil (cancel)
-        if let continuation {
-            self.continuation = nil
-            continuation.resume(returning: nil)
-        }
+        let result = selectedMenuChoiceIds
+        selectedMenuChoiceIds = nil
+        finish(result)
     }
     
     // MARK: - Multi Select
@@ -221,6 +222,7 @@ final class SelectPicker {
         }
         let navigationController = UINavigationController(rootViewController: multiSelectController)
         navigationController.modalPresentationStyle = .pageSheet
+        navigationController.presentationController?.delegate = self
         
         if let popover = navigationController.popoverPresentationController {
             popover.sourceView = geckoView
@@ -229,6 +231,13 @@ final class SelectPicker {
         
         presenter.present(navigationController, animated: true)
         presentedController = navigationController
+    }
+    
+    nonisolated func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        Task { @MainActor [weak self] in
+            self?.presentedController = nil
+            self?.finish(nil)
+        }
     }
     
     // MARK: - Completion

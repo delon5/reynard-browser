@@ -37,7 +37,7 @@ extension TabOverviewCollection: UICollectionViewDataSource, UICollectionViewDel
         }
         
         tabCard.isHidden = false
-        tabCard.configure(with: tabs(for: tabMode)[indexPath.item])
+        configureTabCard(tabCard, with: tabs(for: tabMode)[indexPath.item])
         tabCard.onClose = { [weak self, weak collectionView, weak tabCard] in
             guard let self, let collectionView, let tabCard else {
                 return

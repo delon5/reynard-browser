@@ -1,0 +1,12 @@
+diff --git a/gfx/layers/apz/src/InputQueue.cpp b/gfx/layers/apz/src/InputQueue.cpp
+index 2c6a0d18838d..a74e31074927 100644
+--- a/gfx/layers/apz/src/InputQueue.cpp
++++ b/gfx/layers/apz/src/InputQueue.cpp
+@@ -504,6 +504,7 @@ APZEventResult InputQueue::ReceivePanGestureInput(
+     }
+ 
+     mActivePanGestureBlock = block;
++    CancelAnimationsForNewBlock(block);
+ 
+     const bool waitingForContentResponse =
+         MaybeRequestContentResponse(aTarget, block);

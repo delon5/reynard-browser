@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import UIKit
 
 // MARK: - Content Models
 
@@ -24,6 +25,7 @@ public struct ContextElement {
     public let type: ElementType
     public let srcUri: String?
     public let textContent: String?
+    public let isMouseInput: Bool
 }
 
 public enum SlowScriptResponse {
@@ -61,6 +63,7 @@ public protocol ContentDelegate {
     func onFirstComposite(session: GeckoSession)
     func onFirstContentfulPaint(session: GeckoSession)
     func onPaintStatusReset(session: GeckoSession)
+    func onPageBackgroundColorChange(session: GeckoSession, color: UIColor)
     func onWebAppManifest(session: GeckoSession, manifest: Any)
     func onSlowScript(session: GeckoSession, scriptFileName: String) async -> SlowScriptResponse
     func onShowDynamicToolbar(session: GeckoSession)
@@ -86,6 +89,7 @@ extension ContentDelegate {
     public func onFirstComposite(session: GeckoSession) {}
     public func onFirstContentfulPaint(session: GeckoSession) {}
     public func onPaintStatusReset(session: GeckoSession) {}
+    public func onPageBackgroundColorChange(session: GeckoSession, color: UIColor) {}
     public func onWebAppManifest(session: GeckoSession, manifest: Any) {}
     public func onSlowScript(session: GeckoSession, scriptFileName: String) async -> SlowScriptResponse { .halt }
     public func onShowDynamicToolbar(session: GeckoSession) {}
@@ -115,6 +119,7 @@ enum ContentEvents: String, CaseIterable {
     case webAppManifest = "GeckoView:WebAppManifest"
     case firstContentfulPaint = "GeckoView:FirstContentfulPaint"
     case paintStatusReset = "GeckoView:PaintStatusReset"
+    case backgroundColor = "GeckoView:BackgroundColor"
     case previewImage = "GeckoView:PreviewImage"
     case cookieBannerEventDetected = "GeckoView:CookieBannerEvent:Detected"
     case cookieBannerEventHandled = "GeckoView:CookieBannerEvent:Handled"
@@ -165,7 +170,8 @@ func newContentHandler(_ session: GeckoSession) -> GeckoSessionHandler {
                 altText: message?["alt"] as? String,
                 type: parseElementType(message?["elementType"] as? String ?? ""),
                 srcUri: message?["elementSrc"] as? String,
-                textContent: message?["textContent"] as? String
+                textContent: message?["textContent"] as? String,
+                isMouseInput: message?["isMouseInput"] as? Bool ?? false
             )
             
             delegate?.onContextMenu(
@@ -252,6 +258,27 @@ func newContentHandler(_ session: GeckoSession) -> GeckoSessionHandler {
             
         case .paintStatusReset:
             delegate?.onPaintStatusReset(session: session)
+            return nil
+            
+        case .backgroundColor:
+            guard let red = PayloadValue.int(message?["red"]),
+                  let green = PayloadValue.int(message?["green"]),
+                  let blue = PayloadValue.int(message?["blue"]),
+                  let alpha = PayloadValue.int(message?["alpha"]),
+                  (0...255).contains(red),
+                  (0...255).contains(green),
+                  (0...255).contains(blue),
+                  (0...255).contains(alpha) else {
+                return nil
+            }
+            
+            let color = UIColor(
+                red: CGFloat(red) / 255,
+                green: CGFloat(green) / 255,
+                blue: CGFloat(blue) / 255,
+                alpha: CGFloat(alpha) / 255
+            )
+            delegate?.onPageBackgroundColorChange(session: session, color: color)
             return nil
             
         case .previewImage:

@@ -59,6 +59,13 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.applicationDidBecomeActive()
         browserViewController.privateBrowsingLockCoordinator.presentLockIfNeeded(animated: true)
+        guard let browserViewController = window?.rootViewController as? BrowserViewController else {
+            return
+        }
+        
+        browserViewController.startScreenOrientationHandling()
+        browserViewController.sessionManager.applicationDidBecomeActive()
+        browserViewController.tabManager.applicationDidBecomeActive()
     }
     
     func sceneWillResignActive(_ scene: UIScene) {
@@ -118,6 +125,20 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // coordinator's own lockIfNeeded() now handles showing a safe,
         // non-interactive curtain instead of presenting anything here.
         browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
+        
+        browserViewController.stopScreenOrientationHandling()
+        browserViewController.tabManager.applicationWillResignActive()
+        browserViewController.sessionManager.applicationWillResignActive()
+    }
+    
+    func windowScene(
+        _ windowScene: UIWindowScene,
+        didUpdate previousCoordinateSpace: UICoordinateSpace,
+        interfaceOrientation previousInterfaceOrientation: UIInterfaceOrientation,
+        traitCollection previousTraitCollection: UITraitCollection
+    ) {
+        (window?.rootViewController as? BrowserViewController)?
+            .screenOrientationChanged(to: windowScene.interfaceOrientation)
     }
     
     func sceneWillEnterForeground(_ scene: UIScene) {

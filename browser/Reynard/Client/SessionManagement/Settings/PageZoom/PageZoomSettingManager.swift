@@ -17,11 +17,14 @@ final class PageZoomSettingManager {
     
     func setting(for url: String) -> PageZoomSetting {
         guard let parsedURL = URL(string: url) else {
-            return PageZoomSetting(level: Prefs.AppearanceSettings.defaultPageZoomLevel)
+            return PageZoomSetting(level: Prefs.BrowsingSettings.defaultPageZoomLevel)
+        guard let url = URL(string: url),
+              let level = siteSettingsStore.settings(for: url)?.pageZoom else {
+            return PageZoomSetting(level: Prefs.BrowsingSettings.defaultPageZoomLevel)
         }
 
         let level = siteSettingsStore.settings(for: parsedURL)?.pageZoom
-            ?? Prefs.AppearanceSettings.defaultPageZoomLevel
+            ?? Prefs.BrowsingSettings.defaultPageZoomLevel
         return PageZoomSetting(
             level: level,
             minimumLayoutWidth: PageZoomCompatibilityPolicy.minimumLayoutWidth(for: url)

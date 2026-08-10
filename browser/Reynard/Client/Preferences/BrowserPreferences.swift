@@ -112,7 +112,7 @@ final class BrowserPreferences {
             key("AppearanceSettings", "addressBarPosition"): BrowserChromePosition.bottom.rawValue,
             key("AppearanceSettings", "showsFullWebsiteAddress"): false,
             key("AppearanceSettings", "showsLandscapeTabBar"): true,
-            key("AppearanceSettings", "defaultPageZoomLevel"): PageZoomLevels.defaultLevel,
+            key("BrowsingSettings", "defaultPageZoomLevel"): PageZoomLevels.defaultLevel,
             key("ToolbarSettings", "bottomToolbarActions"): BottomToolbarAction.defaultActions.map(\.rawValue),
             key("ToolbarSettings", "toolbarButtonHapticsEnabled"): true,
             key("ToolbarSettings", "closeTabLongPressOpensNewTab"): true,
@@ -326,6 +326,19 @@ final class BrowserPreferences {
     
     // MARK: - Browsing
     struct BrowsingSettings {
+        static var defaultPageZoomLevel: Int {
+            get {
+                let level = prefs.integer(forSetting: "BrowsingSettings", key: "defaultPageZoomLevel")
+                return PageZoomLevels.all.contains(level) ? level : PageZoomLevels.defaultLevel
+            }
+            set {
+                guard PageZoomLevels.all.contains(newValue) else {
+                    return
+                }
+                prefs.set(newValue, forSetting: "BrowsingSettings", key: "defaultPageZoomLevel")
+            }
+        }
+
         static var requestDesktopWebsite: Bool {
             get {
                 return prefs.bool(forSetting: "BrowsingSettings", key: "requestDesktopWebsite")
@@ -974,19 +987,6 @@ final class BrowserPreferences {
             }
         }
         
-        static var defaultPageZoomLevel: Int {
-            get {
-                let level = prefs.integer(forSetting: "AppearanceSettings", key: "defaultPageZoomLevel")
-                return PageZoomLevels.all.contains(level) ? level : PageZoomLevels.defaultLevel
-            }
-            set {
-                guard PageZoomLevels.all.contains(newValue) else {
-                    return
-                }
-                prefs.set(newValue, forSetting: "AppearanceSettings", key: "defaultPageZoomLevel")
-            }
-        }
-
     }
 
     // MARK: - Toolbar

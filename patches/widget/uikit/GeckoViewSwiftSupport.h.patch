@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
-index e68fca9134c0..5f76bc9d5a00 100644
+index e68fca9134c0..424b8e447b43 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,14 +18,99 @@
+@@ -18,16 +18,122 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -34,18 +34,39 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +  GeckoOverscrollAxisVertical = 1 << 1,
 +};
 +
-+@protocol GeckoViewInputResultDelegate <NSObject>
++typedef NS_OPTIONS(NSUInteger, GeckoEdgeSwipeDirections) {
++  GeckoEdgeSwipeDirectionLeft = 1 << 0,
++  GeckoEdgeSwipeDirectionRight = 1 << 1,
++};
++
++typedef NS_ENUM(NSUInteger, GeckoOrientationLockResult) {
++  GeckoOrientationLockResultSuccess,
++  GeckoOrientationLockResultRejected,
++  GeckoOrientationLockResultNotSupported,
++};
++
++@protocol GeckoViewInteractionDelegate <NSObject>
 +- (void)touchSequenceDidBegin:(uint64_t)sequenceId;
 +- (void)touchSequence:(uint64_t)sequenceId
 +    didResolveHandling:(GeckoInputHandling)handling
 +       scrollableEdges:(GeckoScrollableEdges)scrollableEdges
 +        overscrollAxes:(GeckoOverscrollAxes)overscrollAxes;
 +- (void)touchSequenceDidEnd:(uint64_t)sequenceId;
++- (void)compositorScrollPositionDidChange:(double)scrollY zoom:(double)zoom;
++- (GeckoEdgeSwipeDirections)allowedEdgeSwipeDirections;
++- (void)edgeSwipeDidStart:(GeckoEdgeSwipeDirections)direction;
++- (void)edgeSwipeDidUpdate:(double)progress;
++- (void)edgeSwipeDidComplete:(GeckoEdgeSwipeDirections)direction;
++- (void)edgeSwipeDidEnd;
 +@end
  
  @protocol SwiftGeckoViewRuntime <NSObject>
  - (id<SwiftEventDispatcher>)runtimeDispatcher;
  - (id<SwiftEventDispatcher>)dispatcherByName:(const char*)name;
++- (void)lockScreenOrientation:(NSUInteger)orientationMask
++                   completion:
++                       (void (^)(GeckoOrientationLockResult result))completion;
++- (void)unlockScreenOrientation;
 +@optional
 +- (void)childProcessDidStartWithPID:(int32_t)pid
 +                        processType:(NSString*)processType;
@@ -76,7 +97,7 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// engine built without the EME patches still links.
 +- (void)useContentKeySession:(AVContentKeySession*)session;
  @end
-+
+ 
 +// The reverse direction, and the only one there is.
 +//
 +// Everything above is app-bound: Gecko asks the player to do things.
@@ -100,26 +121,33 @@ index e68fca9134c0..5f76bc9d5a00 100644
 +// resolves to nothing and is ignored rather than dereferenced.
 +//
 +// Main thread only. Declared with the other C entry points below.
-
++
  @protocol GeckoProcessExtension <NSObject>
-@@ -56,7 +117,30 @@
+ - (void)lockdownSandbox:(NSString*)revision;
+ @end
+@@ -55,8 +161,35 @@
+ @end
  
  @protocol GeckoViewWindow <NSObject>
++// Window
  - (UIView*)view;
-+- (AVSampleBufferDisplayLayer*)pictureInPictureDisplayLayer;
-+- (void)setInputResultDelegate:(id<GeckoViewInputResultDelegate>)delegate;
-+// Tells Gecko the bottom toolbar height so content can underlay it.
-+- (void)setDynamicToolbarMaxHeight:(CGFloat)height;
-+// Tells Gecko how far the toolbar is currently displaced from fully
-+// visible: 0 while expanded, -maxHeight once condensed to the pill.
-+- (void)setDynamicToolbarOffset:(CGFloat)offset;
-+// Reported to web content as env(safe-area-inset-*), so a page can
-+// reserve the space the chrome occupies itself.
-+- (void)setSafeAreaInsetsTop:(CGFloat)top
-+                       right:(CGFloat)right
-+                      bottom:(CGFloat)bottom
-+                        left:(CGFloat)left;
  - (void)close;
++
++// Interaction
++- (void)setInteractionDelegate:(id<GeckoViewInteractionDelegate>)delegate;
++
++// PiP
++- (AVSampleBufferDisplayLayer*)pictureInPictureDisplayLayer;
++
++// Layout
++- (void)setDynamicToolbarMaxHeight:(CGFloat)height;
++- (void)setFixedBottomOffset:(CGFloat)offset;
++- (void)updateScreenOrientation:(NSInteger)interfaceOrientation;
++
++// Keyboard
++- (BOOL)focusForHardwareKeyboard;
++- (BOOL)isInHardwareKeyboardMode;
++
 +@optional
 +// Latches the compositor's off-main-thread CoreAnimation commits off
 +// for this window while its hosting scene is inactive - see
@@ -133,7 +161,7 @@ index e68fca9134c0..5f76bc9d5a00 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +149,37 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +198,37 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

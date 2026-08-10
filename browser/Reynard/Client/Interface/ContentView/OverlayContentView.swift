@@ -34,7 +34,6 @@ final class OverlayContentView: UIView {
         super.init(frame: frame)
         configureAppearance()
         configureHierarchy()
-        configureConstraints()
         applyPresentation()
     }
     
@@ -56,7 +55,10 @@ final class OverlayContentView: UIView {
         }
     }
     
-    private func configureConstraints() {
+    func configureContentLayout(
+        topAnchor: NSLayoutYAxisAnchor,
+        bottomAnchor: NSLayoutYAxisAnchor
+    ) {
         [homepageView, searchSuggestionView].forEach { contentView in
             NSLayoutConstraint.activate([
                 contentView.topAnchor.constraint(equalTo: topAnchor),

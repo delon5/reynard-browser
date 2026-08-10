@@ -40,6 +40,7 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
     
     private enum DesktopWebsiteRow: CaseIterable {
         case allWebsites
+        case pageZoom
     }
     
     private enum GesturesRow: CaseIterable {
@@ -169,7 +170,12 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
                 return UITableViewCell()
             }
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-            cell.textLabel?.text = NSLocalizedString("Request Desktop Website", comment: "")
+            switch DesktopWebsiteRow.allCases[indexPath.row] {
+            case .allWebsites:
+                cell.textLabel?.text = NSLocalizedString("Request Desktop Website", comment: "")
+            case .pageZoom:
+                cell.textLabel?.text = NSLocalizedString("Page Zoom", comment: "")
+            }
             cell.accessoryType = .disclosureIndicator
             return cell
         }
@@ -200,7 +206,15 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
         case .gestures:
             return
         case .desktopWebsite:
-            navigationController?.pushViewController(RequestDesktopWebsitePreferencesViewController(), animated: true)
+            guard DesktopWebsiteRow.allCases.indices.contains(indexPath.row) else {
+                return
+            }
+            switch DesktopWebsiteRow.allCases[indexPath.row] {
+            case .allWebsites:
+                navigationController?.pushViewController(RequestDesktopWebsitePreferencesViewController(), animated: true)
+            case .pageZoom:
+                navigationController?.pushViewController(PageZoomPreferencesViewController(), animated: true)
+            }
         }
     }
     

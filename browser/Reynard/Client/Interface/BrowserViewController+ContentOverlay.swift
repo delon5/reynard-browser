@@ -66,6 +66,7 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
     
     func endSearchEditing() {
         view.endEditing(true)
+        requestContentKeyboardFocus()
     }
     
     // MARK: - Homepage Overlay Delegate
@@ -116,7 +117,7 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
         case .currentTab:
             tabManager.browse(to: url.absoluteString)
             return
-        case .newTab:
+        case .newTab, .backgroundTab:
             mode = tabManager.selectedTabMode
             target = .afterSelected
         case .newPrivateTab:
@@ -124,13 +125,17 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
             target = tabManager.selectedTabMode == .private ? .afterSelected : .end
         }
         
-        let tabIndex = tabManager.createTab(selecting: false, target: target, mode: mode)
+        let tabIndex = tabManager.createTab(selecting: disposition != .backgroundTab, target: target, mode: mode)
         let tabs = mode == .private ? tabManager.privateTabs : tabManager.regularTabs
         guard let tab = tabs[safe: tabIndex] else {
             return
         }
         
         tabManager.browse(to: url.absoluteString, in: tab)
+        guard disposition != .backgroundTab else {
+            return
+        }
+        
         captureThumbnail(forTabAt: tabManager.selectedTabIndex, mode: tabManager.selectedTabMode) { [weak self] _ in
             guard let self else {
                 return
@@ -162,6 +167,7 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
     
     func endHomepageEditing() {
         view.endEditing(true)
+        requestContentKeyboardFocus()
     }
     
     func updateHomepageLayout(animated: Bool, duration: TimeInterval) {
@@ -181,6 +187,7 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
     }
     
     func addressBarDidBeginEditing(_ addressBar: AddressBar) {
+        toolbarController.lock(for: .addressBarEditing)
         homepageOverlayCoordinator.addressBarDidBeginEditing(addressBar)
         searchOverlayCoordinator.addressBarDidBeginEditing(addressBar)
     }
@@ -188,6 +195,7 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
     func addressBarDidEndEditing(_ addressBar: AddressBar) {
         homepageOverlayCoordinator.addressBarDidEndEditing(addressBar)
         searchOverlayCoordinator.addressBarDidEndEditing(addressBar)
+        toolbarController.unlock(for: .addressBarEditing)
     }
     
     func addressBar(_ addressBar: AddressBar, didChangeText text: String, previousText: String, isDelete: Bool) {

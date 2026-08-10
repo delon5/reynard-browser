@@ -46,6 +46,11 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
     // MARK: - AddressBarDelegate
     
     func addressBarDidRequestReloadOrStop(_ addressBar: AddressBar) {
+        if tabManager.selectedTab?.session.isOpen() == false {
+            reloadTerminatedTab()
+            return
+        }
+        
         tabManager.reloadOrStopSelectedTab()
     }
     
@@ -217,6 +222,10 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         return tabManager.activeTabs
     }
     
+    func pageBackgroundColor(for tab: Tab) -> UIColor {
+        return sessionManager.pageBackgroundColor(for: tab.session)
+    }
+    
     func selectTabFromGesture(at index: Int, mode: TabMode) {
         tabManager.selectTab(at: index, mode: mode)
     }
@@ -233,7 +242,7 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         }
         
         if let tab = tabManager.activeTabs[safe: index],
-           let previewImage = homepageOverlayCoordinator.previewImage(for: tab, size: contentView.bounds.size) {
+           let previewImage = homepageOverlayCoordinator.previewImage(for: tab) {
             tabManager.updateThumbnail(previewImage, forTabAt: index, mode: mode)
         }
         return index
@@ -247,15 +256,23 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         setTabOverviewVisible(true, animated: animated)
     }
     
-    func addressBarGestureWillBegin() {
+    func addressBarTransitionWillBegin(prepareForGesture: Bool) {
+        toolbarController.lock(for: .addressBarTransition)
+        guard prepareForGesture else {
+            return
+        }
         browserChrome.dismissActionBar(animated: false)
         captureTabThumbnailIfNeeded()
+    }
+    
+    func addressBarTransitionDidEnd() {
+        toolbarController.unlock(for: .addressBarTransition)
     }
     
     private func captureTabThumbnailIfNeeded() {
         if let tab = tabManager.activeTabs[safe: tabManager.selectedTabIndex],
            homepageOverlayCoordinator.needsHomepageThumbnail(for: tab) {
-            if let thumbnail = homepageOverlayCoordinator.previewImage(for: tab, size: contentView.bounds.size) {
+            if let thumbnail = homepageOverlayCoordinator.previewImage(for: tab) {
                 tabManager.updateThumbnail(thumbnail, forTabAt: tabManager.selectedTabIndex, mode: tabManager.selectedTabMode)
             }
             return
@@ -398,9 +415,7 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
             return
         }
         
-        let navigationController = UINavigationController(rootViewController: settingsController)
-        navigationController.modalPresentationStyle = .pageSheet
-        present(navigationController, animated: true)
+        presentContentModal(settingsController)
     }
     
     private func presentBookmarkEditor(addToFavorites: Bool) {
@@ -424,8 +439,6 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
             bookmarkController = EditBookmarkViewController(title: title, url: url)
         }
         
-        let navigationController = UINavigationController(rootViewController: bookmarkController)
-        navigationController.modalPresentationStyle = .pageSheet
-        present(navigationController, animated: true)
+        presentContentModal(bookmarkController)
     }
 }

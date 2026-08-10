@@ -51,7 +51,7 @@ cd "$ROOT_DIR"
 
 "$ROOT_DIR/tools/firefox/prepare-firefox.sh"
 
-rm -f "$FIREFOX_DIR/.mozconfig"
+mv "$FIREFOX_DIR/.mozconfig" "$FIREFOX_DIR/.mozconfig.bak"
 
 {
 echo "ac_add_options --enable-application=mobile/ios"
@@ -102,3 +102,6 @@ fi
 # (e.g. low disk space) should only be a warning, not a build failure.
 "$ROOT_DIR/tools/firefox/gecko-artifact-archive.sh" pack "$GECKO_ARCHIVE" || \
 	echo "Warning: could not cache Gecko artifact for future builds." >&2
+
+rm "$FIREFOX_DIR/.mozconfig"
+mv "$FIREFOX_DIR/.mozconfig.bak" "$FIREFOX_DIR/.mozconfig"

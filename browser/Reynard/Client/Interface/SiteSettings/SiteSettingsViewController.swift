@@ -18,7 +18,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
         case website
         case trackingProtection
         case content
-        case media
         case permissions
         case websiteActions
     }
@@ -86,10 +85,8 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
         case loaded
     }
     
-    private let mediaRows: [Row] = [
-        .autoplay,
-    ]
     private let permissionRows: [Row] = [
+        .autoplay,
         .camera,
         .microphone,
         .location,
@@ -116,7 +113,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
         sections.append(.website)
         sections.append(.trackingProtection)
         sections.append(.content)
-        sections.append(.media)
         sections.append(.permissions)
         sections.append(.websiteActions)
         return sections
@@ -196,8 +192,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
             || hasTrackingProtectionException ? 1 : 2
         case .content:
             return 2
-        case .media:
-            return loadState == .loaded ? mediaRows.count : 0
         case .permissions:
             return loadState == .loaded ? permissionRows.count : 0
         case .websiteActions:
@@ -219,8 +213,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
             return NSLocalizedString("Tracking Protection", comment: "")
         case .content:
             return NSLocalizedString("Content", comment: "Website settings section title")
-        case .media:
-            return NSLocalizedString("Media", comment: "")
         case .permissions:
             return NSLocalizedString("Permissions", comment: "")
         case .websiteActions:
@@ -245,8 +237,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
             return trackingProtectionCell(at: indexPath)
         case .content:
             return contentCell(at: indexPath)
-        case .media:
-            return permissionCell(at: indexPath)
         case .permissions:
             return permissionCell(at: indexPath)
         case .websiteActions:
@@ -268,8 +258,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
             showBlockedTrackers(at: indexPath)
         case .content:
             handleContentSelection(at: indexPath)
-        case .media:
-            handlePermissionSelection(at: indexPath)
         case .permissions:
             handlePermissionSelection(at: indexPath)
         case .websiteActions:
@@ -426,8 +414,6 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
         }
         
         switch visibleSections[indexPath.section] {
-        case .media:
-            return mediaRows[safe: indexPath.row]
         case .permissions:
             return permissionRows[safe: indexPath.row]
         case .availability, .website, .trackingProtection, .content, .websiteActions:
@@ -566,7 +552,7 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
     
     private var selectedPageZoomLevel: Int {
         return SiteSettingsStore.shared.settings(for: url)?.pageZoom
-        ?? Prefs.AppearanceSettings.defaultPageZoomLevel
+        ?? Prefs.BrowsingSettings.defaultPageZoomLevel
     }
     
     private func applyPageZoomLevel(_ level: Int) {
@@ -772,7 +758,7 @@ final class SiteSettingsViewController: UITableViewController, UINavigationContr
         _ = SiteSettingsStore.shared.clearPageZoom(forHost: host)
         _ = SiteSettingsStore.shared.clearWebsiteMode(for: host)
         requestDesktopWebsiteSwitch.isOn = Prefs.BrowsingSettings.requestDesktopWebsite
-        updateSessionPageZoom(Prefs.AppearanceSettings.defaultPageZoomLevel)
+        updateSessionPageZoom(Prefs.BrowsingSettings.defaultPageZoomLevel)
         tableView.reloadData()
         session.reload()
     }

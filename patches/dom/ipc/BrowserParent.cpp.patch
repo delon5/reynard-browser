@@ -1,8 +1,19 @@
 diff --git a/dom/ipc/BrowserParent.cpp b/dom/ipc/BrowserParent.cpp
-index ba640fdbc080..9ce93b6a526d 100644
+index ba640fdbc080..a597dc002395 100644
 --- a/dom/ipc/BrowserParent.cpp
 +++ b/dom/ipc/BrowserParent.cpp
-@@ -793,6 +793,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
+@@ -139,6 +139,10 @@
+ #  include "FxRWindowManager.h"
+ #endif
+ 
++#ifdef XP_IOS
++#  include "mozilla/widget/BackgroundColor.h"
++#endif
++
+ #if defined(XP_WIN) && defined(ACCESSIBILITY)
+ #  include "mozilla/a11y/AccessibleWrap.h"
+ #  include "mozilla/a11y/Compatibility.h"
+@@ -793,6 +797,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
      Maybe<CompositorOptions>* aCompositorOptions) {
    if (mRemoteLayerTreeOwner.IsInitialized()) {
      mRemoteLayerTreeOwner.EnsureLayersConnected(*aCompositorOptions);
@@ -24,7 +35,7 @@ index ba640fdbc080..9ce93b6a526d 100644
    }
    return IPC_OK();
  }
-@@ -860,6 +875,27 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
+@@ -860,6 +879,27 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
    // Tell our embedder that the tab is now going away unless we're an
    // out-of-process iframe.
    RefPtr<nsFrameLoader> frameLoader = GetFrameLoader(true);
@@ -52,7 +63,7 @@ index ba640fdbc080..9ce93b6a526d 100644
    if (frameLoader) {
      if (mBrowsingContext->IsTop()) {
        // If this is a top-level BrowsingContext, tell the frameloader it's time
-@@ -1020,7 +1056,7 @@ void BrowserParent::InitRendering() {
+@@ -1020,13 +1060,19 @@ void BrowserParent::InitRendering() {
          widget->SupportsUnadjustedMovement());
    }
  
@@ -61,7 +72,36 @@ index ba640fdbc080..9ce93b6a526d 100644
    MOZ_ASSERT(widget);
  
    if (GetBrowsingContext()->IsTopContent()) {
-@@ -2554,14 +2590,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
+     (void)SendDynamicToolbarMaxHeightChanged(
+         widget->GetDynamicToolbarMaxHeight());
+   }
++
++#ifdef XP_IOS
++  if (mBackgroundColor) {
++    mozilla::widget::DispatchBackgroundColor(widget, *mBackgroundColor);
++  }
++#endif
+ #endif
+ }
+ 
+@@ -2404,6 +2450,16 @@ mozilla::ipc::IPCResult BrowserParent::RecvSetCursor(
+   return IPC_OK();
+ }
+ 
++mozilla::ipc::IPCResult BrowserParent::RecvUpdateBackgroundColor(
++    const nscolor& aColor) {
++#ifdef XP_IOS
++  mBackgroundColor = Some(aColor);
++  nsCOMPtr<nsIWidget> widget = GetWidget();
++  mozilla::widget::DispatchBackgroundColor(widget, aColor);
++#endif
++  return IPC_OK();
++}
++
+ mozilla::ipc::IPCResult BrowserParent::RecvSetLinkStatus(
+     const nsString& aStatus) {
+   nsCOMPtr<nsIXULBrowserWindow> xulBrowserWindow = GetXULBrowserWindow();
+@@ -2554,14 +2610,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
      const ContentCache& aContentCache,
      const IMENotification& aIMENotification) {
    nsCOMPtr<nsIWidget> widget = GetTextInputHandlingWidget();
@@ -87,7 +127,7 @@ index ba640fdbc080..9ce93b6a526d 100644
    return IPC_OK();
  }
  
-@@ -3223,18 +3267,31 @@ bool BrowserParent::HandleQueryContentEvent(WidgetQueryContentEvent& aEvent) {
+@@ -3223,18 +3287,31 @@ bool BrowserParent::HandleQueryContentEvent(WidgetQueryContentEvent& aEvent) {
        NS_WARN_IF(aEvent.Failed())) {
      return true;
    }

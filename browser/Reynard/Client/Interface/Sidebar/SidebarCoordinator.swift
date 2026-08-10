@@ -17,6 +17,7 @@ protocol SidebarContentController: AnyObject {
     func updateBrowserLayout(animated: Bool, duration: TimeInterval)
     func updateBrowserLayoutIfNeeded(animated: Bool, duration: TimeInterval)
     func openExternalURL(_ url: URL)
+    func sidebarDidEndEditing()
 }
 
 protocol SidebarCoordinatorHost: AnyObject {

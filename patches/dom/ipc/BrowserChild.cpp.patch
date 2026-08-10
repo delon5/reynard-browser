@@ -1,8 +1,22 @@
 diff --git a/dom/ipc/BrowserChild.cpp b/dom/ipc/BrowserChild.cpp
-index f70a010..0632826 100644
+index f70a01005083..bedad4d9d3da 100644
 --- a/dom/ipc/BrowserChild.cpp
 +++ b/dom/ipc/BrowserChild.cpp
-@@ -3743,6 +3743,33 @@ mozilla::ipc::IPCResult BrowserChild::RecvSafeAreaInsetsChanged(
+@@ -230,6 +230,13 @@ PresShell* BrowserChild::GetTopLevelPresShell() const {
+   return nullptr;
+ }
+ 
++void BrowserChild::UpdateBackgroundColor(const nscolor& aColor) {
++  if (!IPCOpen() || mDestroyed) {
++    return;
++  }
++  SendUpdateBackgroundColor(aColor);
++}
++
+ bool BrowserChild::UpdateFrame(const RepaintRequest& aRequest) {
+   MOZ_ASSERT(aRequest.GetScrollId() != ScrollableLayerGuid::NULL_SCROLL_ID);
+ 
+@@ -3743,6 +3750,33 @@ mozilla::ipc::IPCResult BrowserChild::RecvSafeAreaInsetsChanged(
    mPuppetWidget->UpdateSafeAreaInsets(aSafeAreaInsets);
  
    LayoutDeviceIntMargin currentSafeAreaInsets;
@@ -36,7 +50,7 @@ index f70a010..0632826 100644
    // aSafeAreaInsets is for current screen. But we have to calculate safe insets
    // for content window.
    LayoutDeviceIntRect outerRect = GetOuterRect();
-@@ -3753,6 +3780,7 @@ mozilla::ipc::IPCResult BrowserChild::RecvSafeAreaInsetsChanged(
+@@ -3753,6 +3787,7 @@ mozilla::ipc::IPCResult BrowserChild::RecvSafeAreaInsetsChanged(
      currentSafeAreaInsets = nsContentUtils::GetWindowSafeAreaInsets(
          screen, aSafeAreaInsets, windowRect);
    }

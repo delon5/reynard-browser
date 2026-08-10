@@ -79,14 +79,15 @@ final class PromptPresenter: PromptPresenting {
         }
         
         await withCheckedContinuation { continuation in
-            let alert = UIAlertController(
+            let alert = PromptAlertController(
                 title: request.title.isEmpty ? nil : request.title,
                 message: request.message.isEmpty ? nil : request.message,
                 preferredStyle: .alert
             )
-            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { _ in
+            alert.onDismissed = {
                 continuation.resume()
-            })
+            }
+            alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default))
             presenter.present(alert, animated: true)
         }
     }
@@ -97,11 +98,15 @@ final class PromptPresenter: PromptPresenting {
         }
         
         return await withCheckedContinuation { continuation in
-            let alert = UIAlertController(
+            var response: PromptResponse?
+            let alert = PromptAlertController(
                 title: request.title.isEmpty ? nil : request.title,
                 message: request.message.isEmpty ? nil : request.message,
                 preferredStyle: .alert
             )
+            alert.onDismissed = {
+                continuation.resume(returning: response)
+            }
             
             for index in 0..<3 {
                 let title = buttonTitle(at: index, request: request)
@@ -114,13 +119,13 @@ final class PromptPresenter: PromptPresenting {
                     title: title,
                     style: isCancel ? .cancel : .default
                 ) { _ in
-                    continuation.resume(returning: .button(index))
+                    response = .button(index)
                 })
             }
             
             if alert.actions.isEmpty {
                 alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { _ in
-                    continuation.resume(returning: .button(0))
+                    response = .button(0)
                 })
             }
             
@@ -134,19 +139,21 @@ final class PromptPresenter: PromptPresenting {
         }
         
         return await withCheckedContinuation { continuation in
-            let alert = UIAlertController(
+            var response: PromptResponse?
+            let alert = PromptAlertController(
                 title: request.title.isEmpty ? nil : request.title,
                 message: request.message.isEmpty ? nil : request.message,
                 preferredStyle: .alert
             )
+            alert.onDismissed = {
+                continuation.resume(returning: response)
+            }
             alert.addTextField { textField in
                 textField.text = request.value
             }
-            alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { _ in
-                continuation.resume(returning: nil)
-            })
+            alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
             alert.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: ""), style: .default) { _ in
-                continuation.resume(returning: .text(alert.textFields?.first?.text ?? ""))
+                response = .text(alert.textFields?.first?.text ?? "")
             })
             presenter.present(alert, animated: true)
         }
@@ -167,11 +174,15 @@ final class PromptPresenter: PromptPresenting {
         let passwordOnly = request.mode == "password"
         
         return await withCheckedContinuation { continuation in
-            let alert = UIAlertController(
+            var response: PromptResponse?
+            let alert = PromptAlertController(
                 title: title.isEmpty ? NSLocalizedString("Sign In", comment: "") : title,
                 message: message,
                 preferredStyle: .alert
             )
+            alert.onDismissed = {
+                continuation.resume(returning: response)
+            }
             
             if !passwordOnly {
                 alert.addTextField { textField in
@@ -190,13 +201,11 @@ final class PromptPresenter: PromptPresenting {
                 textField.isSecureTextEntry = true
             }
             
-            alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { _ in
-                continuation.resume(returning: nil)
-            })
+            alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
             alert.addAction(UIAlertAction(title: NSLocalizedString("Sign In", comment: ""), style: .default) { _ in
                 let username = passwordOnly ? request.username : alert.textFields?.first?.text ?? ""
                 let password = alert.textFields?.last?.text ?? ""
-                continuation.resume(returning: .auth(username: username, password: password))
+                response = .auth(username: username, password: password)
             })
             presenter.present(alert, animated: true)
         }
@@ -218,16 +227,20 @@ final class PromptPresenter: PromptPresenting {
         )
         
         return await withCheckedContinuation { continuation in
-            let alert = UIAlertController(
+            var response: PromptResponse?
+            let alert = PromptAlertController(
                 title: NSLocalizedString("Confirm Upload", comment: ""),
                 message: message,
                 preferredStyle: .alert
             )
+            alert.onDismissed = {
+                continuation.resume(returning: response)
+            }
             alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { _ in
-                continuation.resume(returning: .folderUpload(allowed: false))
+                response = .folderUpload(allowed: false)
             })
             alert.addAction(UIAlertAction(title: NSLocalizedString("Upload", comment: ""), style: .default) { _ in
-                continuation.resume(returning: .folderUpload(allowed: true))
+                response = .folderUpload(allowed: true)
             })
             presenter.present(alert, animated: true)
         }

@@ -115,6 +115,10 @@ final class LinkPreviewViewController: UIViewController {
 }
 
 extension LinkPreviewViewController: ContentDelegate, NavigationDelegate, HistoryDelegate {
+    func onPageBackgroundColorChange(session: GeckoSession, color: UIColor) {
+        sessionManager.setPageBackgroundColor(color, for: session)
+    }
+    
     func onTitleChange(session: GeckoSession, title: String) {
         pageTitle = title
     }

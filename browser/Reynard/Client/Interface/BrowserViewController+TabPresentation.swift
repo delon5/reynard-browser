@@ -23,6 +23,7 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
     }
     
     func selectTab(at index: Int, mode: TabMode) {
+        toolbarController.reset()
         let targetTabs = mode == .private ? tabManager.privateTabs : tabManager.regularTabs
         if let pendingTabID = pendingNewTabKeyboardFocusTabID,
            targetTabs[safe: index]?.id != pendingTabID {
@@ -44,6 +45,7 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
     }
     
     func closeTab(at index: Int, mode: TabMode) {
+        toolbarController.reset()
         if (tabOverview.isPresented || tabOverview.isTransitionRunning),
            tabOverview.mode == .regularTabs,
            mode == .regular,
@@ -59,6 +61,7 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
     }
     
     func moveTab(from sourceIndex: Int, to destinationIndex: Int, mode: TabMode) {
+        toolbarController.reset()
         tabManager.moveTab(from: sourceIndex, to: destinationIndex, mode: mode)
     }
     
@@ -125,8 +128,14 @@ extension BrowserViewController: TabBarDataSource, TabOverviewDataSource, TabOve
         fulfillPendingAutomaticKeyboardFocusIfPossible()
     }
     
+    func tabOverviewDidFinishDismissal() {
+        toolbarController.unlock(for: .tabOverview)
+        requestContentKeyboardFocus()
+    }
+    
     func setTabOverviewVisible(_ visible: Bool, animated: Bool) {
         if visible {
+            toolbarController.lock(for: .tabOverview)
             if browserChrome.performAfterTransition({ [weak self] in
                 self?.setTabOverviewVisible(true, animated: animated)
             }) {

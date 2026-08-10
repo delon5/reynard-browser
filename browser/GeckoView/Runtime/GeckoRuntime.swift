@@ -8,6 +8,18 @@
 import Foundation
 import UIKit
 
+public protocol GeckoScreenOrientationDelegate: AnyObject {
+    func lockScreenOrientation(
+        to requestedOrientations: UIInterfaceOrientationMask,
+        completion: @escaping (GeckoOrientationLockResult) -> Void
+    )
+    func unlockScreenOrientation()
+}
+
+public final class GeckoScreenOrientationController {
+    public weak var delegate: GeckoScreenOrientationDelegate?
+}
+
 class GeckoRuntimeImpl: NSObject, SwiftGeckoViewRuntime {
     func runtimeDispatcher() -> any SwiftEventDispatcher {
         return GeckoEventDispatcherWrapper.runtimeInstance
@@ -66,12 +78,36 @@ class GeckoRuntimeImpl: NSObject, SwiftGeckoViewRuntime {
     @objc(avPlayerHost)
     func avPlayerHost() -> AnyObject? {
         return AVPlayerHost.shared
+    
+    func lockScreenOrientation(
+        _ orientationMask: UInt,
+        completion: @escaping (GeckoOrientationLockResult) -> Void
+    ) {
+        let requestedOrientations = UIInterfaceOrientationMask(rawValue: orientationMask)
+        DispatchQueue.main.async {
+            guard let delegate = GeckoRuntime.orientationController.delegate else {
+                completion(.notSupported)
+                return
+            }
+            delegate.lockScreenOrientation(
+                to: requestedOrientations,
+                completion: completion
+            )
+        }
+    }
+    
+    func unlockScreenOrientation() {
+        DispatchQueue.main.async {
+            GeckoRuntime.orientationController.delegate?.unlockScreenOrientation()
+        }
     }
 }
 
 public class GeckoRuntime {
     static let runtime = GeckoRuntimeImpl()
 
+    public static let orientationController = GeckoScreenOrientationController()
+    
     public static var version: String {
         return GeckoRuntimeBridge.version()
     }

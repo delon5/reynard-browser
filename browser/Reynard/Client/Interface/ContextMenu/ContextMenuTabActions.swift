@@ -7,10 +7,11 @@
 
 import GeckoView
 
-enum TabOpenDisposition {
+enum TabOpenDisposition: Equatable {
     case currentTab
     case newTab
     case newPrivateTab
+    case backgroundTab
 }
 
 struct ContextMenuTabActions {
@@ -30,12 +31,12 @@ struct ContextMenuTabActions {
         case .currentTab:
             tabManager.replaceSelectedSession(with: session, url: url, title: title)
             
-        case .newTab:
+        case .newTab, .backgroundTab:
             tabManager.addTransferredSession(
                 session,
                 url: url,
                 title: title,
-                selecting: true,
+                selecting: disposition != .backgroundTab,
                 at: tabManager.index(for: .afterSelected, mode: tabManager.selectedTabMode),
                 isPrivate: tabManager.selectedTabMode == .private
             )

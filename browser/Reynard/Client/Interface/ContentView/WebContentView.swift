@@ -20,6 +20,9 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         static let returnAnimationDuration: TimeInterval = 0.45
         static let returnSpringDamping: CGFloat = 0.9
         static let scrollToTopTriggerOffset: CGFloat = 1
+        static let errorTopInset: CGFloat = 96
+        static let errorHorizontalInset: CGFloat = 32
+        static let maximumErrorWidth: CGFloat = 480
     }
     
     enum VisibilityState: Equatable {
@@ -31,11 +34,22 @@ final class WebContentView: UIView, UIScrollViewDelegate {
     private var refreshingSession: GeckoSession?
     private var isTrackingPullProgress = false
     private var pullToRefreshRecognizer: PullToRefreshGestureRecognizer?
+    private var lastScrollState: (position: CGFloat, zoomScale: CGFloat)?
+    private var pageBackgroundTopConstraint: NSLayoutConstraint?
     
     private let webView = GeckoView()
+    private let pageBackgroundView = UIView()
+    private let errorLabel = UILabel()
     private let scrollToTopTriggerView = UIScrollView() // For scrolling up when tap the iOS status bar
     private let refreshIndicatorContainer = UIView()
     private let refreshIndicator = UIActivityIndicatorView(style: .large)
+    
+    var historySwipeDirectionsProvider: (() -> GeckoEdgeSwipeDirections)?
+    var onHistorySwipeDidStart: ((GeckoEdgeSwipeDirections) -> Void)?
+    var onHistorySwipeDidUpdate: ((CGFloat) -> Void)?
+    var onHistorySwipeDidComplete: ((GeckoEdgeSwipeDirections) -> Void)?
+    var onHistorySwipeDidEnd: (() -> Void)?
+    var onVerticalScroll: ((CGFloat) -> Void)?
     
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -49,7 +63,7 @@ final class WebContentView: UIView, UIScrollViewDelegate {
     }
     
     deinit {
-        webView.inputResultDelegate = nil
+        webView.interactionDelegate = nil
     }
     
     override func layoutSubviews() {
@@ -62,33 +76,66 @@ final class WebContentView: UIView, UIScrollViewDelegate {
     }
     
     private func configureHierarchy() {
+        backgroundColor = .systemBackground
         webView.translatesAutoresizingMaskIntoConstraints = false
+        pageBackgroundView.translatesAutoresizingMaskIntoConstraints = false
+        errorLabel.translatesAutoresizingMaskIntoConstraints = false
         scrollToTopTriggerView.translatesAutoresizingMaskIntoConstraints = false
         refreshIndicatorContainer.translatesAutoresizingMaskIntoConstraints = false
         refreshIndicator.translatesAutoresizingMaskIntoConstraints = false
         scrollToTopTriggerView.delegate = self
         scrollToTopTriggerView.showsVerticalScrollIndicator = false
         scrollToTopTriggerView.contentInsetAdjustmentBehavior = .never
+        webView.interactionDelegate = self
+        pageBackgroundView.backgroundColor = .systemBackground
+        errorLabel.font = .preferredFont(forTextStyle: .body)
+        errorLabel.adjustsFontForContentSizeCategory = true
+        errorLabel.numberOfLines = 0
+        errorLabel.textAlignment = .center
+        errorLabel.textColor = .secondaryLabel
+        errorLabel.isHidden = true
         refreshIndicator.hidesWhenStopped = false
         refreshIndicatorContainer.addSubview(refreshIndicator)
         addSubview(scrollToTopTriggerView)
+        addSubview(pageBackgroundView)
         addSubview(refreshIndicatorContainer)
         addSubview(webView)
+        addSubview(errorLabel)
         resetRefreshIndicator()
         refreshIndicatorContainer.alpha = 0
     }
     
     private func configureConstraints() {
+        let topConstraint = pageBackgroundView.topAnchor.constraint(equalTo: topAnchor)
+        topConstraint.isActive = true
+        pageBackgroundTopConstraint = topConstraint
+        
         NSLayoutConstraint.activate([
             scrollToTopTriggerView.topAnchor.constraint(equalTo: topAnchor),
             scrollToTopTriggerView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollToTopTriggerView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollToTopTriggerView.bottomAnchor.constraint(equalTo: bottomAnchor),
             
+            pageBackgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pageBackgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pageBackgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            
             webView.topAnchor.constraint(equalTo: topAnchor),
             webView.leadingAnchor.constraint(equalTo: leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            
+            errorLabel.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: UX.errorTopInset),
+            errorLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            errorLabel.leadingAnchor.constraint(
+                greaterThanOrEqualTo: safeAreaLayoutGuide.leadingAnchor,
+                constant: UX.errorHorizontalInset
+            ),
+            errorLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: safeAreaLayoutGuide.trailingAnchor,
+                constant: -UX.errorHorizontalInset
+            ),
+            errorLabel.widthAnchor.constraint(lessThanOrEqualToConstant: UX.maximumErrorWidth),
             
             refreshIndicatorContainer.centerXAnchor.constraint(equalTo: centerXAnchor),
             refreshIndicatorContainer.topAnchor.constraint(
@@ -100,6 +147,13 @@ final class WebContentView: UIView, UIScrollViewDelegate {
             refreshIndicator.trailingAnchor.constraint(equalTo: refreshIndicatorContainer.trailingAnchor),
             refreshIndicator.bottomAnchor.constraint(equalTo: refreshIndicatorContainer.bottomAnchor),
         ])
+    }
+    
+    func extendPageBackground(to topAnchor: NSLayoutYAxisAnchor) {
+        pageBackgroundTopConstraint?.isActive = false
+        let constraint = pageBackgroundView.topAnchor.constraint(equalTo: topAnchor)
+        constraint.isActive = true
+        pageBackgroundTopConstraint = constraint
     }
     
     func setVisibility(_ visibility: VisibilityState) {
@@ -121,13 +175,42 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         return false
     }
     
-    func setSession(_ session: GeckoSession?) {
-        guard webView.session !== session else {
+    func setTab(_ tab: Tab?, pageBackgroundColor: UIColor? = nil) {
+        hidePageError()
+        pageBackgroundView.backgroundColor = pageBackgroundColor ?? .systemBackground
+        
+        guard webView.session !== tab?.session else {
             return
         }
+        lastScrollState = nil
         refreshingSession = nil
         pullToRefreshRecognizer?.cancelPull()
-        webView.session = session
+        webView.session = tab?.session
+    }
+    
+    func setPageBackgroundColor(_ color: UIColor) {
+        pageBackgroundView.backgroundColor = color
+    }
+    
+    func showPageError(for url: String?) {
+        guard UIApplication.shared.applicationState == .active else {
+            return
+        }
+        
+        let page = url?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let page, !page.isEmpty {
+            let format = NSLocalizedString("A problem occurred on “%@”.", comment: "Webpage URL")
+            errorLabel.text = String(format: format, page)
+        } else {
+            errorLabel.text = NSLocalizedString("A problem occurred on this webpage.", comment: "")
+        }
+        errorLabel.isHidden = false
+        setPullToRefreshEnabled(false)
+    }
+    
+    private func hidePageError() {
+        errorLabel.isHidden = true
+        errorLabel.text = nil
     }
     
     func setPullToRefreshEnabled(_ enabled: Bool) {
@@ -136,9 +219,7 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         }
         if enabled {
             installPullToRefreshRecognizer()
-            webView.inputResultDelegate = self
         } else if let pullToRefreshRecognizer {
-            webView.inputResultDelegate = nil
             refreshingSession = nil
             pullToRefreshRecognizer.cancelPull()
             webView.removeGestureRecognizer(pullToRefreshRecognizer)
@@ -167,30 +248,36 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         webView.addInteraction(interaction)
     }
     
-    func makeThumbnail(visibleSize: CGSize) -> UIImage? {
+    func thumbnailFrame(in view: UIView) -> CGRect {
         layoutIfNeeded()
-        guard visibleSize.width > 1, visibleSize.height > 1 else {
+        return convert(thumbnailBounds, to: view)
+    }
+    
+    func makeThumbnail() -> UIImage? {
+        layoutIfNeeded()
+        let captureBounds = thumbnailBounds
+        guard captureBounds.width > 1, captureBounds.height > 1 else {
             return nil
         }
         
-        // Capped at 2x, deliberately. The default format renders at
-        // the device's native scale - 3x on every modern iPhone -
-        // which makes a full-screen capture roughly 1179x2556 pixels,
-        // ~12MB decompressed. One of these lives in memory PER TAB
-        // (Tab.thumbnail) and is what gets encoded to disk, so the
-        // capture scale multiplies through the entire thumbnail
-        // pipeline's memory and I/O. 2x is still Retina-sharp for the
-        // overview cards these draw into (which display far smaller
-        // than full screen) and even for the full-screen transition
-        // frames, while cutting the pixel count - and every downstream
-        // cost - by 2.25x on 3x devices. 1x/2x devices are unaffected:
-        // the cap only ever lowers scale, never raises it.
+        // Capped at 2x, deliberately. The default format renders at the
+        // device's native scale - 3x on every modern iPhone - making a
+        // full-screen capture ~1179x2556, ~12MB decompressed. One lives
+        // in memory PER TAB and is what gets encoded to disk, so the
+        // capture scale multiplies through the whole thumbnail pipeline.
+        // 2x is still Retina-sharp for the overview cards these draw
+        // into. The cap only ever lowers scale, never raises it.
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = min(format.scale, 2)
-        let renderer = UIGraphicsImageRenderer(size: visibleSize, format: format)
+        let renderer = UIGraphicsImageRenderer(size: captureBounds.size, format: format)
         return renderer.image { context in
+            context.cgContext.translateBy(x: -captureBounds.minX, y: -captureBounds.minY)
             layer.render(in: context.cgContext)
         }
+    }
+    
+    private var thumbnailBounds: CGRect {
+        return bounds.union(pageBackgroundView.frame)
     }
     
     private func installPullToRefreshRecognizer() {
@@ -307,7 +394,7 @@ final class WebContentView: UIView, UIScrollViewDelegate {
     }
 }
 
-extension WebContentView: GeckoViewInputResultDelegate {
+extension WebContentView: GeckoViewInteractionDelegate {
     func touchSequenceDidBegin(_ sequenceID: UInt64) {
         pullToRefreshRecognizer?.beginInputSequence(sequenceID)
     }
@@ -327,6 +414,41 @@ extension WebContentView: GeckoViewInputResultDelegate {
     }
     
     func touchSequenceDidEnd(_ sequenceID: UInt64) {}
+    
+    func compositorScrollPositionDidChange(_ scrollY: Double, zoom: Double) {
+        let currentState = (position: CGFloat(scrollY), zoomScale: CGFloat(zoom))
+        defer {
+            lastScrollState = currentState
+        }
+        guard let previousState = lastScrollState,
+              currentState.zoomScale == previousState.zoomScale || currentState.zoomScale == 1 else {
+            return
+        }
+        let scrollDelta = currentState.position - previousState.position
+        if scrollDelta != 0 {
+            onVerticalScroll?(scrollDelta)
+        }
+    }
+    
+    func allowedEdgeSwipeDirections() -> GeckoEdgeSwipeDirections {
+        return historySwipeDirectionsProvider?() ?? []
+    }
+    
+    func edgeSwipeDidStart(_ direction: GeckoEdgeSwipeDirections) {
+        onHistorySwipeDidStart?(direction)
+    }
+    
+    func edgeSwipeDidUpdate(_ progress: Double) {
+        onHistorySwipeDidUpdate?(CGFloat(progress))
+    }
+    
+    func edgeSwipeDidComplete(_ direction: GeckoEdgeSwipeDirections) {
+        onHistorySwipeDidComplete?(direction)
+    }
+    
+    func edgeSwipeDidEnd() {
+        onHistorySwipeDidEnd?()
+    }
 }
 
 private struct PullInputResult {

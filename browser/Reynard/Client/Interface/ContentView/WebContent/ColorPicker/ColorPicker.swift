@@ -70,21 +70,11 @@ final class ColorPicker: NSObject, UIPopoverPresentationControllerDelegate {
         return .none
     }
     
-    nonisolated func popoverPresentationControllerShouldDismissPopover(
-        _ popoverPresentationController: UIPopoverPresentationController
-    ) -> Bool {
-        let controller = popoverPresentationController.presentedViewController
-        let color: UIColor?
-        if #available(iOS 14.0, *) {
-            color = (controller as? UIColorPickerViewController)?.selectedColor
-        } else {
-            color = nil
-        }
+    nonisolated func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.finish(color?.toHexString() ?? self.currentColor.toHexString())
+            finish(currentColor.toHexString())
         }
-        return true
     }
     
     // MARK: - Completion
@@ -105,16 +95,10 @@ final class ColorPicker: NSObject, UIPopoverPresentationControllerDelegate {
 @available(iOS 14.0, *)
 extension ColorPicker: UIColorPickerViewControllerDelegate {
     nonisolated func colorPickerViewControllerDidSelectColor(_ viewController: UIColorPickerViewController) {
-        let color = viewController.selectedColor
-        Task { @MainActor [weak self] in
-            self?.currentColor = color
+        Task { @MainActor [weak self, weak viewController] in
+            guard let viewController else { return }
+            self?.currentColor = viewController.selectedColor
         }
     }
     
-    nonisolated func colorPickerViewControllerDidFinish(_ viewController: UIColorPickerViewController) {
-        let hex = viewController.selectedColor.toHexString()
-        Task { @MainActor [weak self] in
-            self?.finish(hex)
-        }
-    }
 }
