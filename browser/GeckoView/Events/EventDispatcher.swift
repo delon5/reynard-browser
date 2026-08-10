@@ -91,7 +91,9 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     /// dispatcher. GeckoView:LoadUri is fire-and-forget, so this
     /// disposition is the only record of whether a user's load ever
     /// reached the engine.
-    enum DispatchDisposition: String {
+    /// public because `dispatch` is public and returns it - an internal
+    /// enum on a public method's signature does not compile.
+    public enum DispatchDisposition: String {
         case handledLocally
         case queued
         case delivered
