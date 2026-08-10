@@ -332,12 +332,15 @@ final class SystemMediaSession: MediaSessionDelegate {
     /// lock screen is visible - reconciling nothing. See
     /// fix_release_audio_session_when_idle.py.
     ///
-    /// Only when NO known session has any playback at all (playing or
-    /// paused) is there nothing the lock screen could control: clear
-    /// the now playing entry and release the shared audio session so
-    /// iOS stops offering transport controls for this app. A paused
-    /// session keeps its card - that behaviour is deliberate and
-    /// unchanged here.
+    /// The audio session is released whenever nothing is actually
+    /// PLAYING - see fix_release_audio_session_with_only_paused_media.py.
+    /// Only rendering audio justifies holding the session, and with
+    /// the "audio" background mode an active session is what keeps the
+    /// entire app running in the background. A paused session keeps
+    /// its lock-screen card (deliberate, unchanged) but no longer
+    /// keeps the audio session active with it; the now playing entry
+    /// itself is cleared only when nothing has any playback at all
+    /// (playing or paused).
     ///
     /// activeSession is cleared BEFORE apply(): apply() computes
     /// hasActivePlayback from it, and only a nil activeSession makes
@@ -349,21 +352,28 @@ final class SystemMediaSession: MediaSessionDelegate {
     /// precisely the case where the session should stay active.
     func applicationDidEnterBackground() {
         revalidate()
-        let anyPlayback = sessionStates.values.contains {
-            $0.session != nil && $0.playbackState != .none
+        let anyPlaying = sessionStates.values.contains {
+            $0.session != nil && $0.playbackState == .playing
         }
-        guard !anyPlayback else {
+        guard !anyPlaying else {
             return
         }
-        activeSession = nil
-        nowPlayingCenter.nowPlayingInfo = nil
-        nowPlayingCenter.playbackState = .stopped
-        apply(MediaSessionFeatures())
+        let anyPaused = sessionStates.values.contains {
+            $0.session != nil && $0.playbackState == .paused
+        }
+        if !anyPaused {
+            activeSession = nil
+            nowPlayingCenter.nowPlayingInfo = nil
+            nowPlayingCenter.playbackState = .stopped
+            apply(MediaSessionFeatures())
+        }
         try? AVAudioSession.sharedInstance().setActive(
             false,
             options: .notifyOthersOnDeactivation
         )
-        logger("mediaSession: backgrounded with no playback - cleared")
+        logger(anyPaused
+            ? "mediaSession: backgrounded with only paused media - audio session released, card kept"
+            : "mediaSession: backgrounded with no playback - cleared")
     }
 
     /// Drops sessions that died without reporting, and clears the now
