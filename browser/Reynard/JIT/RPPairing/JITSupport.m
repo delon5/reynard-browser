@@ -81,6 +81,15 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void) {
     return requestedPIDs;
 }
 
+// Sticky counterpart to detachRequestedDebugSessionPIDs, which can only
+// ever name the pids that were already attached when the teardown ran.
+// An attach still in flight at that moment completes afterwards and is
+// in no such set, so without this it starts a loop, re-arms trapping and
+// keeps running in the background.
+//
+// Only ever touched on debugSessionStateQueue().
+static BOOL sDebuggerTeardownRequested = NO;
+
 // Shared, cross-process JIT session visibility - see this script's
 // docstring for the full reasoning. Small file in the App Group
 // container, one "pid:timestamp" entry per line. The brief, bounded
@@ -857,6 +866,20 @@ void cancelAllDebugSessionCalls(void) {
 // CHANGED - the cancellation loop moved to cancelAllDebugSessionCalls
 // above, which runs earlier. This is now the deliberate teardown only,
 // and still runs from sceneDidEnterBackground.
+// Lifts the sticky teardown set by requestDetachForAllDebugSessions.
+// Called from applicationDidBecomeActive, so attaches made from here on
+// are wanted again. Without it the first background would disable
+// trapping for the rest of the launch.
+void clearDebuggerTeardownRequest(void) {
+    dispatch_async(debugSessionStateQueue(), ^{
+        if (!sDebuggerTeardownRequested) {
+            return;
+        }
+        sDebuggerTeardownRequested = NO;
+        logger(@"clearDebuggerTeardownRequest: foreground - attaches are wanted again");
+    });
+}
+
 void requestDetachForAllDebugSessions(void) {
     // CHANGED - dispatch_async for the same reason as
     // cancelAllDebugSessionCalls above. Called from
@@ -868,6 +891,9 @@ void requestDetachForAllDebugSessions(void) {
     dispatch_async(debugSessionStateQueue(), ^{
         NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
         [detachRequestedDebugSessionPIDs() unionSet:active];
+        // Sticky, so an attach that lands after this point joins the
+        // teardown instead of re-arming the debugger behind it.
+        sDebuggerTeardownRequested = YES;
 
         logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)active.count]);
     });
@@ -1356,8 +1382,36 @@ void runDebugService(int32_t pid, DebugSession *session) {
     registerDebugSessionPID(pid);
     registerDebugSessionProxy(pid, session->debugProxy);
     
-    // A loop is running, so traps will be serviced.
-    setDebuggerListeningState(1);
+    // A loop is running, so traps will be serviced - UNLESS a teardown
+    // already ran, in which case this attach was in flight when the app
+    // backgrounded and is landing too late to be wanted.
+    //
+    // Re-arming here is how the app ended up running debug loops in the
+    // background: requestDetachForAllDebugSessions can only name pids
+    // that were attached when it ran, so a late arrival is in no detach
+    // set, starts its loop, calls this unconditionally, and nothing ever
+    // re-runs the teardown behind it. Device evidence - two loops
+    // (pids 1100 and 1172) that started one second after a teardown and
+    // were still alive 547 seconds later, keeping trapping enabled, the
+    // tunnel keep-alives flowing and the 3-second timer logging.
+    //
+    // It also feeds the watchdog kill: the more sessions alive across a
+    // transition, the more attach/detach churn on the next foreground,
+    // and a process left stopped cannot answer the synchronous XPC in
+    // EXConcreteExtension's _hostWillEnterForegroundNote:.
+    __block BOOL tornDown = NO;
+    dispatch_sync(debugSessionStateQueue(), ^{
+        tornDown = sDebuggerTeardownRequested;
+        if (tornDown) {
+            [detachRequestedDebugSessionPIDs() addObject:@(pid)];
+        }
+    });
+    if (tornDown) {
+        logger([NSString stringWithFormat:
+            @"runDebugService: (pid %d) attach landed after teardown - joining it instead of re-arming", pid]);
+    } else {
+        setDebuggerListeningState(1);
+    }
     
     // DIAGNOSTIC TEST - this loop runs for the entire lifetime of the
     // target process (self, on the Helper's self-enable path) and was

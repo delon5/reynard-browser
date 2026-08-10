@@ -33,6 +33,10 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void);
 /// entering the background. See
 /// fix_detach_debug_sessions_on_background.py.
 void requestDetachForAllDebugSessions(void);
+/// Lifts the sticky teardown the above sets, so attaches are wanted
+/// again. Must be called when the app becomes active or JIT stays off
+/// for the rest of the launch.
+void clearDebuggerTeardownRequest(void);
 
 /// Sends the GDB interrupt byte to every live debug session, so a loop
 /// blocked in its continue can act on a pending detach request. See

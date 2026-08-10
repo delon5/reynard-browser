@@ -267,6 +267,10 @@ final class JITController {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.ledger.markApplicationActive()
+            // Before anything is attached: runDebugService refuses to
+            // re-arm while the teardown is standing, so the deferred
+            // attaches below would start loops that immediately detach.
+            JITEnabler.clearDebuggerTeardownRequest()
 
             let deferred = self.ledger.drainDeferredPIDs()
 

@@ -39,6 +39,15 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// header. See fix_expose_detach_to_swift.py.
 + (void)requestDetachForAllDebugSessions NS_SWIFT_NAME(requestDetachForAllDebugSessions());
 
+/// Lifts the sticky teardown requestDetachForAllDebugSessions sets, so
+/// attaches are wanted again. Must run when the app becomes active, or
+/// runDebugService keeps refusing to re-arm and JIT stays off for the
+/// rest of the launch.
+///
+/// Wraps the C function of the same name in JITSupport.h, which Swift
+/// cannot see directly.
++ (void)clearDebuggerTeardownRequest NS_SWIFT_NAME(clearDebuggerTeardownRequest());
+
 /// Cancels in-flight debug proxy calls without tearing sessions down.
 /// Wraps the C function in JITSupport.h, which Swift cannot see
 /// directly - that header is not in the bridging header.
