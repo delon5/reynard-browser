@@ -69,6 +69,8 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private var session: GeckoSession?
     private var dynamicToolbarMaxHeight: CGFloat = 0
     private var contentBottomOffset: CGFloat = 0
+    private var toolbarBottomOffset: CGFloat = 0
+    private var floatingChromeInset: CGFloat = 0
     private var toolbarTopOffset: CGFloat = 0
     private var maxTopToolbarOffset: CGFloat = 0
     private var focusedInputTask: Task<Void, Never>?
@@ -241,6 +243,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     
     func applyToolbarOffsets(top: CGFloat, bottom: CGFloat) {
         toolbarTopOffset = top
+        toolbarBottomOffset = bottom
         webContentView.transform = toolbarAlignedTransform(
             translationX: webContentView.transform.tx
         )
@@ -250,12 +253,43 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         historyTransitionOverlayView.transform = toolbarAlignedTransform(
             translationX: historyTransitionOverlayView.transform.tx
         )
-        let contentBottomOffset = -(top + bottom)
-        guard contentBottomOffset != self.contentBottomOffset else {
+        syncContentBottomOffset()
+    }
+    
+    /// Clearance for chrome that floats OVER the page instead of
+    /// reserving layout space - this fork's condensed pill.
+    ///
+    /// It rides the same channel the toolbar offsets use, because that
+    /// channel is a compositor fixed-layer margin, not a viewport change:
+    /// setContentBottomOffset -> nsWindow::UpdateDynamicToolbarOffset ->
+    /// UiCompositorControllerParent::SetFixedLayerMargins(0, offset), and
+    /// APZCTreeManager::ComputeFixedMarginsOffset then does
+    /// `translation.y -= effectiveMargin.bottom` for anything fixed to
+    /// the bottom. A POSITIVE margin therefore lifts position:fixed and
+    /// sticky-bottom content up by exactly that much, while the page
+    /// keeps its full height and still paints behind the pill - which is
+    /// the floating look, kept.
+    ///
+    /// The toolbar's own offsets are negative by the same rule: as it
+    /// slides away, fixed content follows it down into the strip the
+    /// layout viewport already reserved.
+    func setFloatingChromeInset(_ inset: CGFloat) {
+        guard inset != floatingChromeInset else {
             return
         }
-        self.contentBottomOffset = contentBottomOffset
-        session?.setContentBottomOffset(contentBottomOffset)
+        floatingChromeInset = inset
+        syncContentBottomOffset()
+    }
+    
+    private func syncContentBottomOffset() {
+        let offset = -(toolbarTopOffset + toolbarBottomOffset) + floatingChromeInset
+        guard offset != contentBottomOffset else {
+            return
+        }
+        contentBottomOffset = offset
+        NSLog("dynToolbar: fixed-layer bottom margin %.1f (toolbar %.1f/%.1f, pill %.1f)",
+              offset, toolbarTopOffset, toolbarBottomOffset, floatingChromeInset)
+        session?.setContentBottomOffset(offset)
     }
     
     private func toolbarAlignedTransform(translationX: CGFloat) -> CGAffineTransform {

@@ -95,21 +95,16 @@ final class ToolbarController {
             self.maxToolbarOffset = maxToolbarOffset
             self.maxTopToolbarOffset = maxTopToolbarOffset
         }
-        // The condensed pill is this fork's, not upstream's, and the view
-        // stays full-screen so the pill floats over the page. That makes
-        // this the only lever: content has to clear whatever chrome is
-        // ACTUALLY on screen, so while condensed the reservation is the
-        // pill's own occupied height - which already spans the home
-        // indicator band, the pill being constrained to the view's real
-        // bottomAnchor rather than the safe-area guide.
-        let maxHeight = browserChrome.isScrollCondensed
-            ? BrowserChrome.condensedPillOccupiedHeight
-            : maxToolbarOffset
-        NSLog("dynToolbar: limits max=%.1f top=%.1f condensed=%@",
-              maxHeight, maxTopToolbarOffset,
-              browserChrome.isScrollCondensed ? "YES" : "NO")
+        // The condensed pill floats OVER the page rather than reserving
+        // layout space, so it is not a toolbar-limits question at all -
+        // the limits describe the real toolbar, unchanged from upstream.
+        // The pill's clearance is a compositor fixed-layer margin; see
+        // ContentView.setFloatingChromeInset.
+        contentView.setFloatingChromeInset(
+            browserChrome.isScrollCondensed ? BrowserChrome.condensedPillOccupiedHeight : 0
+        )
         contentView.setToolbarLimits(
-            maxHeight: maxHeight,
+            maxHeight: maxToolbarOffset,
             topOffset: maxTopToolbarOffset
         )
     }
