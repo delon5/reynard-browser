@@ -62,6 +62,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case debugLogFile
         case ideviceNativeLog
         case jitHangBacktrace
+        case stdoutLog
         case resetDDIStorage
         
         var section: Section {
@@ -72,7 +73,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 return .carPlayScripts
             case .backgroundAudioKeepAlive:
                 return .backgroundKeepAlive
-            case .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
+            case .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
                 return .diagnosticLogs
             case .resetDDIStorage:
                 return .jitDiagnostics
@@ -88,6 +89,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let debugLogFileSwitch = UISwitch()
     private let ideviceNativeLogSwitch = UISwitch()
     private let jitHangBacktraceSwitch = UISwitch()
+    private let stdoutLogSwitch = UISwitch()
     
     init() {
         super.init(style: .insetGrouped)
@@ -199,6 +201,16 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("JIT Hang Backtrace", comment: ""),
                 accessoryView: jitHangBacktraceSwitch
             )
+        case .stdoutLog:
+            // Documents/reynard_stdout.txt - Gecko's stdout and stderr,
+            // so JS dump(), printf_stderr and NSLog. Turning it off
+            // sends them to /dev/null rather than leaving the streams
+            // alone: the redirect itself is what stops a full, undrained
+            // stdout pipe blocking the main thread into a watchdog kill.
+            return switchCell(
+                title: NSLocalizedString("Standard Output Log", comment: ""),
+                accessoryView: stdoutLogSwitch
+            )
         case .resetDDIStorage:
             // Destructive-red — this deletes on-disk data, so it
             // should read as destructive like "Erase All Content"
@@ -225,7 +237,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case .videoPictureInPicture, .hideUpdateNotification, .hideUpdateAvailableBanner,
              .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
-             .debugLogFile, .ideviceNativeLog, .jitHangBacktrace:
+             .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
             break
         case .manageCarPlayScripts:
             navigationController?.pushViewController(CarPlayScriptsViewController(), animated: true)
@@ -247,6 +259,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         debugLogFileSwitch.addTarget(self, action: #selector(debugLogFileSwitchDidChange(_:)), for: .valueChanged)
         ideviceNativeLogSwitch.addTarget(self, action: #selector(ideviceNativeLogSwitchDidChange(_:)), for: .valueChanged)
         jitHangBacktraceSwitch.addTarget(self, action: #selector(jitHangBacktraceSwitchDidChange(_:)), for: .valueChanged)
+        stdoutLogSwitch.addTarget(self, action: #selector(stdoutLogSwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
@@ -258,6 +271,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         debugLogFileSwitch.isOn = Prefs.ExperimentalSettings.isJITDebugLogEnabled
         ideviceNativeLogSwitch.isOn = Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled
         jitHangBacktraceSwitch.isOn = Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
+        stdoutLogSwitch.isOn = Prefs.ExperimentalSettings.isStdoutLogEnabled
     }
     
     // All three prompt for a restart, like the Picture-in-Picture
@@ -286,6 +300,14 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         showRestartAlert()
     }
     
+    /// Takes effect on the next launch: the redirect it controls runs in
+    /// main.swift before UIApplicationMain, so the streams for THIS
+    /// process are already pointed wherever they were going. Same as the
+    /// other logging toggles.
+    @objc private func stdoutLogSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isStdoutLogEnabled = sender.isOn
+    }
+
     @objc private func jitHangBacktraceSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.isJITHangBacktraceEnabled = sender.isOn
         showRestartAlert()

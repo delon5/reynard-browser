@@ -13,6 +13,11 @@ typealias Prefs = BrowserPreferences
 final class BrowserPreferences {
     static var shared = BrowserPreferences()
     static let openLinksInAppsBridgeKey = "Reynard.Browsing.openLinksInApps"
+    /// Read by main.swift before UIApplicationMain, which is far earlier
+    /// than registerDefaults() runs - so it is a flat key with an
+    /// explicit "absent means enabled" default there, mirrored here on
+    /// every write. Same arrangement as openLinksInAppsBridgeKey.
+    static let stdoutLogBridgeKey = "Reynard.Experimental.stdoutLog"
     
     let profile: String
     private(set) var registeredDefaults: [String: Any] = [:]
@@ -62,6 +67,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isJITDebugLogEnabled"): true,
             key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
+            key("ExperimentalSettings", "isStdoutLogEnabled"): true,
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
@@ -167,6 +173,12 @@ final class BrowserPreferences {
                 forKey: key("BrowsingSettings", "openLinksInApps")
             ),
             forKey: Self.openLinksInAppsBridgeKey
+        )
+        UserDefaults.standard.set(
+            UserDefaults.standard.bool(
+                forKey: key("ExperimentalSettings", "isStdoutLogEnabled")
+            ),
+            forKey: Self.stdoutLogBridgeKey
         )
     }
 
@@ -1102,6 +1114,26 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isJITDebugLogEnabled")
+            }
+        }
+        
+        /// Gates Documents/reynard_stdout.txt, which captures Gecko's
+        /// stdout and stderr - JS dump(), printf_stderr, NSLog.
+        ///
+        /// Turning this OFF does not stop the redirect in main.swift; it
+        /// points the streams at /dev/null instead. The redirect exists
+        /// because a sideloaded app inherits a stdout pipe that nothing
+        /// drains, and once its buffer fills, write(2) blocks forever -
+        /// on the main thread that is a scene-update watchdog kill ten
+        /// seconds later. Leaving the streams alone would bring that
+        /// back, so "off" means discard the output, not stop redirecting.
+        static var isStdoutLogEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isStdoutLogEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isStdoutLogEnabled")
+                UserDefaults.standard.set(newValue, forKey: BrowserPreferences.stdoutLogBridgeKey)
             }
         }
         

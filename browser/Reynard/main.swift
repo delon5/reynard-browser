@@ -48,7 +48,35 @@ private func configureUnsandboxedAppDataDirectories(_ directories: ReynardDirect
 /// symbolicated JS frames.
 ///
 /// Truncated per launch so it stays bounded.
+///
+/// The Experimental "Standard Output Log" toggle chooses the DESTINATION,
+/// never whether to redirect: with it off the streams go to /dev/null.
+/// Leaving them pointed at the inherited pipe is the hang above, so
+/// "off" has to mean discard rather than skip.
+///
+/// The preference is read from a flat bridge key rather than through
+/// Prefs: this runs before UIApplicationMain, so registerDefaults() has
+/// not happened and the profile-scoped key may not exist yet. Absent
+/// means enabled, matching the registered default.
 private func redirectStandardStreamsToFile() {
+    let defaults = UserDefaults.standard
+    let wantsLogFile = defaults.object(forKey: BrowserPreferences.stdoutLogBridgeKey) == nil
+        ? true
+        : defaults.bool(forKey: BrowserPreferences.stdoutLogBridgeKey)
+
+    guard wantsLogFile else {
+        let discard = open("/dev/null", O_WRONLY)
+        guard discard >= 0 else {
+            return
+        }
+        dup2(discard, STDOUT_FILENO)
+        dup2(discard, STDERR_FILENO)
+        if discard != STDOUT_FILENO, discard != STDERR_FILENO {
+            close(discard)
+        }
+        return
+    }
+
     guard let documents = FileManager.default.urls(
         for: .documentDirectory,
         in: .userDomainMask
