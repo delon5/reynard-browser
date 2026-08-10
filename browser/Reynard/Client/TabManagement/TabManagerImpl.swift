@@ -271,7 +271,20 @@ final class TabManagerImplementation: NSObject, TabManager {
         
         logger(String(format: "tabSleep: sleeping tab %@ (url=%@, suppressInitialNavigation was %@)", tab.id.uuidString, url, String(tab.state.suppressInitialNavigation)))
         sessionManager.close(tab.session)
-        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
+        // NOT opened. An immediate open spawns a replacement content
+        // process straight away, so sleeping a tab freed its page but
+        // left the process - and therefore the hosted app extension -
+        // alive. That is what iOS charges for on the way back in:
+        // ExtensionFoundation's -[EXConcreteExtension
+        // _hostWillEnterForegroundNote:] does a SYNCHRONOUS XPC
+        // round-trip to every hosted extension, on the main thread, and
+        // the 08:00:52 capture died in exactly that call with 17 live
+        // children to work through against a 10 second allowance.
+        //
+        // Deferring the open to selection means a slept tab costs no
+        // process at all. loadRestoredURLIfNeeded opens it on the way
+        // back.
+        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate, opening: .manual)
         tab.state.restoreState = .pending(url)
         tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
         NSLog("[TabMemory] Slept background session for tab %@", tab.id.uuidString)
@@ -763,6 +776,15 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         
         let tab = tabs(for: mode)[index]
+        // A slept tab's session is created unopened on purpose, so this
+        // is where it comes back - before the isOpen() guard below,
+        // which exists to catch a session that DIED, not one that was
+        // never started.
+        if !tab.session.isOpen(), case .pending = tab.state.restoreState {
+            logger(String(format: "tabRestore: opening the deferred session for tab %@", tab.id.uuidString))
+            sessionManager.open(tab.session)
+        }
+        
         guard tab.session.isOpen(),
               case let .pending(url) = tab.state.restoreState else {
             logger(String(format: "tabRestore: tab at index %d not restorable (open=%@, restoreState=%@) - nothing to do", index, String(tab.session.isOpen()), String(describing: tab.state.restoreState)))
@@ -821,6 +843,17 @@ final class TabManagerImplementation: NSObject, TabManager {
         guard sessionManager.isForeground,
               let tab = selectedTab,
               !tab.session.isOpen() else {
+            return
+        }
+        
+        // A slept tab's session is created unopened deliberately - no
+        // content process until it is needed - so opening it is not
+        // recovery and must not be reported as a replacement. Nothing
+        // died here; it was never started.
+        if case .pending = tab.state.restoreState {
+            logger(String(format: "tabSleep: waking tab %@ - opening its deferred session", tab.id.uuidString))
+            sessionManager.open(tab.session)
+            sessionManager.activate(tab.session)
             return
         }
         
@@ -1454,13 +1487,14 @@ final class TabManagerImplementation: NSObject, TabManager {
         tabID: UUID,
         url: String?,
         windowId: String?,
-        isPrivate: Bool
+        isPrivate: Bool,
+        opening: SessionOpening? = nil
     ) -> GeckoSession {
         return sessionManager.createSession(
             url: url,
             tabID: tabID,
             isPrivate: isPrivate,
-            opening: .immediate(windowID: windowId),
+            opening: opening ?? .immediate(windowID: windowId),
             delegates: sessionDelegates
         )
     }
