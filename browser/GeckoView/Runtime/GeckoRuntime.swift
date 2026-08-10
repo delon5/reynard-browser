@@ -78,7 +78,8 @@ class GeckoRuntimeImpl: NSObject, SwiftGeckoViewRuntime {
     @objc(avPlayerHost)
     func avPlayerHost() -> AnyObject? {
         return AVPlayerHost.shared
-    
+    }
+
     func lockScreenOrientation(
         _ orientationMask: UInt,
         completion: @escaping (GeckoOrientationLockResult) -> Void

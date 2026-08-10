@@ -309,6 +309,8 @@ final class JITController {
                 }
             }
         }
+    }
+
     func startBackgroundAudioIfNeeded() {
         guard !usePtraceJIT(),
               Prefs.JITSettings.isJITEnabled,
@@ -1431,11 +1433,6 @@ extension JITController {
             if now.timeIntervalSince(modificationDate) > Self.jitAttachResultStaleAgeSeconds {
                 try? fileManager.removeItem(at: resultFileURL)
             }
-
-            
-            self.hasHandledFailure = true
-            BackgroundAudioManager.shared.stop()
-            self.presentEnablementFailureScreen(error: NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: nil), showsErrorDetails: false)
         }
     }
     
