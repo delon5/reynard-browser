@@ -5,6 +5,7 @@
 //  Created by Minh Ton on 9/4/26.
 //
 
+import AVFoundation
 import Foundation
 import GeckoView
 import MediaPlayer
@@ -198,6 +199,7 @@ final class SystemMediaSession: MediaSessionDelegate {
         if activeSession === session {
             nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
             apply(state.features)
+            nowPlayingCenter.playbackState = .paused
         }
         notifyStateChanged(for: session)
     }
@@ -312,6 +314,10 @@ final class SystemMediaSession: MediaSessionDelegate {
         activeSession = session
         nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
         apply(state.features)
+        // Report the state alongside the info - the info dict's
+        // PlaybackRate alone does not tell iOS the app stopped.
+        nowPlayingCenter.playbackState =
+            state.playbackState == .playing ? .playing : .paused
         
         // See fix_log_media_session_activity.py. Every path that
         // populates now playing comes through here, so this is where a
@@ -320,6 +326,46 @@ final class SystemMediaSession: MediaSessionDelegate {
         logger(String(format: "mediaSession: ACTIVATED %@ (%d in history, %d states)", title, playbackHistory.count, sessionStates.count))
     }
     
+    /// Called when the app moves to the background. revalidate() runs
+    /// on the way to the FOREGROUND (SceneDelegate.sceneDidBecomeActive),
+    /// which left the entire backgrounded stretch - exactly when the
+    /// lock screen is visible - reconciling nothing. See
+    /// fix_release_audio_session_when_idle.py.
+    ///
+    /// Only when NO known session has any playback at all (playing or
+    /// paused) is there nothing the lock screen could control: clear
+    /// the now playing entry and release the shared audio session so
+    /// iOS stops offering transport controls for this app. A paused
+    /// session keeps its card - that behaviour is deliberate and
+    /// unchanged here.
+    ///
+    /// activeSession is cleared BEFORE apply(): apply() computes
+    /// hasActivePlayback from it, and only a nil activeSession makes
+    /// every command disable. It never removes handlers, so disabling
+    /// is what actually retires the card.
+    ///
+    /// Deactivation is best-effort: if the engine still holds a live
+    /// audio unit the call fails ("session is busy"), which is
+    /// precisely the case where the session should stay active.
+    func applicationDidEnterBackground() {
+        revalidate()
+        let anyPlayback = sessionStates.values.contains {
+            $0.session != nil && $0.playbackState != .none
+        }
+        guard !anyPlayback else {
+            return
+        }
+        activeSession = nil
+        nowPlayingCenter.nowPlayingInfo = nil
+        nowPlayingCenter.playbackState = .stopped
+        apply(MediaSessionFeatures())
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+        logger("mediaSession: backgrounded with no playback - cleared")
+    }
+
     /// Drops sessions that died without reporting, and clears the now
     /// playing entry if the active one was among them. See
     /// fix_media_session_leak.py.
@@ -367,6 +413,7 @@ final class SystemMediaSession: MediaSessionDelegate {
         activeSession = nil
         nowPlayingCenter.nowPlayingInfo = nil
         apply(MediaSessionFeatures())
+        nowPlayingCenter.playbackState = .stopped
         
         logger(String(format: "mediaSession: CLEARED - nothing left playing (%d states remain)", sessionStates.count))
     }

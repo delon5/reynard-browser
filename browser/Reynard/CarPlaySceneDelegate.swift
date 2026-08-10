@@ -110,10 +110,13 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// from the scene's own carWindow.
     /// Claims the output route so audio reaches the car.
     ///
-    /// Reynard otherwise never configures an audio session - the only
-    /// setCategory call in the app is in BackgroundAudioKeepAlive, which
-    /// defaults off - so it runs with the system default of
-    /// .soloAmbient. That still produces sound from the phone speaker,
+    /// The app side otherwise leaves the session alone, but the
+    /// ENGINE does not: cubeb claims .playback whenever it sets
+    /// up a stream (cubeb_audiounit_ios.mm), and
+    /// BackgroundAudioKeepAlive (defaults off) claims it too.
+    /// Only before any page has touched audio does the session
+    /// sit at the default .soloAmbient - a default that still
+    /// produces sound from the phone speaker,
     /// which is why playback appeared to work, but it does not claim the
     /// route and so never reaches a connected car.
     ///

@@ -227,6 +227,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         browserViewController.sessionManager.setApplicationForeground(false)
         browserViewController.privateBrowsingLockCoordinator.lockIfNeeded()
 
+        // If nothing is playing or paused there is nothing the
+        // lock screen could control - drop the now playing entry
+        // and release the audio session, or iOS keeps offering
+        // transport controls for an app with nothing to control.
+        SystemMediaSession.shared.applicationDidEnterBackground()
+
         // Everything below runs AFTER this notification returns, not
         // inside it. See fix_defer_background_teardown.py.
         //
