@@ -153,26 +153,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            // Restored AFTER the re-attach completes, not alongside it.
-            //
-            // "Alongside" was the bug. This call is synchronous; the
-            // attaches it depends on are not - three slots at ~1.2s each,
-            // so 15 orphans take about six seconds. Setting the flag here
-            // told every child "a debugger is listening, brk away" for
-            // that whole window, while most had no session able to
-            // service the trap. A process still executing across the
-            // transition - Picture in Picture, which keeps rendering
-            // while the app is away - is the one most likely to hit it,
-            // and a child stopped at an unserviced brk cannot answer the
-            // synchronous XPC iOS sends on this very transition. That is
-            // the 0x8BADF00D seen returning from PiP.
-            //
-            // The cost is that JS runs interpreted for those few seconds
-            // after a return, which is the same trade already made for
-            // backgrounding.
-            JITController.shared.reattachOrphanedProcesses {
-                JITEnabler.setDebuggerListening(true)
-            }
+            // Restored alongside the re-attach, not before it: the
+            // sessions it creates are what make trapping safe again.
+            // See fix_stop_trapping_on_background.py.
+            JITEnabler.setDebuggerListening(true)
+            
+            JITController.shared.reattachOrphanedProcesses()
             
             if reattachTask != .invalid {
                 reattachApplication.endBackgroundTask(reattachTask)
