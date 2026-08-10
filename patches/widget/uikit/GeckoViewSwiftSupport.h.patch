@@ -161,7 +161,7 @@ index e68fca9134c0..424b8e447b43 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +198,37 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +198,58 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
@@ -195,6 +195,27 @@ index e68fca9134c0..424b8e447b43 100644
 +// lets the frame reach the compositor without a copy.
 +MOZ_EXPORT void ReynardAVPlayerNotifyFrame(uintptr_t aPlayerId,
 +                                           CVPixelBufferRef aPixelBuffer);
++
++// Called from the Swift AVPlayer host as the playback position moves:
++// on every display-link frame pull (even when no new pixel buffer is
++// ready - a repeated frame still means the clock ticked), from a 4 Hz
++// periodic time observer that covers the stretches when the pull link
++// is parked, once when the item first reaches readyToPlay, and after
++// every completed seek. Unlike the two callbacks above this one is HOT
++// - up to 120 Hz - and it is cheap by design: callable from ANY
++// thread, the position lands in a lock-protected registry, and a hop
++// to Gecko's main thread is queued only when the media machinery is
++// actually waiting on this position. This is the clock that
++// AVPlayerDemuxer paces its synthetic samples against, i.e. the thing
++// that makes the media element's currentTime advance.
++MOZ_EXPORT void ReynardAVPlayerNotifyTime(uintptr_t aPlayerId,
++                                          double aSeconds);
++
++// Called when AVFoundation reports the item played to its end - the
++// signal that lets the demuxer answer end-of-stream and the media
++// element fire "ended" at the stream's real end. Same threading
++// contract as the position callback above.
++MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId);
 +
  MOZ_END_EXTERN_C
  

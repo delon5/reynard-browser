@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,174 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -32,11 +32,12 @@ new file mode 100644
 +// bookkeeping. Play/Pause/Suspend/Resume forward to the player, exactly
 +// as HLSDecoder forwards to GeckoHLSResourceWrapper.
 +//
-+// The state machine it creates reads from AVPlayerDemuxer, which never
-+// produces a sample. That is deliberate: the state machine base wraps
-+// its reader unconditionally and cannot be given a null one, so the
-+// reader exists to satisfy the structure while the AVPlayer does the
-+// work.
++// The state machine it creates reads from AVPlayerDemuxer, which
++// synthesises timing-only samples paced by the position the Swift host
++// pushes into AVPlayerPlaybackRegistry. The samples carry no pixels -
++// ReynardAVPlayerDecoderModule turns them into image-less VideoData -
++// so the state machine's clock advances in step with the AVPlayer
++// while the visible frames arrive through ReynardAVPlayerNotifyFrame.
 +class AVPlayerDecoder final : public MediaDecoder {
 + public:
 +  static RefPtr<AVPlayerDecoder> Create(MediaDecoderInit& aInit);
@@ -77,12 +78,19 @@ new file mode 100644
 +  void NotifyMetadata(const media::TimeUnit& aDuration,
 +                      const gfx::IntSize& aDisplay);
 +
++  // Wakes MediaFormatReader after AVPlayerPlaybackRegistry took an
++  // update something was waiting on: a parked sample request, the
++  // ended flag, or the periodic buffered-ranges refresh. Called via
++  // the ReynardAVPlayerNotifyTime/-Ended wake-up runnables. Main
++  // thread only.
++  void NotifyPlaybackPoke();
++
 +  // Publishes a blank IOSurface-backed frame so the page has a video
-+  // layer of the right geometry. AVPlayerDemuxer never produces a
-+  // sample, so without this nothing reaches the compositor and there
-+  // is no layer for NativeLayerCA to host an AVPlayerLayer in. The
-+  // visible frames come from the AVPlayer, not from this surface.
-+  // Main thread only.
++  // layer of the right geometry. The decode pipeline carries timing
++  // only - no pixels - so without this nothing reaches the compositor
++  // and there is no layer for NativeLayerCA to host an AVPlayerLayer
++  // in. The visible frames come from the AVPlayer, not from this
++  // surface. Main thread only.
 +  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay);
 +
 +  // Latched by ReynardAVPlayerNotifyFrame the first time a real

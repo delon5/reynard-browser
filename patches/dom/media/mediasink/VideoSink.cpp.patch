@@ -1,0 +1,26 @@
+diff --git a/dom/media/mediasink/VideoSink.cpp b/dom/media/mediasink/VideoSink.cpp
+--- a/dom/media/mediasink/VideoSink.cpp
++++ b/dom/media/mediasink/VideoSink.cpp
+@@ -345,6 +345,22 @@
+   auto now = TimeStamp::Now();
+ 
+   RefPtr<VideoData> video = VideoQueue().PeekFront();
++  // Reynard: a timing-only VideoData - null image, produced by
++  // ReynardAVPlayerDecoderModule so MDSM's clock advances - must never
++  // reach the container. SetCurrentFrame appends nothing for a null
++  // image, and VideoFrameContainer treats an empty image list as
++  // ClearImagesInHost(All), which would wipe the picture the separate
++  // AVPlayer frame path (ReynardAVPlayerNotifyFrame) published.
++  //
++  // RenderVideoFrames already skips these frames; this is the same
++  // check for the redraw path, which MDSM reaches from
++  // FinishDecodeFirstFrame and on seek completion.
++  //
++  // Returning rather than falling through is deliberate: the
++  // blank-frame path below would paint over the AVPlayer picture.
++  if (video && !video->mImage) {
++    return;
++  }
+   if (video) {
+     if (mBlankImage) {
+       video->mImage = mBlankImage;

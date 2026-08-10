@@ -35,7 +35,12 @@ index 28bbbf6..aa32007 100644
      "BackgroundVideoDecodingPermissionObserver.h",
      "BitReader.h",
      "BitWriter.h",
-@@ -279,6 +287,7 @@ UNIFIED_SOURCES += [
+@@ -214,3 +222,4 @@ EXPORTS += [
+     "QueueObject.h",
+     "ReaderProxy.h",
++    "ReynardAVPlayerDecoderModule.h",
+     "SeekJob.h",
+@@ -279,6 +288,7 @@ UNIFIED_SOURCES += [
      "AudioStreamTrack.cpp",
      "AudioTrack.cpp",
      "AudioTrackList.cpp",
@@ -43,3 +48,8 @@ index 28bbbf6..aa32007 100644
      "BackgroundVideoDecodingPermissionObserver.cpp",
      "BaseMediaResource.cpp",
      "BitReader.cpp",
+@@ -338,3 +348,4 @@ UNIFIED_SOURCES += [
+     "QueueObject.cpp",
+     "ReaderProxy.cpp",
++    "ReynardAVPlayerDecoderModule.cpp",
+     "SeekJob.cpp",

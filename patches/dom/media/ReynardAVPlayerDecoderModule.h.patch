@@ -1,0 +1,58 @@
+diff --git a/dom/media/ReynardAVPlayerDecoderModule.h b/dom/media/ReynardAVPlayerDecoderModule.h
+new file mode 100644
+--- /dev/null
++++ b/dom/media/ReynardAVPlayerDecoderModule.h
+@@ -0,0 +1,53 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef ReynardAVPlayerDecoderModule_h_
++#define ReynardAVPlayerDecoderModule_h_
++
++#include "PlatformDecoderModule.h"
++
++namespace mozilla {
++
++// The decoder module for AVPlayerDemuxer's synthetic clock track.
++//
++// It claims exactly one MIME type - REYNARD_AVPLAYER_SYNTHETIC_MIME,
++// which only that demuxer ever advertises - and only while
++// media.reynard.avplayer.enabled is on, so its existence is invisible
++// to every normal stream. Its "decoder" turns each synthetic sample
++// into a VideoData that carries the sample's timing and NO image: the
++// video sink skips image-less frames when publishing to the compositor
++// but still advances the media clock over them, which is the entire
++// point. The pixels the user sees never pass through here - they go
++// AVPlayerItemVideoOutput -> ReynardAVPlayerNotifyFrame ->
++// VideoFrameContainer, untouched by this module.
++//
++// Registered in PDMFactory::CreatePDMs ahead of the real modules. That
++// ordering is idle in the default wiring (nothing else claims the
++// synthetic type) but load-bearing for the Fallback-B variant
++// described in AVPlayerDemuxer.h, where the track advertises video/avc
++// and this module must win it before AppleDecoderModule does.
++class ReynardAVPlayerDecoderModule final : public PlatformDecoderModule {
++ public:
++  ReynardAVPlayerDecoderModule() = default;
++
++  static already_AddRefed<PlatformDecoderModule> Create();
++
++  // Pure virtual in PlatformDecoderModule; shows up in decoder-doctor
++  // diagnostics and the media logs.
++  const char* Name() const override { return "ReynardAVPlayerClock"; }
++
++  media::DecodeSupportSet SupportsMimeType(
++      const nsACString& aMimeType,
++      DecoderDoctorDiagnostics* aDiagnostics) const override;
++
++  already_AddRefed<MediaDataDecoder> CreateVideoDecoder(
++      const CreateDecoderParams& aParams) override;
++
++  already_AddRefed<MediaDataDecoder> CreateAudioDecoder(
++      const CreateDecoderParams& aParams) override;
++};
++
++}  // namespace mozilla
++
++#endif  // ReynardAVPlayerDecoderModule_h_

@@ -2,47 +2,219 @@ diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.cpp
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,447 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 +
 +#include "AVPlayerDemuxer.h"
 +
-+#include "mozilla/Debug.h"  // printf_stderr
++#include <algorithm>
++#include <cmath>
++#include <unordered_map>
 +
-+// Every function here logs, because this file is the blind half of the
-+// metadata stall. The last capture proved Load() completed - the
-+// metadata callback found a live, registered decoder - and proved
-+// MetadataLoaded never fired. Everything between those two points is
-+// async machinery with no output of its own, and each line below cuts
-+// it at a different joint:
-+//
-+//   Init                    - MediaFormatReader engaged this demuxer at
-+//                             all (AsyncReadMetadata ran)
-+//   GetTrackDemuxer/GetInfo - DemuxerProxy::Init's resolve lambda ran
-+//   ShouldComputeStartTime  - that lambda ran to completion: the value
-+//                             is snapshotted immediately before it
-+//                             flips mInitDone
-+//   GetSamples              - the start-time branch was taken anyway,
-+//                             i.e. the false above was NOT honoured -
-+//                             this line before MetadataLoaded means the
-+//                             running build predates 900e242
-+//
-+// All prints and still no MetadataLoaded narrows the stall to
-+// OnDemuxerInitDone's tail or the resolve's hops back through
-+// ReaderProxy and MDSM to the main thread.
++#include "MediaData.h"
++#include "mozilla/Debug.h"  // printf_stderr
++#include "mozilla/StaticMutex.h"
++#include "mozilla/TimeStamp.h"
++#include "nsThreadUtils.h"
++
++// The stub predecessor of this file returned END_OF_STREAM for every
++// sample request, which made the state machine complete instantly: the
++// element fired "ended" at t=0, the page reloaded it, and the only
++// picture was the single frame the notify path had pushed. This
++// version paces synthetic samples against the AVPlayer's own reported
++// position instead, so the state machine's clock advances in real
++// time. The logging discipline is inherited: every state TRANSITION
++// logs, steady state does not.
 +
 +namespace mozilla {
 +
-+AVPlayerDemuxer::AVPlayerDemuxer(const gfx::IntSize& aDisplay)
-+    : mDuration(media::TimeUnit::Invalid()) {
-+  // Enough for the reader to publish metadata and for the compositor to
-+  // size the layer. Nothing decodes these samples, so the codec string is
-+  // only ever inspected, never acted on.
-+  mVideoInfo.mMimeType = "video/avc"_ns;
-+  mVideoInfo.mDisplay = aDisplay;
-+  mVideoInfo.mImage = aDisplay;
++// One synthetic sample every 33.3 ms - a nominal 30 fps. Nothing
++// decodes these, so the cadence only has to be fine enough that the
++// state machine always has a "frame" to sit on and coarse enough not
++// to be busywork. It is NOT the display rate: pixels arrive through
++// ReynardAVPlayerNotifyFrame at whatever rate AVFoundation delivers.
++static media::TimeUnit FrameDuration() {
++  return media::TimeUnit::FromMicroseconds(33333);
++}
++
++// How far the synthetic clock may run ahead of the position the Swift
++// host last reported. The slack absorbs the reporting cadence (the
++// periodic observer ticks at 4 Hz) without letting Gecko's clock
++// meaningfully outrun a stalled AVPlayer. This is the tuning knob for
++// clock drift during AVPlayer stalls.
++static media::TimeUnit MaxLead() {
++  return media::TimeUnit::FromMicroseconds(500000);
++}
++
++// A recognisable non-empty payload. Zero-length samples flirt with
++// assertions in the sample bookkeeping, and four bytes is cheap
++// insurance; the decoder never reads them.
++static const uint8_t kSyntheticPayload[4] = {'R', 'Y', 'N', 'A'};
++
++namespace {
++
++struct RegistryEntry {
++  media::TimeUnit mPosition = media::TimeUnit::Invalid();
++  media::TimeUnit mDuration = media::TimeUnit::Invalid();
++  gfx::IntSize mDisplay;
++  bool mEnded = false;
++  // Position at which a parked GetSamples wants waking; Invalid while
++  // nothing is parked.
++  media::TimeUnit mNeeded = media::TimeUnit::Invalid();
++  // When UpdatePosition last asked for a reader wake, for the
++  // once-a-second freshness poke that keeps buffered ranges moving.
++  TimeStamp mLastPoke;
++};
++
++static StaticMutex sRegistryMutex;
++
++// Leaked, like PlayersById in AVPlayerDecoder.mm and for the same
++// reason: a Swift callback racing XPCOM shutdown must find an empty
++// map, never a destroyed one. Callers hold sRegistryMutex.
++static std::unordered_map<uintptr_t, RegistryEntry>& Registry() {
++  static auto* sRegistry = new std::unordered_map<uintptr_t, RegistryEntry>();
++  return *sRegistry;
++}
++
++}  // namespace
++
++/* static */
++void AVPlayerPlaybackRegistry::Register(uintptr_t aPlayerId) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  Registry()[aPlayerId] = RegistryEntry();
++}
++
++/* static */
++void AVPlayerPlaybackRegistry::Unregister(uintptr_t aPlayerId) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  Registry().erase(aPlayerId);
++}
++
++/* static */
++bool AVPlayerPlaybackRegistry::UpdatePosition(uintptr_t aPlayerId,
++                                              double aSeconds) {
++  if (!std::isfinite(aSeconds) || aSeconds < 0.0) {
++    return false;
++  }
++  StaticMutexAutoLock lock(sRegistryMutex);
++  auto it = Registry().find(aPlayerId);
++  if (it == Registry().end()) {
++    // Teardown race: the decoder unregistered while this report was in
++    // flight. Dropped, exactly like the other callbacks drop unknown
++    // ids.
++    return false;
++  }
++  RegistryEntry& entry = it->second;
++  entry.mPosition = media::TimeUnit::FromSeconds(aSeconds);
++
++  bool poke = false;
++  if (entry.mNeeded.IsValid() && entry.mPosition >= entry.mNeeded) {
++    // A parked GetSamples was waiting for this position. Cleared here,
++    // under the lock, so a burst of reports queues exactly one wake.
++    entry.mNeeded = media::TimeUnit::Invalid();
++    poke = true;
++  }
++  const TimeStamp now = TimeStamp::Now();
++  if (!poke && (entry.mLastPoke.IsNull() ||
++                (now - entry.mLastPoke).ToSeconds() >= 1.0)) {
++    // Freshness: MediaFormatReader recomputes buffered ranges on
++    // NotifyDataArrived, and the element's progress reporting hangs
++    // off that. Once a second is plenty.
++    poke = true;
++  }
++  if (poke) {
++    entry.mLastPoke = now;
++  }
++  return poke;
++}
++
++/* static */
++bool AVPlayerPlaybackRegistry::NotifyEnded(uintptr_t aPlayerId) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  auto it = Registry().find(aPlayerId);
++  if (it == Registry().end()) {
++    return false;
++  }
++  it->second.mEnded = true;
++  // A parked request must wake to hear the end of stream.
++  it->second.mNeeded = media::TimeUnit::Invalid();
++  it->second.mLastPoke = TimeStamp::Now();
++  return true;
++}
++
++/* static */
++void AVPlayerPlaybackRegistry::SetMetadata(uintptr_t aPlayerId,
++                                           double aDurationSeconds,
++                                           const gfx::IntSize& aDisplay) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  auto it = Registry().find(aPlayerId);
++  if (it == Registry().end()) {
++    return;
++  }
++  if (std::isfinite(aDurationSeconds) && aDurationSeconds > 0.0) {
++    it->second.mDuration = media::TimeUnit::FromSeconds(aDurationSeconds);
++  }
++  if (aDisplay.width > 0 && aDisplay.height > 0) {
++    it->second.mDisplay = aDisplay;
++  }
++}
++
++/* static */
++void AVPlayerPlaybackRegistry::ArmResumeAt(uintptr_t aPlayerId,
++                                           const media::TimeUnit& aNeeded) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  auto it = Registry().find(aPlayerId);
++  if (it == Registry().end()) {
++    return;
++  }
++  it->second.mNeeded = aNeeded;
++}
++
++/* static */
++void AVPlayerPlaybackRegistry::OnSeek(uintptr_t aPlayerId,
++                                      const media::TimeUnit& aTarget) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  auto it = Registry().find(aPlayerId);
++  if (it == Registry().end()) {
++    return;
++  }
++  // Optimistic: the AVPlayer will land near the target and correct
++  // this within a report or two. Waiting for that round-trip instead
++  // would park the first post-seek GetSamples for no benefit.
++  it->second.mPosition = aTarget;
++  it->second.mEnded = false;
++  it->second.mNeeded = media::TimeUnit::Invalid();
++}
++
++/* static */
++Maybe<AVPlayerPlaybackRegistry::Snapshot> AVPlayerPlaybackRegistry::Get(
++    uintptr_t aPlayerId) {
++  StaticMutexAutoLock lock(sRegistryMutex);
++  auto it = Registry().find(aPlayerId);
++  if (it == Registry().end()) {
++    return Nothing();
++  }
++  Snapshot snapshot;
++  snapshot.mPosition = it->second.mPosition;
++  snapshot.mDuration = it->second.mDuration;
++  snapshot.mDisplay = it->second.mDisplay;
++  snapshot.mEnded = it->second.mEnded;
++  return Some(snapshot);
++}
++
++AVPlayerDemuxer::AVPlayerDemuxer(uintptr_t aPlayerId,
++                                 const gfx::IntSize& aFallbackDisplay)
++    : mPlayerId(aPlayerId) {
++  // The MIME type is claimed by ReynardAVPlayerDecoderModule and
++  // nothing else, so this extradata-free config can never reach a real
++  // decoder. The display defaults to the caller's fallback until the
++  // metadata callback has filled the registry; GetTrackDemuxer
++  // re-snapshots right before the reader reads the track info.
++  mVideoInfo.mMimeType = nsLiteralCString(REYNARD_AVPLAYER_SYNTHETIC_MIME);
++  mVideoInfo.mDisplay = aFallbackDisplay;
++  mVideoInfo.mImage = aFallbackDisplay;
 +}
 +
 +RefPtr<AVPlayerDemuxer::InitPromise> AVPlayerDemuxer::Init() {
@@ -51,9 +223,9 @@ new file mode 100644
 +}
 +
 +uint32_t AVPlayerDemuxer::GetNumberTracks(TrackInfo::TrackType aType) const {
-+  // Video only. The audio is AVPlayer's and never passes through Gecko,
-+  // so claiming an audio track here would leave the state machine waiting
-+  // for samples that cannot arrive.
++  // Video only. The audio is AVPlayer's and never passes through
++  // Gecko, so claiming an audio track here would leave the state
++  // machine waiting for samples that cannot arrive.
 +  return aType == TrackInfo::kVideoTrack ? 1 : 0;
 +}
 +
@@ -65,7 +237,31 @@ new file mode 100644
 +  if (!granted) {
 +    return nullptr;
 +  }
-+  return MakeAndAddRef<AVPlayerTrackDemuxer>(mVideoInfo);
++
++  // Runs on the demux task queue during DemuxerProxy::Init - strictly
++  // after Load() created the Swift player - so an item that resolved
++  // quickly has already filled the registry, and the reader gets real
++  // dimensions and duration in its very first look at the track. An
++  // item that resolves later keeps the fallback: the on-screen size
++  // then corrects through the frame path, and the timeline through
++  // GetBuffered.
++  Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++      AVPlayerPlaybackRegistry::Get(mPlayerId);
++  if (snapshot) {
++    if (snapshot->mDisplay.width > 0 && snapshot->mDisplay.height > 0) {
++      mVideoInfo.mDisplay = snapshot->mDisplay;
++      mVideoInfo.mImage = snapshot->mDisplay;
++    }
++    if (snapshot->mDuration.IsValid()) {
++      mVideoInfo.mDuration = snapshot->mDuration;
++    }
++  }
++  printf_stderr("avPlayer: track info %dx%d duration=%.3f\n",
++                mVideoInfo.mDisplay.width, mVideoInfo.mDisplay.height,
++                snapshot && snapshot->mDuration.IsValid()
++                    ? snapshot->mDuration.ToSeconds()
++                    : -1.0);
++  return MakeAndAddRef<AVPlayerTrackDemuxer>(mPlayerId, mVideoInfo);
 +}
 +
 +bool AVPlayerDemuxer::IsSeekable() const {
@@ -75,17 +271,15 @@ new file mode 100644
 +}
 +
 +bool AVPlayerDemuxer::ShouldComputeStartTime() const {
-+  // See the header for why false; see the file comment for why it logs.
++  // See the header for why false; logged because DemuxerProxy::Init
++  // snapshots this value immediately before flipping mInitDone.
 +  printf_stderr("avPlayer: demuxer ShouldComputeStartTime -> false\n");
 +  return false;
 +}
 +
-+void AVPlayerDemuxer::SetDuration(const media::TimeUnit& aDuration) {
-+  mDuration = aDuration;
-+}
-+
-+AVPlayerTrackDemuxer::AVPlayerTrackDemuxer(const VideoInfo& aInfo)
-+    : mInfo(aInfo) {}
++AVPlayerTrackDemuxer::AVPlayerTrackDemuxer(uintptr_t aPlayerId,
++                                           const VideoInfo& aInfo)
++    : mPlayerId(aPlayerId), mInfo(aInfo) {}
 +
 +UniquePtr<TrackInfo> AVPlayerTrackDemuxer::GetInfo() const {
 +  printf_stderr("avPlayer: track GetInfo %dx%d\n", mInfo.mDisplay.width,
@@ -95,38 +289,164 @@ new file mode 100644
 +
 +RefPtr<AVPlayerTrackDemuxer::SeekPromise> AVPlayerTrackDemuxer::Seek(
 +    const media::TimeUnit& aTime) {
-+  // Resolve where we were asked to go. The AVPlayer performs the real
-+  // seek; this only keeps the reader's bookkeeping consistent.
++  printf_stderr("avPlayer: track Seek to %.3f\n", aTime.ToSeconds());
++  // The reader's clock jumps immediately and the AVPlayer follows. The
++  // registry is snapped to the target so the first post-seek
++  // GetSamples does not park waiting for a round-trip; the real player
++  // seek happens on the main thread because reaching the Swift host
++  // takes Objective-C.
++  mNextTime = aTime;
++  mWasParked = false;
++  mLoggedEos = false;
++  AVPlayerPlaybackRegistry::OnSeek(mPlayerId, aTime);
++
++  const uintptr_t playerId = mPlayerId;
++  const double seconds = aTime.ToSeconds();
++  NS_DispatchToMainThread(
++      NS_NewRunnableFunction("AVPlayerTrackDemuxer::Seek", [playerId, seconds]() {
++        ReynardAVPlayerRequestHostSeek(playerId, seconds);
++      }));
++
 +  return SeekPromise::CreateAndResolve(aTime, __func__);
 +}
 +
 +RefPtr<AVPlayerTrackDemuxer::SamplesPromise> AVPlayerTrackDemuxer::GetSamples(
 +    int32_t aNumSamples) {
-+  printf_stderr("avPlayer: track GetSamples(%d) -> END_OF_STREAM\n",
-+                aNumSamples);
-+  // Always end of stream. The state machine stops asking, and the frames
-+  // the compositor shows come from the AVPlayerLayer rather than from any
-+  // sample that passed through here.
-+  return SamplesPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_END_OF_STREAM,
-+                                         __func__);
++  Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++      AVPlayerPlaybackRegistry::Get(mPlayerId);
++
++  // End of stream is a real event now, not the permanent answer it was
++  // when this demuxer was a stub: either AVFoundation said the item
++  // played to its end, or the synthetic clock walked past a known
++  // finite duration.
++  if (snapshot &&
++      (snapshot->mEnded ||
++       (snapshot->mDuration.IsValid() && mNextTime >= snapshot->mDuration))) {
++    if (!mLoggedEos) {
++      mLoggedEos = true;
++      printf_stderr("avPlayer: track end of stream at %.3f (%s)\n",
++                    mNextTime.ToSeconds(),
++                    snapshot->mEnded ? "player ended" : "duration reached");
++    }
++    return SamplesPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_END_OF_STREAM,
++                                           __func__);
++  }
++
++  // Park until the AVPlayer's clock catches up - or first appears. The
++  // WAITING_FOR_DATA rejection is the same one MSE demuxers use when a
++  // SourceBuffer runs dry: MediaFormatReader marks the track as
++  // waiting and re-issues the request when the decoder's
++  // NotifyDataArrived fires, which is exactly what the registry's
++  // wake-up path does once the armed position below is crossed.
++  const bool noPosition = !snapshot || !snapshot->mPosition.IsValid();
++  if (noPosition || mNextTime > snapshot->mPosition + MaxLead()) {
++    media::TimeUnit needed = mNextTime - MaxLead();
++    if (needed < media::TimeUnit::Zero()) {
++      needed = media::TimeUnit::Zero();
++    }
++    AVPlayerPlaybackRegistry::ArmResumeAt(mPlayerId, needed);
++    if (!mWasParked) {
++      mWasParked = true;
++      printf_stderr("avPlayer: track parked at %.3f (%s)\n",
++                    mNextTime.ToSeconds(),
++                    noPosition ? "no position yet" : "clock caught up");
++    }
++    return SamplesPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_WAITING_FOR_DATA,
++                                           __func__);
++  }
++  if (mWasParked) {
++    mWasParked = false;
++    printf_stderr("avPlayer: track resumed at %.3f (player at %.3f)\n",
++                  mNextTime.ToSeconds(), snapshot->mPosition.ToSeconds());
++  }
++
++  // The guards above admitted at least the first iteration, so the
++  // holder is never resolved empty.
++  RefPtr<SamplesHolder> samples = new SamplesHolder;
++  const media::TimeUnit firstTime = mNextTime;
++  const int32_t wanted = std::max<int32_t>(aNumSamples, 1);
++  for (int32_t i = 0; i < wanted; i++) {
++    if (snapshot->mDuration.IsValid() && mNextTime >= snapshot->mDuration) {
++      break;  // the next request answers END_OF_STREAM
++    }
++    if (mNextTime > snapshot->mPosition + MaxLead()) {
++      break;  // the next request parks
++    }
++    RefPtr<MediaRawData> sample =
++        new MediaRawData(kSyntheticPayload, sizeof(kSyntheticPayload));
++    if (!sample->Data()) {
++      return SamplesPromise::CreateAndReject(NS_ERROR_OUT_OF_MEMORY, __func__);
++    }
++    sample->mTime = mNextTime;
++    sample->mTimecode = mNextTime;
++    sample->mDuration = FrameDuration();
++    sample->mKeyframe = true;
++    sample->mOffset = static_cast<int64_t>(mFrameIndex++);
++    samples->AppendSample(std::move(sample));
++    mNextTime += FrameDuration();
++  }
++
++  if (!mLoggedFirstEmit) {
++    mLoggedFirstEmit = true;
++    printf_stderr(
++        "avPlayer: first synthetic sample emitted t=%.3f - the state "
++        "machine's clock can advance\n",
++        firstTime.ToSeconds());
++  }
++  return SamplesPromise::CreateAndResolve(samples, __func__);
 +}
 +
 +RefPtr<AVPlayerTrackDemuxer::SkipAccessPointPromise>
 +AVPlayerTrackDemuxer::SkipToNextRandomAccessPoint(
 +    const media::TimeUnit& aTimeThreshold) {
-+  // Pure virtual in MediaTrackDemuxer, so it must exist; nothing is
-+  // ever demuxed here, so there is nothing to skip past. Reject with
-+  // end-of-stream, consistent with GetSamples.
-+  return SkipAccessPointPromise::CreateAndReject(
-+      SkipFailureHolder(NS_ERROR_DOM_MEDIA_END_OF_STREAM, 0), __func__);
++  // Every synthetic sample is a keyframe, so skipping is walking the
++  // clock forward. This must NOT reject with END_OF_STREAM the way the
++  // stub did: the reader asks for a skip when decoding falls behind,
++  // and answering "stream over" to a struggling stream would end it.
++  uint32_t skipped = 0;
++  while (mNextTime < aTimeThreshold) {
++    mNextTime += FrameDuration();
++    skipped++;
++  }
++  return SkipAccessPointPromise::CreateAndResolve(skipped, __func__);
 +}
 +
-+void AVPlayerTrackDemuxer::Reset() {}
++void AVPlayerTrackDemuxer::Reset() {
++  // Flush-to-initial contract. During a seek the reader calls Seek()
++  // with the real target right after, so the zero never survives long.
++  mNextTime = media::TimeUnit::Zero();
++  mFrameIndex = 0;
++  mWasParked = false;
++  mLoggedEos = false;
++}
 +
 +media::TimeIntervals AVPlayerTrackDemuxer::GetBuffered() {
-+  // Buffered ranges are reported by the decoder from the AVPlayer's
-+  // loadedTimeRanges, not from here.
-+  return media::TimeIntervals();
++  // An honest window keeps the state machine's buffering logic and the
++  // element's progress bar sane: everything up to the AVPlayer's
++  // position, plus the lead the synthetic clock is allowed, clamped to
++  // the duration once one is known. The stub returned empty forever,
++  // which was survivable only because no samples ever flowed.
++  Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++      AVPlayerPlaybackRegistry::Get(mPlayerId);
++  if (!snapshot) {
++    return media::TimeIntervals();
++  }
++  if (snapshot->mEnded && snapshot->mDuration.IsValid()) {
++    return media::TimeIntervals(
++        media::TimeInterval(media::TimeUnit::Zero(), snapshot->mDuration));
++  }
++  if (!snapshot->mPosition.IsValid()) {
++    return media::TimeIntervals();
++  }
++  media::TimeUnit end = snapshot->mPosition + MaxLead();
++  if (snapshot->mDuration.IsValid() && snapshot->mDuration < end) {
++    end = snapshot->mDuration;
++  }
++  if (!(media::TimeUnit::Zero() < end)) {
++    return media::TimeIntervals();
++  }
++  return media::TimeIntervals(
++      media::TimeInterval(media::TimeUnit::Zero(), end));
 +}
 +
 +}  // namespace mozilla

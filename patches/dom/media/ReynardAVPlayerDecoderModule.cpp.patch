@@ -1,0 +1,120 @@
+diff --git a/dom/media/ReynardAVPlayerDecoderModule.cpp b/dom/media/ReynardAVPlayerDecoderModule.cpp
+new file mode 100644
+--- /dev/null
++++ b/dom/media/ReynardAVPlayerDecoderModule.cpp
+@@ -0,0 +1,115 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "ReynardAVPlayerDecoderModule.h"
++
++#include "AVPlayerDemuxer.h"  // REYNARD_AVPLAYER_SYNTHETIC_MIME
++#include "MediaData.h"
++#include "MediaInfo.h"
++#include "mozilla/Debug.h"  // printf_stderr
++#include "mozilla/StaticPrefs_media.h"
++
++namespace mozilla {
++
++namespace {
++
++// Turns each synthetic sample into a timing-only VideoData.
++//
++// The image is null ON PURPOSE. VideoSink skips frames with no image
++// when it pushes pictures to the VideoFrameContainer, but it still
++// consumes them off the video queue and advances the media clock over
++// them - the same trick the tree's NullDecoderModule pulls. Attaching
++// a real image here would be actively wrong: the sink would composite
++// it over the AVPlayer frames the notify path publishes.
++//
++// Everything resolves synchronously on the caller's thread. There is
++// nothing to wait for - no hardware, no reordering, no state - so the
++// module needs no task queue of its own.
++class ReynardAVPlayerVideoDecoder final : public MediaDataDecoder {
++ public:
++  // MediaDataDecoder declares NS_INLINE_DECL_PURE_VIRTUAL_REFCOUNTING, so
++  // every concrete decoder supplies its own AddRef/Release - the same way
++  // DummyMediaDataDecoder does.
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ReynardAVPlayerVideoDecoder, final);
++
++  explicit ReynardAVPlayerVideoDecoder(const VideoInfo& aInfo)
++      : mDisplay(aInfo.mDisplay) {}
++
++  RefPtr<InitPromise> Init() override {
++    printf_stderr("avPlayer: timing decoder Init %dx%d\n", mDisplay.width,
++                  mDisplay.height);
++    return InitPromise::CreateAndResolve(TrackInfo::kVideoTrack, __func__);
++  }
++
++  RefPtr<DecodePromise> Decode(MediaRawData* aSample) override {
++    RefPtr<VideoData> frame =
++        new VideoData(aSample->mOffset, aSample->mTime, aSample->mDuration,
++                      aSample->mKeyframe, aSample->mTimecode, mDisplay, 0);
++    DecodedData results;
++    results.AppendElement(std::move(frame));
++    return DecodePromise::CreateAndResolve(std::move(results), __func__);
++  }
++
++  RefPtr<DecodePromise> Drain() override {
++    // Stateless: every sample was returned as it arrived, so there is
++    // never anything left to drain.
++    return DecodePromise::CreateAndResolve(DecodedData(), __func__);
++  }
++
++  RefPtr<FlushPromise> Flush() override {
++    return FlushPromise::CreateAndResolve(true, __func__);
++  }
++
++  RefPtr<ShutdownPromise> Shutdown() override {
++    return ShutdownPromise::CreateAndResolve(true, __func__);
++  }
++
++  nsCString GetDescriptionName() const override {
++    return "reynard avplayer timing decoder"_ns;
++  }
++
++  nsCString GetCodecName() const override {
++    return "reynard-avplayer-clock"_ns;
++  }
++
++ private:
++  ~ReynardAVPlayerVideoDecoder() = default;
++
++  const gfx::IntSize mDisplay;
++};
++
++}  // namespace
++
++/* static */
++already_AddRefed<PlatformDecoderModule> ReynardAVPlayerDecoderModule::Create() {
++  return MakeAndAddRef<ReynardAVPlayerDecoderModule>();
++}
++
++media::DecodeSupportSet ReynardAVPlayerDecoderModule::SupportsMimeType(
++    const nsACString& aMimeType, DecoderDoctorDiagnostics* aDiagnostics) const {
++  if (!StaticPrefs::media_reynard_avplayer_enabled() ||
++      !aMimeType.EqualsLiteral(REYNARD_AVPLAYER_SYNTHETIC_MIME)) {
++    return media::DecodeSupportSet{};
++  }
++  // "Software" in the sense that no decode happens at all. The claim
++  // is what matters: it is what lets MediaFormatReader accept the
++  // synthetic track's metadata.
++  return media::DecodeSupportSet{media::DecodeSupport::SoftwareDecode};
++}
++
++already_AddRefed<MediaDataDecoder> ReynardAVPlayerDecoderModule::CreateVideoDecoder(
++    const CreateDecoderParams& aParams) {
++  printf_stderr("avPlayer: timing decoder created for %s\n",
++                aParams.VideoConfig().mMimeType.get());
++  return MakeAndAddRef<ReynardAVPlayerVideoDecoder>(aParams.VideoConfig());
++}
++
++already_AddRefed<MediaDataDecoder> ReynardAVPlayerDecoderModule::CreateAudioDecoder(
++    const CreateDecoderParams& aParams) {
++  // The synthetic track is video-only by construction; AVPlayer owns
++  // the audio end to end.
++  return nullptr;
++}
++
++}  // namespace mozilla

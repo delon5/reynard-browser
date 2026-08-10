@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.h b/dom/media/AVPlayerDemuxer.h
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,183 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,10 +12,87 @@ new file mode 100644
 +
 +#include "MediaDataDemuxer.h"
 +#include "MediaInfo.h"
++#include "mozilla/Maybe.h"
++
++// The synthetic track's MIME type. Only ReynardAVPlayerDecoderModule
++// claims it, so no real platform decoder is ever offered the
++// extradata-free track this demuxer advertises.
++//
++// FALLBACK B, if the support probe in AVPlayerDecoder::CreateStateMachine
++// logs 0 for this type: some support queries resolve through a fixed
++// codec enum that an invented MIME type can never enter. In that case
++// keep "video/avc" here (the stock Apple module claims H.264, so the
++// metadata gate passes), stamp mExtraData with the magic bytes
++// "RYNAVCLK" in the constructor below, and gate
++// ReynardAVPlayerDecoderModule on that magic instead of on the MIME
++// type - it is registered ahead of the Apple module, and real H.264
++// carries genuine avcC bytes, so nothing else is ever claimed.
++#define REYNARD_AVPLAYER_SYNTHETIC_MIME "video/x-reynard-avplayer"
 +
 +namespace mozilla {
 +
-+// A demuxer that never demuxes anything.
++class AVPlayerTrackDemuxer;
++
++// Playback state pushed from the Swift AVPlayer host and read by the
++// demuxer. The Swift side reports through the exported C symbols
++// ReynardAVPlayerNotifyTime / ReynardAVPlayerNotifyEnded /
++// ReynardAVPlayerNotifyMetadata (see AVPlayerDecoder.mm); the demux
++// task queue reads snapshots while pacing synthetic samples. All
++// methods take one static mutex, so every combination of caller
++// threads is safe.
++class AVPlayerPlaybackRegistry {
++ public:
++  struct Snapshot {
++    media::TimeUnit mPosition = media::TimeUnit::Invalid();
++    media::TimeUnit mDuration = media::TimeUnit::Invalid();
++    gfx::IntSize mDisplay;
++    bool mEnded = false;
++  };
++
++  // Main thread. Registered from Load() right after the Swift host
++  // hands back a player id, unregistered from Shutdown() and the
++  // destructor after the host player is destroyed. Writes to an
++  // unregistered id are dropped, which is what makes the teardown
++  // races benign.
++  static void Register(uintptr_t aPlayerId);
++  static void Unregister(uintptr_t aPlayerId);
++
++  // Any thread; the hot path. Returns true when the caller should wake
++  // the reader: a parked GetSamples armed a resume position this
++  // update crossed, or a second passed since the last wake (which
++  // keeps buffered ranges fresh). The armed position is cleared under
++  // the lock, so one crossing queues exactly one wake.
++  static bool UpdatePosition(uintptr_t aPlayerId, double aSeconds);
++
++  // Any thread. Latches the ended flag. Returns true when the caller
++  // should wake the reader (always, for a known id - a parked request
++  // must wake to hear the end of stream).
++  static bool NotifyEnded(uintptr_t aPlayerId);
++
++  // Any thread. Duration and display size from the metadata callback.
++  // Non-finite durations and degenerate sizes are ignored.
++  static void SetMetadata(uintptr_t aPlayerId, double aDurationSeconds,
++                          const gfx::IntSize& aDisplay);
++
++  // Demux task queue. Arms the position at which a parked GetSamples
++  // wants waking.
++  static void ArmResumeAt(uintptr_t aPlayerId, const media::TimeUnit& aNeeded);
++
++  // Demux task queue. Snaps the position to the seek target and clears
++  // the ended flag, so the first post-seek GetSamples neither waits a
++  // full AVPlayer round-trip nor replays a stale end of stream.
++  static void OnSeek(uintptr_t aPlayerId, const media::TimeUnit& aTarget);
++
++  // Any thread. Nothing() for an unknown id.
++  static Maybe<Snapshot> Get(uintptr_t aPlayerId);
++};
++
++// Forwards a seek to the Swift host's AVPlayer. Defined in
++// AVPlayerDecoder.mm - reaching the host takes Objective-C, and this
++// header is included from plain C++. Main thread only.
++void ReynardAVPlayerRequestHostSeek(uintptr_t aPlayerId, double aSeconds);
++
++// A demuxer that demuxes a clock.
 +//
 +// MediaDecoderStateMachineBase's constructor wraps its reader
 +// unconditionally - mReader(new ReaderProxy(mTaskQueue, aReader)) - and
@@ -25,15 +102,18 @@ new file mode 100644
 +// gives Gecko something structurally valid to hold while AVFoundation
 +// owns the media.
 +//
-+// It reports exactly one video track of the right dimensions and returns
-+// end-of-stream for every sample request, so the reader has metadata to
-+// publish and nothing to decode. Duration and position come from the
-+// AVPlayer via the decoder, not from here.
-+class AVPlayerTrackDemuxer;
-+
++// It reports exactly one video track and synthesises timing-only
++// samples for it, paced by the position the Swift host pushes into
++// AVPlayerPlaybackRegistry. The samples carry no pixels -
++// ReynardAVPlayerDecoderModule turns them into image-less VideoData -
++// so the state machine's clock advances in step with the AVPlayer
++// while the visible frames keep arriving through
++// ReynardAVPlayerNotifyFrame. This is what lets currentTime progress,
++// timeupdate fire, and "ended" land at the stream's real end instead
++// of at t=0 the way the end-of-stream stub did.
 +class AVPlayerDemuxer final : public MediaDataDemuxer {
 + public:
-+  explicit AVPlayerDemuxer(const gfx::IntSize& aDisplay);
++  AVPlayerDemuxer(uintptr_t aPlayerId, const gfx::IntSize& aFallbackDisplay);
 +
 +  RefPtr<InitPromise> Init() override;
 +
@@ -44,46 +124,31 @@ new file mode 100644
 +
 +  bool IsSeekable() const override;
 +
-+  // MediaFormatReader will not resolve its metadata promise until every
-+  // active track has a first demuxed sample time, and GetSamples here
-+  // always rejects with END_OF_STREAM - the frames come from the
-+  // AVPlayer, not from samples passing through this demuxer. Left at
-+  // the default true, OnDemuxerInitDone calls RequestDemuxSamples,
-+  // OnDemuxFailed takes the END_OF_STREAM branch and notifies end of
-+  // stream without ever setting mFirstDemuxedSampleTime, and
-+  // MaybeResolveMetadataPromise returns early forever.
++  // False, the MSE branch: both tracks get a start time of zero
++  // without waiting for a first sample. The synthetic clock starts at
++  // Zero() and every seek resets it, so zero IS the start time - and
++  // the stub era proved the hard way that the "true" path stalls
++  // metadata forever when the first sample is slow to arrive
++  // (MaybeResolveMetadataPromise returns early until a first demuxed
++  // sample time exists). With samples now paced by an external player
++  // that may buffer indefinitely before reporting a first position,
++  // that hazard is still real, so false it stays.
 +  //
-+  // The element therefore never leaves HAVE_NOTHING, and nsVideoFrame
-+  // paints nothing however correct the frame sitting in its
-+  // VideoFrameContainer is. Device captures showed exactly that: the
-+  // placeholder published at the asset's real dimensions with
-+  // planes=2, metadata delivered, and a black screen - which stayed
-+  // black when the placeholder was filled magenta to tell the two
-+  // apart.
-+  //
-+  // Returning false takes MediaFormatReader's other branch, where both
-+  // tracks get a start time of zero without a sample - the same one MSE
-+  // uses, and for the same reason: the samples do not come from here.
-+  //
-+  // Defined out of line so it can log: DemuxerProxy::Init snapshots this
-+  // value last, right before it flips mInitDone, so the line printing is
-+  // proof the proxy's init lambda ran to completion.
++  // Defined out of line so it can log: DemuxerProxy::Init snapshots
++  // this value last, right before it flips mInitDone, so the line
++  // printing is proof the proxy's init lambda ran to completion.
 +  bool ShouldComputeStartTime() const override;
-+
-+  // AVFoundation reports the real duration once the asset loads; until
-+  // then the element sees an unknown duration rather than zero.
-+  void SetDuration(const media::TimeUnit& aDuration);
 +
 + private:
 +  ~AVPlayerDemuxer() = default;
 +
++  const uintptr_t mPlayerId;
 +  VideoInfo mVideoInfo;
-+  media::TimeUnit mDuration;
 +};
 +
 +class AVPlayerTrackDemuxer final : public MediaTrackDemuxer {
 + public:
-+  explicit AVPlayerTrackDemuxer(const VideoInfo& aInfo);
++  AVPlayerTrackDemuxer(uintptr_t aPlayerId, const VideoInfo& aInfo);
 +
 +  UniquePtr<TrackInfo> GetInfo() const override;
 +
@@ -101,7 +166,21 @@ new file mode 100644
 + private:
 +  ~AVPlayerTrackDemuxer() = default;
 +
++  const uintptr_t mPlayerId;
 +  const VideoInfo mInfo;
++
++  // The synthetic clock: presentation time of the next sample
++  // GetSamples will emit. Touched on the demux task queue only.
++  media::TimeUnit mNextTime = media::TimeUnit::Zero();
++  // Monotonic sample counter, stamped into MediaRawData::mOffset so
++  // samples stay distinguishable in logs and frame statistics.
++  uint64_t mFrameIndex = 0;
++  // Log latches: park/resume transitions, end of stream and the first
++  // emission are logged once per state change, never per request -
++  // GetSamples runs tens of times a second.
++  bool mWasParked = false;
++  bool mLoggedEos = false;
++  bool mLoggedFirstEmit = false;
 +};
 +
 +}  // namespace mozilla

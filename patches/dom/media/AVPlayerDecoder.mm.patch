@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,855 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -100,6 +100,8 @@ new file mode 100644
 +    // may already be queued on this thread, and it must not find us.
 +    PlayersById().erase(mPlayerId);
 +    [AVPlayerHost() destroy:mPlayerId];
++    // Registry last - see Shutdown for the ordering argument.
++    AVPlayerPlaybackRegistry::Unregister(mPlayerId);
 +    mPlayerId = 0;
 +  }
 +}
@@ -170,6 +172,13 @@ new file mode 100644
 +    return NS_ERROR_FAILURE;
 +  }
 +
++  // The playback registry entry, created right after the host player.
++  // The Swift side installs its clock reporting inside
++  // createPlayerWithUrl, so a position report can already have raced
++  // this line - the registry drops writes for unknown ids, and the
++  // periodic observer repeats within 250 ms, so nothing is lost.
++  AVPlayerPlaybackRegistry::Register(mPlayerId);
++
 +  // Registered before anything can call back. The Swift host starts
 +  // observing the item inside createPlayerWithUrl, so a ready item can
 +  // deliver metadata almost immediately.
@@ -224,17 +233,22 @@ new file mode 100644
 +  // the two want opposite fixes: a rejection means the advertised type
 +  // is wrong, while never resolving means the start-time path is.
 +  //
-+  // AVPlayerDemuxer advertises video/avc, and nothing decodes through
-+  // Gecko here at all - the frames come from the AVPlayer - so this
-+  // check existing at all is incidental to how the pipeline works. It
-+  // still has to pass.
++  // AVPlayerDemuxer advertises the synthetic type that only
++  // ReynardAVPlayerDecoderModule claims. A 0 here therefore means the
++  // module is not registered (is the PDMFactory.cpp patch applied?) or
++  // the support query resolves through the fixed codec enum rather
++  // than the live modules - in which case switch to the Fallback-B
++  // wiring described in AVPlayerDemuxer.h.
 +  {
-+    const bool avcSupported =
-+        !PDMFactorySupport::IsTypeSupported("video/avc"_ns).isEmpty();
++    const bool supported =
++        !PDMFactorySupport::IsTypeSupported(
++             nsLiteralCString(REYNARD_AVPLAYER_SYNTHETIC_MIME))
++             .isEmpty();
 +    printf_stderr(
-+        "avPlayer: PDM support for video/avc = %d%s\n", avcSupported ? 1 : 0,
-+        avcSupported ? ""
-+                     : " - MediaFormatReader WILL reject metadata for this");
++        "avPlayer: PDM support for " REYNARD_AVPLAYER_SYNTHETIC_MIME
++        " = %d%s\n",
++        supported ? 1 : 0,
++        supported ? "" : " - MediaFormatReader WILL reject metadata for this");
 +  }
 +
 +  // The container feeds MediaFormatReader's "videoActive" gate: a null
@@ -246,7 +260,7 @@ new file mode 100644
 +                init.mVideoFrameContainer ? 1 : 0, knowsCompositor ? 1 : 0);
 +  init.mKnowsCompositor = knowsCompositor.forget();
 +
-+  mDemuxer = new AVPlayerDemuxer(kInitialDisplay);
++  mDemuxer = new AVPlayerDemuxer(mPlayerId, kInitialDisplay);
 +  mReader = new MediaFormatReader(init, mDemuxer);
 +
 +  // Capture 16 pinned the crash between the probe above and Load's
@@ -304,6 +318,13 @@ new file mode 100644
 +  if (mPlayerId) {
 +    PlayersById().erase(mPlayerId);
 +    [AVPlayerHost() destroy:mPlayerId];
++    // Registry teardown ordering: PlayersById first (kills in-flight
++    // main-thread pokes), host destroy second (stops the Swift side's
++    // observers), registry last. A report already in flight finds no
++    // entry and is dropped; a GetSamples still running on the demux
++    // task queue sees "no entry", parks, and the reader's own shutdown
++    // rejects the parked request. Nothing dangles.
++    AVPlayerPlaybackRegistry::Unregister(mPlayerId);
 +    mPlayerId = 0;
 +  }
 +  MediaDecoder::Shutdown();
@@ -412,19 +433,36 @@ new file mode 100644
 +  GetOwner()->DownloadProgressed();
 +}
 +
++void AVPlayerDecoder::NotifyPlaybackPoke() {
++  MOZ_ASSERT(NS_IsMainThread());
++  // The poke runnable can land between Shutdown() and destruction - it
++  // was already in flight when the registry entry died - and
++  // NotifyReaderDataArrived diagnostic-asserts on a shut-down decoder.
++  if (IsShutdown()) {
++    return;
++  }
++  // Re-issues any demux request a WAITING_FOR_DATA rejection parked,
++  // and refreshes the reader's buffered ranges - the same call
++  // MediaSourceDecoder::NotifyDataArrived makes when a SourceBuffer
++  // gains data. The demuxer is what was waiting; the reader owns the
++  // machinery for asking it again.
++  NotifyReaderDataArrived();
++}
++
 +// Puts a layer on screen for AVFoundation's video.
 +//
-+// Nothing reaches the compositor otherwise: AVPlayerDemuxer answers
-+// end-of-stream for every sample request, deliberately, so no VideoData
-+// is ever produced and the page has no video layer at all. The frames
-+// the user eventually sees come from the AVPlayer, not from here - this
-+// only establishes a layer of the right size, in the right place in the
-+// page, for NativeLayerCA to later host an AVPlayerLayer in.
++// Nothing reaches the compositor through the decode pipeline: the
++// samples AVPlayerDemuxer produces carry timing only, and
++// ReynardAVPlayerDecoderModule turns them into image-less VideoData,
++// so the video sink advances the clock without ever publishing a
++// picture. The frames the user eventually sees come from the AVPlayer,
++// not from here - this only establishes a layer of the right size, in
++// the right place in the page, for NativeLayerCA to later host an
++// AVPlayerLayer in.
 +//
 +// Pushed straight into the VideoFrameContainer rather than through the
-+// demuxer/decoder pipeline. That pipeline expects real encoded samples
-+// and a platform decoder to turn them into frames; there is no encoded
-+// data here, because AVFoundation owns the decode end to end.
++// demuxer/decoder pipeline, which by design carries no pixels here -
++// AVFoundation owns the decode end to end.
 +//
 +// The surface is deliberately blank NV12 - the same bi-planar format
 +// IsEligiblePictureInPictureSurface already accepts - so the compositor
@@ -576,16 +614,30 @@ new file mode 100644
 +  MediaDecoder::FirstFrameLoaded(std::move(aInfo), aEventVisibility);
 +}
 +
-+void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& aDuration,
++void AVPlayerDecoder::NotifyMetadata(const media::TimeUnit& /* aDuration -
++                                        already in the registry */,
 +                                     const gfx::IntSize& aDisplay) {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  if (mDemuxer) {
-+    mDemuxer->SetDuration(aDuration);
-+  }
++  // Duration and size reached AVPlayerPlaybackRegistry before this hop
++  // was even queued - the C callback writes them on its caller's
++  // thread - so the demux task queue never depends on this method
++  // running. The old write-only SetDuration hand-off is gone with it.
 +
 +  // Now that the asset's real dimensions are known, republish at the
 +  // correct size - the initial frame used kInitialDisplay.
 +  PublishPlaceholderFrame(aDisplay);
++}
++
++void ReynardAVPlayerRequestHostSeek(uintptr_t aPlayerId, double aSeconds) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // The demuxer's seek lands here through a main-thread hop: reaching
++  // the Swift host takes Objective-C, which AVPlayerDemuxer.cpp cannot
++  // speak. Keyed by player id rather than routed through PlayersById -
++  // the host ignores ids it no longer knows, so a seek racing teardown
++  // is naturally a no-op.
++  printf_stderr("avPlayer: host seek player=%llu to %.3f\n",
++                (unsigned long long)aPlayerId, aSeconds);
++  [AVPlayerHost() seek:aPlayerId to:aSeconds];
 +}
 +
 +}  // namespace mozilla
@@ -611,6 +663,12 @@ new file mode 100644
 +  printf_stderr(
 +      "avPlayer: metadata callback player=%llu geckoMain=%d - dispatching\n",
 +      (unsigned long long)aPlayerId, NS_IsMainThread() ? 1 : 0);
++
++  // Straight into the playback registry, on the caller's thread: the
++  // demux task queue snapshots the registry in GetTrackDemuxer, and
++  // that read must not depend on the main-thread hop below having run.
++  mozilla::AVPlayerPlaybackRegistry::SetMetadata(
++      aPlayerId, aDurationSeconds, mozilla::gfx::IntSize(aWidth, aHeight));
 +
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
 +      "ReynardAVPlayerNotifyMetadata",
@@ -749,5 +807,54 @@ new file mode 100644
 +                                   mozilla::media::TimeUnit::Zero(),
 +                                   mozilla::media::TimeUnit::Zero());
 +        container->Invalidate();
++      }));
++}
++
++// The playback position, pushed by the Swift host. The HOT callback of
++// the family - the display link calls it at up to 120 Hz - so unlike
++// the metadata and frame callbacks it does NOT unconditionally hop to
++// Gecko's main thread. The write lands in AVPlayerPlaybackRegistry on
++// the caller's thread; UpdatePosition answers whether anything is
++// waiting on this position (a parked demux request, or the
++// once-a-second buffered-ranges refresh), and only then is a
++// main-thread runnable queued to poke the reader.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyTime(uintptr_t aPlayerId,
++                                                     double aSeconds) {
++  if (!mozilla::AVPlayerPlaybackRegistry::UpdatePosition(aPlayerId,
++                                                         aSeconds)) {
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyTime", [aPlayerId]() {
++        MOZ_ASSERT(NS_IsMainThread());
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          // Teardown race, same as the other callbacks: dropped.
++          return;
++        }
++        entry->second->NotifyPlaybackPoke();
++      }));
++}
++
++// Played to the end. Sets the registry's ended flag so the demuxer's
++// next sample request answers END_OF_STREAM - which is how the state
++// machine completes and the element fires "ended" at the stream's real
++// end, rather than at t=0 the way the end-of-stream stub did.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId) {
++  printf_stderr("avPlayer: ended callback player=%llu\n",
++                (unsigned long long)aPlayerId);
++  if (!mozilla::AVPlayerPlaybackRegistry::NotifyEnded(aPlayerId)) {
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyEnded", [aPlayerId]() {
++        MOZ_ASSERT(NS_IsMainThread());
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          return;
++        }
++        entry->second->NotifyPlaybackPoke();
 +      }));
 +}

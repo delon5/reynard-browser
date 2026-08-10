@@ -36,6 +36,12 @@
 //  libxul is a framework and cannot leave undefined symbols pointing at
 //  the app.
 //
+//  Besides pixels and metadata, this file reports the playback CLOCK to
+//  Gecko - ReynardAVPlayerNotifyTime / ReynardAVPlayerNotifyEnded - which
+//  is what lets the media element's currentTime advance, timeupdate fire,
+//  and "ended" land at the stream's real end. See installClockReporting
+//  and pushTime.
+//
 
 import AVFoundation
 import Foundation
@@ -154,6 +160,19 @@ public final class AVPlayerHost: NSObject {
         /// not playing - drives the auto-repause in pullFrames.
         var idlePullTicks: Int = 0
 
+        /// Token from addPeriodicTimeObserver; AVFoundation requires it
+        /// handed back to removeTimeObserver before the player is
+        /// released. See installClockReporting / destroy.
+        var timeObserverToken: Any?
+        /// Block-based AVPlayerItemDidPlayToEndTime observation; removed
+        /// explicitly in destroy - a block observer outlives the item
+        /// unless removed.
+        var endObserver: NSObjectProtocol?
+        /// Last position handed to Gecko, for pushTime's delta filter.
+        /// Guarded by stateLock - written from the display link, the
+        /// periodic observer and seek completions.
+        var lastPushedTime: Double?
+
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
             self.player = player
@@ -226,9 +245,72 @@ public final class AVPlayerHost: NSObject {
 
         observeMetadata(of: item, playerId: id, storingInto: entry)
         startFrameDelivery(for: id)
+        installClockReporting(for: id, entry: entry)
 
         avLog("created \(id) for \(parsed.absoluteString)")
         return id
+    }
+
+    /// Reports a playback position to Gecko, from whichever thread the
+    /// caller is on - ReynardAVPlayerNotifyTime is documented
+    /// any-thread, and lands the value in a lock-protected registry.
+    /// The delta filter below is what keeps a 120 Hz display link from
+    /// becoming 120 Hz of registry traffic for a clock that moved less
+    /// than perceptibly.
+    private func pushTime(_ id: UInt, _ entry: Player, _ seconds: Double) {
+        guard seconds.isFinite else {
+            return
+        }
+        let clamped = max(seconds, 0)
+        let shouldPush = withState { () -> Bool in
+            if let last = entry.lastPushedTime, abs(clamped - last) < 0.010 {
+                return false
+            }
+            entry.lastPushedTime = clamped
+            return true
+        }
+        guard shouldPush else {
+            return
+        }
+        ReynardAVPlayerNotifyTime(id, clamped)
+    }
+
+    /// The Gecko side's media clock follows the positions pushed from
+    /// here - AVPlayerDemuxer paces its synthetic samples against them.
+    /// Two sources cover each other: the display-link pull loop reports
+    /// on every tick while frames flow, and the periodic observer keeps
+    /// reporting when the link is parked (idle backstop, audio-only
+    /// renditions). Both funnel through pushTime's delta filter. The
+    /// end-of-stream notification is what lets the element fire "ended"
+    /// at the stream's real end.
+    private func installClockReporting(for id: UInt, entry: Player) {
+        entry.timeObserverToken = entry.player.addPeriodicTimeObserver(
+            forInterval: CMTime(value: 1, timescale: 4),
+            queue: .main
+        ) { [weak self] time in
+            // The entry is re-fetched rather than captured: the player
+            // retains this closure, and a captured entry would retain
+            // the player right back - the same cycle discipline as
+            // frameLinkIDs.
+            guard let self,
+                  let entry = self.withState({ self.players[id] }),
+                  time.isValid, time.isNumeric else {
+                return
+            }
+            self.pushTime(id, entry, time.seconds)
+        }
+
+        entry.endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: entry.item,
+            queue: .main
+        ) { _ in
+            // The id is a value; nothing is retained. Gecko's registry
+            // drops the flag if the player is already gone.
+            avLog("played to end \(id)")
+            ReynardAVPlayerNotifyEnded(id)
+        }
+        avLog("clock reporting installed for \(id)")
     }
 
     /// Feeds decoded frames to Gecko for compositing.
@@ -327,6 +409,14 @@ public final class AVPlayerHost: NSObject {
             noteIdleTick()
             return
         }
+
+        // The clock is pushed before the new-buffer gate: a repeated
+        // frame still means time moved, and Gecko's demuxer paces its
+        // synthetic samples on this position whether or not pixels
+        // cross on this particular tick. This value used to be computed
+        // and thrown away.
+        pushTime(id, entry, CMTimeGetSeconds(itemTime))
+
         guard output.hasNewPixelBuffer(forItemTime: itemTime) else {
             report("no new pixel buffer at t=\(CMTimeGetSeconds(itemTime))")
             noteIdleTick()
@@ -449,13 +539,27 @@ public final class AVPlayerHost: NSObject {
         // itself now (capture 16), so this dispatch is only for
         // ordering and to get off AVFoundation's KVO queue.
         for observation in [
-            item.observe(\.status, options: [.initial, .new]) { item, _ in
+            item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                 DispatchQueue.main.async {
                     // Before report, which returns early whenever the
                     // metadata is unchanged - playback must not depend on
                     // whether the duration happened to move.
                     resumeIfWanted()
                     report(item)
+                    // Seed the clock once the item can answer for a
+                    // position. A paused element never advances the
+                    // periodic observer and never pulls frames, so
+                    // without this one-shot Gecko's demuxer would have
+                    // no position at all and park forever - the element
+                    // would stall at HAVE_METADATA while paused.
+                    if item.status == .readyToPlay,
+                       let self,
+                       let entry = self.withState({ self.players[playerId] }) {
+                        let now = entry.player.currentTime()
+                        if now.isValid, now.isNumeric {
+                            self.pushTime(playerId, entry, now.seconds)
+                        }
+                    }
                 }
             },
             item.observe(\.duration, options: [.new]) { item, _ in
@@ -540,6 +644,18 @@ public final class AVPlayerHost: NSObject {
             link.invalidate()
             entry.displayLink = nil
         }
+        // Clock observers next, before the player is released:
+        // AVFoundation requires removeTimeObserver before the player
+        // deallocates, and a block-based notification observer outlives
+        // the item unless removed explicitly.
+        if let token = entry.timeObserverToken {
+            entry.player.removeTimeObserver(token)
+            entry.timeObserverToken = nil
+        }
+        if let endObserver = entry.endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            entry.endObserver = nil
+        }
         entry.item.remove(entry.videoOutput)
         entry.observers.forEach { $0.invalidate() }
         entry.player.pause()
@@ -585,7 +701,23 @@ public final class AVPlayerHost: NSObject {
         // once the frame has been shown and nothing further arrives, so
         // this does not leave it running.
         resumeFrameDelivery(for: entry)
-        entry.player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+        entry.player.seek(
+            to: CMTime(seconds: seconds, preferredTimescale: 600)
+        ) { [weak self] finished in
+            // Report where playback actually landed - keyframe snapping
+            // can put it off the requested time, and Gecko's demuxer
+            // optimistically assumed the exact target. pushTime is safe
+            // on whatever queue AVFoundation completes on.
+            guard finished,
+                  let self,
+                  let entry = self.withState({ self.players[id] }) else {
+                return
+            }
+            let landed = entry.player.currentTime()
+            if landed.isValid, landed.isNumeric {
+                self.pushTime(id, entry, landed.seconds)
+            }
+        }
     }
 }
 

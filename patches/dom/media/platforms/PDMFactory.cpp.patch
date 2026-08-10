@@ -1,0 +1,39 @@
+diff --git a/dom/media/platforms/PDMFactory.cpp b/dom/media/platforms/PDMFactory.cpp
+--- a/dom/media/platforms/PDMFactory.cpp
++++ b/dom/media/platforms/PDMFactory.cpp
+@@ -14,8 +14,15 @@
+ #include "H264.h"
+ #include "MP4Decoder.h"
+ #include "MediaChangeMonitor.h"
+ #include "MediaInfo.h"
+ #include "PDMFactorySupport.h"
++#ifdef XP_IOS
++// Reynard: the decoder for AVPlayerDemuxer's synthetic clock track -
++// timing-only VideoData, no pixels; see ReynardAVPlayerDecoderModule.h.
++// Must sit here at file scope, NOT next to CreatePDMs, which is inside
++// namespace mozilla - including there nests the whole header in it.
++#  include "ReynardAVPlayerDecoderModule.h"
++#endif
+ #include "VPXDecoder.h"
+ #include "VideoUtils.h"
+ #include "mozilla/ClearOnShutdown.h"
+@@ -486,6 +493,19 @@
+ }
+ 
+ void PDMFactory::CreatePDMs() {
++#ifdef XP_IOS
++  // Reynard: registered unconditionally - the module claims nothing
++  // unless media.reynard.avplayer.enabled is on, and then only its own
++  // synthetic MIME type - and FIRST, ahead of every real decoder
++  // module. The ordering is idle in the default wiring but load-bearing
++  // for the Fallback-B variant (video/avc + tagged extradata) described
++  // in AVPlayerDemuxer.h.
++  //
++  // StartupPDM, not CreateAndStartupPDM: 153 has no such template, and
++  // StartupPDM takes an already_AddRefed, which is what Create() hands
++  // back.
++  StartupPDM(ReynardAVPlayerDecoderModule::Create());
++#endif
+   {
+     auto forced = sForcedPDM.Lock();
+     if (*forced) {
