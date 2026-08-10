@@ -1,0 +1,20 @@
+diff --git a/mobile/shared/modules/geckoview/GeckoViewSessionStore.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewSessionStore.sys.mjs
+index e5cba2b15001..642509d7cb4a 100644
+--- a/mobile/shared/modules/geckoview/GeckoViewSessionStore.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewSessionStore.sys.mjs
+@@ -146,6 +146,15 @@ export var GeckoViewSessionStore = {
+   },
+ 
+   onTabStateUpdate(permanentKey, win, data) {
++    // The embedder can close a session in the same turn that
++    // deactivation scheduled the final async flush
++    // (SessionManager.closeImmediately: deactivate, then close()), so
++    // the flush can land after the embedder element and window global
++    // are both gone. No dispatcher is left to deliver to; dropping the
++    // update beats throwing on every tab close.
++    if (!win) {
++      return;
++    }
+     win.WindowEventDispatcher.sendRequest("GeckoView:StateUpdated", {
+       data: data.data,
+     });

@@ -270,6 +270,34 @@ final class JITController {
         }
     }
     
+    /// Runs the foreground re-attach steps in order, off the main
+    /// thread. See fix_reattach_off_main_queue.py.
+    ///
+    /// dumpChildCensus and reattachOrphanedProcesses each hop to
+    /// attachQueue themselves, so calling all three from the main queue
+    /// runs setDebuggerListening first and leaves the census describing
+    /// a tree trapping has already been re-armed on - the opposite of
+    /// the documented order. Enqueueing them here puts them on the one
+    /// serial queue in written order, and keeps the vAttach fan-out
+    /// they trigger off the thread the scene-update watchdog times.
+    ///
+    /// The completion is delivered back on the main queue: the caller's
+    /// background-task identifier is also touched by UIKit's expiration
+    /// handler, which runs on the main thread.
+    func performForegroundReattach(completion: @escaping () -> Void) {
+        dumpChildCensus(labelled: "childCensus at foreground")
+
+        attachQueue.async {
+            JITEnabler.setDebuggerListening(true)
+        }
+
+        reattachOrphanedProcesses()
+
+        attachQueue.async {
+            DispatchQueue.main.async(execute: completion)
+        }
+    }
+    
     /// Attaches anything that arrived while inactive.
     func applicationDidBecomeActive() {
         attachQueue.async {

@@ -53,6 +53,11 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// directly - that header is not in the bridging header.
 + (void)cancelAllDebugSessionCalls NS_SWIFT_NAME(cancelAllDebugSessionCalls());
 
+/// Sends the interrupt byte to every live debug session, so a loop
+/// blocked in its continue can act. Wraps the C function in
+/// JITSupport.h, which Swift cannot see directly.
++ (void)interruptLiveDebugSessions NS_SWIFT_NAME(interruptLiveDebugSessions());
+
 /// Logs every debug loop and how long since it last ran, so a hang can
 /// name the process the main thread is waiting on.
 + (void)dumpDebugLoopState NS_SWIFT_NAME(dumpDebugLoopState());

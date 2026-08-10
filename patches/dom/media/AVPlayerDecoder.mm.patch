@@ -1,8 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
+index 000000000000..477d70c4ff0c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,855 @@
+@@ -0,0 +1,861 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -123,7 +124,11 @@ new file mode 100644
 +  // decoder was never invoked at all: navigation committed to the URL
 +  // and not one avPlayer line appeared. "Nothing happened" cannot
 +  // distinguish the pref never reaching the engine from DecoderTraits
-+  // resolving the type before it asks us, so both are reported here.
++  // resolving the type before it asks us, so both used to be reported
++  // here. That question is settled - the pipeline is proven end to
++  // end - and DecoderTraits routes every canPlayType/<source> probe
++  // through this function, so only the rare claimed case is logged
++  // now.
 +  const bool enabled = IsEnabled();
 +  const MediaMIMEType& mimeType = aType.Type();
 +  const bool claimed =
@@ -132,9 +137,11 @@ new file mode 100644
 +                  mimeType == MEDIAMIMETYPE("audio/mpegurl") ||
 +                  mimeType == MEDIAMIMETYPE("audio/x-mpegurl"));
 +
-+  printf_stderr("avPlayer: IsSupportedType(%s) pref=%d claimed=%d\n",
-+                mimeType.AsString().BeginReading(), enabled ? 1 : 0,
-+                claimed ? 1 : 0);
++  if (claimed) {
++    printf_stderr("avPlayer: IsSupportedType(%s) pref=%d claimed=%d\n",
++                  mimeType.AsString().BeginReading(), enabled ? 1 : 0,
++                  claimed ? 1 : 0);
++  }
 +
 +  // The HLS family. FairPlay is only ever delivered this way, and it is
 +  // also the container Gecko has no demuxer for on this platform - so

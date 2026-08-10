@@ -1,9 +1,9 @@
 diff --git a/ipc/glue/NSExtensionUtils.mm b/ipc/glue/NSExtensionUtils.mm
 new file mode 100644
-index 000000000000..5991eb32846d
+index 000000000000..b7a945773461
 --- /dev/null
 +++ b/ipc/glue/NSExtensionUtils.mm
-@@ -0,0 +1,628 @@
+@@ -0,0 +1,659 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -344,12 +344,33 @@ index 000000000000..5991eb32846d
 +                    interfaceWithProtocol:@protocol(ExtensionBootstrapPing)]];
 +        [process->mConnection
 +            setExportedObject:process->mExtensionBootstrapPingTarget];
++        // A launched child's death must release its ExtensionFoundation
++        // registration here: past bootstrap, completeOnce is a latched
++        // no-op and nothing else runs until ~GeckoChildProcessHost, while
++        // every stale EXConcreteExtension is one more synchronous XPC
++        // target in _hostWillEnterForegroundNote:. The `completed` check
++        // runs on ExtensionLaunchQueue, which owns the flag, and is
++        // enqueued ahead of the handler's completeOnce so it sees the
++        // pre-event state - a launch still in progress keeps its
++        // completion/timeout handling. dispatch_async, never inline:
++        // -invalidate releases the connection and must not run on the
++        // connection's own handler queue.
 +        [process->mConnection setInterruptionHandler:^{
++          dispatch_async(ExtensionLaunchQueue(), ^{
++            if (completed) {
++              [process invalidate];
++            }
++          });
 +        }];
 +        [process->mConnection setInvalidationHandler:^{
 +          RunOnExtensionLaunchQueueSync(^{
 +            if (process->mLibXPCConnection) {
 +              xpc_connection_cancel(process->mLibXPCConnection);
++            }
++          });
++          dispatch_async(ExtensionLaunchQueue(), ^{
++            if (completed) {
++              [process invalidate];
 +            }
 +          });
 +          completeOnce([NSError
@@ -432,6 +453,16 @@ index 000000000000..5991eb32846d
 +    if ([mExtension
 +            respondsToSelector:@selector(setRequestInterruptionBlock:)]) {
 +      [mExtension setRequestInterruptionBlock:^(NSUUID* requestIdentifier) {
++        // Post-launch this is the only death signal when the NSXPC
++        // connection is already gone, and completeOnce below is a
++        // latched no-op. Same guarded teardown as the connection
++        // handlers: checked on ExtensionLaunchQueue, enqueued ahead of
++        // completeOnce, dispatched off the caller's queue.
++        dispatch_async(ExtensionLaunchQueue(), ^{
++          if (completed) {
++            [process invalidate];
++          }
++        });
 +        completeOnce([NSError
 +            errorWithDomain:@"ReynardExtension"
 +                       code:105

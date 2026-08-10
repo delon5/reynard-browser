@@ -397,6 +397,23 @@ final class TabManagerImplementation: NSObject, TabManager {
             selectedPrivateTabID: snapshot.selectedPrivateTabID,
             selectedTabMode: snapshot.selectedTabMode
         )
+
+        // The tabs are safe; the process is not. The watchdog fires at
+        // two seconds and iOS terminates at ten, so roughly eight
+        // seconds of the scene-update budget are left here and nothing
+        // was using them. A child a supervision session has stopped
+        // cannot answer the synchronous XPC the foreground handshake is
+        // waiting on, and interrupting the loops and cancelling their
+        // in-flight calls is the one lever available from this queue.
+        // It is not a guaranteed save - it is the difference between
+        // spending the remaining budget and spending none of it.
+        //
+        // Both calls are safe from a background thread and neither can
+        // touch the main thread, which is stuck by definition.
+        // See fix_hang_watchdog_recovery.py.
+        JITEnabler.interruptLiveDebugSessions()
+        JITEnabler.cancelAllDebugSessionCalls()
+        logger("tabFlush: HangWatchdog escalation - interrupted live sessions, cancelled in-flight calls")
     }
     
     private func tabs(for mode: TabMode) -> [Tab] {

@@ -583,6 +583,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     cancelAllDebugSessionCalls();
 }
 
++ (void)interruptLiveDebugSessions {
+    interruptLiveDebugSessions();
+}
+
 + (void)dumpDebugLoopState {
     dumpDebugLoopState();
 }
