@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/nsLookAndFeel.mm b/widget/uikit/nsLookAndFeel.mm
-index e5198c6f3fac..81c9af83413e 100644
+index e5198c6f3fac..02c58f498cb4 100644
 --- a/widget/uikit/nsLookAndFeel.mm
 +++ b/widget/uikit/nsLookAndFeel.mm
 @@ -4,20 +4,58 @@
@@ -169,7 +169,22 @@ index e5198c6f3fac..81c9af83413e 100644
      case ColorID::TargetTextBackground:
      case ColorID::TargetTextForeground:
        aResult = GetStandinForNativeColor(aID, aColorScheme);
-@@ -293,6 +343,9 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+@@ -258,7 +308,13 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+       aResult = 0;
+       break;
+     case IntID::ScrollbarFadeBeginDelay:
+-      aResult = 450;
++      // 450 is the macOS value, and it assumes a pointer already on
++      // screen that lands precisely. On touch the user has to notice the
++      // overlay bar, move a thumb across to it, and hit a target only a
++      // few points wide - and at 450 + 200 the bar was fully gone 650ms
++      // after scrolling stopped, which is most of why the scrollbar was
++      // impossible to grab.
++      aResult = 1500;
+       break;
+     case IntID::ScrollbarFadeDuration:
+       aResult = 200;
+@@ -293,6 +349,9 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
      case IntID::SpellCheckerUnderlineStyle:
        aResult = static_cast<int32_t>(StyleTextDecorationStyle::Dotted);
        break;
@@ -179,7 +194,7 @@ index e5198c6f3fac..81c9af83413e 100644
      case IntID::ContextMenuOffsetVertical:
      case IntID::ContextMenuOffsetHorizontal:
        aResult = 2;
-@@ -301,6 +354,11 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+@@ -301,6 +360,11 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
        aResult = 0;
        res = NS_ERROR_FAILURE;
    }
@@ -191,7 +206,7 @@ index e5198c6f3fac..81c9af83413e 100644
    return res;
  }
  
-@@ -325,20 +383,10 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+@@ -325,20 +389,10 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
  
  bool nsLookAndFeel::NativeGetFont(FontID aID, nsString& aFontName,
                                    gfxFontStyle& aFontStyle) {
@@ -216,7 +231,7 @@ index e5198c6f3fac..81c9af83413e 100644
  }
  
  void nsLookAndFeel::EnsureInit() {
-@@ -347,7 +395,7 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
+@@ -347,7 +401,7 @@ static nscolor GetColorFromUIColor(UIColor* aColor) {
    }
    mInitialized = true;
  

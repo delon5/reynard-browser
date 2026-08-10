@@ -1,9 +1,9 @@
 diff --git a/media/libcubeb/src/cubeb_audiounit_ios.mm b/media/libcubeb/src/cubeb_audiounit_ios.mm
 new file mode 100644
-index 000000000000..a4e03a8eca38
+index 000000000000..d62c3b6d08d2
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_audiounit_ios.mm
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,463 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -151,7 +151,17 @@ index 000000000000..a4e03a8eca38
 +
 +}  // namespace
 +
-+extern "C" void cubeb_ios_activate_audio_session(
++// Category/mode/channel configuration WITHOUT activating the session.
++//
++// Split out so device ENUMERATION can set up the category it needs to
++// read port lists without claiming the session. Activating from
++// enumeration meant that a page merely calling enumerateDevices()
++// interrupted whatever the user was listening to - the category is
++// .playback with no .mixWithOthers - without playing a single frame. It
++// also left an active session behind that nothing engine-side ever
++// deactivates, and with the app's "audio" UIBackgroundMode an active
++// session is a standing reason for iOS not to suspend the app.
++extern "C" void cubeb_ios_configure_audio_session_category(
 +    bool aRecording, uint32_t aPreferredOutputChannels) {
 +  AVAudioSession* session = [AVAudioSession sharedInstance];
 +  NSError* error = nil;
@@ -175,7 +185,14 @@ index 000000000000..a4e03a8eca38
 +      [session setPreferredOutputNumberOfChannels:channels error:nil];
 +    }
 +  }
-+  [session setActive:YES error:&error];
++}
++
++extern "C" void cubeb_ios_activate_audio_session(
++    bool aRecording, uint32_t aPreferredOutputChannels) {
++  cubeb_ios_configure_audio_session_category(aRecording,
++                                             aPreferredOutputChannels);
++  NSError* error = nil;
++  [[AVAudioSession sharedInstance] setActive:YES error:&error];
 +}
 +
 +extern "C" uint32_t cubeb_ios_session_sample_rate(void) {
@@ -380,12 +397,22 @@ index 000000000000..a4e03a8eca38
 +  sInitialized = true;
 +}
 +
-+extern "C" void cubeb_ios_activate_audio_session(bool aRecording, uint32_t) {
++extern "C" void cubeb_ios_configure_audio_session_category(bool aRecording,
++                                                          uint32_t) {
 +  cubeb_ios_ensure_audio_session_initialized();
 +  UInt32 category = aRecording ? kAudioSessionCategory_PlayAndRecord
 +                               : kAudioSessionCategory_MediaPlayback;
 +  AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(category),
 +                          &category);
++}
++
++extern "C" void cubeb_ios_activate_audio_session(bool aRecording,
++                                                 uint32_t aChannels) {
++  // Defined in BOTH branches deliberately - the caller in
++  // cubeb_audiounit.cpp is not conditional on the deployment target, so
++  // omitting the configure-only entry point here is a link error on this
++  // fallback path.
++  cubeb_ios_configure_audio_session_category(aRecording, aChannels);
 +  AudioSessionSetActive(true);
 +}
 +
