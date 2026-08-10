@@ -82,6 +82,14 @@ final class JITController {
     // thread too once the queued work finishes, so this flag is only
     // ever touched from one thread - safe without needing a lock.
     private var isProcessingHelperAttachRequests = false
+    // The 3-second helper-attach fallback, stored so the lifecycle
+    // observers can stop it while the app is backgrounded. It used to be
+    // created anonymously and never invalidated, so it woke the CPU
+    // every 3 seconds for the entire process lifetime - which, whenever
+    // something is preventing suspension (an active audio session, PiP,
+    // CarPlay, the keep-alive), means every backgrounded hour.
+    private var helperAttachPollingTimer: Timer?
+    private var helperAttachPollingLifecycleTokens: [NSObjectProtocol] = []
     // Guarded by preflightWatchdogLock, alongside preflightWatchdogs.
     //
     // Previously watchdogQueue-confined and insert-only. Cancellation
@@ -1164,13 +1172,49 @@ extension JITController {
         // interval since this is purely a backstop for the app's
         // entire lifetime, not bounded to one request's own window -
         // the notification remains the fast path in the common case.
-        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            // Deliberately silent. This fires for the app's entire
-            // lifetime and almost always finds nothing - 235 lines of a
-            // 3256-line capture, the single largest contributor to a log
-            // file that has no size cap. The path is named where it
-            // actually carries a request instead, which is the only
-            // place the distinction matters.
+        // Stopped entirely while backgrounded. Nothing is lost: the
+        // Darwin observer above stays registered and is the fast path
+        // (confirmed alive on device - DARWIN NOTIFICATION appears in
+        // every capture), new attaches are deferred while the app is
+        // inactive anyway, and the foreground resume runs an immediate
+        // scan before restarting the timer, so anything that did arrive
+        // is picked up without waiting out an interval.
+        helperAttachPollingLifecycleTokens = [
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, self.helperAttachPollingTimer != nil else {
+                    return
+                }
+                self.helperAttachPollingTimer?.invalidate()
+                self.helperAttachPollingTimer = nil
+                logger("helperRequestDelivery: polling timer PAUSED for background")
+            },
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, self.helperAttachPollingTimer == nil else {
+                    return
+                }
+                logger("helperRequestDelivery: polling timer RESUMED for foreground")
+                self.processPendingHelperAttachRequests(source: "FOREGROUND RESUME")
+                self.startHelperAttachPollingTimer()
+            },
+        ]
+        startHelperAttachPollingTimer()
+    }
+
+    private func startHelperAttachPollingTimer() {
+        // Deliberately silent. This fires for the app's entire
+        // foreground lifetime and almost always finds nothing - 235
+        // lines of a 3256-line capture. The path is named where it
+        // actually carries a request instead, which is the only place
+        // the distinction matters.
+        helperAttachPollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.processPendingHelperAttachRequests(source: "POLLING TIMER")
         }
     }
