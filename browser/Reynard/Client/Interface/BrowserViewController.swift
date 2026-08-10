@@ -179,15 +179,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         refreshAddressBar()
         homepageOverlayCoordinator.updatePresentation(animated: false)
         
-        // NOT attached. ToolbarController is now the single scroll
-        // consumer: it slides the chrome off on a downward drag and
-        // moves content with it. Our pan recogniser condenses the same
-        // chrome into the floating pill on the same gesture, so with
-        // both live one drag would trigger two different chrome
-        // behaviours at once. The coordinator is kept (resetVisible is
-        // still called on tab switches, and re-attaching is one line)
-        // so the pill can come back if the sliding toolbar is not what
-        // we want.
+        scrollChromeCoordinator.attach(to: contentView)
         scrollChromeCoordinator.isEnabled = { [weak self] in
             guard let self else {
                 return false
@@ -618,9 +610,9 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     /// condition are what once gave every page the reserved strip
     /// (fix_per_tab_artificial_safe_area_inset.py). The old
     /// additionalSafeAreaInsets path that used to duplicate this was
-    /// inert (guarded by `false`) and has been removed. The engine-side
-    /// reservation is now ToolbarController's job (it drives
-    /// ContentView.setToolbarLimits); this anchor is the view-side half.
+    /// inert (guarded by `false`) and has been removed; the reservation
+    /// is now entirely the content anchor here plus the
+    /// env(safe-area-inset-bottom) reported by updateDynamicToolbarMaxHeight.
     private var condensedContentBottomAnchor: NSLayoutYAxisAnchor {
         tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
             ? browserChrome.condensedPillTopAnchor
