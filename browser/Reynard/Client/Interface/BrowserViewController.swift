@@ -332,6 +332,18 @@ final class BrowserViewController: UIViewController {
         setUpFindInPageKeyCommand()
 
         applyScrollbarTouchTargetPreferences()
+
+        // iOS's Wi-Fi proxy, which Gecko cannot see for itself on this
+        // port - see SystemProxyBridge. Re-applied on foreground too:
+        // the setting is per-network and can change while backgrounded.
+        SystemProxyBridge.apply()
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            SystemProxyBridge.apply()
+        }
     }
 
     /// Makes the page's own scrollbar big enough to actually grab.
