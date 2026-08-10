@@ -20,7 +20,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 AddonPackageStagingLog.error("Unable to clean staged add-on packages", error: error)
             }
         }
-        JITController.shared.startBackgroundAudioIfNeeded()
         return true
     }
     

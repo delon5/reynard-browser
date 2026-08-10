@@ -311,17 +311,6 @@ final class JITController {
         }
     }
 
-    func startBackgroundAudioIfNeeded() {
-        guard !usePtraceJIT(),
-              Prefs.JITSettings.isJITEnabled,
-              Self.hasTXMSupport(),
-              !hasHandledFailure else {
-            return
-        }
-        
-        BackgroundAudioManager.shared.start()
-    }
-    
     func start() {
         guard usePtraceJIT() || !isDDIMissing() else {
             hasHandledFailure = true
@@ -920,7 +909,6 @@ final class JITController {
                 return
             }
             self.hasHandledFailure = true
-            BackgroundAudioManager.shared.stop()
             self.presentEnablementFailureScreen(
                 error: error,
                 showsErrorDetails: error.code != Int(ETIMEDOUT)
@@ -1057,7 +1045,6 @@ final class JITController {
         }
         
         isJITLessModeActive = true
-        BackgroundAudioManager.shared.stop()
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.cancelAllPreflightWatchdogs()
