@@ -9,6 +9,7 @@ import AVFoundation
 import Foundation
 import GeckoView
 import MediaPlayer
+import UIKit
 
 protocol SystemMediaSessionObserver: AnyObject {
     func systemMediaSessionStateDidChange(_ mediaSession: SystemMediaSession)
@@ -125,6 +126,7 @@ final class SystemMediaSession: MediaSessionDelegate {
         if selectedSession === session {
             observer?.systemMediaSessionStateDidChange(self)
         }
+        releaseAudioSessionIfIdleInBackground()
     }
     
     func onMetadata(session: GeckoSession, metadata: MediaSessionMetadata) {
@@ -202,6 +204,7 @@ final class SystemMediaSession: MediaSessionDelegate {
             nowPlayingCenter.playbackState = .paused
         }
         notifyStateChanged(for: session)
+        releaseAudioSessionIfIdleInBackground()
     }
     
     func onPlaybackNone(session: GeckoSession) {
@@ -215,6 +218,7 @@ final class SystemMediaSession: MediaSessionDelegate {
             activateMostRecentPlayingSession()
         }
         notifyStateChanged(for: session)
+        releaseAudioSessionIfIdleInBackground()
     }
     
     func select(session: GeckoSession) {
@@ -374,6 +378,37 @@ final class SystemMediaSession: MediaSessionDelegate {
         logger(anyPaused
             ? "mediaSession: backgrounded with only paused media - audio session released, card kept"
             : "mediaSession: backgrounded with no playback - cleared")
+    }
+
+    /// Releases the shared audio session when the app is backgrounded
+    /// and playback has just stopped. applicationDidEnterBackground
+    /// only runs at the moment of the transition; media that stops
+    /// WHILE the app is already backgrounded - a PiP window closed, a
+    /// video that ends or pauses itself, a tab that dies - otherwise
+    /// leaves the session active with no remaining hook to release it.
+    /// With the "audio" background mode an active session keeps the
+    /// whole app running, so this is the difference between suspending
+    /// when media ends and running all day. See
+    /// fix_release_audio_session_when_media_stops_in_background.py.
+    ///
+    /// Deactivation is best-effort, same as the backgrounding path: if
+    /// an engine audio unit is still live the call fails, which is
+    /// precisely the case where the session should stay active.
+    private func releaseAudioSessionIfIdleInBackground() {
+        guard UIApplication.shared.applicationState == .background else {
+            return
+        }
+        let anyPlaying = sessionStates.values.contains {
+            $0.session != nil && $0.playbackState == .playing
+        }
+        guard !anyPlaying else {
+            return
+        }
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+        logger("mediaSession: playback stopped while backgrounded - audio session released")
     }
 
     /// Drops sessions that died without reporting, and clears the now
