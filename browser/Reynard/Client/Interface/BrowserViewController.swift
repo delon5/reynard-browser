@@ -605,9 +605,18 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     }
     
     /// The content view's bottom anchor while the toolbar is condensed to
-    /// the pill: pinned above the pill for pages that reserve the space
-    /// themselves (usesSafeAreaInsetCSS), otherwise the true window
-    /// bottom, with the pill floating over the page.
+    /// the pill: always the true window bottom, so the page runs full
+    /// bleed and paints behind the pill.
+    ///
+    /// It used to be pinned above the pill for pages the SafeAreaDetector
+    /// judged to reserve the space themselves (usesSafeAreaInsetCSS).
+    /// That distinction is dead: upstream's nsWindow forces
+    /// safeAreaInsets.bottom = 0 before handing them to Gecko, so
+    /// env(safe-area-inset-bottom) is 0 for every page and none of them
+    /// can pad themselves. Clearance is entirely the compositor
+    /// fixed-layer margin now (ContentView.setFloatingChromeInset), which
+    /// lifts fixed content without touching the viewport - so full bleed
+    /// here cannot double-count against it.
     ///
     /// Shared by applyPhoneLayout and applyCompactLayout so the two can
     /// never decide it differently - divergent copies of this exact
@@ -618,9 +627,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     /// is now entirely the content anchor here plus the
     /// env(safe-area-inset-bottom) reported by updateDynamicToolbarMaxHeight.
     private var condensedContentBottomAnchor: NSLayoutYAxisAnchor {
-        tabManager.selectedTab?.state.usesSafeAreaInsetCSS == true
-            ? browserChrome.condensedPillTopAnchor
-            : view.bottomAnchor
+        view.bottomAnchor
     }
     
     private func applyCompactLayout() {
