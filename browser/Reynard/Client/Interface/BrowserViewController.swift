@@ -330,6 +330,38 @@ final class BrowserViewController: UIViewController {
         // verified once-per-launch bootstrap; the install itself guards
         // against duplicates if this ever runs again.
         setUpFindInPageKeyCommand()
+
+        applyFixedMarginChromeProof()
+    }
+
+    // TEMPORARY - dynamic-bar fixed-margin proof. Delete this method and
+    // its call above once the result is known; it MUST NOT ship alongside
+    // a live margin driven from Swift, because
+    // APZCTreeManager::GetCompositorFixedLayerMargins replaces the
+    // compositor's real margin with these prefs outright rather than
+    // combining them - a live value would be silently pinned to whatever
+    // constant is set here.
+    //
+    // What it proves: whether lifting position:fixed / sticky-bottom
+    // content at the compositor clears the chrome on pages that ignore
+    // env(safe-area-inset-bottom). Facebook's "Open app" banner and
+    // composer are the ones to watch - they never move today. Wikipedia
+    // and other pages with nothing pinned to the bottom should be
+    // completely unaffected.
+    private func applyFixedMarginChromeProof() {
+        // The pref is in screen pixels; the pill height is in points.
+        let bottom = Int(
+            (BrowserChrome.condensedPillOccupiedHeight * UIScreen.main.scale)
+                .rounded()
+        )
+        logger(String(format: "dynToolbar: fixed-margin PROOF bottom=%ld px (%.1f pt @%.0fx)",
+                      bottom,
+                      BrowserChrome.condensedPillOccupiedHeight,
+                      UIScreen.main.scale))
+        GeckoRuntime.setDefaultPrefs([
+            "apz.fixed-margin-override.enabled": true,
+            "apz.fixed-margin-override.bottom": bottom,
+        ])
     }
     
     // MARK: - Browser Layout
