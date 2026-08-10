@@ -103,8 +103,19 @@ final class ToolbarController {
         contentView.setFloatingChromeInset(
             browserChrome.isScrollCondensed ? BrowserChrome.condensedPillOccupiedHeight : 0
         )
+        // ...and the layout viewport must not keep reserving the
+        // toolbar's height while only the pill is on screen. That
+        // reservation is what stopped the page painting behind the pill:
+        // setDynamicToolbarMaxHeight shortens the ICB by exactly this
+        // much, so the strip the pill floats over was simply outside the
+        // viewport, showing the view's background instead of page.
+        //
+        // Zero while condensed gives the page the whole window to paint,
+        // and the fixed-layer margin above - which does not touch the
+        // viewport - keeps its fixed content clear of the pill. One
+        // reflow per condense/expand flip, not per frame.
         contentView.setToolbarLimits(
-            maxHeight: maxToolbarOffset,
+            maxHeight: browserChrome.isScrollCondensed ? 0 : maxToolbarOffset,
             topOffset: maxTopToolbarOffset
         )
     }
