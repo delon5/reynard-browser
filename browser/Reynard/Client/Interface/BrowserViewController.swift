@@ -695,30 +695,44 @@ final class BrowserViewController: UIViewController {
         }
         lastReportedBottomReservation = reservation
 
-        logger(String(format: "dynToolbar: fixedMargin %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@)",
+        logger(String(format: "dynToolbar: %@ %.1f -> %.1f (hasBottomToolbar=%@ condensed=%@ reservation=%@)",
+                      reservation == .readsSafeAreaInset ? "env" : "fixedMargin",
                       dynamicToolbarMaxHeight, target,
                       hasBottomToolbar ? "YES" : "NO",
-                      browserChrome.isScrollCondensed ? "YES" : "NO"))
-        // One mechanism now, not two. The compositor holds the page's
-        // fixed and sticky bottom content above the chrome through APZ
-        // fixed-layer margins, which works whether or not the page reads
-        // env(). Proven on device: Facebook's banner and composer, which
-        // consult no env() and had never moved for any previous attempt,
-        // lifted above the pill.
+                      browserChrome.isScrollCondensed ? "YES" : "NO",
+                      reservation.map { String(describing: $0) } ?? "unknown"))
+        // Two mechanisms after all, chosen per page - because they do
+        // NOT reach the same set of elements.
         //
-        // env() therefore reports 0 from here on. Left non-zero it stacks
-        // with the margin on pages that DO read it - exactly what the
-        // proof build showed, YouTube sitting 60pt too high because it
-        // took both. The detection that fed it (the addon, the per-host
-        // reservation cache, the actor round-trip) is dead weight now and
-        // comes out in a follow-up.
+        // The compositor margin lifts position:fixed and sticky-bottom
+        // layers in the ROOT CONTENT document. env() moved anything that
+        // read it, wherever it sat. The second set is strictly larger,
+        // and the difference is where content goes missing: Twitch's
+        // "Open in App" sheet reads env() but is not a fixed root-content
+        // layer, so with env() at 0 nothing reached it and its "Keep
+        // using web" button became unreachable behind the chrome.
         //
-        // The dynamic-toolbar max stays 0, as it always has on this port.
-        // Shortening the layout viewport is the path that rendered
-        // YouTube into a box smaller than the window; a compositor margin
-        // never touches layout, so that failure cannot recur.
-        contentView.setFixedBottomMargin(target)
-        contentView.setSafeAreaInsetBottom(0)
+        // So a page the engine has told us honours env() gets env() and
+        // NO margin - it positions itself, keeps the background bleed
+        // behind the pill, and elements the compositor cannot see are
+        // handled too. Everything else gets the margin, which needs no
+        // cooperation and is what made Facebook work.
+        //
+        // Never both. That is the Phase 0 double-lift, and it is worse
+        // now than the 60pt it was then: the excess scales with the
+        // chrome height, so an expanded toolbar would put an env-reading
+        // page 142pt too high.
+        //
+        // A misclassified env-reader still lands on the margin, which is
+        // correct for anything fixed - it just loses the background
+        // bleed. That is the accepted trade-off, not a regression.
+        if reservation == .readsSafeAreaInset {
+            contentView.setSafeAreaInsetBottom(target)
+            contentView.setFixedBottomMargin(0)
+        } else {
+            contentView.setSafeAreaInsetBottom(0)
+            contentView.setFixedBottomMargin(target)
+        }
         contentView.setDynamicToolbarMaxHeight(0)
 
         // Store the target rather than what was sent, so the guard above
