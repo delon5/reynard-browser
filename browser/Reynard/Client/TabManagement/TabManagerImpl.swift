@@ -743,7 +743,15 @@ final class TabManagerImplementation: NSObject, TabManager {
         logger(String(format: "tabRestore: RESTORING tab %@ (url=%@) - calling loadURL now", tab.id.uuidString, url))
         tab.state.restoreState = .none
         tab.state.suppressInitialNavigation = false
+        // A restored load reaches the engine only by this path, and a
+        // queued LoadUri the engine never acknowledges has no recovery
+        // of its own. browse() arms the same ladder for exactly that
+        // reason. displayState is what the ladder's retry compares
+        // against, so it is set here as browse() sets it.
+        // See fix_loadwatchdog_restore_loads.py.
+        tab.state.displayState = .pending(url)
         loadURL(url, in: tab)
+        armLoadWatchdog(for: tab, pendingInput: url, retryURL: url)
     }
     
     @discardableResult
