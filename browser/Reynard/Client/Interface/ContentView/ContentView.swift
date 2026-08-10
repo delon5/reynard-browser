@@ -701,14 +701,24 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard gestureRecognizer is UIScreenEdgePanGestureRecognizer,
-              case .idle = historySwipeState,
+        // UIKit asks this of the VIEW for every recognizer attached to it,
+        // not just our own, so answering for all of them vetoes recognizers
+        // this view does not own: the ScrollChromeCoordinator pan that
+        // condenses the chrome is attached here, and its own delegate
+        // implements only shouldRecognizeSimultaneouslyWith, leaving this
+        // the sole gate that can fail it. Only the history edge-swipes
+        // below are ours to decide; everything else keeps UIKit's default.
+        guard gestureRecognizer is UIScreenEdgePanGestureRecognizer else {
+            return super.gestureRecognizerShouldBegin(gestureRecognizer)
+        }
+
+        guard case .idle = historySwipeState,
               isHistorySwipeEnabled,
               state == .browsing,
               webContentView.visibility == .visible else {
             return false
         }
-        
+
         if let backGesture = gestureRecognizer as? UIScreenEdgePanGestureRecognizer,
            backGesture.edges == .left {
             return canGoBack
