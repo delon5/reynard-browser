@@ -10,6 +10,7 @@ import UIKit
 final class LanguagesPreferencesViewController: SettingsTableViewController {
     private enum Section: CaseIterable {
         case websiteLanguage
+        case translation
         
         var text: SettingsSectionText {
             switch self {
@@ -17,6 +18,11 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("Website Language", comment: ""),
                     footerTitle: NSLocalizedString("Some websites are available in multiple languages. Choose languages in the order you prefer.", comment: "")
+                )
+            case .translation:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Translation", comment: ""),
+                    footerTitle: NSLocalizedString("Pages are translated on this device. Review the languages and sites you have chosen to always or never translate.", comment: "")
                 )
             }
         }
@@ -68,7 +74,12 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
         guard Section.allCases.indices.contains(section) else {
             return 0
         }
-        return rows.count
+        switch Section.allCases[section] {
+        case .websiteLanguage:
+            return rows.count
+        case .translation:
+            return 1
+        }
     }
     
     override func sectionText(for section: Int) -> SettingsSectionText {
@@ -79,6 +90,13 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
     }
     
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        if Section.allCases[safe: indexPath.section] == .translation {
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Translation", comment: "")
+            cell.accessoryType = .disclosureIndicator
+            return cell
+        }
+
         guard let row = row(at: indexPath) else {
             return UITableViewCell()
         }
@@ -102,6 +120,14 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
     
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         defer { tableView.deselectRow(at: indexPath, animated: true) }
+
+        if Section.allCases[safe: indexPath.section] == .translation {
+            navigationController?.pushViewController(
+                TranslationPreferencesViewController(), animated: true
+            )
+            return
+        }
+
         guard let row = row(at: indexPath) else {
             return
         }
@@ -112,14 +138,16 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
     }
     
     override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
-        guard case .language = row(at: indexPath) else {
+        guard Section.allCases[safe: indexPath.section] == .websiteLanguage,
+              case .language = row(at: indexPath) else {
             return false
         }
         return canEditLanguages
     }
     
     override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        guard case .language = row(at: indexPath) else {
+        guard Section.allCases[safe: indexPath.section] == .websiteLanguage,
+              case .language = row(at: indexPath) else {
             return false
         }
         return canEditLanguages
@@ -219,3 +247,4 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
         tableView.reloadData()
     }
 }
+

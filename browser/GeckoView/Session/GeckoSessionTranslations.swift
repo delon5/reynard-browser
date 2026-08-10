@@ -111,10 +111,54 @@ extension GeckoRuntime {
     }
 
     /// Every site currently on the never-translate list.
+    ///
+    /// The engine answers `{ sites: [...] }`, not a bare array.
     public static func neverTranslateSites() async -> [String] {
         let response = try? await GeckoEventDispatcherWrapper.runtimeInstance.query(
             type: "GeckoView:Translations:GetNeverTranslateSpecifiedSites"
         )
-        return response as? [String] ?? []
+        return (response as? [String: Any])?["sites"] as? [String] ?? []
+    }
+
+    /// Removes a site from the never-translate list.
+    public static func clearNeverTranslateSite(_ origin: String) async throws {
+        _ = try await GeckoEventDispatcherWrapper.runtimeInstance.query(
+            type: "GeckoView:Translations:SetNeverTranslateSpecifiedSite",
+            message: ["origin": origin, "neverTranslate": false]
+        )
+    }
+
+    /// One language's treatment, as the engine reports it.
+    public struct TranslationLanguageEntry {
+        public let langTag: String
+        public let displayName: String
+        public let setting: TranslationLanguageSetting
+    }
+
+    /// Every language the engine holds a non-default setting for.
+    ///
+    /// Answers `{ settings: [{ langTag, displayName, setting }] }`.
+    /// Entries at `.offer` are the default and are filtered out - the
+    /// point of the list is to show what has been overridden.
+    public static func translationLanguageSettings() async -> [TranslationLanguageEntry] {
+        let response = try? await GeckoEventDispatcherWrapper.runtimeInstance.query(
+            type: "GeckoView:Translations:GetLanguageSettings"
+        )
+        let raw = (response as? [String: Any])?["settings"] as? [[String: Any]] ?? []
+        return raw.compactMap { entry in
+            guard let tag = entry["langTag"] as? String,
+                  let setting = (entry["setting"] as? String).flatMap({
+                      TranslationLanguageSetting(rawValue: $0.lowercased())
+                  }),
+                  setting != .offer else {
+                return nil
+            }
+            let name = entry["displayName"] as? String
+                ?? Locale.current.localizedString(forLanguageCode: tag)
+                ?? tag
+            return TranslationLanguageEntry(
+                langTag: tag, displayName: name, setting: setting
+            )
+        }
     }
 }
