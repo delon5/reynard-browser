@@ -135,6 +135,34 @@ extension GeckoRuntime {
         public let setting: TranslationLanguageSetting
     }
 
+    /// Every language the engine can translate FROM, for offering a
+    /// choice rather than only listing what has already been chosen.
+    ///
+    /// GetLanguageSettings cannot serve this: it returns only languages
+    /// with a non-default setting, so before anything is set it is empty
+    /// - which is exactly when a picker is needed.
+    ///
+    /// Answers `{ sourceLanguages: [{ langTag, langTagKey, displayName }] }`.
+    public static func supportedSourceLanguages() async -> [TranslationLanguageEntry] {
+        let response = try? await GeckoEventDispatcherWrapper.runtimeInstance.query(
+            type: "GeckoView:Translations:TranslationInformation"
+        )
+        let raw = (response as? [String: Any])?["sourceLanguages"] as? [[String: Any]] ?? []
+        return raw.compactMap { entry in
+            guard let tag = entry["langTag"] as? String else {
+                return nil
+            }
+            let name = entry["displayName"] as? String
+                ?? Locale.current.localizedString(forLanguageCode: tag)
+                ?? tag
+            // The engine reports capability, not preference, so every
+            // entry starts at the default treatment.
+            return TranslationLanguageEntry(
+                langTag: tag, displayName: name, setting: .offer
+            )
+        }
+    }
+
     /// Every language the engine holds a non-default setting for.
     ///
     /// Answers `{ settings: [{ langTag, displayName, setting }] }`.

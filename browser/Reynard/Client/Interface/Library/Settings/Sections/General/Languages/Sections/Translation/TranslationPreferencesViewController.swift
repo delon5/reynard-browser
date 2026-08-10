@@ -105,6 +105,24 @@ final class TranslationPreferencesViewController: SettingsTableViewController {
 
     // MARK: - Data
 
+    /// The two language sections gain a trailing "Add Language" row.
+    /// The sites section deliberately does not: a site is added by being
+    /// on it and choosing "never translate this site" from the bar, so
+    /// there is nothing sensible for a picker to list.
+    private func hasAddRow(_ section: Section) -> Bool {
+        switch section {
+        case .alwaysTranslate, .neverTranslate: return true
+        case .neverTranslateSites: return false
+        }
+    }
+
+    private func isAddRow(_ indexPath: IndexPath) -> Bool {
+        guard let section = Section(rawValue: indexPath.section), hasAddRow(section) else {
+            return false
+        }
+        return indexPath.row == max(count(in: section), 1)
+    }
+
     private func count(in section: Section) -> Int {
         switch section {
         case .alwaysTranslate: return alwaysLanguages.count
@@ -138,8 +156,9 @@ final class TranslationPreferencesViewController: SettingsTableViewController {
             return 0
         }
         // One placeholder row when empty, so the section still explains
-        // itself rather than collapsing to a bare header.
-        return max(count(in: section), 1)
+        // itself rather than collapsing to a bare header, plus the add
+        // row where there is one.
+        return max(count(in: section), 1) + (hasAddRow(section) ? 1 : 0)
     }
 
     override func sectionText(for section: Int) -> SettingsSectionText {
@@ -157,6 +176,13 @@ final class TranslationPreferencesViewController: SettingsTableViewController {
             return cell
         }
 
+        if isAddRow(indexPath) {
+            cell.textLabel?.text = NSLocalizedString("Add Language…", comment: "")
+            cell.textLabel?.textColor = .tintColor
+            cell.selectionStyle = .default
+            return cell
+        }
+
         if count(in: section) == 0 {
             cell.textLabel?.text = hasLoaded
                 ? section.emptyText
@@ -169,8 +195,24 @@ final class TranslationPreferencesViewController: SettingsTableViewController {
         return cell
     }
 
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard isAddRow(indexPath), let section = Section(rawValue: indexPath.section) else {
+            return
+        }
+        let setting: GeckoRuntime.TranslationLanguageSetting =
+            section == .alwaysTranslate ? .always : .never
+        let picker = TranslationLanguagePickerViewController(
+            setting: setting,
+            title: section.text.headerTitle ?? NSLocalizedString("Add Language", comment: "")
+        ) { [weak self] in
+            self?.reload()
+        }
+        navigationController?.pushViewController(picker, animated: true)
+    }
+
     override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
-        guard let section = Section(rawValue: indexPath.section) else {
+        guard let section = Section(rawValue: indexPath.section), !isAddRow(indexPath) else {
             return false
         }
         return count(in: section) > 0
