@@ -240,6 +240,10 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             // begins, so GeckoView gets its real final size immediately
             // rather than a continuously-changing target.
             self.applyBrowserLayout(animated: false)
+            self.toolbarController.updateLayout(
+                chromeMode: self.browserLayout.chromeMode,
+                isToolbarEnabled: !self.isShowingFullscreenMedia
+            )
         }
         
         Task { @MainActor [weak self] in

@@ -45,6 +45,25 @@ extension UIColor {
         }
     }
     
+    /// Painted over the toolbars' blur material, which upstream's
+    /// toolbar rework introduced in place of a solid `.toolbarBackground`
+    /// fill. A blur is never pure black - it samples the page behind it -
+    /// so OLED mode lost its whole point on the one surface that is
+    /// always on screen. Transparent when the preference is off, leaving
+    /// the standard material exactly as upstream draws it.
+    ///
+    /// Same restart caveat as `.appBackground`: this re-resolves on a
+    /// light/dark change, not when the preference itself is toggled.
+    static var oledToolbarOverlay: UIColor {
+        return UIColor { traitCollection in
+            guard Prefs.AppearanceSettings.usesOLEDBlackBackground,
+                  traitCollection.userInterfaceStyle == .dark else {
+                return .clear
+            }
+            return .black
+        }
+    }
+    
     /// Same idea again, for grouped-style table views (Settings
     /// screens), which get `.systemGroupedBackground` implicitly from
     /// UIKit itself rather than any explicit assignment in this app's
