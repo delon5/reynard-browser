@@ -15,7 +15,7 @@ import UIKit
 import GeckoView
 
 final class TranslationLanguagePickerViewController: SettingsTableViewController {
-    private let setting: GeckoRuntime.TranslationLanguageSetting
+    private let setting: TranslationLanguageSetting
     private let onPicked: () -> Void
 
     /// Everything the engine can translate from, minus anything already
@@ -26,7 +26,7 @@ final class TranslationLanguagePickerViewController: SettingsTableViewController
     private var hasLoaded = false
 
     init(
-        setting: GeckoRuntime.TranslationLanguageSetting,
+        setting: TranslationLanguageSetting,
         title: String,
         onPicked: @escaping () -> Void
     ) {

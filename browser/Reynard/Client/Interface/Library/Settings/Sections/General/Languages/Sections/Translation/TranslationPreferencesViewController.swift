@@ -178,7 +178,7 @@ final class TranslationPreferencesViewController: SettingsTableViewController {
 
         if isAddRow(indexPath) {
             cell.textLabel?.text = NSLocalizedString("Add Language…", comment: "")
-            cell.textLabel?.textColor = .tintColor
+            cell.textLabel?.textColor = cell.tintColor
             cell.selectionStyle = .default
             return cell
         }
@@ -200,7 +200,7 @@ final class TranslationPreferencesViewController: SettingsTableViewController {
         guard isAddRow(indexPath), let section = Section(rawValue: indexPath.section) else {
             return
         }
-        let setting: GeckoRuntime.TranslationLanguageSetting =
+        let setting: TranslationLanguageSetting =
             section == .alwaysTranslate ? .always : .never
         let picker = TranslationLanguagePickerViewController(
             setting: setting,
