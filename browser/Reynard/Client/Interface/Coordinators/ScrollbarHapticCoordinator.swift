@@ -37,6 +37,11 @@ final class ScrollbarHapticCoordinator: NSObject {
         /// nothing fires from position any more - just where a real
         /// thumb grab is about to happen if one happens at all.
         static let edgeStripWidth: CGFloat = 24
+        /// Vertical movement (points) before a touch in the strip counts
+        /// as a scrollbar grab. Larger than the original 6: that fired on
+        /// ordinary scrolling near the right edge, which is most
+        /// scrolling.
+        static let dragActivationThreshold: CGFloat = 14
     }
     
     /// Consulted on every touch-down within the strip. Return `false`
@@ -46,6 +51,9 @@ final class ScrollbarHapticCoordinator: NSObject {
     var isEnabled: () -> Bool = { true }
     
     private let feedbackGenerator = UIImpactFeedbackGenerator(style: .light)
+    /// Set on touch-down inside the strip, cleared once the haptic has
+    /// fired or the touch ends. Non-nil means armed.
+    private var pendingActivationStart: CGPoint?
 
     /// The pixel-perfect activation. Chain: APZ thumb hit test
     /// (APZCTreeManager patch) -> "reynard-scrollbar-touch-begin"
@@ -81,17 +89,32 @@ final class ScrollbarHapticCoordinator: NSObject {
             return
         }
 
-        // Warm-up only. Nothing here fires a haptic: whether the
-        // scrollbar was actually grabbed is the compositor's call, and it
-        // tells us through activateFromEngineSignal.
-        guard recognizer.state == .began, isEnabled() else {
-            return
+        switch recognizer.state {
+        case .began:
+            guard isEnabled() else {
+                return
+            }
+            let location = recognizer.location(in: view)
+            guard location.x >= view.bounds.width - UX.edgeStripWidth else {
+                return
+            }
+            pendingActivationStart = location
+            feedbackGenerator.prepare()
+
+        case .changed:
+            guard let start = pendingActivationStart else {
+                return
+            }
+            let location = recognizer.location(in: view)
+            guard abs(location.y - start.y) >= UX.dragActivationThreshold else {
+                return
+            }
+            pendingActivationStart = nil
+            feedbackGenerator.impactOccurred()
+
+        default:
+            pendingActivationStart = nil
         }
-        let location = recognizer.location(in: view)
-        guard location.x >= view.bounds.width - UX.edgeStripWidth else {
-            return
-        }
-        feedbackGenerator.prepare()
     }
 }
 

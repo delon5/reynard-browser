@@ -331,7 +331,6 @@ final class BrowserViewController: UIViewController {
         // against duplicates if this ever runs again.
         setUpFindInPageKeyCommand()
 
-        applyScrollbarTouchTargetPreferences()
 
         // iOS's Wi-Fi proxy, which Gecko cannot see for itself on this
         // port - see SystemProxyBridge. Re-applied on foreground too:
@@ -346,27 +345,6 @@ final class BrowserViewController: UIViewController {
         }
     }
 
-    /// Makes the page's own scrollbar big enough to actually grab.
-    ///
-    /// The port inherits the Cocoa scrollbar drawing (Theme.cpp routes
-    /// MOZ_WIDGET_UIKIT into the COCOA branch), which paints an overlay
-    /// scrollbar 16 CSS pixels wide and - per an upstream FIXME in
-    /// ScrollbarDrawingCocoa::RecomputeScrollbarParams - deliberately
-    /// ignores the size-override pref. 16 CSS pixels is about 6 physical
-    /// points once a page declares a ~980px layout viewport on a phone,
-    /// which is well under any sane touch target.
-    ///
-    /// ScrollbarDrawingAndroid is the same non-native theme and DOES
-    /// honour the override, so selecting it (style 3) turns the width
-    /// into something tunable. Its own default is 6, thinner than
-    /// Cocoa's, so the override has to be set alongside it - selecting
-    /// the style without one would make the target smaller, not bigger.
-    private func applyScrollbarTouchTargetPreferences() {
-        GeckoRuntime.setDefaultPrefs([
-            "widget.non-native-theme.scrollbar.style": 3,
-            "widget.non-native-theme.scrollbar.size.override": 24,
-        ])
-    }
 
     // MARK: - Browser Layout
     
