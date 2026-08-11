@@ -1,8 +1,16 @@
 diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySystemAccess.cpp
-index 58158272ebca..c1279f647082 100644
+index 58158272ebca..6fb2323a9a70 100644
 --- a/dom/media/eme/MediaKeySystemAccess.cpp
 +++ b/dom/media/eme/MediaKeySystemAccess.cpp
-@@ -140,6 +140,17 @@ MediaKeySystemStatus MediaKeySystemAccess::GetKeySystemStatus(
+@@ -10,6 +10,7 @@
+ #include "MediaContainerType.h"
+ #include "WebMDecoder.h"
+ #include "mozilla/ClearOnShutdown.h"
++#include "mozilla/Debug.h"  // printf_stderr, for the emeConfig diagnostic
+ #include "mozilla/EMEUtils.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/Services.h"
+@@ -140,6 +141,17 @@ MediaKeySystemStatus MediaKeySystemAccess::GetKeySystemStatus(
      return EnsureCDMInstalled(keySystem, SecureLevel::Software, aOutMessage);
    }
  
@@ -20,7 +28,7 @@ index 58158272ebca..c1279f647082 100644
    // This is used to determine if we need to download Widevine L1.
    bool shouldCheckL1Installation = false;
  #ifdef MOZ_WMF_CDM
-@@ -349,7 +360,23 @@ GetSupportedKeySystemConfigs(const nsAString& aKeySystem,
+@@ -349,7 +361,23 @@ GetSupportedKeySystemConfigs(const nsAString& aKeySystem,
    nsTArray<KeySystemConfigRequest> requests;
  
    // Software Widevine and Clearkey
@@ -45,7 +53,7 @@ index 58158272ebca..c1279f647082 100644
      requests.AppendElement(KeySystemConfigRequest{
          aKeySystem, DecryptionInfo::Software, aIsPrivateBrowsing});
    }
-@@ -670,8 +697,30 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
+@@ -670,8 +698,30 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
      // and subtype names are case-insensitive."'. We're using
      // nsContentTypeParser and that is case-insensitive and converts all its
      // parameter outputs to lower case.)
@@ -77,3 +85,60 @@ index 58158272ebca..c1279f647082 100644
      if (supportedInMP4 && !aKeySystem.mMP4.IsSupported()) {
        EME_LOG(
            "MediaKeySystemConfiguration (label='{}') "
+@@ -1198,6 +1248,56 @@ MediaKeySystemAccess::GetSupportedConfig(MediaKeySystemAccessRequest* aRequest,
+                    }
+                  }
+                }
++#ifdef MOZ_WIDGET_UIKIT
++               // DIAGNOSTIC. requestMediaKeySystemAccess rejecting is the
++               // whole FairPlay symptom - the key system probe succeeds,
++               // the page never creates MediaKeys, and nothing says why
++               // because every reason lives behind EME_LOG. This prints
++               // what was asked for, so the failing requirement can be
++               // read off a normal capture instead of guessed at.
++               printf_stderr(
++                   "emeConfig: REJECTED %s - %zu implementation(s), %zu "
++                   "candidate(s)\n",
++                   NS_ConvertUTF16toUTF8(aRequest->mKeySystem).get(),
++                   aResult.IsResolve() ? aResult.ResolveValue().Length() : 0,
++                   aRequest->mConfigs.Length());
++               for (const MediaKeySystemConfiguration& candidate :
++                    aRequest->mConfigs) {
++                 nsAutoCString desc;
++                 desc.AppendPrintf(
++                     "  initDataTypes=%zu video=%zu audio=%zu",
++                     candidate.mInitDataTypes.WasPassed()
++                         ? candidate.mInitDataTypes.Value().Length()
++                         : 0,
++                     candidate.mVideoCapabilities.WasPassed()
++                         ? candidate.mVideoCapabilities.Value().Length()
++                         : 0,
++                     candidate.mAudioCapabilities.WasPassed()
++                         ? candidate.mAudioCapabilities.Value().Length()
++                         : 0);
++                 if (candidate.mInitDataTypes.WasPassed()) {
++                   for (const nsString& t : candidate.mInitDataTypes.Value()) {
++                     desc.Append(" initData=");
++                     desc.Append(NS_ConvertUTF16toUTF8(t));
++                   }
++                 }
++                 if (candidate.mVideoCapabilities.WasPassed()) {
++                   for (const MediaKeySystemMediaCapability& c :
++                        candidate.mVideoCapabilities.Value()) {
++                     desc.Append(" video=");
++                     desc.Append(NS_ConvertUTF16toUTF8(c.mContentType));
++                   }
++                 }
++                 if (candidate.mAudioCapabilities.WasPassed()) {
++                   for (const MediaKeySystemMediaCapability& c :
++                        candidate.mAudioCapabilities.Value()) {
++                     desc.Append(" audio=");
++                     desc.Append(NS_ConvertUTF16toUTF8(c.mContentType));
++                   }
++                 }
++                 printf_stderr("emeConfig:%s\n", desc.get());
++               }
++#endif
+                promise->Reject(false, __func__);
+              });
+   return promise.forget();
