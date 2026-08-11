@@ -307,8 +307,14 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             return
         }
         Task { @MainActor in
-            if let answer = await session.runUserScript("(() => { const p = document.createElement('div'); p.style.cssText = 'position:fixed;left:-9999px;bottom:env(safe-area-inset-bottom);height:0;width:0'; document.documentElement.appendChild(p); const env = getComputedStyle(p).bottom; p.remove(); return JSON.stringify({env: env, innerWidth: window.innerWidth, visualWidth: window.visualViewport ? window.visualViewport.width : null, dpr: window.devicePixelRatio}); })()") {
+            let probe = "(() => { const p = document.createElement('div'); p.style.cssText = 'position:fixed;left:-9999px;bottom:env(safe-area-inset-bottom);height:0;width:0'; document.documentElement.appendChild(p); const env = getComputedStyle(p).bottom; p.remove(); return JSON.stringify({env: env, innerWidth: window.innerWidth, visualWidth: window.visualViewport ? window.visualViewport.width : null, dpr: window.devicePixelRatio}); })()"
+            if let answer = await session.runUserScript(probe) {
+
                 NSLog("dynToolbar: page reports \(answer)")
+            } else {
+                // The measurement that never reported. Silence here is
+                // what left the CSS-px question open across two captures.
+                NSLog("dynToolbar: page probe returned nothing - runUserScript unavailable or refused")
             }
         }
     }

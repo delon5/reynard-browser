@@ -82,6 +82,12 @@ protocol TabManagerDelegate: AnyObject {
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?)
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession)
     func tabManager(_ tabManager: TabManager, didFirstCompositeFor tabID: UUID)
+    /// A page start for a NEW DOCUMENT in the selected tab. Distinct
+    /// from the .location update, which same-document navigations
+    /// (pushState/replaceState/fragment) also fire - this hook never
+    /// fires for those, so it is the one to drive "a new document
+    /// starts at the top" chrome behaviour from.
+    func tabManagerDidStartDocumentLoad(_ tabManager: TabManager)
     func tabManager(_ tabManager: TabManager, didUpdateTabAt index: Int, reason: TabManagerUpdateReason)
     func tabManager(_ tabManager: TabManager, didFinishLoading session: GeckoSession)
     func tabManager(_ tabManager: TabManager, captureHistoryThumbnailForTabAt index: Int, mode: TabMode, url: String)
@@ -100,6 +106,7 @@ protocol TabManagerDelegate: AnyObject {
 }
 
 extension TabManagerDelegate {
+    func tabManagerDidStartDocumentLoad(_ tabManager: TabManager) {}
     func tabManagerDidTerminateSelectedTab(_ tabManager: TabManager) {}
     func tabManager(_ tabManager: TabManager, didFinishLoading session: GeckoSession) {}
     func tabManager(_ tabManager: TabManager, captureHistoryThumbnailForTabAt index: Int, mode: TabMode, url: String) {}

@@ -109,7 +109,9 @@ final class ToolbarController {
         //
         // I added it anyway this afternoon on the strength of a doc
         // comment, and that is the oversized lift.
-        let pill = BrowserChrome.condensedPillOccupiedHeight
+        // Preference-driven; defaults to the pre-merge
+        // condensedPillOccupiedHeight of 60.
+        let pill = Prefs.AppearanceSettings.pillSafeAreaInset
 
         // FLOATING PILL. The two mechanisms split by state so they can
         // never both charge for the same chrome - that double count is

@@ -182,6 +182,16 @@ extension BrowserViewController: TabManagerDelegate {
         applyFullscreenState(fullScreen, for: session)
     }
     
+    func tabManagerDidStartDocumentLoad(_ tabManager: TabManager) {
+        // A new document starts at the top, so the chrome expands to
+        // match rather than staying condensed from the previous page's
+        // scroll position. Fired from pageStart, which same-document
+        // navigations never produce - expanding from the .location
+        // update instead had the chrome popping open on every
+        // pushState/fragment change.
+        scrollChromeCoordinator.resetVisible(animated: true)
+    }
+    
     func tabManager(_ tabManager: TabManager, didUpdateTabAt index: Int, reason: TabManagerUpdateReason) {
         guard tabManager.activeTabs.indices.contains(index) else {
             return
@@ -199,10 +209,10 @@ extension BrowserViewController: TabManagerDelegate {
             
         case .location:
             if index == tabManager.selectedTabIndex {
-                // A new document starts at the top, so the chrome should
-                // be expanded to match rather than staying condensed from
-                // the previous page's scroll position.
-                scrollChromeCoordinator.resetVisible(animated: true)
+                // Chrome expansion moved to tabManagerDidStartDocumentLoad:
+                // .location also fires for same-document navigations
+                // (pushState/fragment), which must not pop the chrome
+                // open mid-scroll.
                 contentView.noteHistoryLocationChange()
                 refreshAddressBar()
                 syncSelectedPageZoomControls()

@@ -78,6 +78,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
             key("BrowsingSettings", "swipeUpForTabSwitcher"): true,
             key("AppearanceSettings", "hidesToolbarOnScroll"): true,
+            key("AppearanceSettings", "pillSafeAreaInset"): 60,
             
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
@@ -936,6 +937,25 @@ final class BrowserPreferences {
         /// Uses pure black instead of the standard system background
         /// color while in dark mode, for better contrast and battery
         /// savings on OLED screens.
+        /// What the page is told to keep clear of the condensed pill,
+        /// in points, via env(safe-area-inset-bottom).
+        ///
+        /// A preference because the right number has resisted being
+        /// derived. The engine receives exactly what is sent here -
+        /// verified on device, 60pt arriving as 180 device px - but how
+        /// far a page then moves depends on how many times it applies
+        /// the variable, which differs per site. Dial it against the
+        /// sites that matter rather than bisecting it a build at a time.
+        static var pillSafeAreaInset: CGFloat {
+            get {
+                let stored = prefs.integer(forSetting: "AppearanceSettings", key: "pillSafeAreaInset")
+                return CGFloat(min(max(stored, 0), 200))
+            }
+            set {
+                prefs.set(Int(min(max(newValue, 0), 200)), forSetting: "AppearanceSettings", key: "pillSafeAreaInset")
+            }
+        }
+        
         static var usesOLEDBlackBackground: Bool {
             get {
                 prefs.bool(forSetting: "AppearanceSettings", key: "usesOLEDBlackBackground")

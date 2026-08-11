@@ -2301,6 +2301,17 @@ extension TabManagerImplementation: ProgressDelegate {
         
         tab.state.loadingState = .loading(progress: 0)
         notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+
+        // The chrome expands for a NEW DOCUMENT, and pageStart is the
+        // signal that means one: same-document navigations
+        // (pushState/replaceState/fragment) never produce a pageStart,
+        // while every real load does. Driving this from the .location
+        // update had the chrome popping open mid-scroll on single-page
+        // apps. about:blank is a rebuilt window settling, not a
+        // document the user asked for, so it does not qualify.
+        if tab === selectedTab, !normalizedPageStartURL.hasPrefix("about:blank") {
+            delegate?.tabManagerDidStartDocumentLoad(self)
+        }
     }
     
     func onPageStop(session: GeckoSession, success: Bool) {
