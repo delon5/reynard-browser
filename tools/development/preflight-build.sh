@@ -55,10 +55,19 @@ fi
 #    predates the current tree.
 [ -f "$XUL" ] || fail "no libxul at $XUL - Gecko has never finished a build here"
 
-NEWER="$(find "$PREPARED" -name '*.cpp' -o -name '*.h' -o -name '*.mm' -o -name '*.ipdl' -o -name '*.webidl' \
+# The `|| true` matters: without it, `set -e` kills this script silently
+# the moment nothing is newer than XUL - the loop's last command is then a
+# failed [ -nt ] test, the substitution inherits status 1, and the script
+# exits before printing a word. That fails CLOSED on a perfectly good
+# tree, which is worse than the trap it exists to catch.
+NEWER="$(find "$PREPARED" \
+	\( -name '*.cpp' -o -name '*.h' -o -name '*.mm' -o -name '*.ipdl' -o -name '*.webidl' \) \
 	2>/dev/null | grep -v '/obj-aarch64-apple-ios/' | while IFS= read -r f; do
-		[ "$f" -nt "$XUL" ] && { echo "$f"; break; }
-	done)"
+		if [ "$f" -nt "$XUL" ]; then
+			echo "$f"
+			break
+		fi
+	done || true)"
 
 if [ -n "$NEWER" ]; then
 	fail "libxul is older than the prepared source (e.g. ${NEWER#"$PREPARED"/}) - the app would ship the previous engine"
