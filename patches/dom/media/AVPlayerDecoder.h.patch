@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..72f80c12573a
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,204 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -95,6 +95,13 @@ index 000000000000..72f80c12573a
 +  // the ReynardAVPlayerNotifyTime/-Ended wake-up runnables. Main
 +  // thread only.
 +  void NotifyPlaybackPoke();
++
++  // Fires the element's 'encrypted' event for init data discovered by
++  // the FairPlay key session - the only component that ever sees the
++  // stream's encryption, since AVFoundation owns the media. Main
++  // thread only.
++  void DispatchEncryptedFromKeySession(nsTArray<uint8_t>&& aInitData,
++                                       const nsAString& aInitDataType);
 +
 +  // FairPlay decrypts inside AVFoundation, against a key session, and
 +  // only for an asset registered on that same session - so this decoder

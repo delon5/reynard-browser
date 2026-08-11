@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,927 @@
+@@ -0,0 +1,939 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -522,6 +522,23 @@ index 000000000000..661d75d2d5f1
 +  NotifyReaderDataArrived();
 +}
 +
++void AVPlayerDecoder::DispatchEncryptedFromKeySession(
++    nsTArray<uint8_t>&& aInitData, const nsAString& aInitDataType) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (IsShutdown()) {
++    return;
++  }
++  MediaDecoderOwner* owner = GetOwner();
++  if (!owner) {
++    return;
++  }
++  printf_stderr("avPlayer: dispatching 'encrypted' (%s, %zu bytes)\n",
++                NS_ConvertUTF16toUTF8(aInitDataType).get(),
++                (size_t)aInitData.Length());
++  // Queued by the element itself until HAVE_METADATA if it lands early.
++  owner->DispatchEncrypted(aInitData, aInitDataType);
++}
++
 +// Puts a layer on screen for AVFoundation's video.
 +//
 +// Nothing reaches the compositor through the decode pipeline: the
@@ -603,38 +620,19 @@ index 000000000000..661d75d2d5f1
 +
 +  // Fresh IOSurface pages are zero-filled, and zeroed NV12 in
 +  // video-range BT.709 (Y=0, CbCr=0) decodes to saturated GREEN, not
-+  // black - which would be visible until an AVPlayerLayer replaces it.
-+  // Black in 420v is Y=0x10, CbCr=0x80.
-+  //
-+  // TEMPORARY - REVERT BEFORE media.reynard.avplayer.enabled SHIPS ON.
-+  //
-+  // Filled magenta rather than black, because black is exactly what a
-+  // page with no video at all looks like. A device capture showed this
-+  // path completing perfectly - "placeholder PUBLISHED 400x300
-+  // planes=2" - over a screenshot that was entirely black, and the two
-+  // outcomes were indistinguishable: a correctly composited black
-+  // rectangle and nothing reaching the screen look the same. The
-+  // original green WAS diagnostic; correcting it to black removed the
-+  // only visual evidence this function produces.
-+  //
-+  // Magenta rather than green because green already means something
-+  // here - an unfilled surface, i.e. the Lock() failure logged below.
-+  //
-+  // BT.709 limited range: Y=0x4E, Cb=0xD6, Cr=0xE6. The chroma plane is
-+  // interleaved, so unlike a neutral fill this cannot be a memset.
++  // black - so the surface is filled to true black: Y=0x10 with
++  // CbCr=0x80 in 420v limited range. Both planes are uniform, so two
++  // memsets do it. (The magenta diagnostic fill this replaces served
++  // its purpose - the compositor path is proven end to end. Green on
++  // screen still means the Lock() failure below: an unfilled surface.)
 +  if (macSurface->Lock(/* aReadOnly */ false)) {
 +    if (void* yPlane = macSurface->GetBaseAddressOfPlane(0)) {
-+      memset(yPlane, 0x4E,
++      memset(yPlane, 0x10,
 +             macSurface->GetBytesPerRow(0) * macSurface->GetDevicePixelHeight(0));
 +    }
 +    if (void* cbcrPlane = macSurface->GetBaseAddressOfPlane(1)) {
-+      auto* chroma = static_cast<uint8_t*>(cbcrPlane);
-+      const size_t chromaBytes = macSurface->GetBytesPerRow(1) *
-+                                 macSurface->GetDevicePixelHeight(1);
-+      for (size_t i = 0; i + 1 < chromaBytes; i += 2) {
-+        chroma[i] = 0xD6;
-+        chroma[i + 1] = 0xE6;
-+      }
++      memset(cbcrPlane, 0x80,
++             macSurface->GetBytesPerRow(1) * macSurface->GetDevicePixelHeight(1));
 +    }
 +    macSurface->Unlock(false);
 +  } else {
@@ -711,6 +709,20 @@ index 000000000000..661d75d2d5f1
 +  printf_stderr("avPlayer: host seek player=%llu to %.3f\n",
 +                (unsigned long long)aPlayerId, aSeconds);
 +  [AVPlayerHost() seek:aPlayerId to:aSeconds];
++}
++
++void ReynardAVPlayerDispatchEncrypted(uintptr_t aPlayerId,
++                                      nsTArray<uint8_t>&& aInitData,
++                                      const nsAString& aInitDataType) {
++  MOZ_ASSERT(NS_IsMainThread());
++  auto& players = PlayersById();
++  auto entry = players.find(aPlayerId);
++  if (entry == players.end()) {
++    // Teardown race, same as the other callbacks: dropped.
++    return;
++  }
++  entry->second->DispatchEncryptedFromKeySession(std::move(aInitData),
++                                                 aInitDataType);
 +}
 +
 +}  // namespace mozilla

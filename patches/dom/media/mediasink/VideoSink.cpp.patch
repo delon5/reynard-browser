@@ -1,23 +1,27 @@
 diff --git a/dom/media/mediasink/VideoSink.cpp b/dom/media/mediasink/VideoSink.cpp
 --- a/dom/media/mediasink/VideoSink.cpp
 +++ b/dom/media/mediasink/VideoSink.cpp
-@@ -345,6 +345,22 @@
+@@ -345,6 +345,26 @@
    auto now = TimeStamp::Now();
  
    RefPtr<VideoData> video = VideoQueue().PeekFront();
-+  // Reynard: a timing-only VideoData - null image, produced by
-+  // ReynardAVPlayerDecoderModule so MDSM's clock advances - must never
-+  // reach the container. SetCurrentFrame appends nothing for a null
-+  // image, and VideoFrameContainer treats an empty image list as
-+  // ClearImagesInHost(All), which would wipe the picture the separate
-+  // AVPlayer frame path (ReynardAVPlayerNotifyFrame) published.
++  // Reynard: the synthetic timing track never paints through this sink
++  // - pictures arrive via ReynardAVPlayerNotifyFrame - so every Redraw
++  // outcome is wrong for it. A null-image frame must not reach the
++  // container (SetCurrentFrame appends nothing for a null image, and
++  // an empty image list means ClearImagesInHost(All)), and the
++  // empty-queue blank-frame path below - reachable when the demuxer is
++  // parked and every synthetic frame has been consumed, e.g. a Redraw
++  // on a visibility change while paused - must not paint a zero-sized
++  // blank over the AVPlayer picture either. Bail for the synthetic
++  // track entirely; every other track keeps stock behaviour.
 +  //
-+  // RenderVideoFrames already skips these frames; this is the same
-+  // check for the redraw path, which MDSM reaches from
-+  // FinishDecodeFirstFrame and on seek completion.
-+  //
-+  // Returning rather than falling through is deliberate: the
-+  // blank-frame path below would paint over the AVPlayer picture.
++  // The literal matches REYNARD_AVPLAYER_SYNTHETIC_MIME in
++  // AVPlayerDemuxer.h; not included from here to keep mediasink out of
++  // dom/media's include graph.
++  if (aInfo.mMimeType.EqualsLiteral("video/x-reynard-avplayer")) {
++    return;
++  }
 +  if (video && !video->mImage) {
 +    return;
 +  }

@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,795 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -22,6 +22,15 @@ index 000000000000..c20df0f7f09f
 +// name does not resolve from dom/media.
 +#include "mozilla/widget/GeckoViewSupport.h"
 +
++namespace mozilla {
++// Defined in AVPlayerDecoder.mm; forward-declared here rather than
++// through a header so dom/media/eme/fairplay needs no include-path
++// changes. Both live in libxul.
++void ReynardAVPlayerDispatchEncrypted(uintptr_t aPlayerId,
++                                      nsTArray<uint8_t>&& aInitData,
++                                      const nsAString& aInitDataType);
++}  // namespace mozilla
++
 +using namespace mozilla;
 +
 +// The delegate AVContentKeySession calls back on. Owns a strong
@@ -34,6 +43,10 @@ index 000000000000..c20df0f7f09f
 +  // AVContentKeySession hands back the request, not our session id.
 +  NSMutableDictionary<NSString*, AVContentKeyRequest*>* mRequestsBySession;
 +  NSMutableDictionary<NSString*, NSString*>* mSessionsByIdentifier;
++  // Key requests the asset raised before any EME session mapped their
++  // identifier - forwarded to the page as 'encrypted' and held pending
++  // until CreateSession adopts them.
++  NSMutableDictionary<NSString*, AVContentKeyRequest*>* mUnsolicitedByIdentifier;
 +}
 +- (instancetype)initWithProxy:(FairPlayCDMProxy*)aProxy;
 +- (void)detach;
@@ -41,6 +54,7 @@ index 000000000000..c20df0f7f09f
 +          forIdentifier:(NSString*)aIdentifier;
 +- (AVContentKeyRequest*)requestForSession:(NSString*)aSessionId;
 +- (void)forgetSession:(NSString*)aSessionId;
++- (AVContentKeyRequest*)takeUnsolicitedForIdentifier:(NSString*)aKey;
 +@end
 +
 +@implementation FairPlayKeyDelegate
@@ -51,6 +65,7 @@ index 000000000000..c20df0f7f09f
 +    mProxy = aProxy;
 +    mRequestsBySession = [[NSMutableDictionary alloc] init];
 +    mSessionsByIdentifier = [[NSMutableDictionary alloc] init];
++    mUnsolicitedByIdentifier = [[NSMutableDictionary alloc] init];
 +  }
 +  return self;
 +}
@@ -59,6 +74,7 @@ index 000000000000..c20df0f7f09f
 +  mProxy = nullptr;
 +  [mRequestsBySession removeAllObjects];
 +  [mSessionsByIdentifier removeAllObjects];
++  [mUnsolicitedByIdentifier removeAllObjects];
 +}
 +
 +- (void)rememberSession:(NSString*)aSessionId
@@ -79,6 +95,39 @@ index 000000000000..c20df0f7f09f
 +- (void)forgetSession:(NSString*)aSessionId {
 +  @synchronized(self) {
 +    [mRequestsBySession removeObjectForKey:aSessionId];
++  }
++}
++
++// The map key for a request's identifier - the same encoding
++// CreateSession stores: the skd string itself, or base64 of raw bytes.
++- (NSString*)identifierKeyForRequest:(AVContentKeyRequest*)aRequest {
++  id identifier = aRequest.identifier;
++  if ([identifier isKindOfClass:[NSString class]]) {
++    return (NSString*)identifier;
++  }
++  if ([identifier isKindOfClass:[NSData class]]) {
++    return [(NSData*)identifier base64EncodedStringWithOptions:0];
++  }
++  return nil;
++}
++
++- (void)rememberUnsolicited:(AVContentKeyRequest*)aRequest
++                     forKey:(NSString*)aKey {
++  @synchronized(self) {
++    mUnsolicitedByIdentifier[aKey] = aRequest;
++  }
++}
++
++- (AVContentKeyRequest*)takeUnsolicitedForIdentifier:(NSString*)aKey {
++  if (!aKey) {
++    return nil;
++  }
++  @synchronized(self) {
++    AVContentKeyRequest* request = mUnsolicitedByIdentifier[aKey];
++    if (request) {
++      [mUnsolicitedByIdentifier removeObjectForKey:aKey];
++    }
++    return request;
 +  }
 +}
 +
@@ -111,11 +160,43 @@ index 000000000000..c20df0f7f09f
 +
 +  NSString* sessionId = [self sessionIdForRequest:keyRequest];
 +  if (!sessionId) {
-+    // A key request with no EME session mapped to its identifier: HLS
-+    // key rotation, or content the page never called generateRequest
-+    // for. Fail it - a bare return left AVFoundation waiting forever
-+    // for a response that could not come, which stalled playback with
-+    // no diagnosis on either side.
++    // A key request no EME session has mapped: the asset reached an
++    // EXT-X-KEY before the page called generateRequest for it - the
++    // normal Safari-style order, where the PLAYER learns about
++    // encryption from the 'encrypted' event. This pipeline's demuxer
++    // never sees the stream, so this delegate is the only place that
++    // event can come from: forward the identifier to the page as
++    // 'encrypted', hold the request pending, and let CreateSession
++    // adopt it when generateRequest arrives with the same identifier.
++    NSString* identifierKey = [self identifierKeyForRequest:keyRequest];
++    if (identifierKey) {
++      nsTArray<uint8_t> initData;
++      nsCString initDataType;
++      id identifier = keyRequest.identifier;
++      if ([identifier isKindOfClass:[NSString class]]) {
++        NSData* uri =
++            [(NSString*)identifier dataUsingEncoding:NSUTF8StringEncoding];
++        initData.AppendElements(static_cast<const uint8_t*>([uri bytes]),
++                                [uri length]);
++        initDataType.AssignLiteral("skd");
++      } else {
++        NSData* keyId = (NSData*)identifier;
++        initData.AppendElements(static_cast<const uint8_t*>([keyId bytes]),
++                                [keyId length]);
++        initDataType.AssignLiteral("sinf");
++      }
++      [self rememberUnsolicited:keyRequest forKey:identifierKey];
++      if (mProxy->MaybeForwardUnsolicitedKeyRequest(std::move(initData),
++                                                    initDataType)) {
++        return;
++      }
++      // No bound player to dispatch through - undo the hold and fall
++      // through to the failure below.
++      [self takeUnsolicitedForIdentifier:identifierKey];
++    }
++    // Nothing to tell the page through (unbound proxy, or an identifier
++    // of an unexpected class). Fail it - a bare return left AVFoundation
++    // waiting forever for a response that could not come.
 +    [keyRequest processContentKeyResponseError:
 +        [NSError errorWithDomain:@"ReynardFairPlay"
 +                            code:-2
@@ -365,6 +446,21 @@ index 000000000000..c20df0f7f09f
 +  OnSetSessionId(aCreateSessionToken, NS_ConvertUTF8toUTF16(sessionId));
 +  ResolvePromise(aPromiseId);
 +
++  // If the asset already raised this exact key request - the delegate
++  // forwarded it to the page as 'encrypted', and this generateRequest
++  // is the reply - adopt the pending request instead of asking
++  // AVFoundation for a duplicate. rememberSession above has mapped the
++  // identifier, so re-entering the delegate flow now finds the session
++  // and produces the SPC; the session argument is unused there.
++  if (AVContentKeyRequest* pending =
++          [mDelegate takeUnsolicitedForIdentifier:identifierKey]) {
++    EME_LOG("FairPlayCDMProxy::CreateSession({}) adopting pending request",
++            fmt::ptr(this));
++    [mDelegate contentKeySession:mKeySession
++        didProvideContentKeyRequest:pending];
++    return;
++  }
++
 +  [mKeySession processContentKeyRequestWithIdentifier:identifier
 +                                   initializationData:initData
 +                                              options:nil];
@@ -472,6 +568,26 @@ index 000000000000..c20df0f7f09f
 +                             NS_ConvertUTF8toUTF16(message));
 +      });
 +  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++}
++
++bool FairPlayCDMProxy::MaybeForwardUnsolicitedKeyRequest(
++    nsTArray<uint8_t>&& aInitData, const nsACString& aInitDataType) {
++  // Delegate queue. mBoundPlayerId is written on the main thread at
++  // bind time, before playback normally starts; a torn read here at
++  // worst declines the forward, which is the pre-bridge behaviour.
++  const uintptr_t playerId = mBoundPlayerId;
++  if (!playerId) {
++    return false;
++  }
++  nsString initDataType = NS_ConvertUTF8toUTF16(aInitDataType);
++  nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
++      "FairPlayCDMProxy::MaybeForwardUnsolicitedKeyRequest",
++      [playerId, initData = std::move(aInitData), initDataType]() mutable {
++        ReynardAVPlayerDispatchEncrypted(playerId, std::move(initData),
++                                         initDataType);
++      });
++  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++  return true;
 +}
 +
 +void FairPlayCDMProxy::BindToPlayer(uintptr_t aPlayerId) {

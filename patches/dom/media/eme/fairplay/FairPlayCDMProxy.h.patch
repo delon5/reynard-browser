@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6fb7f0dd6c7d
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,177 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -134,6 +134,16 @@ index 000000000000..6fb7f0dd6c7d
 +                         nsTArray<uint8_t>&& aRequestData);
 +  void OnKeyRequestFailed(const nsACString& aSessionId,
 +                          const nsACString& aMessage);
++
++  // Also from the delegate: a key request whose identifier no EME
++  // session has mapped, on a proxy bound to a player. Forwarded to the
++  // page as an 'encrypted' event so a Safari-style player can start
++  // its licence flow - this pipeline's demuxer never sees the stream,
++  // so nothing else can fire that event. Returns false when no player
++  // is bound yet, in which case the delegate fails the request (the
++  // pre-bridge behaviour).
++  bool MaybeForwardUnsolicitedKeyRequest(nsTArray<uint8_t>&& aInitData,
++                                         const nsACString& aInitDataType);
 +
 +  // The application certificate, supplied by the page through
 +  // setServerCertificate. makeStreamingContentKeyRequestDataForApp

@@ -126,7 +126,14 @@ public final class AVPlayerHost: NSObject {
         // already-correct case costs nothing.
         let existing = withState { Array(players.values) }
         for entry in existing where entry.keySession !== session {
+            // Off the licence-less fallback FIRST. An asset registered
+            // on two sessions can have its key request routed to either,
+            // and the fallback's delegate fails every request by design
+            // - so leaving the old registration in place can kill the
+            // item even though the EME session is perfectly bound.
+            entry.keySession.removeContentKeyRecipient(entry.asset)
             session.addContentKeyRecipient(entry.asset)
+            entry.keySession = session
             avLog("re-registered an existing asset on the EME key session")
         }
     }
@@ -147,15 +154,54 @@ public final class AVPlayerHost: NSObject {
             avLog("EME key session for player \(playerId), which does not exist yet")
             return
         }
+        if entry.keySession !== session {
+            // Same rule as the unpaired path: never leave the asset
+            // registered on the fallback session as well.
+            entry.keySession.removeContentKeyRecipient(entry.asset)
+        }
         session.addContentKeyRecipient(entry.asset)
+        entry.keySession = session
         avLog("EME key session bound to player \(playerId)")
+    }
+
+    /// DIAGNOSTIC + likely fix for "play() ignored": the AVPlayer runs
+    /// in a content-process extension, and iOS media services refuse to
+    /// start a playback timebase for a process with no active playback
+    /// audio session - play() then lands straight back in .paused with
+    /// no error surfaced anywhere. Decode still works (frames vend), so
+    /// the only symptom is rate=0/timeControl=0 right after play().
+    /// Attempted once per process, both outcomes logged. If activation
+    /// FAILS here, playback cannot run in this process at all, and the
+    /// player has to move to (or be brokered by) the app process.
+    private static var audioSessionConfigured = false
+    private static func ensurePlaybackAudioSession() {
+        guard !audioSessionConfigured else { return }
+        audioSessionConfigured = true
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+            avLog("audio session ACTIVATED (category playback)")
+        } catch {
+            avLog("audio session activation FAILED: \(error)")
+        }
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: session,
+            queue: .main
+        ) { note in
+            avLog("audio session INTERRUPTION: \(note.userInfo ?? [:])")
+        }
     }
 
     private final class Player {
         let player: AVPlayer
         let item: AVPlayerItem
         let asset: AVURLAsset
-        let keySession: AVContentKeySession
+        // var, not let: the EME publish paths re-bind the asset onto the
+        // session the licence actually arrives on, and destroy() must
+        // clean whichever session the asset is CURRENTLY registered to.
+        var keySession: AVContentKeySession
         let delegate: ContentKeyDelegate?
         var observers: [NSKeyValueObservation] = []
         // Last values handed to the decoder, so an unchanged repeat is
@@ -218,6 +264,9 @@ public final class AVPlayerHost: NSObject {
         /// Guarded by stateLock - written from the display link, the
         /// periodic observer and seek completions.
         var lastPushedTime: Double?
+        /// One-shot diagnostic - see the muted retry in pullFrames.
+        /// Guarded by stateLock.
+        var mutedRetryDone = false
 
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
@@ -275,6 +324,8 @@ public final class AVPlayerHost: NSObject {
             avLog("no EME session published - using a local one (no licence)")
         }
         keySession.addContentKeyRecipient(asset)
+
+        Self.ensurePlaybackAudioSession()
 
         let item = AVPlayerItem(asset: asset)
         let player = AVPlayer(playerItem: item)
@@ -422,7 +473,9 @@ public final class AVPlayerHost: NSObject {
                   + " rate=\(player.rate)"
                   + " timeControl=\(player.timeControlStatus.rawValue)"
                   + " itemStatus=\(entry.item.status.rawValue)"
-                  + " outputs=\(entry.item.outputs.count)")
+                  + " outputs=\(entry.item.outputs.count)"
+                  + " waiting=\(player.reasonForWaitingToPlay?.rawValue ?? "nil")"
+                  + " err=\(entry.item.error.map { String(describing: $0) } ?? "nil")")
         }
 
         // The link was installed at createPlayer and only invalidated at
@@ -462,6 +515,30 @@ public final class AVPlayerHost: NSObject {
             if shouldPark {
                 setPullParked(true, for: entry)
                 avLog("framePull[\(id)] idle while paused - pausing pull link")
+            }
+        }
+
+        // DIAGNOSTIC one-shot: play() was requested, the item is ready,
+        // and the player still sits in .paused - the signature of media
+        // services refusing playback for this process (the instrumented
+        // capture shows decoder Play with no pause anywhere). Retry once
+        // MUTED: if muted playback starts, the audio path is the gate
+        // and the fix is session activation / host brokering, not the
+        // pipeline. Tick 200 is after the readiness replay had its
+        // chance and before the idle backstop can park the link.
+        if tick == 200 {
+            let wantsRetry = withState { () -> Bool in
+                guard entry.wantsPlayback, !entry.mutedRetryDone else {
+                    return false
+                }
+                entry.mutedRetryDone = true
+                return true
+            }
+            if wantsRetry, entry.item.status == .readyToPlay,
+               entry.player.timeControlStatus == .paused {
+                avLog("framePull[\(id)] DIAGNOSTIC muted retry - play() was ignored while ready")
+                entry.player.isMuted = true
+                entry.player.play()
             }
         }
 
