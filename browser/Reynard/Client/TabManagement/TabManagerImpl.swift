@@ -210,6 +210,27 @@ final class TabManagerImplementation: NSObject, TabManager {
     }
 
     func sleepBackgroundedTabs() {
+        // Not while Picture in Picture is up. PiP means a video is
+        // playing in a floating window over another app, and sleeping
+        // closes content processes - including, as a device capture
+        // showed, the one PiP is rendering from:
+        //
+        //   22:29:05.230  pipLife: willStart
+        //   22:29:06.370  tabSleep: sleeping tab 96DB0CF2
+        //
+        // The per-tab guard below could not catch it: it asks whether
+        // tab.session IS the PiP session, and sleeping REPLACES
+        // tab.session with a new object, so after any tab has slept the
+        // registration no longer matches the object it registered. This
+        // check needs no identity to hold.
+        //
+        // The cost is bounded - PiP is a transient state, and the memory
+        // sleeping would have freed is reclaimed the moment it ends,
+        // when backgrounding runs this again.
+        if sessionManager.hasPictureInPictureSession {
+            NSLog("[TabMemory] NOT sleeping - Picture in Picture is active")
+            return
+        }
         NSLog("[TabMemory] Sleeping backgrounded tab sessions")
         for tab in regularTabs {
             evictSessionIfNeeded(for: tab, isPrivate: false)

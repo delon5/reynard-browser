@@ -161,6 +161,25 @@ final class SessionManager {
             || SystemMediaSession.shared.prioritySession === session
     }
     
+    /// Whether ANY session is currently driving Picture in Picture.
+    ///
+    /// Identity-independent, unlike isMediaPriority. Sleeping a tab
+    /// replaces its `session` with a fresh object, so the moment any tab
+    /// has slept, `pictureInPictureSession === tab.session` can no
+    /// longer be relied on to find PiP's owner - it compares a
+    /// registration made before the swap against an object created
+    /// after it. A device capture caught the consequence exactly:
+    ///
+    ///   22:29:05.230  pipLife: willStart - handing the session to PiP
+    ///   22:29:06.370  tabSleep: sleeping tab 96DB0CF2
+    ///
+    /// with no "NOT sleeping" line for any tab, then a hang and a
+    /// scene-update kill on the way back in. The video stopped because
+    /// the process rendering it was torn down underneath PiP.
+    var hasPictureInPictureSession: Bool {
+        return pictureInPictureSession != nil
+    }
+    
     /// Exposed for tab eviction, which must not sleep a tab whose
     /// session is one of these.
     func isMediaPriority(_ session: GeckoSession?) -> Bool {
