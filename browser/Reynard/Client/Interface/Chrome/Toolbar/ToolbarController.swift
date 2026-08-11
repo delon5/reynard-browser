@@ -109,25 +109,22 @@ final class ToolbarController {
         //
         // I added it anyway this afternoon on the strength of a doc
         // comment, and that is the oversized lift.
-        // Preference-driven; defaults to the pre-merge
-        // condensedPillOccupiedHeight of 60.
-        let pill = Prefs.AppearanceSettings.pillSafeAreaInset
 
-        // FLOATING PILL. The two mechanisms split by state so they can
-        // never both charge for the same chrome - that double count is
-        // what "RECEIVED offset=180 max=426 height=606" was, 202pt of
-        // clearance and a black bar.
+        // ONE mechanism: the layout viewport, at the height of whatever
+        // chrome is actually on screen. env stays at zero.
         //
-        // Condensed: reserve NOTHING in the viewport, so the page keeps
-        // the full window and a scrolling feed passes under the pill,
-        // which is the floating look. The pill's clearance is a
-        // compositor fixed-layer margin instead, and that lifts exactly
-        // what should be lifted - position:fixed and sticky-bottom bars,
-        // the site's own navigation - without relaying the document out.
+        // Both together is what doubled it - 142 of toolbar reservation
+        // plus 60 of env is 202, against the ~206 measured off the
+        // device. Sending max=0 while condensed does not clear the
+        // earlier reservation either; the engine keeps the last non-zero
+        // value it was given and the page pads env on top of it.
         //
-        // Expanded: the toolbar is opaque and occupies real space, so it
-        // is a viewport reservation and the margin is nothing.
-        let maxHeight = condensed ? 0 : maxToolbarOffset
+        // The height includes the home indicator band, because the pill
+        // sits over it: 60pt of pill and margin plus the safe area, ~94
+        // here. That combination - viewport alone, at the true pill
+        // height - is the one this has not been run at.
+        let pill = Prefs.AppearanceSettings.pillSafeAreaInset + rootView.safeAreaInsets.bottom
+        let maxHeight = condensed ? pill : maxToolbarOffset
 
         // Both knobs on one line, because they only mean anything
         // together: maxHeight shortens the LAYOUT VIEWPORT, so it moves
@@ -157,7 +154,7 @@ final class ToolbarController {
         // reads the variable, whether or not its bar is a fixed layer.
         // The compositor margin only ever moved fixed and sticky ones.
         contentView.setFloatingChromeInset(0)
-        contentView.setSafeAreaInsetBottom(condensed ? pill : 0)
+        contentView.setSafeAreaInsetBottom(0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset
