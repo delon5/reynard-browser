@@ -98,24 +98,22 @@ final class ToolbarController {
         // The condensed pill floats OVER the page rather than reserving
         // layout space, so it is not a toolbar-limits question at all -
         // the limits describe the real toolbar, unchanged from upstream.
-        // The pill's clearance is a compositor fixed-layer margin; see
-        // ContentView.setFloatingChromeInset.
-        contentView.setFloatingChromeInset(
-            browserChrome.isScrollCondensed ? BrowserChrome.condensedPillOccupiedHeight : 0
-        )
-        // ...and the layout viewport must not keep reserving the
-        // toolbar's height while only the pill is on screen. That
-        // reservation is what stopped the page painting behind the pill:
-        // setDynamicToolbarMaxHeight shortens the ICB by exactly this
-        // much, so the strip the pill floats over was simply outside the
-        // viewport, showing the view's background instead of page.
-        //
-        // Zero while condensed gives the page the whole window to paint,
-        // and the fixed-layer margin above - which does not touch the
-        // viewport - keeps its fixed content clear of the pill. One
-        // reflow per condense/expand flip, not per frame.
+        let condensed = browserChrome.isScrollCondensed
+        let pill = BrowserChrome.condensedPillOccupiedHeight
+        let maxHeight = condensed ? 0 : maxToolbarOffset
+
+        // Both knobs on one line, because they only mean anything
+        // together: maxHeight shortens the LAYOUT VIEWPORT, so it moves
+        // ordinary document flow, while the inset is a compositor
+        // fixed-layer margin that moves only position:fixed and
+        // sticky-bottom layers. A bottom bar that is neither will not
+        // move for either of them, which is the case this log is here to
+        // tell apart.
+        NSLog("dynToolbar: condensed=\(condensed) max=\(maxHeight) pill=\(pill) toolbar=\(maxToolbarOffset) top=\(maxTopToolbarOffset)")
+
+        contentView.setFloatingChromeInset(condensed ? pill : 0)
         contentView.setToolbarLimits(
-            maxHeight: browserChrome.isScrollCondensed ? 0 : maxToolbarOffset,
+            maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset
         )
     }
