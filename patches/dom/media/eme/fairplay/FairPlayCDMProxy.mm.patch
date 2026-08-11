@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,679 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -111,6 +111,18 @@ index 000000000000..c20df0f7f09f
 +
 +  NSString* sessionId = [self sessionIdForRequest:keyRequest];
 +  if (!sessionId) {
++    // A key request with no EME session mapped to its identifier: HLS
++    // key rotation, or content the page never called generateRequest
++    // for. Fail it - a bare return left AVFoundation waiting forever
++    // for a response that could not come, which stalled playback with
++    // no diagnosis on either side.
++    [keyRequest processContentKeyResponseError:
++        [NSError errorWithDomain:@"ReynardFairPlay"
++                            code:-2
++                        userInfo:@{
++                          NSLocalizedDescriptionKey :
++                              @"No EME session for this key request"
++                        }]];
 +    return;
 +  }
 +
@@ -126,6 +138,15 @@ index 000000000000..c20df0f7f09f
 +    mProxy->OnKeyRequestFailed(
 +        nsDependentCString(sid),
 +        "setServerCertificate must be called before generateRequest for FairPlay"_ns);
++    // The EME error above tells the page; this tells AVFoundation, so
++    // the request does not sit pending forever inside the player.
++    [keyRequest processContentKeyResponseError:
++        [NSError errorWithDomain:@"ReynardFairPlay"
++                            code:-3
++                        userInfo:@{
++                          NSLocalizedDescriptionKey :
++                              @"FairPlay application certificate not set"
++                        }]];
 +    return;
 +  }
 +

@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,893 @@
+@@ -0,0 +1,921 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -325,6 +325,34 @@ index 000000000000..661d75d2d5f1
 +    [AVPlayerHost() resume:mPlayerId];
 +  }
 +  MediaDecoder::Resume();
++}
++
++double AVPlayerDecoder::GetCurrentTime() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    const double seconds = [AVPlayerHost() currentTime:mPlayerId];
++    if (seconds >= 0) {
++      return seconds;
++    }
++  }
++  // Not created yet, or the player has no position yet - the base
++  // value is the mirrored MDSM position, which is at least defined.
++  return MediaDecoder::GetCurrentTime();
++}
++
++double AVPlayerDecoder::GetDuration() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mPlayerId) {
++    const double seconds = [AVPlayerHost() duration:mPlayerId];
++    if (seconds > 0) {
++      return seconds;
++    }
++  }
++  // Unknown: fall back to the base class, which reports the MDSM's
++  // notion (infinity until told otherwise) rather than 0 - the element
++  // reads a 0 duration as "ended at the start", and CurrentTime clamps
++  // against this value.
++  return MediaDecoder::GetDuration();
 +}
 +
 +void AVPlayerDecoder::Shutdown() {

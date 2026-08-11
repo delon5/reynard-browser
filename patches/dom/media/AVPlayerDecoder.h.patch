@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..72f80c12573a
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,197 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -58,6 +58,16 @@ index 000000000000..72f80c12573a
 +  void Suspend() override;
 +  void Resume() override;
 +  void Shutdown() override;
++
++  // The element's clock and duration, answered by the AVPlayer rather
++  // than the stub pipeline. The base implementations mirror the MDSM,
++  // whose position never moves here - the demuxer feeds it nothing -
++  // so video.currentTime sat at 0 for the whole life of every stream
++  // and any page-side "is it actually playing" watchdog declared a
++  // stall. Both are virtual on MediaDecoder, so the element's reads
++  // route here; internal MDSM bookkeeping keeps its own clock.
++  double GetCurrentTime() override;
++  double GetDuration() override;
 +
 +  void AddSizeOfResources(ResourceSizes* aSizes) override;
 +  already_AddRefed<nsIPrincipal> GetCurrentPrincipal() override;
