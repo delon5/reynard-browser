@@ -1575,14 +1575,29 @@ extension TabManagerImplementation: ContentDelegate {
         }
     }
     
-    func onFirstComposite(session: GeckoSession) {
+    // NEVER CALLED. The event bridge has dispatch cases for
+    // firstContentfulPaint and paintStatusReset and none for first
+    // composite, so nothing in this port delivers it - which is why no
+    // log in this project has ever contained a "first composite after"
+    // line, only the 8-second complaints from a watch that could not be
+    // satisfied. The work moved to onFirstContentfulPaint below.
+    func onFirstComposite(session: GeckoSession) {}
+    
+    /// The paint signal this port actually delivers.
+    ///
+    /// First contentful paint is not first composite - it fires when the
+    /// page paints content, not when the compositor first presents a
+    /// frame - but it is the one that arrives, and it answers the
+    /// question both callers are really asking: has this tab put
+    /// anything on screen yet.
+    func onFirstContentfulPaint(session: GeckoSession) {
         guard let location = tabLocation(for: session) else {
             return
         }
         let tab = tabs(for: location.mode)[location.index]
         if let wait = paintWaits.removeValue(forKey: tab.id) {
             wait.workItem.cancel()
-            NSLog("[PaintWatch] tab %@ first composite after %.2fs (%@)",
+            NSLog("[PaintWatch] tab %@ first contentful paint after %.2fs (%@)",
                   tab.id.uuidString,
                   CFAbsoluteTimeGetCurrent() - wait.startedAt,
                   wait.url)
@@ -1590,8 +1605,6 @@ extension TabManagerImplementation: ContentDelegate {
         tab.state.hasFirstComposite = true
         delegate?.tabManager(self, didFirstCompositeFor: tab.id)
     }
-    
-    func onFirstContentfulPaint(session: GeckoSession) {}
     
     func onPaintStatusReset(session: GeckoSession) {}
     
