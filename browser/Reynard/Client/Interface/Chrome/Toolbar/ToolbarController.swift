@@ -101,23 +101,21 @@ final class ToolbarController {
         let condensed = browserChrome.isScrollCondensed
         let pill = BrowserChrome.condensedPillOccupiedHeight
 
-        // CONSTANT, and the PILL's height - not the toolbar's, and not
-        // toggled.
+        // Reserve what is ACTUALLY on screen: the toolbar's height while
+        // it is up, the pill's once it has condensed. One mechanism, one
+        // number.
         //
-        // The engine reported max=426 throughout, which is the expanded
-        // toolbar at 142pt x3, with the pill inset arriving on top as
-        // offset=180: "RECEIVED offset=180 max=426 height=606". The page
-        // was clearing 202pt of chrome at the bottom, which is the black
-        // bar, and the toggling between that and 0 relaid the document
-        // out on every condense.
+        // The two failures that bracket this are both in the log.
+        // Reserving the toolbar (426) AND sending the pill as a
+        // fixed-layer margin (180) charged for both at once - "RECEIVED
+        // offset=180 max=426 height=606", 202pt of clearance and a black
+        // bar. Reserving the pill alone left the expanded toolbar, at
+        // 142pt, covering the bottom 82pt of the page instead.
         //
-        // Content has to clear whatever is ACTUALLY on screen, and the
-        // pill is the only thing there once the toolbar has gone. The
-        // expanded toolbar covers content rather than reserving space
-        // for it, which is what underlaying it means, and it hides on
-        // scroll anyway. Never measured, so no oscillation and no
-        // reflow storm.
-        let maxHeight = pill
+        // The flip does cost one reflow per condense. That is accepted
+        // deliberately - it is per flip, not per frame - and it is the
+        // price of the number being right in both states.
+        let maxHeight = condensed ? pill : maxToolbarOffset
 
         // Both knobs on one line, because they only mean anything
         // together: maxHeight shortens the LAYOUT VIEWPORT, so it moves
