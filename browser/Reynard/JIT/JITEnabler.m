@@ -274,8 +274,33 @@ static void jitHangBacktraceHandler(int signalNumber) {
                 failureCode == DebugProxyConnectFailed) {
                 if ([self invalidateSharedProviderIfCurrent:provider]) {
                     logger([NSString stringWithFormat:
-                        @"tunnelRecovery: (pid %d) transport failure %ld - dropped the cached provider, the next attach will rebuild the tunnel",
+                        @"tunnelRecovery: (pid %d) transport failure %ld - dropped the cached provider, rebuilding and retrying now",
                         pid, (long)failureCode]);
+                    // Retry immediately, once, against a rebuilt tunnel.
+                    //
+                    // Invalidating alone only helps the NEXT attach; this
+                    // one still returns NO, and that failure becomes the
+                    // "Failed to enable JIT / Error -9" screen - deferred
+                    // by pendingFailureAction until didBecomeActive, so it
+                    // is shown on RETURN from background even though the
+                    // tunnel died during it. Backgrounding kills the
+                    // tunnel every time, so a first-attach-after-resume
+                    // failure is expected, recoverable, and already known
+                    // to be recoverable at this exact point - reporting it
+                    // to the user is simply wrong.
+                    //
+                    // One retry, not a loop: if the rebuilt tunnel fails
+                    // too, the failure is real and belongs on screen.
+                    NSError *retryError = nil;
+                    DeviceProvider *rebuilt = [self getProviderForPID:pid error:&retryError];
+                    if (rebuilt && connectDebugSession(rebuilt, &session, @"10.7.0.1", pid, error)) {
+                        logger([NSString stringWithFormat:
+                            @"tunnelRecovery: (pid %d) retry on the rebuilt tunnel SUCCEEDED", pid]);
+                        provider = rebuilt;
+                        goto sessionConnected;
+                    }
+                    logger([NSString stringWithFormat:
+                        @"tunnelRecovery: (pid %d) retry on the rebuilt tunnel FAILED - reporting", pid]);
                 } else {
                     logger([NSString stringWithFormat:
                         @"tunnelRecovery: (pid %d) transport failure %ld against an already-replaced provider - leaving the new one alone",
@@ -285,6 +310,7 @@ static void jitHangBacktraceHandler(int signalNumber) {
             return NO;
         }
         
+    sessionConnected:
         // REMOVED process_control_new / process_control_disable_memory_limit /
         // process_control_free entirely - see
         // fix_remove_process_control_new.py's docstring for the full
