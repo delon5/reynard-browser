@@ -543,6 +543,30 @@ public class GeckoSession {
         return .none
     }
     
+    /// The visual viewport's width in CSS pixels, asked directly of
+    /// the content process. Dividing the content view's point width by
+    /// this gives points-per-CSS-px - the page's effective zoom -
+    /// which converts point-based chrome geometry (the find bar) into
+    /// the CSS pixels the engine scrolls in. ~1 on a mobile-optimised
+    /// page; ~0.4 with a 980px desktop layout viewport on a phone.
+    /// Mirrors bottomReservation above.
+    ///
+    /// nil means no answer - the query failed, or the engine predates
+    /// the GetVisualViewportMetrics actor change - and callers should
+    /// fall back to scale 1 rather than refusing to act.
+    public func visualViewportCSSWidth() async -> CGFloat? {
+        let response = try? await dispatcher.query(type: "GeckoView:GetVisualViewportMetrics")
+        guard let values = response as? [AnyHashable: Any],
+              let widthValue = values["width"],
+              let width = PayloadValue.cgFloat(widthValue),
+              width > 0 else {
+            let reason = (response as? [AnyHashable: Any])?["reason"] as? String
+            NSLog("visualViewport: no width (%@)", reason ?? (response == nil ? "query failed" : "no width in payload"))
+            return nil
+        }
+        return width
+    }
+    
     /// Runs a script against this session's page, as page script.
     /// Returns nil if the query failed, or an error string if the
     /// script itself threw. See fix_carplay_user_script.py.

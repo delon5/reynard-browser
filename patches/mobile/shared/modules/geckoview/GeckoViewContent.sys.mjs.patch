@@ -10,18 +10,19 @@ index c850b03..a85c1de 100644
  
  export class GeckoViewContent extends GeckoViewModule {
    onInit() {
-@@ -14,6 +15,10 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -14,6 +15,11 @@ export class GeckoViewContent extends GeckoViewModule {
        "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
        "GeckoView:RestoreState",
        "GeckoView:ContainsFormData",
 +      "GeckoView:Autofill:FillOneTimeCode",
 +      "GeckoView:GetFocusedInputMetrics",
 +      "GeckoView:GetSafeAreaInsetUsage",
++      "GeckoView:GetVisualViewportMetrics",
 +      "GeckoView:RunUserScript",
        "GeckoView:ProcessBackPressed",
        "GeckoView:ScrollBy",
        "GeckoView:ScrollTo",
-@@ -279,6 +284,18 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -279,6 +285,21 @@ export class GeckoViewContent extends GeckoViewModule {
        case "GeckoView:ContainsFormData":
          this._containsFormData(aCallback);
          break;
@@ -34,13 +35,16 @@ index c850b03..a85c1de 100644
 +      case "GeckoView:GetSafeAreaInsetUsage":
 +        this._getSafeAreaInsetUsage(aCallback);
 +        break;
++      case "GeckoView:GetVisualViewportMetrics":
++        this._getVisualViewportMetrics(aCallback);
++        break;
 +      case "GeckoView:RunUserScript":
 +        this._runUserScript(aData, aCallback);
 +        break;
        case "GeckoView:GetWebCompatInfo":
          this._getWebCompatInfo(aCallback);
          break;
-@@ -455,6 +472,82 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -455,6 +476,94 @@ export class GeckoViewContent extends GeckoViewModule {
      aCallback.onSuccess(await this.actor.containsFormData());
    }
  
@@ -117,6 +121,18 @@ index c850b03..a85c1de 100644
 +      );
 +    } catch (error) {
 +      aCallback.onError(`Cannot run user script, error: ${error}`);
++    }
++  }
++
++  // A question about THIS session's page, so this.actor - the same
++  // routing reasoning as _getSafeAreaInsetUsage above.
++  async _getVisualViewportMetrics(aCallback) {
++    try {
++      aCallback.onSuccess(
++        await this.actor.sendQuery("GetVisualViewportMetrics")
++      );
++    } catch (error) {
++      aCallback.onError(`Cannot get visual viewport metrics, error: ${error}`);
 +    }
 +  }
 +

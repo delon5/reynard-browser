@@ -112,13 +112,20 @@ extension BrowserViewController {
     }
 
     private enum FindUX {
-        /// Where a match should sit below the top of the visual
-        /// viewport, in CSS pixels - clear of the find bar itself.
-        static let matchTargetOffset: CGFloat = 140
+        /// Where a match should sit below the top of the content view,
+        /// in POINTS - clear of the find bar, which is point-sized
+        /// (safe area top + 8pt offset + ~46pt of bar). Converted to
+        /// CSS pixels per page in scrollToFindMatch: as plain CSS px
+        /// this held only at zoom 1, and on a ~980px desktop-viewport
+        /// page (~0.4pt per CSS px) 140 CSS px was ~56pt - at or
+        /// behind the bar's bottom edge, on exactly the pages that
+        /// need find-in-page most.
+        static let matchTargetOffsetPoints: CGFloat = 140
         /// Below this the match is close enough to where it should be;
         /// moving anyway would jerk the page while stepping between two
-        /// matches that are both already on screen.
-        static let matchDeadBand: CGFloat = 60
+        /// matches that are both already on screen. Points, converted
+        /// alongside the target.
+        static let matchDeadBandPoints: CGFloat = 60
     }
 
     private var findInPageBar: FindInPageBar? {
@@ -215,18 +222,28 @@ extension BrowserViewController {
     /// composited: it reads the visual offset and re-issues it through
     /// scrollToVisual with UPDATE_TYPE_MAIN_THREAD.
     ///
-    /// clientRect is relative to the visual viewport, so the delta needed
-    /// is simply "where the match is" minus "where we want it", entirely
-    /// in CSS pixels - no viewport height required, which is just as well
-    /// since it is not available here. The dead band keeps stepping
-    /// between two matches that are already both on screen from jerking
-    /// the page for a few pixels.
-    private func scrollToFindMatch(_ result: FindInPageResult, in session: GeckoSession) {
+    /// clientRect is relative to the visual viewport, so the delta is
+    /// "where the match is" minus "where we want it", in CSS pixels.
+    /// The target, though, is dictated by the find BAR, which is
+    /// point-sized - so it is converted per page through the visual
+    /// viewport's CSS width (see visualViewportCSSWidth). The dead band
+    /// keeps stepping between two matches that are already both on
+    /// screen from jerking the page for a few pixels.
+    private func scrollToFindMatch(_ result: FindInPageResult, in session: GeckoSession) async {
         guard result.found, let rect = result.clientRect else {
             return
         }
-        let delta = rect.minY - FindUX.matchTargetOffset
-        guard abs(delta) > FindUX.matchDeadBand else {
+        // Points per CSS pixel: the content view's point width against
+        // the visual viewport's CSS width. Falls back to 1 - the
+        // previous behaviour - when the engine cannot answer, and is
+        // clamped so a degenerate answer can never fling the page.
+        var pointsPerCSSPixel: CGFloat = 1
+        let viewWidth = contentView.bounds.width
+        if viewWidth > 0, let cssWidth = await session.visualViewportCSSWidth() {
+            pointsPerCSSPixel = min(max(viewWidth / cssWidth, 0.1), 4)
+        }
+        let delta = rect.minY - FindUX.matchTargetOffsetPoints / pointsPerCSSPixel
+        guard abs(delta) > FindUX.matchDeadBandPoints / pointsPerCSSPixel else {
             return
         }
         session.scrollBy(CGPoint(x: 0, y: delta))
@@ -252,7 +269,7 @@ extension BrowserViewController {
                 return
             }
             self?.findInPageBar?.updateCount(current: result.current, total: result.total)
-            self?.scrollToFindMatch(result, in: session)
+            await self?.scrollToFindMatch(result, in: session)
         }
     }
 }

@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,313 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +67,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -282,6 +282,29 @@ index 9ca6e15..799455c 100644
 +    };
 +  }
 +
++  // The visual viewport's geometry, in CSS pixels. The embedder
++  // divides its content view's point width by `width` to get the
++  // page's effective points-per-CSS-px, which is what converts
++  // point-sized chrome geometry (the find bar) into the CSS pixels
++  // GeckoView:ScrollBy moves in. ~1 on a mobile-optimised page; ~0.4
++  // on a page declaring a ~980px desktop viewport on a phone.
++  getVisualViewportMetrics() {
++    const viewport = this.contentWindow?.visualViewport;
++    if (!viewport || !(viewport.width > 0)) {
++      // A reason rather than a bare null, matching
++      // getFocusedInputMetrics: the embedder can then log WHY instead
++      // of a silent nil.
++      return { reason: "visual viewport unavailable" };
++    }
++    return {
++      width: viewport.width,
++      height: viewport.height,
++      pageLeft: viewport.pageLeft,
++      pageTop: viewport.pageTop,
++      scale: viewport.scale,
++    };
++  }
++
 +  collectSessionState() {
 +    const { docShell, contentWindow } = this;
 +    const history = lazy.SessionHistory.collect(docShell);
@@ -316,7 +339,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +491,15 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +514,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -328,6 +351,9 @@ index 9ca6e15..799455c 100644
 +      }
 +      case "RunUserScript": {
 +        return this.runUserScript(message.data?.script);
++      }
++      case "GetVisualViewportMetrics": {
++        return this.getVisualViewportMetrics();
 +      }
      }
  
