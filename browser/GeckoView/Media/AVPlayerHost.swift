@@ -194,6 +194,50 @@ public final class AVPlayerHost: NSObject {
         }
     }
 
+    /// PROBE - see fix_avplayer_silent_playback_probe.py. Set false to
+    /// restore audio once the question is answered.
+    private static let kSilentPlaybackProbe = true
+
+    /// Disables every audio track on a ready item, then re-issues play.
+    ///
+    /// iOS refused playback to this process with '!pla'
+    /// (AVAudioSessionErrorCodeCannotStartPlaying): a content-process
+    /// extension cannot activate a playback audio session, and an item
+    /// that wants to render audio therefore never starts - play() lands
+    /// straight back in .paused. Muting does not help, because the item
+    /// still has an audio track to render. Removing the track from the
+    /// equation entirely is the test: if the player then runs, video is
+    /// available in-process today and only sound needs brokering to the
+    /// app process.
+    private func probeSilentPlayback(_ entry: Player, _ id: UInt) {
+        guard Self.kSilentPlaybackProbe else { return }
+        let alreadyDone = withState { () -> Bool in
+            if entry.silentProbeDone { return true }
+            entry.silentProbeDone = true
+            return false
+        }
+        guard !alreadyDone else { return }
+
+        var audioTracks = 0
+        for track in entry.item.tracks where track.assetTrack?.mediaType == .audio {
+            track.isEnabled = false
+            audioTracks += 1
+        }
+        avLog("silentProbe[\(id)] disabled \(audioTracks) audio of "
+              + "\(entry.item.tracks.count) track(s)"
+              + " timeControl=\(entry.player.timeControlStatus.rawValue)")
+
+        // play() was already issued (and ignored) before the tracks
+        // existed, so it has to be re-issued now that they are gone.
+        guard withState({ entry.wantsPlayback }) else {
+            avLog("silentProbe[\(id)] element does not want playback - not retrying")
+            return
+        }
+        resumeFrameDelivery(for: entry)
+        entry.player.play()
+        avLog("silentProbe[\(id)] play() re-issued without audio tracks")
+    }
+
     private final class Player {
         let player: AVPlayer
         let item: AVPlayerItem
@@ -264,6 +308,9 @@ public final class AVPlayerHost: NSObject {
         /// Guarded by stateLock - written from the display link, the
         /// periodic observer and seek completions.
         var lastPushedTime: Double?
+        /// One-shot guard for the silent-playback probe. Guarded by
+        /// stateLock.
+        var silentProbeDone = false
         /// One-shot diagnostic - see the muted retry in pullFrames.
         /// Guarded by stateLock.
         var mutedRetryDone = false
@@ -697,6 +744,7 @@ public final class AVPlayerHost: NSObject {
                     if item.status == .readyToPlay,
                        let self,
                        let entry = self.withState({ self.players[playerId] }) {
+                        self.probeSilentPlayback(entry, playerId)
                         let now = entry.player.currentTime()
                         if now.isValid, now.isNumeric {
                             self.pushTime(playerId, entry, now.seconds)

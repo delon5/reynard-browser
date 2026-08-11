@@ -9,7 +9,7 @@ diff --git a/dom/media/mediasource/MediaSource.cpp b/dom/media/mediasource/Media
  #include "mozilla/dom/Document.h"
  #include "mozilla/dom/HTMLMediaElement.h"
  #include "mozilla/gfx/gfxVars.h"
-@@ -26,12 +27,14 @@
+@@ -26,12 +27,15 @@
  #include "nsDebug.h"
  #include "nsError.h"
  #include "nsGlobalWindowInner.h"
@@ -18,6 +18,7 @@ diff --git a/dom/media/mediasource/MediaSource.cpp b/dom/media/mediasource/Media
  #include "nsIScriptObjectPrincipal.h"
  #include "nsMimeTypes.h"
  #include "nsPIDOMWindow.h"
++#include "nsPIDOMWindowInlines.h"
  #include "nsString.h"
  #include "nsThreadUtils.h"
 +#include "xpcpublic.h"
