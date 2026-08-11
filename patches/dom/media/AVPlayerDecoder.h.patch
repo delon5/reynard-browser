@@ -1,8 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
+index 000000000000..72f80c12573a
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,187 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -84,6 +85,19 @@ new file mode 100644
 +  // the ReynardAVPlayerNotifyTime/-Ended wake-up runnables. Main
 +  // thread only.
 +  void NotifyPlaybackPoke();
++
++  // FairPlay decrypts inside AVFoundation, against a key session, and
++  // only for an asset registered on that same session - so this decoder
++  // has to know which proxy is its own rather than relying on whichever
++  // published last. MediaDecoder::SetCDMProxy is virtual for this.
++  RefPtr<SetCDMPromise> SetCDMProxy(CDMProxy* aProxy) override;
++
++ private:
++  void BindCDMProxyToPlayer();
++
++  RefPtr<CDMProxy> mCDMProxy;
++
++ public:
 +
 +  // Publishes a blank IOSurface-backed frame so the page has a video
 +  // layer of the right geometry. The decode pipeline carries timing

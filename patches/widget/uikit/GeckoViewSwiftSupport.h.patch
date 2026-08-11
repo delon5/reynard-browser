@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftSupport.h
-index e68fca9134c0..424b8e447b43 100644
+index e68fca9134c0..abeed80a456f 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,122 @@
+@@ -18,16 +18,130 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -71,8 +71,8 @@ index e68fca9134c0..424b8e447b43 100644
 +- (void)childProcessDidStartWithPID:(int32_t)pid
 +                        processType:(NSString*)processType;
 +- (id<GeckoAVPlayerHost>)avPlayerHost;
-+@end
-+
+ @end
+ 
 +// The app's AVPlayer host. FairPlay content is owned by AVFoundation end
 +// to end - only AVURLAsset conforms to AVContentKeyRecipient - so
 +// AVPlayerDecoder drives a player living in the app rather than decoding
@@ -96,8 +96,16 @@ index e68fca9134c0..424b8e447b43 100644
 +// so the host must use this rather than create its own. Optional so an
 +// engine built without the EME patches still links.
 +- (void)useContentKeySession:(AVContentKeySession*)session;
- @end
- 
++// The paired form: this session's keys belong to THIS player, so its
++// asset is the one to register as a recipient. FairPlay decrypts only
++// an asset registered on the same session the licence arrived on, so
++// with two protected elements the unpaired call above can attach the
++// second one's asset to the first one's session. Optional, like the
++// rest of this protocol, so a host without it keeps the old behaviour.
++- (void)useContentKeySession:(AVContentKeySession*)session
++                   forPlayer:(NSUInteger)playerId;
++@end
++
 +// The reverse direction, and the only one there is.
 +//
 +// Everything above is app-bound: Gecko asks the player to do things.
@@ -125,7 +133,7 @@ index e68fca9134c0..424b8e447b43 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +161,35 @@
+@@ -55,8 +169,35 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -161,7 +169,7 @@ index e68fca9134c0..424b8e447b43 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +198,58 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +206,58 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

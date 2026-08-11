@@ -131,6 +131,26 @@ public final class AVPlayerHost: NSObject {
         }
     }
 
+    /// The paired form: these keys are for THIS player.
+    ///
+    /// FairPlay decrypts only an asset registered on the same session
+    /// its licence arrived on, so with two protected elements the
+    /// unpaired call above can hand the second one's asset to the first
+    /// one's session. AVPlayerDecoder::SetCDMProxy names the player it
+    /// owns, FairPlayCDMProxy forwards it here, and the registration is
+    /// exact. Callable in either order relative to createPlayer: the
+    /// proxy waits until it has both halves.
+    @objc public func useContentKeySession(_ session: AVContentKeySession,
+                                           forPlayer playerId: UInt) {
+        emeContentKeySession = session
+        guard let entry = withState({ players[playerId] }) else {
+            avLog("EME key session for player \(playerId), which does not exist yet")
+            return
+        }
+        session.addContentKeyRecipient(entry.asset)
+        avLog("EME key session bound to player \(playerId)")
+    }
+
     private final class Player {
         let player: AVPlayer
         let item: AVPlayerItem

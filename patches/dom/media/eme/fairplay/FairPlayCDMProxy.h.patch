@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.h b/dom/media/eme/fairplay/FairPlayCDMProxy.h
 new file mode 100644
-index 000000000000..b645920014e9
+index 000000000000..6fb7f0dd6c7d
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,167 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -77,6 +77,15 @@ index 000000000000..b645920014e9
 +  void RemoveSession(const nsAString& aSessionId,
 +                     PromiseId aPromiseId) override;
 +
++  // Pairs this proxy with the AVPlayer its keys are for. FairPlay only
++  // decrypts an asset registered as a recipient of the SAME key
++  // session, so a proxy published to whichever player happened to be
++  // most recent is only correct when there is exactly one. Called by
++  // AVPlayerDecoder::SetCDMProxy; publishes as soon as both the session
++  // and the id are known, in either order.
++  void BindToPlayer(uintptr_t aPlayerId);
++  void PublishKeySessionIfBound();
++
 +  void QueryOutputProtectionStatus() override;
 +
 +  void NotifyOutputProtectionStatus(
@@ -131,6 +140,10 @@ index 000000000000..b645920014e9
 +  // cannot produce an SPC without it, so a generateRequest before one
 +  // arrives is rejected rather than left hanging.
 +  nsTArray<uint8_t> mAppCertificate;
++
++  // The AVPlayer these keys belong to, once AVPlayerDecoder has said so.
++  // Zero until then; the publish waits for it rather than guessing.
++  uintptr_t mBoundPlayerId = 0;
 +
 +  // The session the EME key exchange is bound to.
 +  //

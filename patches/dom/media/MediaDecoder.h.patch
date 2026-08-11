@@ -1,0 +1,19 @@
+diff --git a/dom/media/MediaDecoder.h b/dom/media/MediaDecoder.h
+index 98d4e9bffca6..edc305b6883e 100644
+--- a/dom/media/MediaDecoder.h
++++ b/dom/media/MediaDecoder.h
+@@ -442,7 +442,13 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
+ 
+   AbstractThread* AbstractMainThread() const { return mAbstractMainThread; }
+ 
+-  RefPtr<SetCDMPromise> SetCDMProxy(CDMProxy* aProxy);
++  // Virtual so a decoder that owns its own CDM can learn about the
++  // proxy. AVPlayerDecoder needs it: FairPlay decryption happens inside
++  // AVFoundation against a key session, and the asset must be
++  // registered on the SAME session the keys arrive on - which means the
++  // proxy has to be paired with one player, not published globally and
++  // hoped to be the right one.
++  virtual RefPtr<SetCDMPromise> SetCDMProxy(CDMProxy* aProxy);
+ 
+   void EnsureTelemetryReported();
+ 

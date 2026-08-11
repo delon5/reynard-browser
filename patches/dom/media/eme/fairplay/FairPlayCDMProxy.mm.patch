@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.mm b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
 new file mode 100644
-index 000000000000..735db2e0c810
+index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +0,631 @@
+@@ -0,0 +1,658 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -260,13 +260,11 @@ index 000000000000..735db2e0c810
 +    // licence was negotiated on - a second session holds no keys. So
 +    // AVPlayerHost cannot create its own; it has to use this one.
 +    //
-+    // Published rather than pulled because MediaDecoder::SetCDMProxy is
-+    // not virtual, so AVPlayerDecoder has no hook to reach the proxy
-+    // through. The embedder keeps the most recent session and attaches
-+    // assets to it; with one protected element playing at a time - the
-+    // only case this pipeline supports today - that is the same
-+    // pairing, and the optional protocol method means a build without
-+    // the host simply skips this.
++    // This is the unpaired publish, kept for the case where nothing
++    // ever binds - the embedder attaches assets to the most recent
++    // session, which is right whenever there is only one protected
++    // element. BindToPlayer supersedes it with an exact pairing as soon
++    // as AVPlayerDecoder::SetCDMProxy names a player.
 +    if (id<GeckoAVPlayerHost> host = AVPlayerHostForKeySession()) {
 +      [host useContentKeySession:mKeySession];
 +    }
@@ -453,6 +451,35 @@ index 000000000000..735db2e0c810
 +                             NS_ConvertUTF8toUTF16(message));
 +      });
 +  mMainThread->Dispatch(task.forget(), NS_DISPATCH_NORMAL);
++}
++
++void FairPlayCDMProxy::BindToPlayer(uintptr_t aPlayerId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (mBoundPlayerId == aPlayerId) {
++    return;
++  }
++  mBoundPlayerId = aPlayerId;
++  EME_LOG("FairPlayCDMProxy::BindToPlayer({}) player={}", fmt::ptr(this),
++          (unsigned long long)aPlayerId);
++  PublishKeySessionIfBound();
++}
++
++// Either order: Init may run before the decoder has a player, and the
++// decoder may bind before Init has a session. Whichever arrives second
++// does the publish.
++void FairPlayCDMProxy::PublishKeySessionIfBound() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!mKeySession || !mBoundPlayerId) {
++    return;
++  }
++  id<GeckoAVPlayerHost> host = AVPlayerHostForKeySession();
++  if (!host ||
++      ![host respondsToSelector:@selector(useContentKeySession:forPlayer:)]) {
++    return;
++  }
++  EME_LOG("FairPlayCDMProxy::PublishKeySessionIfBound({}) player={}",
++          fmt::ptr(this), (unsigned long long)mBoundPlayerId);
++  [host useContentKeySession:mKeySession forPlayer:mBoundPlayerId];
 +}
 +
 +void FairPlayCDMProxy::QueryOutputProtectionStatus() {

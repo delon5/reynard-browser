@@ -1,9 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
-index 000000000000..477d70c4ff0c
+index 000000000000..44033cac4773
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,861 @@
+@@ -0,0 +1,894 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,6 +12,9 @@ index 000000000000..477d70c4ff0c
 +
 +#include "AVPlayerDemuxer.h"
 +#include "MediaDecoderStateMachine.h"
++#include "mozilla/CDMProxy.h"           // KeySystem
++#include "mozilla/EMEUtils.h"           // IsFairPlayKeySystem
++#include "mozilla/FairPlayCDMProxy.h"   // BindToPlayer
 +#include "MediaFormatReader.h"
 +#include "MediaShutdownManager.h"
 +#include "mozilla/StaticPrefs_media.h"
@@ -178,6 +181,10 @@ index 000000000000..477d70c4ff0c
 +  if (!mPlayerId) {
 +    return NS_ERROR_FAILURE;
 +  }
++
++  // The page can set mediaKeys before the element has a src, so the
++  // proxy may already be here waiting for a player to name.
++  BindCDMProxyToPlayer();
 +
 +  // The playback registry entry, created right after the host player.
 +  // The Swift side installs its clock reporting inside
@@ -438,6 +445,32 @@ index 000000000000..477d70c4ff0c
 +  // DownloadProgressed lives on MediaDecoderOwner, not MediaDecoder -
 +  // same call HLSDecoder::NotifyDataArrived makes.
 +  GetOwner()->DownloadProgressed();
++}
++
++RefPtr<MediaDecoder::SetCDMPromise> AVPlayerDecoder::SetCDMProxy(
++    CDMProxy* aProxy) {
++  MOZ_ASSERT(NS_IsMainThread());
++  mCDMProxy = aProxy;
++  BindCDMProxyToPlayer();
++  return MediaDecoder::SetCDMProxy(aProxy);
++}
++
++// Pairs this decoder's proxy with this decoder's player, so the keys
++// land on the session the asset is registered against. Safe to call
++// twice and in either order - the proxy publishes only once both halves
++// are known, and BindToPlayer ignores a repeat of the same id.
++void AVPlayerDecoder::BindCDMProxyToPlayer() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!mCDMProxy || !mPlayerId) {
++    return;
++  }
++  // Only FairPlay reaches AVFoundation, and MediaKeys creates exactly
++  // one proxy type for that key system, so the key system is a sound
++  // discriminator - CDMProxy has no As* hook to use instead.
++  if (!IsFairPlayKeySystem(mCDMProxy->KeySystem())) {
++    return;
++  }
++  static_cast<FairPlayCDMProxy*>(mCDMProxy.get())->BindToPlayer(mPlayerId);
 +}
 +
 +void AVPlayerDecoder::NotifyPlaybackPoke() {
