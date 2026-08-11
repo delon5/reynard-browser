@@ -139,7 +139,15 @@ final class ToolbarController {
         // Neither reserves layout viewport, so the page still runs full
         // height and paints behind the pill - the element below it, the
         // controls above it.
-        contentView.setFloatingChromeInset(condensed ? pill : 0)
+        // ONE of them, not both. A bar that is position:fixed AND on a
+        // page that reads env gets moved twice - Facebook is both, and
+        // its "Open app" banner ended up 188pt off the bottom against a
+        // pill top at 94, which is the black gap between the two.
+        //
+        // env wins because it reaches the larger set: any page that
+        // reads the variable, whether or not its bar is a fixed layer.
+        // The compositor margin only ever moved fixed and sticky ones.
+        contentView.setFloatingChromeInset(0)
         contentView.setSafeAreaInsetBottom(condensed ? pill : 0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
