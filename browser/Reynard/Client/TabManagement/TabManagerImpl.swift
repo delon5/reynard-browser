@@ -719,11 +719,21 @@ final class TabManagerImplementation: NSObject, TabManager {
         regularTabs = snapshot.regularTabs.map { snapshot in
             let tab = Tab(
                 id: snapshot.id,
+                // NOT opened. A restored tab is .pending until it is
+                // selected - nothing has been loaded into this session -
+                // so opening it here buys a content process, and
+                // therefore a hosted app extension, per restored tab
+                // before the user has touched anything. A capture seven
+                // seconds after launch counted 11 tab processes, and
+                // iOS sync-XPCs every one of them on the main thread at
+                // each scene transition. loadRestoredURLIfNeeded opens
+                // the session when the tab is actually selected.
                 session: createSession(
                     tabID: snapshot.id,
                     url: snapshot.url,
                     windowId: nil,
-                    isPrivate: false
+                    isPrivate: false,
+                    opening: .manual
                 ),
                 title: snapshot.title,
                 url: snapshot.url,
@@ -743,7 +753,8 @@ final class TabManagerImplementation: NSObject, TabManager {
                     tabID: snapshot.id,
                     url: snapshot.url,
                     windowId: nil,
-                    isPrivate: true
+                    isPrivate: true,
+                    opening: .manual
                 ),
                 title: snapshot.title,
                 url: snapshot.url,
