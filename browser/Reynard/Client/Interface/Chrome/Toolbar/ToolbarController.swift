@@ -129,7 +129,18 @@ final class ToolbarController {
         // tell apart.
         NSLog("dynToolbar: condensed=\(condensed) max=\(maxHeight) pill=\(pill) toolbar=\(maxToolbarOffset) top=\(maxTopToolbarOffset)")
 
+        // Both, and they do different jobs. The margin lifts fixed and
+        // sticky layers at composite time - immediate, no relayout, but
+        // it only reaches layers. env(safe-area-inset-bottom) asks the
+        // PAGE to lay itself out around the pill, which is what moved
+        // YouTube's controls before the merge and is the only thing that
+        // reaches a bottom bar that is neither fixed nor sticky.
+        //
+        // Neither reserves layout viewport, so the page still runs full
+        // height and paints behind the pill - the element below it, the
+        // controls above it.
         contentView.setFloatingChromeInset(condensed ? pill : 0)
+        contentView.setSafeAreaInsetBottom(condensed ? pill : 0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset

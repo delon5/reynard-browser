@@ -595,4 +595,14 @@ public class GeckoSession {
     public func setContentBottomOffset(_ offset: CGFloat) {
         window?.setFixedBottomOffset(offset)
     }
+
+    /// Reported to the page as env(safe-area-inset-bottom).
+    ///
+    /// The compositor margin above moves fixed and sticky layers only.
+    /// This reaches any page that reads the variable, which is how a
+    /// site lifts its own bottom controls clear of the floating pill
+    /// while its background still runs the full height behind it.
+    public func setSafeAreaInsetBottom(_ inset: CGFloat) {
+        window?.setSafeAreaInsetBottom?(inset)
+    }
 }

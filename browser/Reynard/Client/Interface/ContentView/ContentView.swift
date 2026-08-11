@@ -71,6 +71,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private var contentBottomOffset: CGFloat = 0
     private var toolbarBottomOffset: CGFloat = 0
     private var floatingChromeInset: CGFloat = 0
+    private var safeAreaInsetBottom: CGFloat = 0
     private var toolbarTopOffset: CGFloat = 0
     private var maxTopToolbarOffset: CGFloat = 0
     private var focusedInputTask: Task<Void, Never>?
@@ -279,6 +280,22 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         }
         floatingChromeInset = inset
         syncContentBottomOffset()
+    }
+
+    /// What the page is told to keep clear via env(safe-area-inset-bottom).
+    ///
+    /// Deliberately separate from the compositor margin: that one moves
+    /// fixed and sticky layers at composite time, this one asks the page
+    /// to lay itself out around the chrome. A site that reads env - and
+    /// YouTube does - lifts its own controls with it while its
+    /// background keeps painting the full height behind the pill.
+    func setSafeAreaInsetBottom(_ inset: CGFloat) {
+        guard inset != safeAreaInsetBottom else {
+            return
+        }
+        safeAreaInsetBottom = inset
+        NSLog("dynToolbar: env(safe-area-inset-bottom) -> \(inset)")
+        session?.setSafeAreaInsetBottom(inset)
     }
     
     private func syncContentBottomOffset() {
@@ -528,6 +545,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         webContentView.setTab(tab, pageBackgroundColor: pageBackgroundColor)
         tab?.session.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         tab?.session.setContentBottomOffset(contentBottomOffset)
+        tab?.session.setSafeAreaInsetBottom(safeAreaInsetBottom)
         updatePullToRefreshAvailability()
     }
     
