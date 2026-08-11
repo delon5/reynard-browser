@@ -85,6 +85,7 @@ final class BrowserPreferences {
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
             key("CompatibilitySettings", "useAndroidUserAgent"): true,
+            key("CompatibilitySettings", "hideMediaSourceForSafariUA"): true,
             
             // Browsing
             key("BrowsingSettings", "requestDesktopWebsite"): UIDevice.current.userInterfaceIdiom == .pad,
@@ -881,6 +882,15 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "CompatibilitySettings", key: "useCustomUserAgent")
+            }
+        }
+        
+        static var hideMediaSourceForSafariUA: Bool {
+            get {
+                prefs.bool(forSetting: "CompatibilitySettings", key: "hideMediaSourceForSafariUA")
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings", key: "hideMediaSourceForSafariUA")
             }
         }
         

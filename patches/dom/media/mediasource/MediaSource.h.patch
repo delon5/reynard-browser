@@ -1,0 +1,17 @@
+diff --git a/dom/media/mediasource/MediaSource.h b/dom/media/mediasource/MediaSource.h
+--- a/dom/media/mediasource/MediaSource.h
++++ b/dom/media/mediasource/MediaSource.h
+@@ -70,6 +70,13 @@
+   void SetLiveSeekableRange(double aStart, double aEnd, ErrorResult& aRv);
+   void ClearLiveSeekableRange(ErrorResult& aRv);
+
++  // WebIDL Func: whether MediaSource is visible to this global. Reynard
++  // hides it for documents whose UA override impersonates iPhone Safari
++  // - real iPhone Safari has never exposed classic MSE, and players
++  // that find it under that UA walk into MSE+FairPlay, which this
++  // engine cannot serve.
++  static bool VisibleForCurrentGlobal(JSContext* aCx, JSObject* aGlobal);
++
+   static bool IsTypeSupported(const GlobalObject&, const nsAString& aType);
+   // Throws on aRv if not supported.
+   static void IsTypeSupported(const nsAString& aType,

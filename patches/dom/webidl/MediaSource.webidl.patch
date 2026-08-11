@@ -1,0 +1,15 @@
+diff --git a/dom/webidl/MediaSource.webidl b/dom/webidl/MediaSource.webidl
+--- a/dom/webidl/MediaSource.webidl
++++ b/dom/webidl/MediaSource.webidl
+@@ -20,8 +20,9 @@
+   "decode"
+ };
+
+-[Pref="media.mediasource.enabled",
+- Exposed=Window]
++[Pref="media.mediasource.enabled",
++ Func="mozilla::dom::MediaSource::VisibleForCurrentGlobal",
++ Exposed=Window]
+ interface MediaSource : EventTarget {
+   [Throws]
+   constructor();

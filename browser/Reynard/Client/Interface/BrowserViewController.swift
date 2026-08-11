@@ -359,6 +359,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     private func applyGeckoPreferences() {
         // HTTPS-only mode
         HTTPSOnlyModePolicyController.applyHTTPSOnlyMode()
+        MediaCompatibilityPolicyController.applyMediaSourceVisibility()
         
         // HLS/FairPlay through AVFoundation
         AVPlayerPolicyController.applyAVPlayerHLS()

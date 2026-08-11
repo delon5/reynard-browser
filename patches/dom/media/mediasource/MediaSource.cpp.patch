@@ -1,0 +1,63 @@
+diff --git a/dom/media/mediasource/MediaSource.cpp b/dom/media/mediasource/MediaSource.cpp
+--- a/dom/media/mediasource/MediaSource.cpp
++++ b/dom/media/mediasource/MediaSource.cpp
+@@ -18,6 +18,7 @@
+ #include "mozilla/Logging.h"
+ #include "mozilla/StaticPrefs_media.h"
+ #include "mozilla/dom/BindingDeclarations.h"
++#include "mozilla/dom/BrowsingContext.h"
+ #include "mozilla/dom/Document.h"
+ #include "mozilla/dom/HTMLMediaElement.h"
+ #include "mozilla/gfx/gfxVars.h"
+@@ -26,12 +27,14 @@
+ #include "nsDebug.h"
+ #include "nsError.h"
+ #include "nsGlobalWindowInner.h"
++#include "nsIDocShell.h"
+ #include "nsIRunnable.h"
+ #include "nsIScriptObjectPrincipal.h"
+ #include "nsMimeTypes.h"
+ #include "nsPIDOMWindow.h"
+ #include "nsString.h"
+ #include "nsThreadUtils.h"
++#include "xpcpublic.h"
+
+ struct JSContext;
+ class JSObject;
+@@ -420,6 +423,36 @@
+   mDecoder->DecodeError(aError);
+ }
+
++/* static */
++bool MediaSource::VisibleForCurrentGlobal(JSContext* aCx, JSObject* aGlobal) {
++  // Reynard: hide MediaSource from documents whose UA override
++  // impersonates iPhone Safari. Real iPhone Safari has never exposed
++  // classic MSE, and a player that finds it under that UA selects
++  // MSE+FairPlay - which this engine cannot serve: sample-level
++  // FairPlay needs an authorization Apple does not grant outside
++  // WebKit. Hiding it steers players to native HLS + FairPlay, the
++  // path AVPlayerDecoder owns. The Pref= annotation still gates
++  // media.mediasource.enabled; this only adds UA consistency.
++  if (!StaticPrefs::media_reynard_mediasource_hide_for_iphone_ua()) {
++    return true;
++  }
++  nsGlobalWindowInner* win = xpc::WindowOrNull(aGlobal);
++  if (!win) {
++    // Not a window global. MediaSource is Window-only today, so this
++    // is belt and braces.
++    return true;
++  }
++  nsIDocShell* docShell = win->GetDocShell();
++  if (!docShell) {
++    return true;
++  }
++  nsString customUserAgent;
++  docShell->GetBrowsingContext()->GetCustomUserAgent(customUserAgent);
++  // Only the Safari-iOS spoof contains "iPhone"; the Android-Firefox
++  // and Chrome spoofs do not, and an empty override is the native UA.
++  return customUserAgent.Find(u"iPhone"_ns) == kNotFound;
++}
++
+ /* static */
+ bool MediaSource::IsTypeSupported(const GlobalObject& aOwner,
+                                   const nsAString& aType) {

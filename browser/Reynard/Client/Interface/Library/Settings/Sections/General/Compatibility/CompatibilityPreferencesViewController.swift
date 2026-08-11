@@ -11,6 +11,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     private enum Section: CaseIterable {
         case userAgent
         case perSiteOverrides
+        case media
         
         var text: SettingsSectionText {
             switch self {
@@ -20,6 +21,14 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
                 return SettingsSectionText(
                     footerTitle: NSLocalizedString(
                         "Set a specific user agent for individual websites. A site's own override, when enabled, takes priority over the settings above.",
+                        comment: ""
+                    )
+                )
+            case .media:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Media", comment: ""),
+                    footerTitle: NSLocalizedString(
+                        "Hide Media Source Extensions on sites using an iPhone Safari user agent, so video players pick the native HLS path - the only one that can carry FairPlay in this browser. Real iPhone Safari does not expose MSE either.",
                         comment: ""
                     )
                 )
@@ -38,9 +47,14 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         case manageOverrides
     }
     
+    private enum MediaRow: CaseIterable {
+        case hideMediaSource
+    }
+    
     private let androidUserAgentSwitch = UISwitch()
     private let customUserAgentSwitch = UISwitch()
     private let enablePerSiteOverridesSwitch = UISwitch()
+    private let hideMediaSourceSwitch = UISwitch()
     
     private var displayedUserAgentRows: [UserAgentRow] {
         var rows: [UserAgentRow] = [.useAndroidUserAgent, .useCustomUserAgent]
@@ -97,6 +111,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             return displayedUserAgentRows.count
         case .perSiteOverrides:
             return displayedPerSiteOverridesRows.count
+        case .media:
+            return MediaRow.allCases.count
         }
     }
     
@@ -110,6 +126,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             return userAgentCell(at: indexPath.row, in: tableView)
         case .perSiteOverrides:
             return perSiteOverridesCell(at: indexPath.row, in: tableView)
+        case .media:
+            return mediaCell(at: indexPath.row, in: tableView)
         }
     }
     
@@ -164,6 +182,21 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         }
     }
     
+    private func mediaCell(at row: Int, in tableView: UITableView) -> UITableViewCell {
+        guard MediaRow.allCases.indices.contains(row) else {
+            return UITableViewCell()
+        }
+        
+        switch MediaRow.allCases[row] {
+        case .hideMediaSource:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Hide Media Source (MSE)", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = hideMediaSourceSwitch
+            return cell
+        }
+    }
+    
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         defer { tableView.deselectRow(at: indexPath, animated: true) }
         guard Section.allCases.indices.contains(indexPath.section) else {
@@ -183,6 +216,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
                 return
             }
             navigationController?.pushViewController(PerSiteUserAgentOverridesViewController(), animated: true)
+        case .media:
+            break
         }
     }
     
@@ -204,6 +239,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             )
         case .perSiteOverrides:
             return Section.perSiteOverrides.text
+        case .media:
+            return Section.media.text
         }
     }
     
@@ -211,17 +248,24 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         androidUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useAndroidUserAgent
         customUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useCustomUserAgent
         enablePerSiteOverridesSwitch.isOn = Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides
+        hideMediaSourceSwitch.isOn = Prefs.CompatibilitySettings.hideMediaSourceForSafariUA
     }
     
     private func configureSwitches() {
         androidUserAgentSwitch.addTarget(self, action: #selector(applyAndroidUserAgentPreference), for: .valueChanged)
         customUserAgentSwitch.addTarget(self, action: #selector(applyCustomUserAgentPreference), for: .valueChanged)
         enablePerSiteOverridesSwitch.addTarget(self, action: #selector(applyPerSiteOverridesPreference), for: .valueChanged)
+        hideMediaSourceSwitch.addTarget(self, action: #selector(applyHideMediaSourcePreference), for: .valueChanged)
     }
     
     @objc private func applyPerSiteOverridesPreference() {
         Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides = enablePerSiteOverridesSwitch.isOn
         tableView.reloadData()
+    }
+    
+    @objc private func applyHideMediaSourcePreference() {
+        Prefs.CompatibilitySettings.hideMediaSourceForSafariUA = hideMediaSourceSwitch.isOn
+        MediaCompatibilityPolicyController.applyMediaSourceVisibility()
     }
     
     @objc private func applyCustomUserAgentPreference() {

@@ -247,10 +247,21 @@ index 3d33f9916a24..7315821b5984 100644
      value: false
    #else
      value: true
-@@ -13156,6 +13197,15 @@
+@@ -13156,6 +13197,26 @@
    value: true
    mirror: always
  
++# Hide window.MediaSource for documents whose UA override impersonates
++# iPhone Safari (override contains "iPhone"). Real iPhone Safari has
++# never exposed classic MSE; players that feature-detect it under that
++# UA select MSE+FairPlay, which this engine cannot serve. Hiding it
++# steers them to native HLS + FairPlay. Consulted by
++# MediaSource::VisibleForCurrentGlobal.
++- name: media.reynard.mediasource.hide-for-iphone-ua
++  type: bool
++  value: true
++  mirror: always
++
 +# Hand HLS to AVFoundation instead of Gecko, so AVURLAsset owns the URL
 +# and FairPlay can attach an AVContentKeySession to it. Off until the
 +# pipeline is complete; turning it on changes which decoder claims every
