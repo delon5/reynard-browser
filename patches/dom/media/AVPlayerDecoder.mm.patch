@@ -1,9 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
-index 000000000000..44033cac4773
+index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,893 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -447,8 +447,7 @@ index 000000000000..44033cac4773
 +  GetOwner()->DownloadProgressed();
 +}
 +
-+RefPtr<MediaDecoder::SetCDMPromise> AVPlayerDecoder::SetCDMProxy(
-+    CDMProxy* aProxy) {
++RefPtr<SetCDMPromise> AVPlayerDecoder::SetCDMProxy(CDMProxy* aProxy) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  mCDMProxy = aProxy;
 +  BindCDMProxyToPlayer();
