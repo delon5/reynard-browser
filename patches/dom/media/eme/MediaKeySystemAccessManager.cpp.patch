@@ -1,5 +1,5 @@
 diff --git a/dom/media/eme/MediaKeySystemAccessManager.cpp b/dom/media/eme/MediaKeySystemAccessManager.cpp
-index aaa3ff25b64f..6f717f9706ba 100644
+index aaa3ff25b64f..9d47732f49f7 100644
 --- a/dom/media/eme/MediaKeySystemAccessManager.cpp
 +++ b/dom/media/eme/MediaKeySystemAccessManager.cpp
 @@ -5,6 +5,7 @@
@@ -37,7 +37,7 @@ index aaa3ff25b64f..6f717f9706ba 100644
    if (status != MediaKeySystemStatus::Available) {
      // Failed due to user disabling something, send a notification to
      // chrome, so we can show some UI to explain how the user can rectify
-@@ -556,6 +570,17 @@ void MediaKeySystemAccessManager::RequestMediaKeySystemAccess(
+@@ -556,6 +570,41 @@ void MediaKeySystemAccessManager::RequestMediaKeySystemAccess(
  void MediaKeySystemAccessManager::ProvideAccess(
      UniquePtr<PendingRequest> aRequest) {
    MOZ_ASSERT(aRequest);
@@ -49,8 +49,32 @@ index aaa3ff25b64f..6f717f9706ba 100644
 +  // object. If this prints and FairPlayCDMProxy still logs nothing,
 +  // the page was granted access and chose not to call createMediaKeys,
 +  // which is a player/UA question rather than an engine one.
-+  printf_stderr("emeAccess: GRANTED %s\n",
-+                NS_ConvertUTF16toUTF8(aRequest->mKeySystem).get());
++  // ...and WHAT it was granted. Access resolving while FairPlayCDMProxy
++  // stays silent means the page inspected this configuration and chose
++  // not to call createMediaKeys - so the configuration is the evidence.
++  // An empty videoCapabilities is the shape that would explain it: the
++  // request succeeds, but the player finds nothing it can play.
++  const MediaKeySystemConfiguration& cfg = aRequest->mSupportedConfig.ref();
++  nsAutoCString desc;
++  desc.AppendPrintf("initData=%zu video=%zu audio=%zu sessions=%zu",
++                    cfg.mInitDataTypes.Length(),
++                    cfg.mVideoCapabilities.Length(),
++                    cfg.mAudioCapabilities.Length(),
++                    cfg.mSessionTypes.Length());
++  for (const nsString& t : cfg.mInitDataTypes) {
++    desc.Append(" i:");
++    desc.Append(NS_ConvertUTF16toUTF8(t));
++  }
++  for (const MediaKeySystemMediaCapability& c : cfg.mVideoCapabilities) {
++    desc.Append(" v:");
++    desc.Append(NS_ConvertUTF16toUTF8(c.mContentType));
++  }
++  for (const MediaKeySystemMediaCapability& c : cfg.mAudioCapabilities) {
++    desc.Append(" a:");
++    desc.Append(NS_ConvertUTF16toUTF8(c.mContentType));
++  }
++  printf_stderr("emeAccess: GRANTED %s %s\n",
++                NS_ConvertUTF16toUTF8(aRequest->mKeySystem).get(), desc.get());
 +#endif
    MOZ_ASSERT(
        aRequest->mSupportedConfig,

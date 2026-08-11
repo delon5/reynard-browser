@@ -1,7 +1,16 @@
 diff --git a/dom/media/eme/MediaKeys.cpp b/dom/media/eme/MediaKeys.cpp
+index 6b7f54395612..2f0e918f504d 100644
 --- a/dom/media/eme/MediaKeys.cpp
 +++ b/dom/media/eme/MediaKeys.cpp
-@@ -27,6 +27,9 @@
+@@ -3,6 +3,7 @@
+  * You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "mozilla/dom/MediaKeys.h"
++#include "mozilla/Debug.h"  // printf_stderr, for the emeKeys diagnostic
+ 
+ #include "ChromiumCDMProxy.h"
+ #include "GMPCrashHelper.h"
+@@ -27,6 +28,9 @@
  #include "nsPrintfCString.h"
  #include "nsServiceManagerUtils.h"
  
@@ -11,7 +20,7 @@ diff --git a/dom/media/eme/MediaKeys.cpp b/dom/media/eme/MediaKeys.cpp
  #ifdef MOZ_WIDGET_ANDROID
  #  include "AndroidDecoderModule.h"
  #  include "mozilla/MediaDrmCDMProxy.h"
-@@ -439,6 +442,18 @@
+@@ -439,6 +443,18 @@ already_AddRefed<CDMProxy> MediaKeys::CreateCDMProxy() {
    EME_LOG("MediaKeys[{}]::CreateCDMProxy(), isHardwareDecryptionSupported={}",
            fmt::ptr(this), isHardwareDecryptionSupported);
    RefPtr<CDMProxy> proxy;
@@ -30,3 +39,19 @@ diff --git a/dom/media/eme/MediaKeys.cpp b/dom/media/eme/MediaKeys.cpp
  #ifdef MOZ_WIDGET_ANDROID
    if (IsWidevineKeySystem(mKeySystem)) {
      if (AndroidDecoderModule::IsJavaDecoderModuleAllowed()) {
+@@ -473,6 +489,15 @@ already_AddRefed<CDMProxy> MediaKeys::CreateCDMProxy() {
+ 
+ already_AddRefed<DetailedPromise> MediaKeys::Init(ErrorResult& aRv) {
+   EME_LOG("MediaKeys[{}]::Init()", fmt::ptr(this));
++#ifdef MOZ_WIDGET_UIKIT
++  // DIAGNOSTIC. The other half of emeAccess: this is createMediaKeys()
++  // actually running. Access is granted for FairPlay and
++  // FairPlayCDMProxy never logs, so either the page never gets here -
++  // it looked at the configuration and stopped - or it does and Init
++  // fails before CreateCDMProxy. One line separates those.
++  printf_stderr("emeKeys: MediaKeys::Init for %s\n",
++                NS_ConvertUTF16toUTF8(mKeySystem).get());
++#endif
+   RefPtr<DetailedPromise> promise(MakePromise(aRv, "MediaKeys::Init()"_ns));
+   if (aRv.Failed()) {
+     return nullptr;
