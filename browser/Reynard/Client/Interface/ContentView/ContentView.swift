@@ -282,7 +282,16 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     private func syncContentBottomOffset() {
-        let offset = -(toolbarTopOffset + toolbarBottomOffset) + floatingChromeInset
+        // REPLACES, not adds. While the pill is showing the toolbar is
+        // not on screen, but ToolbarController goes on sliding it, so
+        // summing the two let the clearance decay with every scroll
+        // frame - 60 -> 44 -> 29 -> 0 -> -20 in one capture, i.e. the
+        // page's fixed content drifting down past the pill it was
+        // supposed to clear. The pill's height IS the clearance while it
+        // is up, whatever the toolbar thinks it is doing.
+        let offset = floatingChromeInset > 0
+            ? floatingChromeInset
+            : -(toolbarTopOffset + toolbarBottomOffset)
         guard offset != contentBottomOffset else {
             return
         }
