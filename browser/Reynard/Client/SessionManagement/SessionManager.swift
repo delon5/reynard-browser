@@ -129,8 +129,7 @@ final class SessionManager {
             // session is now on screen, and it will not be activated by
             // anything else. A tab whose activate landed here loads into
             // an inactive docshell and never paints.
-            NSLog("[SessionActivation] activate SKIPPED - session %p is not open (caller believes it is selected)",
-                  session)
+            NSLog("[SessionActivation] activate SKIPPED - \(ObjectIdentifier(session)) is not open (caller believes it is selected)")
             return
         }
         sessionsRequestedActive[ObjectIdentifier(session)] = session
@@ -148,12 +147,8 @@ final class SessionManager {
         // audio carries on, which is what CarPlay video stopping on lock
         // looks like.
         let active = isApplicationForeground || mustStayActive(session)
-        NSLog("[SessionActivation] activate session %p -> active=%@ foreground=%@ commitsSuspended=%@ (%d in active set)",
-              session,
-              active ? "YES" : "NO",
-              isApplicationForeground ? "YES" : "NO",
-              (!isPhoneSceneActive && !isCommitLatchExempt(session)) ? "YES" : "NO",
-              sessionsRequestedActive.count)
+        let suspended = !isPhoneSceneActive && !isCommitLatchExempt(session)
+        NSLog("[SessionActivation] activate \(ObjectIdentifier(session)) -> active=\(active) foreground=\(isApplicationForeground) commitsSuspended=\(suspended) activeSet=\(sessionsRequestedActive.count)")
         session.setActive(active)
         session.setFocused(true)
     }
