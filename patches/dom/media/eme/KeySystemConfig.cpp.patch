@@ -1,12 +1,16 @@
 diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.cpp
+index e812f981e91d..a10b5ef3f204 100644
 --- a/dom/media/eme/KeySystemConfig.cpp
 +++ b/dom/media/eme/KeySystemConfig.cpp
-@@ -8,3 +8,4 @@
+@@ -7,6 +7,7 @@
+ #include "EMEUtils.h"
  #include "GMPUtils.h"
  #include "KeySystemNames.h"
 +#include "mozilla/Debug.h"  // printf_stderr, for the emeKeySystem diagnostic
  #include "mozilla/StaticPrefs_media.h"
-@@ -30,6 +30,27 @@
+ #include "mozilla/dom/ChromeUtilsBinding.h"
+ #include "mozilla/dom/Promise.h"
+@@ -30,6 +31,27 @@ namespace mozilla {
  
  /* static */
  bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
@@ -34,7 +38,7 @@ diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.c
  #ifdef MOZ_WIDGET_ANDROID
    // Check if we can use MediaDrm for this keysystem.
    if (mozilla::java::MediaDrmProxy::IsSchemeSupported(
-@@ -119,6 +140,44 @@
+@@ -119,6 +141,58 @@ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
    }
  }
  
@@ -67,19 +71,33 @@ diff --git a/dom/media/eme/KeySystemConfig.cpp b/dom/media/eme/KeySystemConfig.c
 +  config->mAudioRobustness.AppendElement(u""_ns);
 +  config->mVideoRobustness.AppendElement(u""_ns);
 +
-+  // Declared as decrypt-only rather than decrypt-and-decode. Decode
-+  // happens in VideoToolbox, but the samples are only usable through
-+  // AVFoundation's own path - so until that path exists this advertises
-+  // what the platform can decrypt, not what Gecko can currently draw.
-+  config->mMP4.SetCanDecrypt(EME_CODEC_H264);
-+  config->mMP4.SetCanDecrypt(EME_CODEC_AAC);
++  // Decrypt AND decode, which is what actually happens: AVFoundation
++  // owns the whole path, from the content key through VideoToolbox to
++  // the frames the compositor gets.
++  //
++  // Declaring decrypt-only was what rejected every FairPlay request.
++  // CanDecryptAndDecode tries DecryptsAndDecodes first, and on failing
++  // that falls to Decrypts - which then insists MediaSource
++  // ::IsTypeSupported can handle the type, i.e. that GECKO can decode
++  // it. Gecko has no H264 decoder on iOS; that absence is the reason
++  // this pipeline exists. So the capability was dropped, the
++  // configuration came back with no video capabilities, and
++  // requestMediaKeySystemAccess rejected - after Supports() had already
++  // said yes, which is exactly the "recognised as FairPlay but never
++  // loads" the device showed.
++  //
++  // The comment this replaces said it advertised "what the platform can
++  // decrypt, not what Gecko can currently draw", and was written before
++  // the AVPlayer path existed. It does now.
++  config->mMP4.SetCanDecryptAndDecode(EME_CODEC_H264);
++  config->mMP4.SetCanDecryptAndDecode(EME_CODEC_AAC);
 +}
 +#endif
 +
  /* static */ void KeySystemConfig::CreateWivineL3KeySystemConfigs(
      const KeySystemConfigRequest& aRequest,
      nsTArray<KeySystemConfig>& aOutConfigs) {
-@@ -232,6 +291,11 @@
+@@ -232,6 +306,11 @@ KeySystemConfig::CreateKeySystemConfigs(
      } else if (IsWidevineKeySystem(keySystem)) {
        CreateWivineL3KeySystemConfigs(request, outConfigs);
      }
