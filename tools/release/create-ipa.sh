@@ -9,6 +9,12 @@ fi
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+# Refuse to package an IPA whose libxul predates the patch series.
+# Editing patches/ and rebuilding only the app target produces a build
+# that looks fine and runs the PREVIOUS engine on device - invisible
+# here, and indistinguishable from "the fix did not work" when testing.
+"$SCRIPT_DIR/../development/preflight-build.sh" "$ROOT_DIR"
+
 ARCHIVE_DIR="$ROOT_DIR/dist/Reynard.xcarchive"
 APP_DIR="$ARCHIVE_DIR/Products/Applications"
 WORK_DIR="$ROOT_DIR/dist/Reynard"

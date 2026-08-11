@@ -221,7 +221,14 @@ public final class AVPlayerHost: NSObject {
 
     /// PROBE - see fix_avplayer_silent_playback_probe.py. Set false to
     /// restore audio once the question is answered.
-    private static let kSilentPlaybackProbe = true
+    // OFF. The probe answered its question - with audio tracks disabled
+    // the player still reached only .waitingToPlayAtSpecifiedRate, one
+    // frame, then .paused - and every audio-session category was refused
+    // to this process, so the restriction was never about audio. Leaving
+    // it on now only hides the win condition: with the player brokered
+    // into the app process, SOUND is the fastest proof that playback
+    // sustains somewhere iOS permits, and it needs no log at all.
+    private static let kSilentPlaybackProbe = false
 
     /// Disables every audio track on a ready item, then re-issues play.
     ///
