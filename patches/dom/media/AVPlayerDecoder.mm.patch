@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,939 @@
+@@ -0,0 +1,958 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -217,6 +217,25 @@ index 000000000000..661d75d2d5f1
 +  rv = CreateAndInitStateMachine(false);
 +  printf_stderr("avPlayer: Load done - CreateAndInitStateMachine rv=0x%08x\n",
 +                static_cast<uint32_t>(rv));
++
++  // The content principal, from the URL AVFoundation is about to load.
++  // Without this mContentPrincipal stays null for the decoder's whole
++  // life, and HTMLMediaElement::IsCORSSameOrigin - which asks
++  // NodePrincipal()->Subsumes(GetCurrentPrincipal()) - can never pass.
++  // DispatchEncrypted then fires the REDACTED form of the event,
++  // MediaEncryptedEvent::Constructor(this), with no init data and an
++  // empty type: exactly the "type='' initData=null" every capture
++  // showed, even on same-origin streams where the data should be
++  // exposed. Players call generateRequest with that null and throw.
++  //
++  // NotifyLoad is the intended entry point and still has no caller;
++  // this calls the same work directly, at the one place the resolved
++  // URL is already in hand. AVFoundation's own redirects remain
++  // invisible to us, so a redirected stream is treated as its
++  // pre-redirect origin - the same limitation HLSDecoder has.
++  UpdateCurrentPrincipal(spec);
++  printf_stderr("avPlayer: content principal set from %s\n", spec.get());
++
 +  return rv;
 +}
 +
