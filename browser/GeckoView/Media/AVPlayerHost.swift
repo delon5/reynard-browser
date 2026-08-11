@@ -194,8 +194,17 @@ public final class AVPlayerHost: NSObject {
         var pullTicks: UInt64 = 0
         var reportedFirstPull = false
         /// Consecutive ticks that delivered nothing while the player was
-        /// not playing - drives the auto-repause in pullFrames.
+        /// PAUSED - drives the auto-repause in pullFrames. Deliberately
+        /// not counted while rebuffering (.waitingToPlayAtSpecifiedRate):
+        /// nothing would unpark the link when the stall clears.
+        /// Guarded by stateLock, like wantsPlayback.
         var idlePullTicks: Int = 0
+        /// Desired park state for the pull link. Guarded by stateLock -
+        /// written from Gecko's main thread (pause, suspend) and from
+        /// the GCD main queue (the idle backstop, the readiness replay).
+        /// CADisplayLink.isPaused itself is only ever touched on the
+        /// GCD main queue; see setPullParked.
+        var pullParked = false
 
         /// Token from addPeriodicTimeObserver; AVFoundation requires it
         /// handed back to removeTimeObserver before the player is
@@ -421,19 +430,38 @@ public final class AVPlayerHost: NSObject {
         // CADisableMinimumFrameDurationOnPhone set in Info.plist - for
         // the entire life of every player, paused and backgrounded
         // included, computing an item time and querying the output every
-        // tick. A player that is not playing and has delivered nothing
-        // for ~2s at 120Hz cannot need that. play, resume, seek and the
+        // tick. A player that is PAUSED and has delivered nothing for
+        // ~2s at 120Hz cannot need that. play, resume, seek and the
         // readiness replay all restart delivery.
+        //
+        // == .paused exactly, NOT "anything but .playing". A rebuffer
+        // sits in .waitingToPlayAtSpecifiedRate with the timebase
+        // frozen, so every tick reports "no new pixel buffer" - and
+        // when AVPlayer recovers on its own, no play/resume/seek
+        // arrives to unpark a parked link, and item.status never
+        // leaves .readyToPlay so the readiness replay does not fire
+        // either (nor could it: rate stays 1.0 while waiting, and the
+        // replay bails on rate != 0). Parking on a stall therefore
+        // froze the video permanently on the last decoded frame while
+        // audio played on. Every case the backstop exists for still
+        // parks: created-but-never-played, pause() and suspend() all
+        // sit in .paused.
         func noteIdleTick() {
-            guard entry.player.timeControlStatus != .playing else {
+            let shouldPark = withState { () -> Bool in
+                guard entry.player.timeControlStatus == .paused else {
+                    entry.idlePullTicks = 0
+                    return false
+                }
+                entry.idlePullTicks += 1
+                guard entry.idlePullTicks >= 240 else {
+                    return false
+                }
                 entry.idlePullTicks = 0
-                return
+                return true
             }
-            entry.idlePullTicks += 1
-            if entry.idlePullTicks >= 240 {
-                entry.idlePullTicks = 0
-                link.isPaused = true
-                avLog("framePull[\(id)] idle while not playing - pausing pull link")
+            if shouldPark {
+                setPullParked(true, for: entry)
+                avLog("framePull[\(id)] idle while paused - pausing pull link")
             }
         }
 
@@ -467,7 +495,7 @@ public final class AVPlayerHost: NSObject {
             return
         }
 
-        entry.idlePullTicks = 0
+        withState { entry.idlePullTicks = 0 }
         if !entry.reportedFirstPull {
             entry.reportedFirstPull = true
             avLog("framePull[\(id)] FIRST BUFFER after \(tick) ticks - handing to Gecko")
@@ -633,7 +661,7 @@ public final class AVPlayerHost: NSObject {
         }
         entry.player.pause()
         // A paused player produces no frames.
-        entry.displayLink?.isPaused = true
+        setPullParked(true, for: entry)
     }
 
     /// Backgrounding. Playback stops but the item is kept, so resuming
@@ -645,7 +673,7 @@ public final class AVPlayerHost: NSObject {
             return
         }
         entry.player.pause()
-        entry.displayLink?.isPaused = true
+        setPullParked(true, for: entry)
     }
 
     @objc public func resume(_ id: UInt) {
@@ -664,8 +692,46 @@ public final class AVPlayerHost: NSObject {
     /// that can make frames flow again routes through here: play,
     /// resume, seek, and the readiness replay in observeMetadata.
     private func resumeFrameDelivery(for entry: Player) {
-        entry.idlePullTicks = 0
-        entry.displayLink?.isPaused = false
+        setPullParked(false, for: entry)
+    }
+
+    /// The one owner of the park state. The DECISION lives under
+    /// stateLock with the rest of the Player's shared state; the
+    /// APPLICATION to CADisplayLink.isPaused happens only on the GCD
+    /// main queue, the queue the link is scheduled on - pause and
+    /// suspend arrive on Gecko's main thread, which is a different
+    /// thread in a content process (see the stateLock comment above),
+    /// and CADisplayLink is not documented thread-safe. The block
+    /// re-reads the desired state under the lock, so a decision that
+    /// lands while the hop is in flight wins over the stale one; the
+    /// link is also only read under the lock, so the hop cannot race
+    /// destroy() nilling it.
+    private func setPullParked(_ parked: Bool, for entry: Player) {
+        let hasLink = withState { () -> Bool in
+            entry.pullParked = parked
+            if !parked {
+                entry.idlePullTicks = 0
+            }
+            return entry.displayLink != nil
+        }
+        guard hasLink else {
+            return
+        }
+        DispatchQueue.main.async { [weak self, weak entry] in
+            guard let self, let entry else {
+                return
+            }
+            let apply = self.withState { () -> (CADisplayLink, Bool)? in
+                guard let link = entry.displayLink else {
+                    return nil
+                }
+                return (link, entry.pullParked)
+            }
+            guard let apply else {
+                return
+            }
+            apply.0.isPaused = apply.1
+        }
     }
 
     @objc public func destroy(_ id: UInt) {
