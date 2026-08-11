@@ -130,6 +130,20 @@ final class TabManagerImplementation: NSObject, TabManager {
     }
     
     private var memoryWarningObservationToken: NSObjectProtocol?
+
+    /// Recoveries parked because the content process died while the
+    /// app was not active. Closing the dead session and opening a
+    /// replacement spawns an NSExtension process, and a process
+    /// spawned into a backgrounded app is suspended mid-launch and
+    /// cannot answer the synchronous XPC ExtensionFoundation sends
+    /// every hosted extension during willEnterForeground - the main
+    /// thread blocks inside the cascade and the watchdog kills the app
+    /// at 10s (0x8BADF00D, seen on device with PiP active). Parked
+    /// here instead and drained at didBecomeActive, the same lifecycle
+    /// point where every user-initiated tab open already spawns
+    /// safely. See fix_defer_respawns_while_inactive.py.
+    private var deferredSessionRecoveries: [(tabID: UUID, reason: String)] = []
+    private var didBecomeActiveObservationToken: NSObjectProtocol?
     
     init(
         delegate: TabManagerDelegate?,
@@ -169,12 +183,27 @@ final class TabManagerImplementation: NSObject, TabManager {
             self?.sleepBackgroundedTabs()
             self?.dropBackgroundThumbnails()
         }
+
+        // Recoveries deferred while the app was not active run here -
+        // after the foreground cascade, so the spawn cannot collide
+        // with the synchronous extension messaging inside it. See
+        // fix_defer_respawns_while_inactive.py.
+        didBecomeActiveObservationToken = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.drainDeferredSessionRecoveries()
+        }
     }
     
     deinit {
         hangWatchdog.stop()
         if let memoryWarningObservationToken {
             NotificationCenter.default.removeObserver(memoryWarningObservationToken)
+        }
+        if let didBecomeActiveObservationToken {
+            NotificationCenter.default.removeObserver(didBecomeActiveObservationToken)
         }
     }
     
@@ -1384,6 +1413,19 @@ final class TabManagerImplementation: NSObject, TabManager {
                 return
             }
 
+            // ADDED - see fix_defer_respawns_while_inactive.py. The
+            // rebuild rung below spawns a content process, which must
+            // not happen while the app is backgrounded (it is the
+            // respawn-while-inactive hazard recoverTabAfterSessionLoss
+            // now defers), and a re-dispatch would go to a process
+            // that may be suspended. Re-arm with the same attempt and
+            // judge again on the foreground side.
+            guard UIApplication.shared.applicationState == .active else {
+                NSLog("[LoadWatchdog] tab %@ fired while app is not active - re-arming (attempt %d)", tabID.uuidString, attempt)
+                self.armLoadWatchdog(for: tab, pendingInput: pendingInput, retryURL: retryURL, attempt: attempt)
+                return
+            }
+
             if attempt == 0 {
                 NSLog("[LoadWatchdog] tab %@ silent %.1fs after LoadUri %@ - re-dispatching (retry 1 of 1)", tabID.uuidString, CFAbsoluteTimeGetCurrent() - armedAt, self.loggableURL(retryURL, isPrivate: tab.isPrivate))
                 self.loadURL(retryURL, in: tab)
@@ -1676,7 +1718,28 @@ extension TabManagerImplementation: ContentDelegate {
         // watchdog left armed here would fire against the fresh session
         // and double-load.
         clearLoadWatchdog(for: tab, signal: "sessionRecovery")
-        
+
+        // ADDED - see fix_defer_respawns_while_inactive.py.
+        //
+        // createSession(.immediate) below opens the window on the
+        // spot, which spawns the replacement NSExtension process. A
+        // process spawned while the app is backgrounded is suspended
+        // mid-launch, cannot answer the synchronous XPC iOS sends
+        // every hosted extension on the next willEnterForeground, and
+        // the watchdog kills the app for the hang - 0x8BADF00D, on
+        // device: onKill at 22:29:06.67 during a PiP background stay,
+        // replacement pid spawned 54ms later, main thread dead from
+        // the moment the user tapped back in at 22:29:12.95. The dead
+        // session stays on the tab, inert, until the drain at
+        // didBecomeActive re-enters this method.
+        if UIApplication.shared.applicationState != .active {
+            if !deferredSessionRecoveries.contains(where: { $0.tabID == tab.id }) {
+                deferredSessionRecoveries.append((tabID: tab.id, reason: reason))
+            }
+            logger(String(format: "tabRecovery: content process %@ for tab %@ while app is not active - deferring respawn until didBecomeActive", reason, tab.id.uuidString))
+            return
+        }
+
         // Nothing to reload to - keeping it would leave a permanently
         // blank entry, so removal is still right here.
         guard let url = displayedURL(for: tab) else {
@@ -1701,6 +1764,38 @@ extension TabManagerImplementation: ContentDelegate {
         // than waiting for it to be reselected.
         if tab === selectedTab {
             loadRestoredURLIfNeeded(for: location.index, mode: location.mode)
+        }
+    }
+
+    /// Runs the recoveries parked while the app was not active - see
+    /// the deferral in recoverTabAfterSessionLoss and
+    /// fix_defer_respawns_while_inactive.py. Called from the
+    /// didBecomeActive observer, so the app is genuinely active and
+    /// the foreground cascade - with its synchronous per-extension
+    /// XPC - is over before any process spawns.
+    private func drainDeferredSessionRecoveries() {
+        guard !deferredSessionRecoveries.isEmpty else {
+            return
+        }
+        let parked = deferredSessionRecoveries
+        deferredSessionRecoveries = []
+        logger(String(format: "tabRecovery: draining %d recovery(ies) deferred while inactive", parked.count))
+        for entry in parked {
+            guard let location = tabLocation(for: entry.tabID) else {
+                // Closed while parked - nothing left to recover.
+                continue
+            }
+            let tab = tabs(for: location.mode)[location.index]
+            // sleepBackgroundedTabs may have rebuilt this tab while it
+            // was parked (a memory warning mid-background evicts it:
+            // dead session closed, fresh pending one in place - the
+            // same end state recovery produces). Recovering again
+            // would close the healthy replacement.
+            guard case .none = tab.state.restoreState else {
+                logger(String(format: "tabRecovery: tab %@ already rebuilt while parked - skipping", entry.tabID.uuidString))
+                continue
+            }
+            recoverTabAfterSessionLoss(session: tab.session, reason: entry.reason)
         }
     }
     

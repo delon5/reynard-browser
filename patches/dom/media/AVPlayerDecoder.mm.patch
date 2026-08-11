@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,921 @@
+@@ -0,0 +1,927 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -297,6 +297,8 @@ index 000000000000..661d75d2d5f1
 +
 +void AVPlayerDecoder::Play() {
 +  MOZ_ASSERT(NS_IsMainThread());
++  printf_stderr("avPlayer: decoder Play() player=%llu\n",
++                (unsigned long long)mPlayerId);
 +  if (mPlayerId) {
 +    [AVPlayerHost() play:mPlayerId];
 +  }
@@ -305,6 +307,8 @@ index 000000000000..661d75d2d5f1
 +
 +void AVPlayerDecoder::Pause() {
 +  MOZ_ASSERT(NS_IsMainThread());
++  printf_stderr("avPlayer: decoder Pause() player=%llu\n",
++                (unsigned long long)mPlayerId);
 +  if (mPlayerId) {
 +    [AVPlayerHost() pause:mPlayerId];
 +  }
@@ -313,6 +317,8 @@ index 000000000000..661d75d2d5f1
 +
 +void AVPlayerDecoder::Suspend() {
 +  MOZ_ASSERT(NS_IsMainThread());
++  printf_stderr("avPlayer: decoder Suspend() player=%llu\n",
++                (unsigned long long)mPlayerId);
 +  if (mPlayerId) {
 +    [AVPlayerHost() suspend:mPlayerId];
 +  }

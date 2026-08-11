@@ -642,6 +642,7 @@ public final class AVPlayerHost: NSObject {
     /// lost: an item that is not ready yet drops the rate back to 0, and
     /// resumeIfWanted replays this once it becomes ready.
     @objc public func play(_ id: UInt) {
+        avLog("HOST play(\(id))")
         guard let entry = withState({ () -> Player? in
             players[id]?.wantsPlayback = true
             return players[id]
@@ -653,6 +654,14 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func pause(_ id: UInt) {
+        // DIAGNOSTIC - names the pauser. The libxul frames in this
+        // backtrace identify the Gecko path that decided to pause;
+        // symbolicate the addresses offline if the build is stripped.
+        avLog("HOST pause(\(id)) thread="
+            + (Thread.isMainThread ? "gcd-main" : Thread.current.description))
+        for frame in Thread.callStackSymbols.dropFirst().prefix(8) {
+            avLog("HOST pause[\(id)] frame: \(frame)")
+        }
         guard let entry = withState({ () -> Player? in
             players[id]?.wantsPlayback = false
             return players[id]
@@ -667,6 +676,14 @@ public final class AVPlayerHost: NSObject {
     /// Backgrounding. Playback stops but the item is kept, so resuming
     /// does not re-fetch or re-negotiate keys.
     @objc public func suspend(_ id: UInt) {
+        // DIAGNOSTIC - names the pauser. The libxul frames in this
+        // backtrace identify the Gecko path that decided to pause;
+        // symbolicate the addresses offline if the build is stripped.
+        avLog("HOST suspend(\(id)) thread="
+            + (Thread.isMainThread ? "gcd-main" : Thread.current.description))
+        for frame in Thread.callStackSymbols.dropFirst().prefix(8) {
+            avLog("HOST suspend[\(id)] frame: \(frame)")
+        }
         // wantsPlayback deliberately left alone: this is not the user
         // pausing, and resume has to be able to tell the two apart.
         guard let entry = withState({ players[id] }) else {
@@ -677,6 +694,7 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func resume(_ id: UInt) {
+        avLog("HOST resume(\(id))")
         // Only resume what was actually playing. Unconditionally calling
         // play() here would start a video the user had paused before
         // backgrounding.
@@ -735,6 +753,7 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func destroy(_ id: UInt) {
+        avLog("HOST destroy(\(id))")
         guard let entry = withState({ players.removeValue(forKey: id) }) else {
             return
         }

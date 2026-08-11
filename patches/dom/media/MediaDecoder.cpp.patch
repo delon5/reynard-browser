@@ -27,3 +27,30 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
  
    return NS_OK;
  }
+@@ -916,18 +926,26 @@
+ void MediaDecoder::PlaybackEnded() {
+   MOZ_ASSERT(NS_IsMainThread());
+   MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
++  // REYNARD DIAGNOSTIC - names the pauser. If this prints and a host
++  // pause follows, Gecko ended playback and stopped the AVPlayer.
++  printf_stderr("mediaDecoder: PlaybackEnded entered - state=%s\n",
++                EnumValueToString(mPlayState));
+ 
+   if (mLogicallySeeking || mPlayState == PLAY_STATE_LOADING ||
+       mPlayState == PLAY_STATE_ENDED) {
+     LOG("MediaDecoder::PlaybackEnded bailed out, "
+         "mLogicallySeeking=%d mPlayState=%s",
+         mLogicallySeeking.Ref(), EnumValueToString(mPlayState));
++    printf_stderr("mediaDecoder: PlaybackEnded BAILED (state=%s)\n",
++                  EnumValueToString(mPlayState));
+     return;
+   }
+ 
+   LOG("MediaDecoder::PlaybackEnded");
+ 
+   ChangeState(PLAY_STATE_ENDED);
+   InvalidateWithFlags(VideoFrameContainer::INVALIDATE_FORCE);
++  printf_stderr(
++      "mediaDecoder: PlaybackEnded - element will fire 'ended' and Pause()\n");
+   GetOwner()->PlaybackEnded();
+ }
