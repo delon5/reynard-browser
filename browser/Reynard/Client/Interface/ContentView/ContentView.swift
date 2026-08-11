@@ -293,9 +293,18 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     /// slides away, fixed content follows it down into the strip the
     /// layout viewport already reserved.
     func setFloatingChromeInset(_ inset: CGFloat) {
-        guard inset != floatingChromeInset else {
-            return
-        }
+        // No early-out, for the third time tonight and the same reason.
+        //
+        // The value this feeds - the compositor margin - is ALSO written
+        // by every scroll frame through applyToolbarOffsets, so our copy
+        // of the inset agreeing with the last inset says nothing about
+        // what the compositor currently holds. A capture caught exactly
+        // that: condensing computed margin=60 and emitted no send at all,
+        // leaving the compositor on the -107.2 a scroll frame had left
+        // there, so a floating pill lifted nothing.
+        //
+        // syncContentBottomOffset still de-duplicates against the value
+        // actually sent, which is the right place for that check.
         floatingChromeInset = inset
         syncContentBottomOffset()
     }

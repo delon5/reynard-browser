@@ -136,8 +136,11 @@ final class ToolbarController {
         let pillTop = browserChrome.condensedPillFrame(in: rootView).minY
         NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) margin=\(margin) pillTop=\(pillTop) viewH=\(rootView.bounds.height)")
 
-        contentView.setChromeCondensed(condensed)
+        // Inset BEFORE the condensed flag: setChromeCondensed re-syncs
+        // the margin, and it must not do that while still holding the
+        // previous inset.
         contentView.setFloatingChromeInset(margin)
+        contentView.setChromeCondensed(condensed)
         contentView.setSafeAreaInsetBottom(0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
