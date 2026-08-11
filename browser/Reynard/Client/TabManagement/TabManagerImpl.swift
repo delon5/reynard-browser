@@ -818,6 +818,20 @@ final class TabManagerImplementation: NSObject, TabManager {
             // "toolbarTrace: ... visited=1 delivered=0" is reporting.
             if tab === selectedTab {
                 sessionManager.activate(tab.session)
+                // Re-bind as well, because the view bound to this
+                // session while it was still closed: selectTab notifies
+                // didSelectTabAt - which sends the toolbar limits and the
+                // content bottom offset - BEFORE this line runs, and a
+                // session with no window drops both silently. Without
+                // this the tab lays out with no chrome reservation at all
+                // and its content sits under the pill. Same session on
+                // both sides deliberately; what changed is that it is
+                // now open.
+                delegate?.tabManager(
+                    self,
+                    didReplaceSelectedSession: tab.session,
+                    with: tab.session
+                )
             }
         }
         
