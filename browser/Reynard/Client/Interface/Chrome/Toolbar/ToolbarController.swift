@@ -104,21 +104,21 @@ final class ToolbarController {
         // indicator band beneath it - about 94pt here, not 60.
         let pill = BrowserChrome.condensedPillOccupiedHeight + rootView.safeAreaInsets.bottom
 
-        // Reserve what is ACTUALLY on screen: the toolbar's height while
-        // it is up, the pill's once it has condensed. One mechanism, one
-        // number.
+        // FLOATING PILL. The two mechanisms split by state so they can
+        // never both charge for the same chrome - that double count is
+        // what "RECEIVED offset=180 max=426 height=606" was, 202pt of
+        // clearance and a black bar.
         //
-        // The two failures that bracket this are both in the log.
-        // Reserving the toolbar (426) AND sending the pill as a
-        // fixed-layer margin (180) charged for both at once - "RECEIVED
-        // offset=180 max=426 height=606", 202pt of clearance and a black
-        // bar. Reserving the pill alone left the expanded toolbar, at
-        // 142pt, covering the bottom 82pt of the page instead.
+        // Condensed: reserve NOTHING in the viewport, so the page keeps
+        // the full window and a scrolling feed passes under the pill,
+        // which is the floating look. The pill's clearance is a
+        // compositor fixed-layer margin instead, and that lifts exactly
+        // what should be lifted - position:fixed and sticky-bottom bars,
+        // the site's own navigation - without relaying the document out.
         //
-        // The flip does cost one reflow per condense. That is accepted
-        // deliberately - it is per flip, not per frame - and it is the
-        // price of the number being right in both states.
-        let maxHeight = condensed ? pill : maxToolbarOffset
+        // Expanded: the toolbar is opaque and occupies real space, so it
+        // is a viewport reservation and the margin is nothing.
+        let maxHeight = condensed ? 0 : maxToolbarOffset
 
         // Both knobs on one line, because they only mean anything
         // together: maxHeight shortens the LAYOUT VIEWPORT, so it moves
@@ -129,11 +129,7 @@ final class ToolbarController {
         // tell apart.
         NSLog("dynToolbar: condensed=\(condensed) max=\(maxHeight) pill=\(pill) toolbar=\(maxToolbarOffset) top=\(maxTopToolbarOffset)")
 
-        // Zero: the viewport reservation above IS the pill's clearance
-        // now, and adding a fixed-layer margin for it as well is exactly
-        // the 426+180 double-count. The toolbar's own slide offsets
-        // still flow through applyToolbarOffsets untouched.
-        contentView.setFloatingChromeInset(0)
+        contentView.setFloatingChromeInset(condensed ? pill : 0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset
