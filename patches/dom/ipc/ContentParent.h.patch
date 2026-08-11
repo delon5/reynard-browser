@@ -2,12 +2,20 @@ diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
 index 8cca90086a07..ccabf1e2f072 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
-@@ -746,6 +746,9 @@ class ContentParent final : public PContentParent,
+@@ -746,6 +746,17 @@ class ContentParent final : public PContentParent,
        const OriginAttributes& aOriginAttributes, uint64_t aInnerWindowId,
        const nsCString& aPartitionKey, BlobURLDataRequestResolver&& aResolver);
  
 +  mozilla::ipc::IPCResult RecvNotifyGPUProcessLost(
 +      const uint64_t& aProcessToken);
++
++  // Reynard: the content process cannot play media (iOS refuses it an
++  // audio session), so it asks this process to own the AVPlayer.
++  mozilla::ipc::IPCResult RecvAVPlayerCreate(const uint64_t& aPlayerId,
++                                             const nsCString& aUrl);
++  mozilla::ipc::IPCResult RecvAVPlayerControl(const uint64_t& aPlayerId,
++                                              const uint32_t& aOp,
++                                              const double& aArg);
 +
   protected:
    bool CheckBrowsingContextEmbedder(CanonicalBrowsingContext* aBC,

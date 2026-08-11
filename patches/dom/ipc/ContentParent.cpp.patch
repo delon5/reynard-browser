@@ -74,7 +74,7 @@ index 2ee13e7e51c7..b3556e90c7ef 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -7985,6 +8007,17 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -7985,6 +8007,51 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  
@@ -88,6 +88,40 @@ index 2ee13e7e51c7..b3556e90c7ef 100644
 +  }
 +  return IPC_OK();
 +}
++
++#if defined(MOZ_WIDGET_UIKIT)
++namespace mozilla {
++// Defined in dom/media/AVPlayerDecoder.mm. Declared here rather than
++// through a header so dom/ipc needs no new include path, and because
++// reaching the Swift host takes Objective-C, which this file cannot
++// speak. Same shape as ReynardAVPlayerDispatchEncrypted. Both live in
++// libxul, and both are main-thread only.
++void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl);
++void ReynardAVPlayerBrokerControl(uint64_t aKey, uint32_t aOp, double aArg);
++}  // namespace mozilla
++
++// The content process's player id is only unique within that process,
++// so it is composed with the child id before reaching the broker.
++static uint64_t AVPlayerBrokerKey(uint64_t aChildID, uint64_t aPlayerId) {
++  return (aChildID << 32) | (aPlayerId & 0xffffffff);
++}
++
++IPCResult ContentParent::RecvAVPlayerCreate(const uint64_t& aPlayerId,
++                                            const nsCString& aUrl) {
++  ReynardAVPlayerBrokerCreate(
++      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId), aUrl);
++  return IPC_OK();
++}
++
++IPCResult ContentParent::RecvAVPlayerControl(const uint64_t& aPlayerId,
++                                             const uint32_t& aOp,
++                                             const double& aArg) {
++  ReynardAVPlayerBrokerControl(
++      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId), aOp,
++      aArg);
++  return IPC_OK();
++}
++#endif
 +
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);

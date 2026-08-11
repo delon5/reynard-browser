@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,958 @@
+@@ -0,0 +1,1109 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -30,6 +30,10 @@ index 000000000000..661d75d2d5f1
 +#include "nsNetUtil.h"
 +#include "MediaContainerType.h"
 +#include "PDMFactorySupport.h"
++// SendAVPlayerCreate / SendAVPlayerControl - the player lives in the
++// app process, because iOS refuses this one an audio session.
++#include "mozilla/dom/ContentChild.h"
++#include "nsXULAppAPI.h"  // XRE_IsContentProcess
 +
 +#include <cmath>
 +#include <unordered_map>
@@ -76,6 +80,137 @@ index 000000000000..661d75d2d5f1
 +// metadata callback arrives.
 +static const gfx::IntSize kInitialDisplay(1920, 1080);
 +
++// Control opcodes for the app-process broker. Shared by value with
++// ContentParent through PContent's AVPlayerControl message; keep the
++// numbering stable.
++enum AVPlayerOp : uint32_t {
++  kAVPlayerPlay = 0,
++  kAVPlayerPause = 1,
++  kAVPlayerSuspend = 2,
++  kAVPlayerResume = 3,
++  kAVPlayerDestroy = 4,
++  kAVPlayerSeek = 5,
++};
++
++// PARENT PROCESS ONLY: the real players, keyed by the composite id
++// ContentParent builds from (childID, content-side player id). The
++// content process never sees a host id - it names its own player and
++// this map does the translation.
++//
++// Main thread only, like PlayersById, and for the same reason: every
++// entry point is a main-thread IPC callback.
++static std::unordered_map<uint64_t, uintptr_t>& BrokeredPlayers() {
++  MOZ_ASSERT(NS_IsMainThread());
++  static std::unordered_map<uint64_t, uintptr_t> sBrokeredPlayers;
++  return sBrokeredPlayers;
++}
++
++void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
++  MOZ_ASSERT(NS_IsMainThread());
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (!host) {
++    printf_stderr("avPlayer: broker has no host - cannot create key %llu\n",
++                  (unsigned long long)aKey);
++    return;
++  }
++  NSUInteger playerId = [host
++      createPlayerWithUrl:[NSString stringWithUTF8String:aUrl.get()]];
++  if (!playerId) {
++    printf_stderr("avPlayer: broker createPlayer FAILED for key %llu\n",
++                  (unsigned long long)aKey);
++    return;
++  }
++  BrokeredPlayers()[aKey] = static_cast<uintptr_t>(playerId);
++  printf_stderr(
++      "avPlayer: broker created host player %llu for key %llu (%s)\n",
++      (unsigned long long)playerId, (unsigned long long)aKey, aUrl.get());
++}
++
++void ReynardAVPlayerBrokerControl(uint64_t aKey, uint32_t aOp, double aArg) {
++  MOZ_ASSERT(NS_IsMainThread());
++  auto& players = BrokeredPlayers();
++  auto entry = players.find(aKey);
++  if (entry == players.end()) {
++    // Create failed, or the control raced teardown. Dropped, like every
++    // other unknown-id path here.
++    return;
++  }
++  const NSUInteger playerId = static_cast<NSUInteger>(entry->second);
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (!host) {
++    return;
++  }
++  printf_stderr("avPlayer: broker op=%u player=%llu\n", aOp,
++                (unsigned long long)playerId);
++  switch (aOp) {
++    case kAVPlayerPlay:
++      [host play:playerId];
++      break;
++    case kAVPlayerPause:
++      [host pause:playerId];
++      break;
++    case kAVPlayerSuspend:
++      [host suspend:playerId];
++      break;
++    case kAVPlayerResume:
++      [host resume:playerId];
++      break;
++    case kAVPlayerSeek:
++      [host seek:playerId to:aArg];
++      break;
++    case kAVPlayerDestroy:
++      [host destroy:playerId];
++      players.erase(entry);
++      break;
++    default:
++      break;
++  }
++}
++
++// Every control the decoder issues, routed to whichever process owns
++// the player: straight to the host in the parent, over PContent from a
++// content process.
++static void ControlPlayer(uintptr_t aPlayerId, uint32_t aOp,
++                          double aArg = 0.0) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!aPlayerId) {
++    return;
++  }
++  if (XRE_IsContentProcess()) {
++    if (dom::ContentChild* cc = dom::ContentChild::GetSingleton()) {
++      cc->SendAVPlayerControl(static_cast<uint64_t>(aPlayerId), aOp, aArg);
++    }
++    return;
++  }
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (!host) {
++    return;
++  }
++  const NSUInteger playerId = static_cast<NSUInteger>(aPlayerId);
++  switch (aOp) {
++    case kAVPlayerPlay:
++      [host play:playerId];
++      break;
++    case kAVPlayerPause:
++      [host pause:playerId];
++      break;
++    case kAVPlayerSuspend:
++      [host suspend:playerId];
++      break;
++    case kAVPlayerResume:
++      [host resume:playerId];
++      break;
++    case kAVPlayerSeek:
++      [host seek:playerId to:aArg];
++      break;
++    case kAVPlayerDestroy:
++      [host destroy:playerId];
++      break;
++    default:
++      break;
++  }
++}
++
 +// Live decoders by the player handle the Swift host handed back.
 +//
 +// The metadata callback arrives as a C symbol carrying only that handle
@@ -103,7 +238,7 @@ index 000000000000..661d75d2d5f1
 +    // Erased first: destroy tears down the KVO observations, but one
 +    // may already be queued on this thread, and it must not find us.
 +    PlayersById().erase(mPlayerId);
-+    [AVPlayerHost() destroy:mPlayerId];
++    ControlPlayer(mPlayerId, kAVPlayerDestroy);
 +    // Registry last - see Shutdown for the ordering argument.
 +    AVPlayerPlaybackRegistry::Unregister(mPlayerId);
 +    mPlayerId = 0;
@@ -173,13 +308,37 @@ index 000000000000..661d75d2d5f1
 +  }
 +
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
-+  if (!host) {
++  if (!host && !XRE_IsContentProcess()) {
++    // A content process reaches the host through IPC and needs no local
++    // one; only the parent-process path requires it here.
 +    return NS_ERROR_NOT_AVAILABLE;
 +  }
 +
-+  mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
-+  if (!mPlayerId) {
-+    return NS_ERROR_FAILURE;
++  if (XRE_IsContentProcess()) {
++    // The app process owns the player; this process only names it. iOS
++    // refuses a content extension any playback audio session ('!pla'),
++    // so a player created here reaches .waitingToPlayAtSpecifiedRate,
++    // renders at most one frame and is dropped back to .paused by media
++    // services - which is exactly what every capture showed.
++    //
++    // The id is ours and need only be unique within this process;
++    // ContentParent composes it with our child id before it reaches
++    // the broker.
++    static uintptr_t sNextContentPlayerId = 1;
++    mPlayerId = sNextContentPlayerId++;
++    dom::ContentChild* cc = dom::ContentChild::GetSingleton();
++    if (!cc) {
++      mPlayerId = 0;
++      return NS_ERROR_NOT_AVAILABLE;
++    }
++    cc->SendAVPlayerCreate(static_cast<uint64_t>(mPlayerId), spec);
++    printf_stderr("avPlayer: brokering player %llu to the app process\n",
++                  (unsigned long long)mPlayerId);
++  } else {
++    mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
++    if (!mPlayerId) {
++      return NS_ERROR_FAILURE;
++    }
 +  }
 +
 +  // The page can set mediaKeys before the element has a src, so the
@@ -318,9 +477,7 @@ index 000000000000..661d75d2d5f1
 +  MOZ_ASSERT(NS_IsMainThread());
 +  printf_stderr("avPlayer: decoder Play() player=%llu\n",
 +                (unsigned long long)mPlayerId);
-+  if (mPlayerId) {
-+    [AVPlayerHost() play:mPlayerId];
-+  }
++  ControlPlayer(mPlayerId, kAVPlayerPlay);
 +  MediaDecoder::Play();
 +}
 +
@@ -328,9 +485,7 @@ index 000000000000..661d75d2d5f1
 +  MOZ_ASSERT(NS_IsMainThread());
 +  printf_stderr("avPlayer: decoder Pause() player=%llu\n",
 +                (unsigned long long)mPlayerId);
-+  if (mPlayerId) {
-+    [AVPlayerHost() pause:mPlayerId];
-+  }
++  ControlPlayer(mPlayerId, kAVPlayerPause);
 +  MediaDecoder::Pause();
 +}
 +
@@ -338,17 +493,13 @@ index 000000000000..661d75d2d5f1
 +  MOZ_ASSERT(NS_IsMainThread());
 +  printf_stderr("avPlayer: decoder Suspend() player=%llu\n",
 +                (unsigned long long)mPlayerId);
-+  if (mPlayerId) {
-+    [AVPlayerHost() suspend:mPlayerId];
-+  }
++  ControlPlayer(mPlayerId, kAVPlayerSuspend);
 +  MediaDecoder::Suspend();
 +}
 +
 +void AVPlayerDecoder::Resume() {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  if (mPlayerId) {
-+    [AVPlayerHost() resume:mPlayerId];
-+  }
++  ControlPlayer(mPlayerId, kAVPlayerResume);
 +  MediaDecoder::Resume();
 +}
 +
@@ -384,7 +535,7 @@ index 000000000000..661d75d2d5f1
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (mPlayerId) {
 +    PlayersById().erase(mPlayerId);
-+    [AVPlayerHost() destroy:mPlayerId];
++    ControlPlayer(mPlayerId, kAVPlayerDestroy);
 +    // Registry teardown ordering: PlayersById first (kills in-flight
 +    // main-thread pokes), host destroy second (stops the Swift side's
 +    // observers), registry last. A report already in flight finds no
@@ -727,7 +878,7 @@ index 000000000000..661d75d2d5f1
 +  // is naturally a no-op.
 +  printf_stderr("avPlayer: host seek player=%llu to %.3f\n",
 +                (unsigned long long)aPlayerId, aSeconds);
-+  [AVPlayerHost() seek:aPlayerId to:aSeconds];
++  ControlPlayer(aPlayerId, kAVPlayerSeek, aSeconds);
 +}
 +
 +void ReynardAVPlayerDispatchEncrypted(uintptr_t aPlayerId,
