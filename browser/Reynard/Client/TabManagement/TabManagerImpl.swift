@@ -784,6 +784,21 @@ final class TabManagerImplementation: NSObject, TabManager {
             selectedTabMode = regularTabs.isEmpty ? .private : .regular
         }
         
+        // The tab you are about to look at opens EAGERLY. Everything
+        // else stays deferred, which is where the process saving is - a
+        // capture after the deferral counted 5 live children at launch
+        // against 14 before it - but the selected tab has to behave
+        // exactly as it always did: app opens, tab loads, pull to
+        // refresh works. Leaving it to the same lazy path as the rest
+        // made startup depend on a chain of callbacks that is easy to
+        // break and hard to notice.
+        if let selected = tabs(for: selectedTabMode)[safe: max(selectedIndex(for: selectedTabMode), 0)],
+           !selected.session.isOpen() {
+            logger(String(format: "tabRestore: opening the selected tab's session eagerly (%@)", selected.id.uuidString))
+            sessionManager.open(selected.session)
+            sessionManager.activate(selected.session)
+        }
+
         delegate?.tabManagerDidChangeTabs(self)
 
         selectTab(at: max(selectedIndex(for: selectedTabMode), 0), mode: selectedTabMode)
