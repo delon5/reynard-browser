@@ -305,7 +305,12 @@ public class GeckoSession {
         // all. One line per navigation. Deliberately no isOpen() guard
         // - isOpen() staying true around a dead content process is the
         // failure being made visible here, not a precondition.
-        NSLog("[GeckoSession] LoadUri %@ -> %@ (open=%d)", url, disposition.rawValue, isOpen() ? 1 : 0)
+        //
+        // Redacted for private sessions: this line lands in
+        // Documents/reynard_stdout.txt, which persists across launches
+        // and exists to be handed to someone through file sharing. The
+        // disposition and open state - what the line is for - survive.
+        NSLog("[GeckoSession] LoadUri %@ -> %@ (open=%d)", isPrivateMode ? "<private>" : url, disposition.rawValue, isOpen() ? 1 : 0)
     }
     
     public func reload() {

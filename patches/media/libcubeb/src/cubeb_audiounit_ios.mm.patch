@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..d62c3b6d08d2
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_audiounit_ios.mm
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,512 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -185,6 +185,42 @@ index 000000000000..d62c3b6d08d2
 +      [session setPreferredOutputNumberOfChannels:channels error:nil];
 +    }
 +  }
++}
++
++// Enumeration-only session setup: read-only wherever possible.
++//
++// The configurator above still REWRITES the shared session's category,
++// mode and options every time it runs - so a page calling
++// enumerateDevices() during mixing playback dropped .mixWithOthers
++// (options are hard-zero on the !aRecording path), and during a call
++// an output query tore down a live PlayAndRecord route. Enumeration
++// needs none of that: output ports come from currentRoute, readable
++// under any category, and availableInputs only needs a record-capable
++// category - which, if one is already set, must not be replaced.
++extern "C" void cubeb_ios_configure_audio_session_for_enumeration(
++    bool aRecording) {
++  if (!aRecording) {
++    return;
++  }
++  AVAudioSession* session = [AVAudioSession sharedInstance];
++  NSString* category = session.category;
++  if ([category isEqualToString:AVAudioSessionCategoryPlayAndRecord] ||
++      [category isEqualToString:AVAudioSessionCategoryRecord]) {
++    return;
++  }
++  // No record-capable category is set, so availableInputs would come
++  // back empty. Take the same category the stream configurator would,
++  // but keep whatever is already playing mixable alongside it - a
++  // device QUERY must not interrupt anyone's audio.
++  NSError* error = nil;
++  [session setCategory:AVAudioSessionCategoryPlayAndRecord
++                  mode:AVAudioSessionModeDefault
++               options:AVAudioSessionCategoryOptionDefaultToSpeaker |
++                       AVAudioSessionCategoryOptionAllowBluetoothHFP |
++                       AVAudioSessionCategoryOptionAllowBluetoothA2DP |
++                       AVAudioSessionCategoryOptionAllowAirPlay |
++                       AVAudioSessionCategoryOptionMixWithOthers
++                 error:&error];
 +}
 +
 +extern "C" void cubeb_ios_activate_audio_session(
@@ -404,6 +440,19 @@ index 000000000000..d62c3b6d08d2
 +                               : kAudioSessionCategory_MediaPlayback;
 +  AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(category),
 +                          &category);
++}
++
++extern "C" void cubeb_ios_configure_audio_session_for_enumeration(
++    bool aRecording) {
++  // Same symbol set as the iOS 14+ branch above - the caller in
++  // cubeb_audiounit.cpp is not conditional on the deployment target,
++  // so omitting this would be a link error on the fallback path. The
++  // old-API category property has no options to preserve, so the
++  // stream configurator's behaviour is the best available here.
++  if (!aRecording) {
++    return;
++  }
++  cubeb_ios_configure_audio_session_category(true, 0);
 +}
 +
 +extern "C" void cubeb_ios_activate_audio_session(bool aRecording,

@@ -1,4 +1,5 @@
 diff --git a/dom/media/eme/MediaKeySystemAccessManager.cpp b/dom/media/eme/MediaKeySystemAccessManager.cpp
+index aaa3ff25b64f..48f6a50a1c90 100644
 --- a/dom/media/eme/MediaKeySystemAccessManager.cpp
 +++ b/dom/media/eme/MediaKeySystemAccessManager.cpp
 @@ -5,6 +5,7 @@
@@ -9,7 +10,7 @@ diff --git a/dom/media/eme/MediaKeySystemAccessManager.cpp b/dom/media/eme/Media
  #include "MediaKeySystemAccessPermissionRequest.h"
  #include "VideoUtils.h"
  #include "mozilla/DetailedPromise.h"
-@@ -410,6 +411,10 @@
+@@ -410,6 +411,10 @@ void MediaKeySystemAccessManager::RequestMediaKeySystemAccess(
  #ifdef MOZ_WMF_CDM
        !IsPlayReadyKeySystemAndSupported(aRequest->mKeySystem) &&
        !IsWidevineExperimentKeySystemAndSupported(aRequest->mKeySystem) &&
@@ -20,3 +21,19 @@ diff --git a/dom/media/eme/MediaKeySystemAccessManager.cpp b/dom/media/eme/Media
  #endif
        !IsClearkeyKeySystem(aRequest->mKeySystem)) {
      // Not to inform user, because nothing to do if the keySystem is not
+@@ -499,6 +504,15 @@ void MediaKeySystemAccessManager::RequestMediaKeySystemAccess(
+     }
+     return;
+   }
++#ifdef MOZ_WIDGET_UIKIT
++  // DIAGNOSTIC. The emeConfig line further down never appears on device,
++  // so the request is being turned down before configuration selection
++  // is reached - and every reason between here and there is silent.
++  // This says which status came back and the message that goes with it.
++  printf_stderr("emeStatus: %s -> status=%d msg=%s\n",
++                NS_ConvertUTF16toUTF8(aRequest->mKeySystem).get(),
++                (int)status, message.get());
++#endif
+   if (status != MediaKeySystemStatus::Available) {
+     // Failed due to user disabling something, send a notification to
+     // chrome, so we can show some UI to explain how the user can rectify

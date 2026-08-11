@@ -268,7 +268,7 @@ final class TabManagerImplementation: NSObject, TabManager {
             return
         }
         
-        logger(String(format: "tabSleep: sleeping tab %@ (url=%@, suppressInitialNavigation was %@)", tab.id.uuidString, url, String(tab.state.suppressInitialNavigation)))
+        logger(String(format: "tabSleep: sleeping tab %@ (url=%@, suppressInitialNavigation was %@)", tab.id.uuidString, loggableURL(url, isPrivate: isPrivate), String(tab.state.suppressInitialNavigation)))
         sessionManager.close(tab.session)
         // NOT opened. An immediate open spawns a replacement content
         // process straight away, so sleeping a tab freed its page but
@@ -856,7 +856,7 @@ final class TabManagerImplementation: NSObject, TabManager {
             return
         }
         
-        logger(String(format: "tabRestore: RESTORING tab %@ (url=%@) - calling loadURL now", tab.id.uuidString, url))
+        logger(String(format: "tabRestore: RESTORING tab %@ (url=%@) - calling loadURL now", tab.id.uuidString, loggableURL(url, isPrivate: tab.isPrivate)))
         tab.state.restoreState = .none
         tab.state.suppressInitialNavigation = false
         // A restored load reaches the engine only by this path, and a
@@ -1265,6 +1265,15 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// press is itself a load, now backed by a working ladder.
     private static let loadWatchdogSeconds: TimeInterval = 3.0
 
+    /// URLs are evidence in logs that exist to be handed to strangers:
+    /// Documents/reynard_stdout.txt and reynard_jit_log.txt both sit
+    /// under UIFileSharingEnabled and persist across launches. Private
+    /// browsing promises the opposite, so its URLs never enter them -
+    /// the tab id keeps every line traceable without the URL.
+    private func loggableURL(_ url: String, isPrivate: Bool) -> String {
+        return isPrivate ? "<private>" : url
+    }
+
     /// Starts the composite clock for a tab. Reported either as a
     /// latency when the frame arrives, or as an explicit absence after
     /// paintWatchdogSeconds - the case that previously left no trace.
@@ -1294,7 +1303,9 @@ final class TabManagerImplementation: NSObject, TabManager {
     private func armLoadWatchdog(for tab: Tab, pendingInput: String, retryURL: String, attempt: Int = 0) {
         let tabID = tab.id
         loadWatchdogs[tabID]?.workItem.cancel()
-        armPaintWatch(for: tabID, url: retryURL)
+        // Redacted at arm time, so every later PaintWatch line -
+        // success and timeout alike - is safe in a shared log.
+        armPaintWatch(for: tabID, url: loggableURL(retryURL, isPrivate: tab.isPrivate))
 
         let armedAt = CFAbsoluteTimeGetCurrent()
         let workItem = DispatchWorkItem { [weak self] in
@@ -1317,7 +1328,7 @@ final class TabManagerImplementation: NSObject, TabManager {
             }
 
             if attempt == 0 {
-                NSLog("[LoadWatchdog] tab %@ silent %.1fs after LoadUri %@ - re-dispatching (retry 1 of 1)", tabID.uuidString, CFAbsoluteTimeGetCurrent() - armedAt, retryURL)
+                NSLog("[LoadWatchdog] tab %@ silent %.1fs after LoadUri %@ - re-dispatching (retry 1 of 1)", tabID.uuidString, CFAbsoluteTimeGetCurrent() - armedAt, self.loggableURL(retryURL, isPrivate: tab.isPrivate))
                 self.loadURL(retryURL, in: tab)
                 self.armLoadWatchdog(for: tab, pendingInput: pendingInput, retryURL: retryURL, attempt: 1)
                 return
@@ -1351,7 +1362,7 @@ final class TabManagerImplementation: NSObject, TabManager {
             armedAt: armedAt
         )
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadWatchdogSeconds, execute: workItem)
-        NSLog("[LoadWatchdog] tab %@ armed (attempt %d) for %@", tabID.uuidString, attempt, retryURL)
+        NSLog("[LoadWatchdog] tab %@ armed (attempt %d) for %@", tabID.uuidString, attempt, loggableURL(retryURL, isPrivate: tab.isPrivate))
     }
 
     private func clearLoadWatchdog(for tab: Tab, signal: String) {
@@ -1617,7 +1628,7 @@ extension TabManagerImplementation: ContentDelegate {
             return
         }
         
-        logger(String(format: "tabRecovery: content process %@ for tab %@ - preserving and marking for restore (%@)", reason, tab.id.uuidString, url))
+        logger(String(format: "tabRecovery: content process %@ for tab %@ - preserving and marking for restore (%@)", reason, tab.id.uuidString, loggableURL(url, isPrivate: isPrivate)))
         
         sessionManager.close(tab.session)
         tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
@@ -1787,7 +1798,7 @@ extension TabManagerImplementation: NavigationDelegate {
             return
         }
         if let normalizedURL {
-            logger(String(format: "tabLocation: tab %@ location changed to %@ (not suppressed)", tab.id.uuidString, normalizedURL))
+            logger(String(format: "tabLocation: tab %@ location changed to %@ (not suppressed)", tab.id.uuidString, loggableURL(normalizedURL, isPrivate: tab.isPrivate)))
         }
         
         if let normalizedURL, !normalizedURL.isEmpty {

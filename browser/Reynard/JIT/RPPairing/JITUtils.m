@@ -80,6 +80,14 @@ static const off_t kReynardLogMaxBytes = 4 * 1024 * 1024;
 static NSURL *gReynardLogURL = nil;
 static _Atomic(off_t) gReynardLogBytes = 0;
 static os_unfair_lock gReynardLogRotateLock = OS_UNFAIR_LOCK_INIT;
+// Set when a rotation renamed the log away but could not retarget the
+// descriptor at a fresh generation (open or dup2 failed - a full disk
+// is the likely cause). The descriptor is then still bound to the
+// renamed .1 file, and appending to it with the byte counter reset
+// would grow that generation without bound, defeating the cap on
+// exactly the full disk that caused the failure. Checked by logger()'s
+// file mirror; os_log is never affected.
+static _Atomic(bool) gReynardLogFileBroken = false;
 
 static void ReynardOpenLogFileIfNeeded(void) {
     static dispatch_once_t onceToken;
@@ -159,8 +167,19 @@ static void ReynardRotateLogIfNeeded(void) {
                 // number, so a racing writer always holds a valid
                 // descriptor and at worst writes into whichever
                 // generation is current.
-                dup2(rotated, gReynardLogFileDescriptor);
+                if (dup2(rotated, gReynardLogFileDescriptor) < 0) {
+                    // The descriptor still points at the renamed
+                    // generation; appending there would defeat the cap.
+                    // The stale descriptor is deliberately NOT closed -
+                    // that is the number-reuse race all over again.
+                    atomic_store(&gReynardLogFileBroken, true);
+                }
                 close(rotated);
+            } else {
+                // No fresh generation to write into - same situation.
+                // File logging stops (the pre-dup2 failure semantics);
+                // os_log continues.
+                atomic_store(&gReynardLogFileBroken, true);
             }
             atomic_store(&gReynardLogBytes, 0);
         } else {
@@ -182,7 +201,8 @@ void logger(NSString *message) {
     }
 
     ReynardOpenLogFileIfNeeded();
-    if (gReynardLogFileDescriptor < 0) {
+    if (gReynardLogFileDescriptor < 0 ||
+        atomic_load(&gReynardLogFileBroken)) {
         return;
     }
 

@@ -167,6 +167,10 @@ final class SystemMediaSession: MediaSessionDelegate {
     }
     
     func onPlaybackPlaying(session: GeckoSession) {
+        // In-page resumes arrive here with no remote command involved.
+        // If the session was released while backgrounded, this is the
+        // first moment it is known to be needed again.
+        activateAudioSessionForPlayback()
         revalidate()
         let identifier = ObjectIdentifier(session)
         let state = state(for: session)
@@ -481,10 +485,26 @@ final class SystemMediaSession: MediaSessionDelegate {
         commandCenter.changePlaybackPositionCommand.isEnabled = features.contains(.seekTo)
     }
     
+    /// The app releases the shared audio session whenever nothing is
+    /// PLAYING (applicationDidEnterBackground,
+    /// releaseAudioSessionIfIdleInBackground) - but nothing app-side
+    /// ever re-activated it, and the engine only activates on stream
+    /// INIT, not on resuming a stream it already holds. So the
+    /// lock-screen Play offered for a paused tab could restart
+    /// playback into a deactivated session. Re-activation is cheap
+    /// and idempotent when the session is already active; failure is
+    /// left to iOS, the same best-effort stance the releases take.
+    private func activateAudioSessionForPlayback() {
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
+
     private func registerRemoteCommands() {
         var targets: [Any] = []
         targets.append(commandCenter.playCommand.addTarget { [weak self] _ in
             guard let session = self?.activeSession else { return .commandFailed }
+            // Before the play reaches Gecko, so the session is live
+            // before cubeb restarts the audio unit.
+            self?.activateAudioSessionForPlayback()
             session.mediaSession.play()
             return .success
         })
@@ -509,6 +529,7 @@ final class SystemMediaSession: MediaSessionDelegate {
             case .playing:
                 session.mediaSession.pause()
             case .paused:
+                activateAudioSessionForPlayback()
                 session.mediaSession.play()
             case .none:
                 return .commandFailed

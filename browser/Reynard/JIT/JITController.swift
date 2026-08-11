@@ -247,10 +247,14 @@ final class JITController {
     /// this is the list to diff against a hang.
     func dumpChildCensus(labelled label: String) {
         attachQueue.async {
+            // Prune first: childTypes is purely diagnostic, the dump
+            // below only ever showed live children anyway, and without
+            // eviction the map grew by one entry per child process for
+            // the life of the app.
+            self.ledger.pruneDeadChildren(alive: Self.pidIsAlive)
             let census = self.ledger.childCensus()
-            let live = census.filter { Self.pidIsAlive($0.pid) }
-            logger("\(label): \(census.count) child(ren) announced, \(live.count) alive")
-            for entry in live {
+            logger("\(label): \(self.ledger.announcedChildTotal()) child(ren) announced this launch, \(census.count) alive")
+            for entry in census {
                 let session = JITEnabler.hasActiveDebugSession(forPID: entry.pid)
                 logger(String(
                     format: "  %@: pid %d type=%@ attached=%@ session=%@",

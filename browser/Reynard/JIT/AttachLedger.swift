@@ -43,7 +43,12 @@ final class AttachLedger {
     /// they are invisible to every JIT-side instrument. They are equally
     /// valid candidates for the extension that fails to answer the
     /// foreground handshake, and nothing would ever have shown it.
+    ///
+    /// Pruned of dead pids at each census dump - see pruneDeadChildren.
     private var childTypes: [Int32: String] = [:]
+    /// Total announcements this launch, surviving the pruning, so the
+    /// census dump still reports how many children were ever seen.
+    private var announcedChildCount = 0
 
     /// PIDs that arrived while the app was not active, held for the
     /// drain on return. No attach is started while inactive: vAttach
@@ -180,7 +185,29 @@ final class AttachLedger {
 
     func noteChild(_ pid: Int32, type: String) {
         dispatchPrecondition(condition: .onQueue(queue))
+        if childTypes[pid] == nil {
+            announcedChildCount += 1
+        }
         childTypes[pid] = type
+    }
+
+    /// Drops children that are no longer alive. childTypes is purely
+    /// diagnostic - unlike attachedPIDs and rejectedPIDs it feeds no
+    /// attach decision - and pids recycle anyway, so an evicted child
+    /// that somehow returns is simply re-announced. Without this the
+    /// map grew by one entry per child process for the life of the
+    /// app: content processes churn on every tab sleep and recovery,
+    /// so that is a real, if slow, leak. The census dump already
+    /// showed only live children, so pruning costs it nothing.
+    func pruneDeadChildren(alive isAlive: (Int32) -> Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        childTypes = childTypes.filter { isAlive($0.key) }
+    }
+
+    /// Every child ever announced this launch, including pruned ones.
+    func announcedChildTotal() -> Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return announcedChildCount
     }
 
     /// Every announced child, with its type and whether the JIT layer

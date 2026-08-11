@@ -14,16 +14,17 @@ import UIKit
 /// observer -> GeckoViewStartup relay -> GeckoView:ScrollbarTouchBegin
 /// -> activateFromEngineSignal below.
 ///
-/// This class also used to approximate the same thing by POSITION - any
-/// vertical drag beginning within 24pt of the right edge - as a fallback
-/// for engines predating that hit test. That heuristic buzzed on
-/// ordinary scrolling near the right edge, which is most scrolling. It
-/// went unnoticed only because ContentView's gestureRecognizerShouldBegin
-/// happened to veto this recognizer entirely; once that veto was
-/// narrowed to the history edge-swipes it owns, the heuristic started
-/// running and the false positives became obvious. No haptic is better
-/// than a wrong one, so the heuristic is gone and only the engine's
-/// verdict fires.
+/// This class ALSO approximates the same thing by POSITION - a vertical
+/// drag of dragActivationThreshold beginning within edgeStripWidth of
+/// the right edge - because the engine signal above is not currently
+/// arriving (see 0ec7277: with the heuristic removed there was no buzz
+/// at all, so the heuristic is the whole working feature today). It
+/// still buzzes on ordinary scrolling near the right edge; the 14pt
+/// threshold mitigates that, it does not fix it. The real fix remains
+/// finding why GeckoView:ScrollbarTouchBegin never reaches
+/// activateFromEngineSignal - and the moment it does,
+/// engineSignalObserved silences the heuristic for good, so the
+/// accurate signal and the guess can never buzz the same grab twice.
 ///
 /// The recognizer stays, doing nothing but spinning up the taptic engine
 /// on a touch-down near the edge so the engine signal's buzz lands with
@@ -54,6 +55,13 @@ final class ScrollbarHapticCoordinator: NSObject {
     /// Set on touch-down inside the strip, cleared once the haptic has
     /// fired or the touch ends. Non-nil means armed.
     private var pendingActivationStart: CGPoint?
+    /// Latched the first time the engine's thumb hit test delivers.
+    /// From then on the position heuristic stays silent: the engine
+    /// signal is pixel-accurate and fires at touch-down, so letting
+    /// the heuristic fire too would buzz the same grab twice, ~14pt
+    /// apart. The latch 8b07bbf removed along with the heuristic;
+    /// 0ec7277 restored the heuristic without it.
+    private var engineSignalObserved = false
 
     /// The pixel-perfect activation. Chain: APZ thumb hit test
     /// (APZCTreeManager patch) -> "reynard-scrollbar-touch-begin"
@@ -64,6 +72,11 @@ final class ScrollbarHapticCoordinator: NSObject {
         guard isEnabled() else {
             return
         }
+        // The engine's verdict supersedes the heuristic: disarm the
+        // touch in flight and silence the heuristic from here on, so
+        // one grab can never buzz twice.
+        engineSignalObserved = true
+        pendingActivationStart = nil
         // Usually already prepared by the touch-down below (a thumb grab
         // necessarily begins inside the strip); preparing again is a
         // cheap no-op that covers the remaining cases.
@@ -102,7 +115,7 @@ final class ScrollbarHapticCoordinator: NSObject {
             feedbackGenerator.prepare()
 
         case .changed:
-            guard let start = pendingActivationStart else {
+            guard !engineSignalObserved, let start = pendingActivationStart else {
                 return
             }
             let location = recognizer.location(in: view)

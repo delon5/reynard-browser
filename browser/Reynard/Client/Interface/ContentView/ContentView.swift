@@ -294,8 +294,23 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             return
         }
         safeAreaInsetBottom = inset
-        NSLog("dynToolbar: env(safe-area-inset-bottom) -> \(inset)")
+        NSLog("dynToolbar: env(safe-area-inset-bottom) sent \(inset)pt")
         session?.setSafeAreaInsetBottom(inset)
+
+        // MEASUREMENT. We send POINTS; the page sees CSS PIXELS, and
+        // the conversion runs through the page's own layout viewport -
+        // which is why a value that looks right on a mobile-optimised
+        // page can be several times too large on one declaring a ~980px
+        // desktop viewport. Rather than bisect it again, ask the page
+        // what env() actually resolved to.
+        guard let session, inset > 0 else {
+            return
+        }
+        Task { @MainActor in
+            if let answer = await session.runUserScript("(() => { const p = document.createElement('div'); p.style.cssText = 'position:fixed;left:-9999px;bottom:env(safe-area-inset-bottom);height:0;width:0'; document.documentElement.appendChild(p); const env = getComputedStyle(p).bottom; p.remove(); return JSON.stringify({env: env, innerWidth: window.innerWidth, visualWidth: window.visualViewport ? window.visualViewport.width : null, dpr: window.devicePixelRatio}); })()") {
+                NSLog("dynToolbar: page reports \(answer)")
+            }
+        }
     }
     
     private func syncContentBottomOffset() {

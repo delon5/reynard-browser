@@ -553,9 +553,25 @@ static NSMutableDictionary<NSNumber *, NSNumber *> *debugLoopWaiting(void) {
     return waiting;
 }
 
+// When each loop last CHANGED waiting state, so the dump can tell "out
+// of the wait for 2ms - servicing a trap" from "out of the wait for 4
+// seconds - stuck". Guarded by debugLoopTickLock, like its siblings.
+static NSMutableDictionary<NSNumber *, NSNumber *> *debugLoopWaitingSince(void) {
+    static NSMutableDictionary<NSNumber *, NSNumber *> *since;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        since = [NSMutableDictionary dictionary];
+    });
+    return since;
+}
+
 void recordDebugLoopWaiting(int32_t pid, BOOL waiting) {
     NSLock *lock = debugLoopTickLock();
     [lock lock];
+    NSNumber *previous = debugLoopWaiting()[@(pid)];
+    if (previous == nil || previous.boolValue != waiting) {
+        debugLoopWaitingSince()[@(pid)] = @(CFAbsoluteTimeGetCurrent());
+    }
     debugLoopWaiting()[@(pid)] = @(waiting);
     [lock unlock];
 }
@@ -572,6 +588,7 @@ void forgetDebugLoopTick(int32_t pid) {
     [lock lock];
     [debugLoopLastTick() removeObjectForKey:@(pid)];
     [debugLoopWaiting() removeObjectForKey:@(pid)];
+    [debugLoopWaitingSince() removeObjectForKey:@(pid)];
     [lock unlock];
 }
 
@@ -584,6 +601,7 @@ void dumpDebugLoopStateLabelled(const char *label) {
     [lock lock];
     NSDictionary<NSNumber *, NSNumber *> *snapshot = [debugLoopLastTick() copy];
     NSDictionary<NSNumber *, NSNumber *> *waitingSnapshot = [debugLoopWaiting() copy];
+    NSDictionary<NSNumber *, NSNumber *> *sinceSnapshot = [debugLoopWaitingSince() copy];
     [lock unlock];
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -611,12 +629,24 @@ void dumpDebugLoopStateLabelled(const char *label) {
         // looks like. See fix_track_loop_waiting_state.py.
         NSNumber *isWaiting = waitingSnapshot[key];
         BOOL waiting = isWaiting != nil && isWaiting.boolValue;
+        // How long the loop has been in its CURRENT state. A loop out
+        // of the wait for a few milliseconds is healthy - it is between
+        // the trap landing and the next continue, exactly where the
+        // waiting bracket sits - so the marker requires out-of-wait
+        // for longer than the same 1 second the age note above already
+        // calls far outside normal. A loop with no transition recorded
+        // keeps the old behaviour rather than hiding.
+        NSNumber *since = sinceSnapshot[key];
+        double stateMs = since != nil ? (now - since.doubleValue) * 1000.0 : -1.0;
+        BOOL suspect = isWaiting != nil && !waiting &&
+                       (since == nil || stateMs > 1000.0);
 
-        logger([NSString stringWithFormat:@"%@:   pid %d %@ (%.0fms)%@",
+        logger([NSString stringWithFormat:@"%@:   pid %d %@ (%.0fms, state %.0fms)%@",
                 tag, pid,
                 isWaiting == nil ? @"UNKNOWN    " : (waiting ? @"WAITING    " : @"NOT WAITING"),
                 ageMs,
-                (isWaiting != nil && !waiting) ? @"  <<< SUSPECT" : @""]);
+                stateMs,
+                suspect ? @"  <<< SUSPECT" : @""]);
     }
 }
 

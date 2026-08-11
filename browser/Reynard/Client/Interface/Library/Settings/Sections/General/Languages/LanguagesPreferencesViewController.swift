@@ -94,6 +94,15 @@ final class LanguagesPreferencesViewController: SettingsTableViewController {
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
             cell.textLabel?.text = NSLocalizedString("Translation", comment: "")
             cell.accessoryType = .disclosureIndicator
+            // This table lives in editing mode (the language list is
+            // reorderable), and accessoryType only shows OUTSIDE
+            // editing - without the editing twin the chevron vanished
+            // and the row indented like a reorderable entry. Mirrors
+            // the accessoryView/editingAccessoryView pairing in
+            // BottomToolbarPreferencesViewController and the sibling
+            // Add Language row's indent guard.
+            cell.editingAccessoryType = .disclosureIndicator
+            cell.shouldIndentWhileEditing = false
             return cell
         }
 

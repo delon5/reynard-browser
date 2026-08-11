@@ -99,10 +99,17 @@ final class ToolbarController {
         // layout space, so it is not a toolbar-limits question at all -
         // the limits describe the real toolbar, unchanged from upstream.
         let condensed = browserChrome.isScrollCondensed
-        // The 20pt margin inside condensedPillOccupiedHeight is measured
-        // from the SAFE AREA GUIDE, so the pill also occupies the home
-        // indicator band beneath it - about 94pt here, not 60.
-        let pill = BrowserChrome.condensedPillOccupiedHeight + rootView.safeAreaInsets.bottom
+        // The pre-merge value exactly: no device inset added. That code
+        // had been through the device and says why - "the pill is
+        // constrained to the view's real bottomAnchor, not the safe area
+        // guide, so condensedPillOccupiedHeight already spans the home
+        // indicator band. Adding the device inset on top double-counted
+        // it and pushed content ~38pt too high, which is what the device
+        // showed on YouTube."
+        //
+        // I added it anyway this afternoon on the strength of a doc
+        // comment, and that is the oversized lift.
+        let pill = BrowserChrome.condensedPillOccupiedHeight
 
         // FLOATING PILL. The two mechanisms split by state so they can
         // never both charge for the same chrome - that double count is
