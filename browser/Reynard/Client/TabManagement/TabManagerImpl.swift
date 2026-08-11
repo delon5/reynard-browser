@@ -283,7 +283,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         // Deferring the open to selection means a slept tab costs no
         // process at all. loadRestoredURLIfNeeded opens it on the way
         // back.
-        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
+        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate, opening: .manual)
         tab.state.restoreState = .pending(url)
         tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
         NSLog("[TabMemory] Slept background session for tab %@", tab.id.uuidString)
@@ -732,7 +732,8 @@ final class TabManagerImplementation: NSObject, TabManager {
                     tabID: snapshot.id,
                     url: snapshot.url,
                     windowId: nil,
-                    isPrivate: false
+                    isPrivate: false,
+                    opening: .manual
                 ),
                 title: snapshot.title,
                 url: snapshot.url,
@@ -752,7 +753,8 @@ final class TabManagerImplementation: NSObject, TabManager {
                     tabID: snapshot.id,
                     url: snapshot.url,
                     windowId: nil,
-                    isPrivate: true
+                    isPrivate: true,
+                    opening: .manual
                 ),
                 title: snapshot.title,
                 url: snapshot.url,
@@ -1047,6 +1049,27 @@ final class TabManagerImplementation: NSObject, TabManager {
            let previousSession = previousTab?.session {
             sessionManager.deactivate(previousSession)
         }
+
+        // THE RULE: a selected tab always has an open session.
+        //
+        // Restored and slept tabs are created unopened - that is the
+        // whole saving, one content process instead of twenty - and
+        // every previous attempt tied the open to some particular
+        // condition instead: loadRestoredURLIfNeeded only opens when
+        // restoreState is .pending, so a tab in any other state kept a
+        // closed session, activate() skipped it ("activate SKIPPED - is
+        // not open"), the docshell never activated and the tab came up
+        // black or simply never loaded.
+        //
+        // Selection is the one thing every route has in common, and it
+        // is here, before activate() and before the delegate binds the
+        // view - so the session is open in time for the toolbar limits
+        // and content offset that binding sends.
+        if !selectedTab.session.isOpen() {
+            logger(String(format: "tabSelect: opening the deferred session for tab %@", selectedTab.id.uuidString))
+            sessionManager.open(selectedTab.session)
+        }
+
         sessionManager.activate(selectedTab.session)
         systemMediaSession.select(session: selectedTab.session)
         pictureInPictureCoordinator?.selectedSessionDidChange()
