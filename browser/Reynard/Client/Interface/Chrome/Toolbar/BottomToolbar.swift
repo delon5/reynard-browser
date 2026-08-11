@@ -72,6 +72,16 @@ final class BottomToolbar: UIView {
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
+     /// Restores pure black on OLED - see UIColor.oledToolbarOverlay.
+    /// Lives inside the effect view's contentView so it covers the blur
+    /// rather than sitting behind it.
+    private let oledOverlayView: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = .oledToolbarOverlay
+        view.isUserInteractionEnabled = false
+        return view
+    }()
     
    
     private lazy var backButton = ToolbarButton(buttonType: .back, target: self, action: #selector(backTapped))
@@ -307,6 +317,7 @@ final class BottomToolbar: UIView {
     
     private func configureHierarchy() {
         addSubview(backgroundView)
+        backgroundView.contentView.addSubview(oledOverlayView)
         addSubview(contentView)
         contentView.addSubview(buttons)
         applyConfiguredActions()
@@ -322,6 +333,11 @@ final class BottomToolbar: UIView {
             backgroundView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: UX.backgroundViewHorizontalExtension),
             backgroundView.topAnchor.constraint(equalTo: contentView.topAnchor),
             backgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            
+            oledOverlayView.leadingAnchor.constraint(equalTo: backgroundView.contentView.leadingAnchor),
+            oledOverlayView.trailingAnchor.constraint(equalTo: backgroundView.contentView.trailingAnchor),
+            oledOverlayView.topAnchor.constraint(equalTo: backgroundView.contentView.topAnchor),
+            oledOverlayView.bottomAnchor.constraint(equalTo: backgroundView.contentView.bottomAnchor),
             
             contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
