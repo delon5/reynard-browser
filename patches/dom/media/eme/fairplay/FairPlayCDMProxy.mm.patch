@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,822 @@
+@@ -0,0 +1,846 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -55,6 +55,7 @@ index 000000000000..c20df0f7f09f
 +- (AVContentKeyRequest*)requestForSession:(NSString*)aSessionId;
 +- (void)forgetSession:(NSString*)aSessionId;
 +- (AVContentKeyRequest*)takeUnsolicitedForIdentifier:(NSString*)aKey;
++- (void)replayUnsolicitedRequests;
 +@end
 +
 +@implementation FairPlayKeyDelegate
@@ -131,6 +132,23 @@ index 000000000000..c20df0f7f09f
 +  }
 +}
 +
++// Re-offers every parked request now that something has changed -
++// BindToPlayer naming the player these keys belong to. Each one goes
++// back through didProvideContentKeyRequest, which this time finds
++// either a session mapping or a bound proxy to forward through. The
++// snapshot is taken under the lock and the walk happens outside it,
++// because the re-entry re-parks into the same dictionary.
++- (void)replayUnsolicitedRequests {
++  NSArray<AVContentKeyRequest*>* parked;
++  @synchronized(self) {
++    parked = [mUnsolicitedByIdentifier allValues];
++    [mUnsolicitedByIdentifier removeAllObjects];
++  }
++  for (AVContentKeyRequest* request in parked) {
++    [self contentKeySession:nil didProvideContentKeyRequest:request];
++  }
++}
++
 +// Resolves the EME session id for a request, by the identifier it was
 +// issued with.
 +- (NSString*)sessionIdForRequest:(AVContentKeyRequest*)aRequest {
@@ -190,20 +208,17 @@ index 000000000000..c20df0f7f09f
 +                                                    initDataType)) {
 +        return;
 +      }
-+      // No bound player to dispatch through - undo the hold and fall
-+      // through to the failure below.
-+      [self takeUnsolicitedForIdentifier:identifierKey];
 +    }
-+    // Nothing to tell the page through (unbound proxy, or an identifier
-+    // of an unexpected class). Fail it - a bare return left AVFoundation
-+    // waiting forever for a response that could not come.
-+    [keyRequest processContentKeyResponseError:
-+        [NSError errorWithDomain:@"ReynardFairPlay"
-+                            code:-2
-+                        userInfo:@{
-+                          NSLocalizedDescriptionKey :
-+                              @"No EME session for this key request"
-+                        }]];
++    // Parked, NOT failed. AVFoundation raises the first key request as
++    // soon as the asset reaches its EXT-X-KEY, which can precede
++    // AVPlayerDecoder::SetCDMProxy -> BindToPlayer by milliseconds -
++    // and failing a key request does not decline one key, it fails the
++    // WHOLE ITEM, permanently (itemStatus 2 with
++    // "No EME session for this key request" on the item's error, a
++    // spinner and no EME at all). A pending request only stalls, and
++    // BindToPlayer replays everything parked here the moment the
++    // player id arrives. Requests that nothing can ever satisfy are
++    // failed at detach instead, where that is true.
 +    return;
 +  }
 +
@@ -619,6 +634,15 @@ index 000000000000..c20df0f7f09f
 +  EME_LOG("FairPlayCDMProxy::BindToPlayer({}) player={}", fmt::ptr(this),
 +          (unsigned long long)aPlayerId);
 +  PublishKeySessionIfBound();
++  // Anything that arrived before this bind is parked in the delegate,
++  // waiting for exactly this moment - a key request that lost the race
++  // to SetCDMProxy would otherwise sit there until teardown, and the
++  // page would never hear 'encrypted' for it.
++  if (mDelegate) {
++    printf_stderr("avPlayer: replaying parked key requests for player %llu\n",
++                  (unsigned long long)aPlayerId);
++    [mDelegate replayUnsolicitedRequests];
++  }
 +}
 +
 +// Either order: Init may run before the decoder has a player, and the
