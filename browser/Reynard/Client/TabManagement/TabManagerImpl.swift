@@ -893,6 +893,15 @@ final class TabManagerImplementation: NSObject, TabManager {
         )
         tab.session = replacementSession
         tab.state.sessionNavigationAvailability = .unavailable
+        // createSession(.immediate) opens the session and then
+        // DEACTIVATES it, so a replacement made here starts inactive and
+        // an inactive docshell never paints. selectTab happens to
+        // activate afterwards; the load path does not, and that is the
+        // black page you get when selecting a tab whose session had been
+        // closed - it loads, the title arrives, nothing composites.
+        // Activating at the single place the replacement is created
+        // covers every caller.
+        sessionManager.activate(replacementSession)
         delegate?.tabManager(
             self,
             didReplaceSelectedSession: previousSession,
