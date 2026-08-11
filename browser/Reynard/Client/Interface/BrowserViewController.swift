@@ -56,6 +56,13 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     let tabBar = TabBar()
     let tabOverview = TabOverview()
     let contentView = ContentView()
+    
+    /// Fills the gap between the content view's bottom and the window
+    /// bottom - the strip the pill sits on when it is not floating.
+    /// Painted with the page's own background color so the page appears
+    /// to continue under the pill even though it stops at its top edge.
+    /// Zero height whenever the content view already reaches the bottom.
+    private let pillUnderlayView = UIView()
     lazy var browserChrome = BrowserChrome()
     let addonPopupLoadingIndicator = UIActivityIndicatorView(style: .large)
     var addonPopupLoadingTimeoutWorkItem: DispatchWorkItem?
@@ -73,6 +80,10 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         addonPopupLoadingIndicator.translatesAutoresizingMaskIntoConstraints = false
         loadingView.addSubview(addonPopupLoadingIndicator)
         NSLayoutConstraint.activate([
+            pillUnderlayView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pillUnderlayView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pillUnderlayView.topAnchor.constraint(equalTo: contentView.bottomAnchor),
+            pillUnderlayView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             addonPopupLoadingIndicator.centerXAnchor.constraint(equalTo: loadingView.centerXAnchor),
             addonPopupLoadingIndicator.centerYAnchor.constraint(equalTo: loadingView.centerYAnchor)
         ])
@@ -388,6 +399,12 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         tabBar.dataSource = self
         tabOverview.configure(dataSource: self, delegate: self, presentationContext: self)
         
+        pillUnderlayView.translatesAutoresizingMaskIntoConstraints = false
+        pillUnderlayView.backgroundColor = .systemBackground
+        contentView.onPageBackgroundColorChange = { [weak self] color in
+            self?.pillUnderlayView.backgroundColor = color
+        }
+        view.addSubview(pillUnderlayView)
         view.addSubview(contentView)
         view.addSubview(tabBar)
         view.addSubview(browserChrome)
@@ -608,29 +625,32 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     }
     
     /// The content view's bottom anchor while the toolbar is condensed to
-    /// the pill: always the true window bottom, so the page runs full
-    /// bleed and paints behind the pill.
+    /// the pill, chosen by Prefs.AppearanceSettings.pillFloatsOverPage.
     ///
-    /// It used to be pinned above the pill for pages the SafeAreaDetector
-    /// judged to reserve the space themselves (usesSafeAreaInsetCSS).
-    /// That distinction is dead: upstream's nsWindow forces
-    /// safeAreaInsets.bottom = 0 before handing them to Gecko, so
-    /// env(safe-area-inset-bottom) is 0 for every page and none of them
-    /// can pad themselves. Clearance is entirely the compositor
-    /// fixed-layer margin now (ContentView.setFloatingChromeInset), which
-    /// lifts fixed content without touching the viewport - so full bleed
-    /// here cannot double-count against it.
+    /// These are the only two coherent behaviors and they are exclusive.
+    /// Floating runs the page to the true window bottom: it paints the
+    /// full height, and a long feed genuinely scrolls behind the pill,
+    /// because that IS the same region - no inset, margin or viewport
+    /// value separates "paints behind" from "scrolls behind". Stopping
+    /// puts the page's last row at the pill's top edge, so nothing is
+    /// ever behind it on any site, at the cost of the float.
     ///
-    /// Shared by applyPhoneLayout and applyCompactLayout so the two can
-    /// never decide it differently - divergent copies of this exact
-    /// condition are what once gave every page the reserved strip
-    /// (fix_per_tab_artificial_safe_area_inset.py). The old
-    /// additionalSafeAreaInsets path that used to duplicate this was
-    /// inert (guarded by `false`) and has been removed; the reservation
-    /// is now entirely the content anchor here plus the
-    /// env(safe-area-inset-bottom) reported by updateDynamicToolbarMaxHeight.
+    /// Note what stopping does NOT need: the shortened layout viewport.
+    /// setDynamicToolbarMaxHeight is how the full toolbar reserves its
+    /// strip, but it shortens Gecko's ICB without giving Gecko anything
+    /// to paint there, so on a short page (google.com) the reserved
+    /// strip composites as an unpainted black bar. Here the strip is
+    /// simply outside the content view and shows this VC's own
+    /// background, which is themed - hence maxHeight 0 when not
+    /// floating (ToolbarController.updateDynamicToolbarMaxHeight).
     private var condensedContentBottomAnchor: NSLayoutYAxisAnchor {
-        view.bottomAnchor
+        // Floating: the view runs to the window bottom, the page paints
+        // behind the pill, and a scrolling feed passes under it - the
+        // same pixels, so that is not separable. Otherwise the view
+        // stops at the pill's top edge and nothing is ever behind it.
+        Prefs.AppearanceSettings.pillFloatsOverPage
+            ? view.bottomAnchor
+            : browserChrome.condensedPillTopAnchor
     }
     
     private func applyCompactLayout() {

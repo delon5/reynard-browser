@@ -124,7 +124,12 @@ final class ToolbarController {
         // here. That combination - viewport alone, at the true pill
         // height - is the one this has not been run at.
         let pill = Prefs.AppearanceSettings.pillSafeAreaInset + rootView.safeAreaInsets.bottom
-        let maxHeight = condensed ? pill : maxToolbarOffset
+        // Only when the pill FLOATS. With the view stopping at the pill
+        // there is no page behind it to reserve against, and reserving
+        // anyway would lift content a second time - the same double the
+        // 142+60 was.
+        let floats = Prefs.AppearanceSettings.pillFloatsOverPage
+        let maxHeight = condensed ? (floats ? pill : 0) : maxToolbarOffset
 
         // Both knobs on one line, because they only mean anything
         // together: maxHeight shortens the LAYOUT VIEWPORT, so it moves
@@ -133,7 +138,7 @@ final class ToolbarController {
         // sticky-bottom layers. A bottom bar that is neither will not
         // move for either of them, which is the case this log is here to
         // tell apart.
-        NSLog("dynToolbar: condensed=\(condensed) max=\(maxHeight) pill=\(pill) toolbar=\(maxToolbarOffset) top=\(maxTopToolbarOffset)")
+        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) pill=\(pill) toolbar=\(maxToolbarOffset)")
 
         // Both, and they do different jobs. The margin lifts fixed and
         // sticky layers at composite time - immediate, no relayout, but

@@ -56,6 +56,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case videoPictureInPicture
         case avPlayerHLS
         case siteIsolation
+        case pillFloats
         case hideUpdateNotification
         case hideUpdateAvailableBanner
         case carPlayScriptsEnabled
@@ -69,7 +70,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         var section: Section {
             switch self {
-            case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .hideUpdateNotification, .hideUpdateAvailableBanner:
+            case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
             case .carPlayScriptsEnabled, .manageCarPlayScripts:
                 return .carPlayScripts
@@ -86,6 +87,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let videoPictureInPictureSwitch = UISwitch()
     private let avPlayerHLSSwitch = UISwitch()
     private let siteIsolationSwitch = UISwitch()
+    private let pillFloatsSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
     private let carPlayScriptsSwitch = UISwitch()
@@ -150,6 +152,12 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             return switchCell(
                 title: "Video Picture-in-Picture",
                 accessoryView: videoPictureInPictureSwitch
+            )
+        case .pillFloats:
+            return switchCell(
+                title: NSLocalizedString("Pill Floats Over Page", comment: ""),
+                subtitle: NSLocalizedString("Page paints the full height. A long feed then scrolls behind the pill", comment: ""),
+                accessoryView: pillFloatsSwitch
             )
         case .siteIsolation:
             return switchCell(
@@ -250,7 +258,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         }
         
         switch sectionRows[indexPath.row] {
-        case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .hideUpdateNotification, .hideUpdateAvailableBanner,
+        case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats, .hideUpdateNotification, .hideUpdateAvailableBanner,
              .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
              .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
@@ -270,6 +278,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
         avPlayerHLSSwitch.addTarget(self, action: #selector(avPlayerHLSSwitchDidChange(_:)), for: .valueChanged)
         siteIsolationSwitch.addTarget(self, action: #selector(siteIsolationSwitchDidChange(_:)), for: .valueChanged)
+        pillFloatsSwitch.addTarget(self, action: #selector(pillFloatsSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
         carPlayScriptsSwitch.addTarget(self, action: #selector(carPlayScriptsSwitchDidChange(_:)), for: .valueChanged)
@@ -284,6 +293,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
         avPlayerHLSSwitch.isOn = Prefs.ExperimentalSettings.isAVPlayerHLSEnabled
         siteIsolationSwitch.isOn = Prefs.ExperimentalSettings.isSiteIsolationEnabled
+        pillFloatsSwitch.isOn = Prefs.AppearanceSettings.pillFloatsOverPage
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
         carPlayScriptsSwitch.isOn = Prefs.ExperimentalSettings.isCarPlayScriptsEnabled
@@ -341,6 +351,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     // Pushed to the engine immediately as well as at startup, so a
     // restart is only needed for pages already loaded under the old
     // setting - DecoderTraits asks IsSupportedType per media element.
+    // No restart: the next layout pass picks it up.
+    @objc private func pillFloatsSwitchDidChange(_ sender: UISwitch) {
+        Prefs.AppearanceSettings.pillFloatsOverPage = sender.isOn
+    }
+    
     // Restart required: the process model is decided as content
     // processes are created, so flipping it mid-session leaves the
     // existing ones on the old model.

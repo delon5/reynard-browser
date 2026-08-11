@@ -80,6 +80,7 @@ final class BrowserPreferences {
             key("BrowsingSettings", "swipeUpForTabSwitcher"): true,
             key("AppearanceSettings", "hidesToolbarOnScroll"): true,
             key("AppearanceSettings", "pillSafeAreaInset"): 60,
+            key("AppearanceSettings", "pillFloatsOverPage"): false,
             
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
@@ -938,6 +939,24 @@ final class BrowserPreferences {
         /// Uses pure black instead of the standard system background
         /// color while in dark mode, for better contrast and battery
         /// savings on OLED screens.
+        /// Whether the condensed pill floats OVER the page.
+        ///
+        /// The two are exclusive on a scrolling page and no amount of
+        /// tuning reconciles them. Floating keeps the page painting the
+        /// full height - which is the look - but a long feed genuinely
+        /// scrolls behind the pill, because those are the same pixels.
+        /// Off stops the content view at the pill's top edge: nothing is
+        /// ever behind it, on any site, at the cost of the float and of
+        /// the strip the pill sits on showing app background.
+        static var pillFloatsOverPage: Bool {
+            get {
+                return prefs.bool(forSetting: "AppearanceSettings", key: "pillFloatsOverPage")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AppearanceSettings", key: "pillFloatsOverPage")
+            }
+        }
+        
         /// What the page is told to keep clear of the condensed pill,
         /// in points, via env(safe-area-inset-bottom).
         ///

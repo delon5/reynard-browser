@@ -564,14 +564,22 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         self.session = tab?.session
         resetFocusedInputRelocation()
         webContentView.setTab(tab, pageBackgroundColor: pageBackgroundColor)
+        onPageBackgroundColorChange?(pageBackgroundColor ?? .systemBackground)
         tab?.session.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
         tab?.session.setContentBottomOffset(contentBottomOffset)
         tab?.session.setSafeAreaInsetBottom(safeAreaInsetBottom)
         updatePullToRefreshAvailability()
     }
     
+    /// Fires whenever the page's background color is known, so anything
+    /// drawn OUTSIDE this view can match it - specifically the strip
+    /// below the content view when the pill is not floating, which would
+    /// otherwise read as a black bar against a light page.
+    var onPageBackgroundColorChange: ((UIColor) -> Void)?
+    
     func setPageBackgroundColor(_ color: UIColor) {
         webContentView.setPageBackgroundColor(color)
+        onPageBackgroundColorChange?(color)
     }
     
     func showPageError(for url: String?) {
