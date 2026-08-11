@@ -106,10 +106,19 @@ final class ToolbarController {
         //     reserve one.
         //
         //   floating - the page runs full bleed and paints the whole
-        //     height, so there is no black bar; env(safe-area-inset-
-        //     bottom) tells pages that read it to keep their own bottom
-        //     controls above the pill. Ordinary content still scrolls
-        //     behind the pill, which is what floating means.
+        //     height, so there is no black bar, and the compositor
+        //     fixed-layer margin lifts position:fixed and sticky bottom
+        //     bars clear of the pill. Ordinary content still scrolls
+        //     behind it, which is what floating means.
+        //
+        //     The margin rather than env(safe-area-inset-bottom),
+        //     because env only reaches pages that READ it and Facebook's
+        //     "Open app" banner does not - it is fixed to bottom:0 and
+        //     sat under the pill while every other site was fine. The
+        //     margin reaches any fixed or sticky layer regardless of
+        //     what the page believes. Not BOTH: a bar that is fixed AND
+        //     on an env-reading page moves twice, which is the 188pt
+        //     overshoot this hit before.
         //
         // What is NOT sent in either: the layout-viewport reservation.
         // setDynamicToolbarMaxHeight shortens Gecko's ICB without giving
@@ -119,17 +128,17 @@ final class ToolbarController {
         let condensed = browserChrome.isScrollCondensed
         let floats = Prefs.AppearanceSettings.pillFloatsOverPage
         let maxHeight = condensed ? 0 : maxToolbarOffset
-        let env = (condensed && floats) ? Prefs.AppearanceSettings.pillSafeAreaInset : 0
+        let margin = (condensed && floats) ? Prefs.AppearanceSettings.pillSafeAreaInset : 0
 
         // The pill's real top edge in window coordinates, next to what
         // the page is being told, so a capture shows the gap and its
         // cause on one line instead of needing another build to guess.
         let pillTop = browserChrome.condensedPillFrame(in: rootView).minY
-        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) env=\(env) pillTop=\(pillTop) viewH=\(rootView.bounds.height) inset=\(rootView.safeAreaInsets.bottom)")
+        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) margin=\(margin) pillTop=\(pillTop) viewH=\(rootView.bounds.height)")
 
         contentView.setChromeCondensed(condensed)
-        contentView.setFloatingChromeInset(0)
-        contentView.setSafeAreaInsetBottom(env)
+        contentView.setFloatingChromeInset(margin)
+        contentView.setSafeAreaInsetBottom(0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset

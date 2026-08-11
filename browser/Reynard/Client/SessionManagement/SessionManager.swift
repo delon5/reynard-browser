@@ -180,6 +180,23 @@ final class SessionManager {
         return pictureInPictureSession != nil
     }
     
+    /// Whether ANY session is currently driving media the system is
+    /// showing outside this app - Picture in Picture, or the now-playing
+    /// entry the lock screen and CarPlay drive their transport controls
+    /// from.
+    ///
+    /// Same identity-independence as above, and it matters here for the
+    /// same reason: SystemMediaSession.prioritySession is a weak
+    /// reference to the session object that was playing, and sleeping
+    /// swaps a tab's session object out, so `=== tab.session` stops
+    /// matching. Under CarPlay that is worse than a paused video - the
+    /// head unit keeps showing transport controls for a page whose
+    /// content process has been closed underneath it.
+    var hasSystemMediaSession: Bool {
+        return pictureInPictureSession != nil
+            || SystemMediaSession.shared.prioritySession != nil
+    }
+    
     /// Exposed for tab eviction, which must not sleep a tab whose
     /// session is one of these.
     func isMediaPriority(_ session: GeckoSession?) -> Bool {

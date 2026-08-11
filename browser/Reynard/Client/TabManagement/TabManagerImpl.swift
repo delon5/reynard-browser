@@ -210,8 +210,10 @@ final class TabManagerImplementation: NSObject, TabManager {
     }
 
     func sleepBackgroundedTabs() {
-        // Not while Picture in Picture is up. PiP means a video is
-        // playing in a floating window over another app, and sleeping
+        // Not while the system is showing media from us. That means
+        // Picture in Picture, or a now-playing entry driving the lock
+        // screen and CarPlay: in every case something OUTSIDE the app is
+        // presenting a page we would be closing. Sleeping
         // closes content processes - including, as a device capture
         // showed, the one PiP is rendering from:
         //
@@ -227,8 +229,8 @@ final class TabManagerImplementation: NSObject, TabManager {
         // The cost is bounded - PiP is a transient state, and the memory
         // sleeping would have freed is reclaimed the moment it ends,
         // when backgrounding runs this again.
-        if sessionManager.hasPictureInPictureSession {
-            NSLog("[TabMemory] NOT sleeping - Picture in Picture is active")
+        if sessionManager.hasSystemMediaSession {
+            NSLog("[TabMemory] NOT sleeping - Picture in Picture or system media (lock screen / CarPlay) is active")
             return
         }
         NSLog("[TabMemory] Sleeping backgrounded tab sessions")

@@ -367,7 +367,10 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // second displacement underneath it. That is the doubling.
         let offset: CGFloat
         if isChromeCondensed {
-            offset = 0
+            // The pill's own clearance when floating, zero when the view
+            // stops at it - never the toolbar's sliding offset, which
+            // belongs to a toolbar that is no longer on screen.
+            offset = floatingChromeInset
         } else {
             offset = floatingChromeInset > 0
                 ? floatingChromeInset
