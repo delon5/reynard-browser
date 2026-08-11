@@ -1,5 +1,5 @@
 diff --git a/dom/media/eme/MediaKeySystemAccessManager.cpp b/dom/media/eme/MediaKeySystemAccessManager.cpp
-index aaa3ff25b64f..48f6a50a1c90 100644
+index aaa3ff25b64f..6f717f9706ba 100644
 --- a/dom/media/eme/MediaKeySystemAccessManager.cpp
 +++ b/dom/media/eme/MediaKeySystemAccessManager.cpp
 @@ -5,6 +5,7 @@
@@ -37,3 +37,21 @@ index aaa3ff25b64f..48f6a50a1c90 100644
    if (status != MediaKeySystemStatus::Available) {
      // Failed due to user disabling something, send a notification to
      // chrome, so we can show some UI to explain how the user can rectify
+@@ -556,6 +570,17 @@ void MediaKeySystemAccessManager::RequestMediaKeySystemAccess(
+ void MediaKeySystemAccessManager::ProvideAccess(
+     UniquePtr<PendingRequest> aRequest) {
+   MOZ_ASSERT(aRequest);
++#ifdef MOZ_WIDGET_UIKIT
++  // DIAGNOSTIC. emeConfig only prints when GetSupportedConfig REJECTS,
++  // and it never printed - so the configuration was accepted and the
++  // failure is downstream of EME entirely. This is the resolve, the
++  // point where requestMediaKeySystemAccess hands the page an access
++  // object. If this prints and FairPlayCDMProxy still logs nothing,
++  // the page was granted access and chose not to call createMediaKeys,
++  // which is a player/UA question rather than an engine one.
++  printf_stderr("emeAccess: GRANTED %s\n",
++                NS_ConvertUTF16toUTF8(aRequest->mKeySystem).get());
++#endif
+   MOZ_ASSERT(
+       aRequest->mSupportedConfig,
+       "The request needs a supported config if we're going to provide access!");
