@@ -2,12 +2,14 @@ diff --git a/dom/media/mediaelement/HTMLMediaElement.cpp b/dom/media/mediaelemen
 index dbf941c..6357b9b 100644
 --- a/dom/media/mediaelement/HTMLMediaElement.cpp
 +++ b/dom/media/mediaelement/HTMLMediaElement.cpp
-@@ -13,6 +13,9 @@
+@@ -13,6 +13,11 @@
  #include "AudioStreamTrack.h"
  #include "AutoplayPolicy.h"
  #include "ChannelMediaDecoder.h"
 +#ifdef MOZ_WIDGET_UIKIT
 +#  include "AVPlayerDecoder.h"
++#  include "mozilla/Debug.h"     // printf_stderr
++#  include "mozilla/EMEUtils.h"  // IsFairPlayKeySystem
 +#endif
  #include "CrossGraphPort.h"
  #include "DOMMediaStream.h"
@@ -42,3 +44,28 @@ index dbf941c..6357b9b 100644
    RefPtr<ChannelMediaDecoder> decoder =
        ChannelMediaDecoder::Create(decoderInit, &diagnostics);
    if (!decoder) {
+@@ -7875,4 +7901,24 @@
+   if (MozAudioCaptured()) {
++#ifdef MOZ_WIDGET_UIKIT
++    // Reynard: FairPlay decrypts inside AVFoundation and Gecko never
++    // holds a decrypted sample, so a capture stream can only carry
++    // silence - the leak this check guards against cannot happen.
++    // Device captures show fresh, src-less elements arriving here
++    // already marked captured, which rejected setMediaKeys with a
++    // bare NotSupportedError and killed every FairPlay page before
++    // the CDM stack ran at all.
++    nsAutoString keySystem;
++    if (aMediaKeys) {
++      aMediaKeys->GetKeySystem(keySystem);
++    }
++    const bool fairPlayExempt = IsFairPlayKeySystem(keySystem);
++    printf_stderr(
++        "emeKeys: SetMediaKeys with audio captured, keySystem=%s exempt=%d\n",
++        NS_ConvertUTF16toUTF8(keySystem).get(), fairPlayExempt ? 1 : 0);
++    if (!fairPlayExempt)
++#endif
++    {
+     aRv.Throw(NS_ERROR_DOM_NOT_SUPPORTED_ERR);
+     return nullptr;
++    }
+   }

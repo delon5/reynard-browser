@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,795 @@
+@@ -0,0 +1,822 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -516,6 +516,26 @@ index 000000000000..c20df0f7f09f
 +      contentKeyResponseWithFairPlayStreamingKeyResponseData:ckc];
 +  [request processContentKeyResponse:response];
 +
++  // The CKC is handed to AVFoundation synchronously and there is no
++  // callback that says "key now usable", so usability is declared at
++  // delivery: pages gate playback on keyStatuses, and an empty map
++  // reads as "no licence" no matter how well the exchange went. The
++  // session id stands in for the key id - FairPlay identifiers are
++  // opaque skd URIs, and EME pages iterate the map rather than look
++  // up specific ids.
++  {
++    NS_ConvertUTF16toUTF8 sessionIdUtf8(aSessionId);
++    CencKeyId keyId;
++    keyId.AppendElements(
++        reinterpret_cast<const uint8_t*>(sessionIdUtf8.get()),
++        sessionIdUtf8.Length());
++    dom::Optional<dom::MediaKeyStatus> status;
++    status.Construct(dom::MediaKeyStatus::Usable);
++    auto caps = mCapabilites.Lock();
++    caps->SetKeyStatus(keyId, nsString(aSessionId), status);
++  }
++  OnKeyStatusesChange(aSessionId);
++
 +  ResolvePromise(aPromiseId);
 +}
 +
@@ -783,6 +803,13 @@ index 000000000000..c20df0f7f09f
 +
 +void FairPlayCDMProxy::OnKeyStatusesChange(const nsAString& aSessionId) {
 +  MOZ_ASSERT(NS_IsMainThread());
++  if (mKeys.IsNull()) {
++    return;
++  }
++  RefPtr<dom::MediaKeySession> session = mKeys->GetSession(aSessionId);
++  if (session) {
++    session->DispatchKeyStatusesChange();
++  }
 +}
 +
 +void FairPlayCDMProxy::GetStatusForPolicy(
