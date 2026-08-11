@@ -99,7 +99,14 @@ final class ToolbarController {
         // layout space, so it is not a toolbar-limits question at all -
         // the limits describe the real toolbar, unchanged from upstream.
         let condensed = browserChrome.isScrollCondensed
-        let pill = BrowserChrome.condensedPillOccupiedHeight
+        // condensedPillOccupiedHeight is 20 + 40, and that 20 is measured
+        // from the SAFE AREA GUIDE, not the window bottom - so the pill
+        // actually occupies those 60pt plus the home indicator band
+        // beneath them. Reporting 60 ended content roughly 34pt inside
+        // the pill, which is the CSS falling behind it while the toolbar
+        // case looked right (142 is a real frame height, with nothing
+        // left out).
+        let pill = BrowserChrome.condensedPillOccupiedHeight + rootView.safeAreaInsets.bottom
 
         // Reserve what is ACTUALLY on screen: the toolbar's height while
         // it is up, the pill's once it has condensed. One mechanism, one
