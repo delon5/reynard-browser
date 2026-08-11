@@ -99,7 +99,6 @@ final class TabManagerImplementation: NSObject, TabManager {
     
     // A background termination may be reported after the app becomes active.
     // Keep the session eligible for silent recovery until a foreground composite confirms it survived.
-    private weak var sessionEligibleForSilentRecovery: GeckoSession?
     
     private lazy var lenientURLExpression: NSRegularExpression = {
         let pattern = "^\\s*(\\w+-+)*[\\w\\[]+(://[/]*|:|\\.)(\\w+-+)*[\\w\\[:]+([\\S&&[^\\w-]]\\S*)?\\s*$"
@@ -293,7 +292,6 @@ final class TabManagerImplementation: NSObject, TabManager {
     // MARK: - Application Lifecycle
     
     func applicationWillResignActive() {
-        sessionEligibleForSilentRecovery = selectedTab?.session
     }
     
     func applicationDidBecomeActive() {
@@ -866,80 +864,6 @@ final class TabManagerImplementation: NSObject, TabManager {
     
     // MARK: - Session Recovery
     
-    private func recoverSelectedSessionIfNeeded() {
-        guard sessionManager.isForeground,
-              let tab = selectedTab,
-              !tab.session.isOpen() else {
-            return
-        }
-        
-        // A slept tab's session is created unopened deliberately - no
-        // content process until it is needed - so opening it is not
-        // recovery and must not be reported as a replacement. Nothing
-        // died here; it was never started.
-        if case .pending = tab.state.restoreState {
-            logger(String(format: "tabSleep: waking tab %@ - opening its deferred session", tab.id.uuidString))
-            sessionManager.open(tab.session)
-            sessionManager.activate(tab.session)
-            return
-        }
-        
-        let previousSession = tab.session
-        let replacementSession = createSession(
-            tabID: tab.id,
-            url: tab.url,
-            windowId: nil,
-            isPrivate: tab.isPrivate
-        )
-        tab.session = replacementSession
-        tab.state.sessionNavigationAvailability = .unavailable
-        // createSession(.immediate) opens the session and then
-        // DEACTIVATES it, so a replacement made here starts inactive and
-        // an inactive docshell never paints. selectTab happens to
-        // activate afterwards; the load path does not, and that is the
-        // black page you get when selecting a tab whose session had been
-        // closed - it loads, the title arrives, nothing composites.
-        // Activating at the single place the replacement is created
-        // covers every caller.
-        sessionManager.activate(replacementSession)
-        delegate?.tabManager(
-            self,
-            didReplaceSelectedSession: previousSession,
-            with: replacementSession
-        )
-    }
-    
-    private func handleSessionTermination(_ session: GeckoSession) {
-        guard let location = tabLocation(for: session) else {
-            return
-        }
-        
-        let wasAwaitingForegroundComposite =
-        sessionEligibleForSilentRecovery === session
-        if wasAwaitingForegroundComposite {
-            sessionEligibleForSilentRecovery = nil
-        }
-        
-        let didTerminateSelectedTab = selectedTab?.session === session
-        let tab = tabs(for: location.mode)[location.index]
-        sessionManager.close(session)
-        tab.state.restoreState = restoredURL(from: tab.url).map(TabRestoreState.pending) ?? .none
-        tab.state.loadingState = .idle
-        notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
-        persistState()
-        
-        guard didTerminateSelectedTab,
-              sessionManager.isApplicationActive else {
-            return
-        }
-        
-        if wasAwaitingForegroundComposite {
-            selectTab(at: location.index, mode: location.mode)
-        } else {
-            delegate?.tabManagerDidTerminateSelectedTab(self)
-        }
-    }
-    
     // MARK: - Tab Lifecycle
     
     private func saveClosedTabIfNeeded(_ tab: Tab, mode: TabMode) {
@@ -1085,7 +1009,6 @@ final class TabManagerImplementation: NSObject, TabManager {
            let previousSession = previousTab?.session {
             sessionManager.deactivate(previousSession)
         }
-        recoverSelectedSessionIfNeeded()
         sessionManager.activate(selectedTab.session)
         systemMediaSession.select(session: selectedTab.session)
         pictureInPictureCoordinator?.selectedSessionDidChange()
@@ -1225,13 +1148,6 @@ final class TabManagerImplementation: NSObject, TabManager {
     func browse(to term: String, in tab: Tab) {
         let navigationInput = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !navigationInput.isEmpty else {
-            return
-        }
-        
-        if selectedTab === tab {
-            recoverSelectedSessionIfNeeded()
-        }
-        guard tab.session.isOpen() else {
             return
         }
         
@@ -1673,10 +1589,6 @@ extension TabManagerImplementation: ContentDelegate {
         }
         tab.state.hasFirstComposite = true
         delegate?.tabManager(self, didFirstCompositeFor: tab.id)
-        if sessionManager.isApplicationActive,
-           sessionEligibleForSilentRecovery === session {
-            sessionEligibleForSilentRecovery = nil
-        }
     }
     
     func onFirstContentfulPaint(session: GeckoSession) {}
