@@ -100,7 +100,24 @@ final class ToolbarController {
         // the limits describe the real toolbar, unchanged from upstream.
         let condensed = browserChrome.isScrollCondensed
         let pill = BrowserChrome.condensedPillOccupiedHeight
-        let maxHeight = condensed ? 0 : maxToolbarOffset
+
+        // CONSTANT, and the PILL's height - not the toolbar's, and not
+        // toggled.
+        //
+        // The engine reported max=426 throughout, which is the expanded
+        // toolbar at 142pt x3, with the pill inset arriving on top as
+        // offset=180: "RECEIVED offset=180 max=426 height=606". The page
+        // was clearing 202pt of chrome at the bottom, which is the black
+        // bar, and the toggling between that and 0 relaid the document
+        // out on every condense.
+        //
+        // Content has to clear whatever is ACTUALLY on screen, and the
+        // pill is the only thing there once the toolbar has gone. The
+        // expanded toolbar covers content rather than reserving space
+        // for it, which is what underlaying it means, and it hides on
+        // scroll anyway. Never measured, so no oscillation and no
+        // reflow storm.
+        let maxHeight = pill
 
         // Both knobs on one line, because they only mean anything
         // together: maxHeight shortens the LAYOUT VIEWPORT, so it moves
@@ -111,7 +128,11 @@ final class ToolbarController {
         // tell apart.
         NSLog("dynToolbar: condensed=\(condensed) max=\(maxHeight) pill=\(pill) toolbar=\(maxToolbarOffset) top=\(maxTopToolbarOffset)")
 
-        contentView.setFloatingChromeInset(condensed ? pill : 0)
+        // Zero: the viewport reservation above IS the pill's clearance
+        // now, and adding a fixed-layer margin for it as well is exactly
+        // the 426+180 double-count. The toolbar's own slide offsets
+        // still flow through applyToolbarOffsets untouched.
+        contentView.setFloatingChromeInset(0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset
