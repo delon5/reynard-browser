@@ -230,10 +230,28 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     func setToolbarLimits(maxHeight: CGFloat, topOffset: CGFloat) {
+        // ALWAYS send - never gate on our own copy.
+        //
+        // There are two caches on this path and a value can be dropped
+        // between them. nsWindow::UpdateDynamicToolbarMaxHeight already
+        // early-returns on an unchanged value, so it is the authority;
+        // this one only ever suppressed a needed send. The call is
+        // `session?`, so any moment with no session - a tab switch, a
+        // session replacement - advanced this copy while the engine kept
+        // the old value, and because our copy then matched, the correct
+        // value was never sent again.
+        //
+        // A device capture caught exactly that: the app logging max=0.0
+        // while condensed, and nsPresContext still holding max=426 (the
+        // 142pt full toolbar) minutes later. The page reserved a toolbar
+        // that was not on screen, which is the gap above the pill.
+        //
+        // Cost of always sending is one scalar over IPC per layout pass.
         if maxHeight != dynamicToolbarMaxHeight {
-            dynamicToolbarMaxHeight = maxHeight
-            session?.setDynamicToolbarMaxHeight(maxHeight)
+            NSLog("dynToolbar: max height \(dynamicToolbarMaxHeight) -> \(maxHeight) (session \(session == nil ? "MISSING" : "live"))")
         }
+        dynamicToolbarMaxHeight = maxHeight
+        session?.setDynamicToolbarMaxHeight(maxHeight)
         
         guard abs(topOffset - maxTopToolbarOffset) > 0.5 else {
             return
@@ -290,11 +308,13 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     /// YouTube does - lifts its own controls with it while its
     /// background keeps painting the full height behind the pill.
     func setSafeAreaInsetBottom(_ inset: CGFloat) {
-        guard inset != safeAreaInsetBottom else {
-            return
+        // Always send, for the same reason as setToolbarLimits above:
+        // the widget already ignores an unchanged value, and gating here
+        // loses the send whenever there is no session to send it to.
+        if inset != safeAreaInsetBottom {
+            NSLog("dynToolbar: env(safe-area-inset-bottom) \(safeAreaInsetBottom) -> \(inset)pt (session \(session == nil ? "MISSING" : "live"))")
         }
         safeAreaInsetBottom = inset
-        NSLog("dynToolbar: env(safe-area-inset-bottom) sent \(inset)pt")
         session?.setSafeAreaInsetBottom(inset)
 
         // MEASUREMENT. We send POINTS; the page sees CSS PIXELS, and
