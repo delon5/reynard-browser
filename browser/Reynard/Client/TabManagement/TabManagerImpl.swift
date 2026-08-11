@@ -283,7 +283,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         // Deferring the open to selection means a slept tab costs no
         // process at all. loadRestoredURLIfNeeded opens it on the way
         // back.
-        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate, opening: .manual)
+        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
         tab.state.restoreState = .pending(url)
         tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
         NSLog("[TabMemory] Slept background session for tab %@", tab.id.uuidString)
@@ -732,8 +732,7 @@ final class TabManagerImplementation: NSObject, TabManager {
                     tabID: snapshot.id,
                     url: snapshot.url,
                     windowId: nil,
-                    isPrivate: false,
-                    opening: .manual
+                    isPrivate: false
                 ),
                 title: snapshot.title,
                 url: snapshot.url,
@@ -753,8 +752,7 @@ final class TabManagerImplementation: NSObject, TabManager {
                     tabID: snapshot.id,
                     url: snapshot.url,
                     windowId: nil,
-                    isPrivate: true,
-                    opening: .manual
+                    isPrivate: true
                 ),
                 title: snapshot.title,
                 url: snapshot.url,
