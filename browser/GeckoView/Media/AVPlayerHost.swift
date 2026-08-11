@@ -112,6 +112,23 @@ public final class AVPlayerHost: NSObject {
     @objc public func useContentKeySession(_ session: AVContentKeySession) {
         emeContentKeySession = session
         avLog("EME published a content key session")
+
+        // Re-register anything already created. There is no ordering
+        // guarantee between the page setting src (which reaches
+        // createPlayer) and its EME handshake reaching
+        // FairPlayCDMProxy::Init, and a player made first was registered
+        // on the local no-licence session - which never receives a key,
+        // so the asset stays encrypted no matter how correct the rest of
+        // the exchange is. FairPlay only decrypts an asset registered as
+        // a recipient of the SAME session the keys arrive on.
+        //
+        // addContentKeyRecipient is idempotent per session, so the
+        // already-correct case costs nothing.
+        let existing = withState { Array(players.values) }
+        for entry in existing where entry.keySession !== session {
+            session.addContentKeyRecipient(entry.asset)
+            avLog("re-registered an existing asset on the EME key session")
+        }
     }
 
     private final class Player {

@@ -1,12 +1,30 @@
 diff --git a/dom/media/eme/EMEUtils.cpp b/dom/media/eme/EMEUtils.cpp
+index e6515f6fc9f2..4ebc42de738d 100644
 --- a/dom/media/eme/EMEUtils.cpp
 +++ b/dom/media/eme/EMEUtils.cpp
-@@ -49,6 +49,10 @@
+@@ -14,6 +14,7 @@
+ #include "mozilla/dom/UnionTypes.h"
+ #include "nsContentUtils.h"
+ #include "nsIScriptObjectPrincipal.h"
++#include "nsReadableUtils.h"  // StringBeginsWith, for the FairPlay name match
+ 
+ #ifdef MOZ_WMF_CDM
+ #  include "mozilla/PMFCDM.h"
+@@ -49,6 +50,19 @@ bool IsWidevineKeySystem(const nsAString& aKeySystem) {
    return aKeySystem.EqualsLiteral(kWidevineKeySystemName);
  }
  
 +bool IsFairPlayKeySystem(const nsAString& aKeySystem) {
-+  return aKeySystem.EqualsLiteral(kFairPlayKeySystemName);
++  if (aKeySystem.EqualsLiteral(kFairPlayKeySystemName)) {
++    return true;
++  }
++  // The versioned names, which is what pages actually ask for. Safari
++  // takes com.apple.fps from 12.1, but com.apple.fps.1_0 is still the
++  // common request across the shipping players (hls.js, Shaka, JW,
++  // Bitmovin), with 2_0 and 3_0 in use as well. Matching only the bare
++  // name rejects those at requestMediaKeySystemAccess - before any of
++  // this pipeline is reached, and with nothing in the log to say why.
++  return StringBeginsWith(aKeySystem, u"com.apple.fps."_ns);
 +}
 +
  #ifdef MOZ_WMF_CDM
