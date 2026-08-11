@@ -603,6 +603,6 @@ public class GeckoSession {
     /// site lifts its own bottom controls clear of the floating pill
     /// while its background still runs the full height behind it.
     public func setSafeAreaInsetBottom(_ inset: CGFloat) {
-        window?.setSafeAreaInsetBottom?(inset)
+        window?.setSafeAreaInsetBottom(inset)
     }
 }
