@@ -125,6 +125,12 @@ final class SessionManager {
     
     func activate(_ session: GeckoSession) {
         guard session.isOpen() else {
+            // Not a no-op worth ignoring: the caller believes this
+            // session is now on screen, and it will not be activated by
+            // anything else. A tab whose activate landed here loads into
+            // an inactive docshell and never paints.
+            NSLog("[SessionActivation] activate SKIPPED - session %p is not open (caller believes it is selected)",
+                  session)
             return
         }
         sessionsRequestedActive[ObjectIdentifier(session)] = session
@@ -141,7 +147,14 @@ final class SessionManager {
         // anything routes it through here - Gecko stops painting while
         // audio carries on, which is what CarPlay video stopping on lock
         // looks like.
-        session.setActive(isApplicationForeground || mustStayActive(session))
+        let active = isApplicationForeground || mustStayActive(session)
+        NSLog("[SessionActivation] activate session %p -> active=%@ foreground=%@ commitsSuspended=%@ (%d in active set)",
+              session,
+              active ? "YES" : "NO",
+              isApplicationForeground ? "YES" : "NO",
+              (!isPhoneSceneActive && !isCommitLatchExempt(session)) ? "YES" : "NO",
+              sessionsRequestedActive.count)
+        session.setActive(active)
         session.setFocused(true)
     }
     

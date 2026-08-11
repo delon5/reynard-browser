@@ -800,6 +800,16 @@ final class TabManagerImplementation: NSObject, TabManager {
         if !tab.session.isOpen(), case .pending = tab.state.restoreState {
             logger(String(format: "tabRestore: opening the deferred session for tab %@", tab.id.uuidString))
             sessionManager.open(tab.session)
+            // ...and activate it here, because the activate() selectTab
+            // already made was a no-op: it runs before this point and
+            // returns early on a session that is not open yet. Without
+            // this the tab loads into an INACTIVE docshell - the page
+            // runs, and never composites, until some later transition
+            // activates it. That is what
+            // "toolbarTrace: ... visited=1 delivered=0" is reporting.
+            if tab === selectedTab {
+                sessionManager.activate(tab.session)
+            }
         }
         
         guard tab.session.isOpen(),
