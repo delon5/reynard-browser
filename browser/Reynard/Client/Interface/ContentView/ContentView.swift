@@ -319,6 +319,16 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         }
     }
     
+    /// Whether the chrome is condensed to the pill. Gates the fixed-layer
+    /// margin, which belongs to the full toolbar alone.
+    private var isChromeCondensed = false
+    
+    func setChromeCondensed(_ condensed: Bool) {
+        guard condensed != isChromeCondensed else { return }
+        isChromeCondensed = condensed
+        syncContentBottomOffset()
+    }
+    
     private func syncContentBottomOffset() {
         // REPLACES, not adds. While the pill is showing the toolbar is
         // not on screen, but ToolbarController goes on sliding it, so
@@ -327,9 +337,22 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // page's fixed content drifting down past the pill it was
         // supposed to clear. The pill's height IS the clearance while it
         // is up, whatever the toolbar thinks it is doing.
-        let offset = floatingChromeInset > 0
-            ? floatingChromeInset
-            : -(toolbarTopOffset + toolbarBottomOffset)
+        // While condensed, ZERO - not the toolbar's sliding offset.
+        //
+        // This margin exists to keep a page's fixed bars glued to a
+        // toolbar that is sliding off screen. Condensed, that toolbar is
+        // already gone and the condensed mode has its own single
+        // mechanism (a shorter view when stopping, env when floating),
+        // so letting this keep reporting -(top+bottom) = -142 stacked a
+        // second displacement underneath it. That is the doubling.
+        let offset: CGFloat
+        if isChromeCondensed {
+            offset = 0
+        } else {
+            offset = floatingChromeInset > 0
+                ? floatingChromeInset
+                : -(toolbarTopOffset + toolbarBottomOffset)
+        }
         guard offset != contentBottomOffset else {
             return
         }

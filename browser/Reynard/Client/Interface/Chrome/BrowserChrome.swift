@@ -197,6 +197,12 @@ final class BrowserChrome: UIView {
         return addressBar.bottomAnchor
     }
     
+    /// The pill's real frame, for logging the gap it is supposed to
+    /// leave against the value the page was actually given.
+    func condensedPillFrame(in view: UIView) -> CGRect {
+        return condensedPill.convert(condensedPill.bounds, to: view)
+    }
+    
     func addressBarFrame(in view: UIView) -> CGRect {
         return addressBar.convert(addressBar.bounds, to: view)
     }
