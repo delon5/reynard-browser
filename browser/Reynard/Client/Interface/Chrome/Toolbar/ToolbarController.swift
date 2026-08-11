@@ -134,7 +134,14 @@ final class ToolbarController {
         // the page is being told, so a capture shows the gap and its
         // cause on one line instead of needing another build to guess.
         let pillTop = browserChrome.condensedPillFrame(in: rootView).minY
-        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) margin=\(margin) pillTop=\(pillTop) viewH=\(rootView.bounds.height)")
+        // contentBottom is the measurement that has never been taken.
+        // Everything else here describes what we SEND; this is what the
+        // layout actually produced. In stop mode it must equal pillTop -
+        // if it equals viewH instead, the bottom anchor did not take and
+        // the page is free to paint under the pill no matter what the
+        // engine was told.
+        let contentBottom = contentView.convert(contentView.bounds, to: rootView).maxY
+        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) margin=\(margin) pillTop=\(pillTop) contentBottom=\(contentBottom) viewH=\(rootView.bounds.height)")
 
         // Inset BEFORE the condensed flag: setChromeCondensed re-syncs
         // the margin, and it must not do that while still holding the
