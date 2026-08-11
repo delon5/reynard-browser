@@ -65,6 +65,7 @@ final class BrowserPreferences {
             // Experimental
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
             key("ExperimentalSettings", "isAVPlayerHLSEnabled"): false,
+            key("ExperimentalSettings", "isSiteIsolationEnabled"): true,
             key("ExperimentalSettings", "isJITDebugLogEnabled"): true,
             key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
             key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
@@ -1094,6 +1095,28 @@ final class BrowserPreferences {
     
     // MARK: - Experimental
     struct ExperimentalSettings {
+        /// Site isolation - Fission. On by default, as upstream has it.
+        ///
+        /// The reason it is exposed at all: with Fission on, every
+        /// ORIGIN gets its own remote type, and
+        /// dom.ipc.processCount.<remoteType> is 1 - so twelve sites open
+        /// means twelve content processes. iOS then sends one
+        /// synchronous XPC per hosted extension, on the main thread, at
+        /// every scene transition, against a 10 second watchdog. Turning
+        /// this off collapses those tabs onto the shared "web" remote
+        /// type and the count with them.
+        ///
+        /// The trade is real: origins stop being isolated from each
+        /// other, both for Spectre-class attacks and for crashes.
+        static var isSiteIsolationEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "isSiteIsolationEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isSiteIsolationEnabled")
+            }
+        }
+        
         /// Hands HLS (and therefore FairPlay, which is only ever
         /// delivered that way) to AVFoundation instead of Gecko, which
         /// has no HLS demuxer on this platform. Mirrored into the engine

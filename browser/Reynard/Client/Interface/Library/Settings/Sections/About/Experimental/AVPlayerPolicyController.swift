@@ -18,7 +18,11 @@ import GeckoView
 enum AVPlayerPolicyController {
     static func applyAVPlayerHLS() {
         GeckoRuntime.setDefaultPrefs([
-            "media.reynard.avplayer.enabled": Prefs.ExperimentalSettings.isAVPlayerHLSEnabled
+            "media.reynard.avplayer.enabled": Prefs.ExperimentalSettings.isAVPlayerHLSEnabled,
+            // Fission. Off collapses per-origin content processes onto
+            // the shared "web" remote type, which is the only lever that
+            // changes the arithmetic of the foreground XPC handshake.
+            "fission.autostart": Prefs.ExperimentalSettings.isSiteIsolationEnabled,
         ])
     }
 }

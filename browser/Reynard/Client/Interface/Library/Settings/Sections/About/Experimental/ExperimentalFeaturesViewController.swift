@@ -55,6 +55,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private enum Row: CaseIterable {
         case videoPictureInPicture
         case avPlayerHLS
+        case siteIsolation
         case hideUpdateNotification
         case hideUpdateAvailableBanner
         case carPlayScriptsEnabled
@@ -68,7 +69,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         var section: Section {
             switch self {
-            case .videoPictureInPicture, .avPlayerHLS, .hideUpdateNotification, .hideUpdateAvailableBanner:
+            case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
             case .carPlayScriptsEnabled, .manageCarPlayScripts:
                 return .carPlayScripts
@@ -84,6 +85,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private let videoPictureInPictureSwitch = UISwitch()
     private let avPlayerHLSSwitch = UISwitch()
+    private let siteIsolationSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
     private let carPlayScriptsSwitch = UISwitch()
@@ -148,6 +150,12 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             return switchCell(
                 title: "Video Picture-in-Picture",
                 accessoryView: videoPictureInPictureSwitch
+            )
+        case .siteIsolation:
+            return switchCell(
+                title: NSLocalizedString("Site Isolation", comment: ""),
+                subtitle: NSLocalizedString("A process per site. Off uses far fewer, which the app is steadier with", comment: ""),
+                accessoryView: siteIsolationSwitch
             )
         case .avPlayerHLS:
             return switchCell(
@@ -242,7 +250,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         }
         
         switch sectionRows[indexPath.row] {
-        case .videoPictureInPicture, .avPlayerHLS, .hideUpdateNotification, .hideUpdateAvailableBanner,
+        case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .hideUpdateNotification, .hideUpdateAvailableBanner,
              .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
              .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
@@ -261,6 +269,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private func configureSwitch() {
         videoPictureInPictureSwitch.addTarget(self, action: #selector(videoPictureInPictureSwitchDidChange(_:)), for: .valueChanged)
         avPlayerHLSSwitch.addTarget(self, action: #selector(avPlayerHLSSwitchDidChange(_:)), for: .valueChanged)
+        siteIsolationSwitch.addTarget(self, action: #selector(siteIsolationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
         carPlayScriptsSwitch.addTarget(self, action: #selector(carPlayScriptsSwitchDidChange(_:)), for: .valueChanged)
@@ -274,6 +283,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private func refreshDisplayedState() {
         videoPictureInPictureSwitch.isOn = Prefs.ExperimentalSettings.isVideoPictureInPictureEnabled
         avPlayerHLSSwitch.isOn = Prefs.ExperimentalSettings.isAVPlayerHLSEnabled
+        siteIsolationSwitch.isOn = Prefs.ExperimentalSettings.isSiteIsolationEnabled
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
         carPlayScriptsSwitch.isOn = Prefs.ExperimentalSettings.isCarPlayScriptsEnabled
@@ -331,6 +341,15 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     // Pushed to the engine immediately as well as at startup, so a
     // restart is only needed for pages already loaded under the old
     // setting - DecoderTraits asks IsSupportedType per media element.
+    // Restart required: the process model is decided as content
+    // processes are created, so flipping it mid-session leaves the
+    // existing ones on the old model.
+    @objc private func siteIsolationSwitchDidChange(_ sender: UISwitch) {
+        Prefs.ExperimentalSettings.isSiteIsolationEnabled = sender.isOn
+        AVPlayerPolicyController.applyAVPlayerHLS()
+        showRestartAlert()
+    }
+    
     @objc private func avPlayerHLSSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.isAVPlayerHLSEnabled = sender.isOn
         AVPlayerPolicyController.applyAVPlayerHLS()

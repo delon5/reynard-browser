@@ -10,6 +10,9 @@ import GeckoView
 import UIKit
 
 final class TabManagerImplementation: NSObject, TabManager {
+    /// How many content processes may stay alive behind the selected tab.
+    private static let liveSessionCap = 5
+
     private(set) var regularTabs: [Tab] = []
     private(set) var privateTabs: [Tab] = []
     private(set) var selectedTabMode: TabMode = .regular
@@ -177,6 +180,35 @@ final class TabManagerImplementation: NSObject, TabManager {
     
     // MARK: - Tab Sleeping
     
+    /// Live content processes cost more than memory on this platform:
+    /// iOS sends one SYNCHRONOUS XPC per hosted extension, on the main
+    /// thread, at every scene transition, against a 10 second watchdog.
+    /// Twelve tabs visited is twelve of those, and that is what has been
+    /// killing the app on the way back from the background.
+    ///
+    /// Gecko retires a process the moment its last tab lets go -
+    /// dom.ipc.processReuse.unusedGraceMs is 0 and no keepalive pref is
+    /// set - so all this has to do is let go. evictSessionIfNeeded closes
+    /// the session and leaves the replacement unopened; the selection
+    /// rule above opens it again if the tab is returned to.
+    ///
+    /// Least recently selected first, and deliberately generous: this
+    /// only fires well past what a transition can survive.
+    private func retireSessionsBeyondCap(keeping selected: Tab) {
+        let live = (regularTabs + privateTabs)
+            .filter { $0 !== selected && $0.session.isOpen() }
+        guard live.count > Self.liveSessionCap else {
+            return
+        }
+        let doomed = live
+            .sorted { $0.state.selectionOrder < $1.state.selectionOrder }
+            .prefix(live.count - Self.liveSessionCap)
+        for tab in doomed {
+            logger(String(format: "tabRetire: closing the session for tab %@ (cap %d, live %d)", tab.id.uuidString, Self.liveSessionCap, live.count))
+            evictSessionIfNeeded(for: tab, isPrivate: tab.isPrivate)
+        }
+    }
+
     func sleepBackgroundedTabs() {
         NSLog("[TabMemory] Sleeping backgrounded tab sessions")
         for tab in regularTabs {
@@ -1049,6 +1081,8 @@ final class TabManagerImplementation: NSObject, TabManager {
            let previousSession = previousTab?.session {
             sessionManager.deactivate(previousSession)
         }
+
+        retireSessionsBeyondCap(keeping: selectedTab)
 
         // THE RULE: a selected tab always has an open session.
         //
