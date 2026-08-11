@@ -1,7 +1,8 @@
 diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySystemAccess.cpp
+index 58158272ebca..c1279f647082 100644
 --- a/dom/media/eme/MediaKeySystemAccess.cpp
 +++ b/dom/media/eme/MediaKeySystemAccess.cpp
-@@ -140,6 +140,17 @@
+@@ -140,6 +140,17 @@ MediaKeySystemStatus MediaKeySystemAccess::GetKeySystemStatus(
      return EnsureCDMInstalled(keySystem, SecureLevel::Software, aOutMessage);
    }
  
@@ -19,7 +20,7 @@ diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySyst
    // This is used to determine if we need to download Widevine L1.
    bool shouldCheckL1Installation = false;
  #ifdef MOZ_WMF_CDM
-@@ -349,7 +360,23 @@
+@@ -349,7 +360,23 @@ GetSupportedKeySystemConfigs(const nsAString& aKeySystem,
    nsTArray<KeySystemConfigRequest> requests;
  
    // Software Widevine and Clearkey
@@ -44,3 +45,35 @@ diff --git a/dom/media/eme/MediaKeySystemAccess.cpp b/dom/media/eme/MediaKeySyst
      requests.AppendElement(KeySystemConfigRequest{
          aKeySystem, DecryptionInfo::Software, aIsPrivateBrowsing});
    }
+@@ -670,8 +697,30 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
+     // and subtype names are case-insensitive."'. We're using
+     // nsContentTypeParser and that is case-insensitive and converts all its
+     // parameter outputs to lower case.)
+-    const bool supportedInMP4 =
++    bool supportedInMP4 =
+         MP4Decoder::IsSupportedType(containerType, aDiagnostics);
++#ifdef MOZ_WIDGET_UIKIT
++    // FairPlay is declared against the PLAYLIST, not the segments.
++    // Safari's pages - and every player written for them - ask for
++    // application/vnd.apple.mpegurl here, because that is the type the
++    // element will be given. Gecko has no HLS demuxer, so neither
++    // MP4Decoder nor WebMDecoder claims it, and the capability was
++    // dropped: the returned configuration then had no video
++    // capabilities at all and requestMediaKeySystemAccess rejected -
++    // after Supports() had already said yes to the key system, which is
++    // why the log shows the probe succeeding and nothing after it.
++    //
++    // The segments behind an HLS playlist are fMP4 or TS carrying H264
++    // and AAC, which is exactly what mMP4 advertises, so the MP4
++    // container support is the right answer for them.
++    if (!supportedInMP4 && IsFairPlayKeySystem(aKeySystem.mKeySystem) &&
++        (containerType.Type() == MEDIAMIMETYPE("application/vnd.apple.mpegurl") ||
++         containerType.Type() == MEDIAMIMETYPE("application/x-mpegurl") ||
++         containerType.Type() == MEDIAMIMETYPE("audio/mpegurl") ||
++         containerType.Type() == MEDIAMIMETYPE("audio/x-mpegurl"))) {
++      supportedInMP4 = true;
++    }
++#endif
+     if (supportedInMP4 && !aKeySystem.mMP4.IsSupported()) {
+       EME_LOG(
+           "MediaKeySystemConfiguration (label='{}') "
