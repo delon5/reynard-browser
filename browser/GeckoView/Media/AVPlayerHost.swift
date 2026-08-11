@@ -178,12 +178,37 @@ public final class AVPlayerHost: NSObject {
         guard !audioSessionConfigured else { return }
         audioSessionConfigured = true
         let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
-            avLog("audio session ACTIVATED (category playback)")
-        } catch {
-            avLog("audio session activation FAILED: \(error)")
+
+        // A ladder, not a single attempt. iOS returned '!pla'
+        // (AVAudioSessionErrorCodeCannotStartPlaying) for the exclusive
+        // playback session below, which is the usual answer for a
+        // process not permitted to take the audio focus - a content
+        // extension. A MIXABLE or ambient session asks for no focus and
+        // is frequently granted to the very same process. If one of
+        // these activates, playback may sustain in-process and no
+        // app-process brokering is needed.
+        let candidates: [(String, AVAudioSession.Category, AVAudioSession.Mode,
+                          AVAudioSession.CategoryOptions)] = [
+            ("playback/moviePlayback", .playback, .moviePlayback, []),
+            ("playback/moviePlayback+mix", .playback, .moviePlayback, [.mixWithOthers]),
+            ("ambient/default+mix", .ambient, .default, [.mixWithOthers]),
+            ("soloAmbient/default", .soloAmbient, .default, []),
+        ]
+        var activated = false
+        for (name, category, mode, options) in candidates {
+            do {
+                try session.setCategory(category, mode: mode, options: options)
+                try session.setActive(true)
+                avLog("audio session ACTIVATED: \(name)")
+                activated = true
+                break
+            } catch {
+                avLog("audio session \(name) refused: \(error)")
+            }
+        }
+        if !activated {
+            avLog("audio session: NO category could be activated - playback "
+                  + "must move to the app process")
         }
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
