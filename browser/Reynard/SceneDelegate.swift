@@ -323,7 +323,27 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
 
-        DispatchQueue.main.async { [weak self] in
+        // CHANGED - delayed and re-checked rather than next-turn. See
+        // fix_debounce_background_teardown.py's docstring.
+        //
+        // async alone only moves this to the next main-queue turn, a few
+        // milliseconds, so it cannot notice the app coming straight back.
+        // On 2026-08-12 the app backgrounded at 22:30:42.271 and
+        // foregrounded at 22:30:42.491 - an app-switcher glance - and the
+        // teardown was still interrupting and detaching six sessions at
+        // :508, inside the foreground cascade. The synchronous
+        // per-extension XPC landed on processes that were mid-teardown
+        // and the watchdog took the app.
+        //
+        // Same reasoning as fix_cancel_only_on_real_teardown.py further
+        // up this file: this transition fires for a swipe up, Control
+        // Centre or a notification pull, and destroying every content
+        // process's session for a momentary interruption is not worth it.
+        //
+        // 1.5s sits past a returned-from glance and well inside the
+        // background grace period, matching the 1s this file already
+        // waits before cancelAllDebugSessionCalls.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             defer {
                 if teardownTask != .invalid {
                     teardownApplication.endBackgroundTask(teardownTask)
@@ -331,6 +351,13 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                 }
             }
             guard let self else {
+                return
+            }
+            // applicationState rather than a cached flag - iOS wakes a
+            // backgrounded app periodically and the flag goes stale-true
+            // across those wakes. Legal here: this is the main queue.
+            guard UIApplication.shared.applicationState != .active else {
+                logger("backgroundTeardown: skipped - the app came back before the teardown ran")
                 return
             }
             self.performBackgroundTeardown(for: browserViewController)
@@ -386,7 +413,42 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // fix_dump_loops_at_background.py.
         JITEnabler.dumpDebugLoopState(labelled: "loopState at background")
         
-        JITEnabler.requestDetachForAllDebugSessions()
+        // ADDED - see fix_no_teardown_while_system_media_active.py's
+        // docstring.
+        //
+        // requestDetachForAllDebugSessions is not a passive flag-setter -
+        // it calls interruptLiveDebugSessions, which sends the GDB
+        // interrupt byte to every target and STOPS it. Doing that to the
+        // process rendering Picture in Picture contradicts what the
+        // coordinator logs one line earlier:
+        //
+        //   22:42:01.439  pipLife: didStart - PiP is now active, its
+        //                 content process must stay alive in the background
+        //   22:42:01.906  requestDetachForAllDebugSessions: for 8 session(s)
+        //   22:42:01.906  interruptLiveDebugSessions: 8 live, interrupted 8
+        //
+        // The audio stuttered for the 18 seconds PiP was up, and the
+        // census on the way back showed all ten children at session=NO.
+        //
+        // hasSystemMediaSession rather than hasPictureInPictureSession,
+        // deliberately: its own doc comment covers PiP AND the
+        // now-playing entry that CarPlay and the lock screen drive their
+        // transport controls from, and notes that under CarPlay losing
+        // the content process is worse than a paused video - the head
+        // unit keeps showing controls for a page that no longer exists.
+        // Backgrounded audio has the same requirement as PiP.
+        //
+        // setDebuggerListening(false) above still runs, so children stop
+        // trapping either way and a region needed during playback is
+        // simply prepared interpreted - the same trade that fix already
+        // makes at every background. Only the interrupt and the detach
+        // are skipped. The loops stay alive, parked in their continue,
+        // and the next background after media stops tears down normally.
+        if browserViewController.sessionManager.hasSystemMediaSession {
+            logger("backgroundTeardown: skipping the debug-session detach - PiP or system media is live and its content process must keep running")
+        } else {
+            JITEnabler.requestDetachForAllDebugSessions()
+        }
         
         // An attach in flight has left its target STOPPED, and it stays
         // that way until the debug loop starts and sends continue. If

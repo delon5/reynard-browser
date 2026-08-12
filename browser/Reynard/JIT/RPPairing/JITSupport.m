@@ -1756,6 +1756,51 @@ void runDebugService(int32_t pid, DebugSession *session) {
                             (long)debugServiceIteration]);
                 }
 
+                // ADDED - see fix_dont_forward_stop_signals.py's
+                // docstring.
+                //
+                // Never re-deliver a signal that stops or kills the
+                // target. The branch above is written for a genuine
+                // fault, and forwarding is right for one - but
+                // interruptLiveDebugSessions manufactures a stop that is
+                // neither our brk nor a fault, and it lands here too.
+                //
+                // Our own 0x03 interrupt comes back as
+                // metype=5 (EXC_SOFTWARE) medata=10003 (EXC_SOFT_SIGNAL)
+                // signal=11, and the signal field is HEX - 0x11 is 17,
+                // SIGSTOP. forwardSignalStop sends vCont;S11, which
+                // DELIVERS it. The loop then detaches on its next
+                // iteration and nothing ever sends SIGCONT.
+                //
+                // Device evidence, 2026-08-12 22:42 (build 1b1f7b4): PiP
+                // logs "its content process must stay alive in the
+                // background", the teardown 467ms later SIGSTOPs all
+                // eight sessions including that one, and the audio
+                // stutters for the 18 seconds PiP is up. The second PiP
+                // cycle did the same to five processes and the app was
+                // killed on the restore - a stopped extension cannot
+                // answer the synchronous XPC in
+                // _hostWillEnterForegroundNote:.
+                //
+                // Falling through to the top of the loop is the correct
+                // response: shouldDetachDebugSessionPID is set by now, so
+                // the detach runs and RESUMES the target, which is what
+                // the interrupt existed to enable. With no detach pending
+                // it sends a plain continue instead. Both are right.
+                NSString *stopMedata = packetField(stopResponse, @"medata");
+                BOOL isSoftSignal = [stopMedata isEqualToString:@"10003"];
+                BOOL isStopOrKillSignal =
+                    [signal isEqualToString:@"11"] ||   // SIGSTOP
+                    [signal isEqualToString:@"13"] ||   // SIGTSTP
+                    [signal isEqualToString:@"14"] ||   // SIGTTIN
+                    [signal isEqualToString:@"15"] ||   // SIGTTOU
+                    [signal isEqualToString:@"09"];     // SIGKILL
+
+                if (signal && isSoftSignal && isStopOrKillSignal) {
+                    logger([NSString stringWithFormat:@"stopSignalSkip: (pid %d) soft signal 0x%@ would stop the target - NOT forwarding, letting the loop detach or continue instead (iteration %ld)", pid, signal, (long)debugServiceIteration]);
+                    continue;
+                }
+
                 // continue with signal
                 if (signal && !forwardSignalStop(session->debugProxy, signal, threadID, &commandError)) break;
                 continue;
