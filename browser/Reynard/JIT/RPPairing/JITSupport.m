@@ -1574,6 +1574,27 @@ void runDebugService(int32_t pid, DebugSession *session) {
             if ([stopResponse hasPrefix:@"W"] || [stopResponse hasPrefix:@"X"]) {
                 exitPacketPresent = YES;
                 logger([NSString stringWithFormat:@"Target exited for pid %d with packet %@ (iteration %ld, loop ran %.0fms total)", pid, stopResponse, (long)debugServiceIteration, (continueCallEnd - debugServiceLoopStart) * 1000.0]);
+                // ADDED - see fix_forget_child_on_target_exit.py's
+                // docstring.
+                //
+                // The one place the app is reliably told a child has
+                // died. NotifyChildProcessStarted has no exited
+                // counterpart, so without this the pid stays in
+                // attachedPIDs for the life of the app and is handed to
+                // reattachOrphanedProcesses on every foreground - and
+                // once the number is recycled, pidIsAlive reads the new
+                // owner as alive and the pass sends it a vAttach.
+                //
+                // Posted rather than called: this is the ObjC layer and
+                // the ledger is Swift, and this mirrors the existing
+                // GeckoRuntime.ChildProcessDidStart path that already
+                // drives childProcessDidStart. Delivery is synchronous
+                // on this thread, and the observer does nothing but hop
+                // to attachQueue.
+                [[NSNotificationCenter defaultCenter]
+                    postNotificationName:@"Reynard.JITTargetDidExit"
+                                  object:nil
+                                userInfo:@{@"pid": @(pid)}];
                 break;
             }
             

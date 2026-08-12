@@ -23,5 +23,9 @@ extension Notification.Name {
     static let downloadStoreDidStartDownload = Notification.Name("DownloadStore.DidStartDownload")
     static let historyStoreDidChange = Notification.Name("HistoryStore.DidChange")
     static let geckoRuntimeChildProcessDidStart = Notification.Name("GeckoRuntime.ChildProcessDidStart")
+    /// Posted by runDebugService when debugserver answers a continue with
+    /// a W or X packet - the one death signal the app actually receives.
+    /// See fix_forget_child_on_target_exit.py.
+    static let jitTargetDidExit = Notification.Name("Reynard.JITTargetDidExit")
     static let jitlessModeDidActivate = Notification.Name("JITless.ModeDidActivate")
 }
