@@ -199,32 +199,9 @@ final class AttachLedger {
     /// app: content processes churn on every tab sleep and recovery,
     /// so that is a real, if slow, leak. The census dump already
     /// showed only live children, so pruning costs it nothing.
-    /// CHANGED - see fix_prune_attach_ledger.py's docstring. Now prunes
-    /// attachedPIDs as well, and reports how many went.
-    ///
-    /// attachedPIDs is what reattachOrphanedProcesses walks, and it was
-    /// the one collection here still growing for the life of the app: 4
-    /// entries at 18:37 and 29 at 19:12 against 5 live children, in the
-    /// capture whose final fan-out stopped three extensions and got the
-    /// app killed.
-    ///
-    /// Only ESRCH pids go. isAlive is JITController.pidIsAlive, which
-    /// reads EPERM as alive because a content process is an app
-    /// extension in another coalition and cannot be signalled, so
-    /// nothing live is ever dropped. A pid that IS gone can only return
-    /// by number reuse, and a reused number is a different process that
-    /// should get its own attach - which is the same reasoning the
-    /// childTypes prune below already rests on.
-    ///
-    /// announcedChildCount is untouched, so the lifetime total the
-    /// census reports still means what it did.
-    func pruneDeadChildren(alive isAlive: (Int32) -> Bool) -> Int {
+    func pruneDeadChildren(alive isAlive: (Int32) -> Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         childTypes = childTypes.filter { isAlive($0.key) }
-
-        let before = attachedPIDs.count
-        attachedPIDs = attachedPIDs.filter { isAlive($0) }
-        return before - attachedPIDs.count
     }
 
     /// Every child ever announced this launch, including pruned ones.
@@ -245,21 +222,5 @@ final class AttachLedger {
     func isRejected(_ pid: Int32) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
         return rejectedPIDs.contains(pid)
-    }
-
-    /// The type this child was announced with, if it was ever announced.
-    ///
-    /// ADDED - see fix_reattach_respects_process_type.py's docstring.
-    /// noteChild records this for EVERY child, before any decision about
-    /// attaching, precisely so socket/gpu/rdd/utility are visible - but
-    /// until now nothing consulted it outside the census dump, so the
-    /// Helper path and the re-attach pass both attached non-tab children
-    /// that shouldAttach would have rejected on sight.
-    ///
-    /// nil means never announced, which is not the same as "not
-    /// attachable" and is deliberately left to the caller to decide.
-    func knownType(_ pid: Int32) -> String? {
-        dispatchPrecondition(condition: .onQueue(queue))
-        return childTypes[pid]
     }
 }

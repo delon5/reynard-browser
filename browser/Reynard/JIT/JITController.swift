@@ -127,33 +127,6 @@ final class JITController {
     private let preflightTimeoutSeconds: Int = 5
     private let failurePresentationRetryLimit = 12
     
-    // ADDED - see fix_reattach_requires_active_app.py's docstring.
-    //
-    // A mirror of the ledger's applicationActive flag that ANY queue can
-    // read, written synchronously on the thread iOS calls us on.
-    //
-    // The ledger's own flag is authoritative and stays so - it is set
-    // through attachQueue.async, and attachQueue is held for a full
-    // 90-second bounded attach whenever the preflight-watchdog retry
-    // path runs attachToProcess there. A flag that can lag the real
-    // application state by minutes is fine as bookkeeping and unfit as
-    // the thing that decides whether starting a vAttach is safe, which
-    // is what reattachOrphanedProcesses needs it for.
-    private static let applicationActiveLock = NSLock()
-    private static var applicationActiveMirror = true
-
-    static var isApplicationActiveFromAnyQueue: Bool {
-        applicationActiveLock.lock()
-        defer { applicationActiveLock.unlock() }
-        return applicationActiveMirror
-    }
-
-    private static func setApplicationActiveMirror(_ active: Bool) {
-        applicationActiveLock.lock()
-        applicationActiveMirror = active
-        applicationActiveLock.unlock()
-    }
-
     private init() {
         ledger = AttachLedger(confinedTo: attachQueue)
     }
@@ -199,30 +172,6 @@ final class JITController {
     func reattachOrphanedProcesses() {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
-            // ADDED - see fix_reattach_requires_active_app.py's
-            // docstring for the capture this comes from.
-            //
-            // The only attach path that never had this guard, and the
-            // one that fans out. On 2026-08-12 the scene backgrounded
-            // 1.04s after becoming active, the 2-second reattach timer
-            // fired anyway, and this pass started five vAttaches into a
-            // backgrounding app. vAttach stops its target; the calls did
-            // not return for 165 seconds because the app was suspended
-            // underneath them; the transport was reset by then so every
-            // detach and every retry failed. Three hosted extensions
-            // were left STOPPED with nothing able to resume them, and a
-            // stopped extension cannot answer the synchronous XPC in
-            // _hostWillEnterForegroundNote:. 0x8BADF00D.
-            //
-            // Skipped rather than deferred: drainDeferredPIDs is
-            // consumed by applicationDidBecomeActive, which skips any
-            // pid already in attachedPIDs - and every orphan is one by
-            // definition. This pass is idempotent and re-runs on the
-            // next foreground.
-            guard Self.isApplicationActiveFromAnyQueue else {
-                logger("reattachOrphanedProcesses: app is not active - skipping this pass entirely")
-                return
-            }
             // CHANGED - the three counts are computed and logged
             // separately, unconditionally. See
             // fix_unconditional_reattach_logging.py.
@@ -233,31 +182,7 @@ final class JITController {
             // identical - and only the middle one is benign.
             let attached = self.ledger.attachedSnapshot()
             let alive = attached.filter { Self.pidIsAlive($0) }
-            // ADDED - see fix_reattach_respects_process_type.py.
-            //
-            // This pass re-attaches straight out of attachedPIDs and
-            // never consulted a type, so any non-tab child that got into
-            // the ledger through the Helper path was re-attached on
-            // every foreground - and every re-attach is a fresh vAttach,
-            // which stops it. pid 8804 (type=utility) was one of the
-            // three left stopped by the 19:12:34 fan-out on 2026-08-12,
-            // and so one of the extensions that could not answer the
-            // foreground XPC.
-            let notAttachable = alive.filter { pid in
-                guard let type = self.ledger.knownType(pid) else {
-                    // Never announced. Left alone rather than guessed
-                    // at - this filter only ever removes work.
-                    return false
-                }
-                return !self.shouldAttach(to: type)
-            }
-            for pid in notAttachable.sorted() {
-                logger(String(format: "reattachOrphanedProcesses: pid %d type=%@ is not attachable - not re-attaching", pid, self.ledger.knownType(pid) ?? "?"))
-            }
             let orphaned = alive.filter { pid in
-                guard !notAttachable.contains(pid) else {
-                    return false
-                }
                 // An attach that has been dispatched but has not
                 // finished is NOT an orphan - it is a pid partway
                 // through the very thing this pass would start again.
@@ -305,24 +230,6 @@ final class JITController {
                         self.attachSlots.signal()
                         self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
                     }
-                    // ADDED - the slot wait above is UNBOUNDED, so the
-                    // guard at the top of this pass can be arbitrarily
-                    // stale by the time this pid reaches the front. In
-                    // the 2026-08-12 capture five orphans queued behind
-                    // three slots and trickled out over ~450ms. Starting
-                    // the vAttach is the irreversible step - it stops
-                    // the target and only the debug loop's continue
-                    // resumes it - so it is checked here too.
-                    //
-                    // The mirror is read rather than the ledger flag:
-                    // this runs on the CONCURRENT attachWorkQueue, and
-                    // hopping to attachQueue to ask would block a
-                    // slot-holding thread behind a possible 90-second
-                    // attach.
-                    guard Self.isApplicationActiveFromAnyQueue else {
-                        logger(String(format: "reattachOrphanedProcesses: pid %d abandoned at the slot - app went inactive while it queued", pid))
-                        return
-                    }
                     self.attachToProcess(pid: pid)
                 }
             }
@@ -344,10 +251,7 @@ final class JITController {
             // below only ever showed live children anyway, and without
             // eviction the map grew by one entry per child process for
             // the life of the app.
-            let prunedAttached = self.ledger.pruneDeadChildren(alive: Self.pidIsAlive)
-            if prunedAttached > 0 {
-                logger(String(format: "%@: pruned %ld dead pid(s) from the attach ledger", label, prunedAttached))
-            }
+            self.ledger.pruneDeadChildren(alive: Self.pidIsAlive)
             let census = self.ledger.childCensus()
             logger("\(label): \(self.ledger.announcedChildTotal()) child(ren) announced this launch, \(census.count) alive")
             for entry in census {
@@ -365,9 +269,6 @@ final class JITController {
     /// No further attaches are started until the app is active again.
     /// See fix_defer_attaches_while_inactive.py.
     func applicationWillResignActive() {
-        // Set BEFORE the queue hop, on the caller's thread. The async
-        // below can sit behind a 90-second attach; this cannot.
-        Self.setApplicationActiveMirror(false)
         attachQueue.async {
             self.ledger.markApplicationInactive()
         }
@@ -390,46 +291,19 @@ final class JITController {
     func performForegroundReattach(completion: @escaping () -> Void) {
         dumpChildCensus(labelled: "childCensus at foreground")
 
-        // MOVED - see
-        // fix_arm_trapping_only_with_a_live_session.py's docstring. The
-        // arm used to sit here, ahead of the re-attach pass, so trapping
-        // came back on before any of the sessions that make it safe
-        // existed. It now happens below, after the pass, and only if a
-        // session is genuinely live.
+        attachQueue.async {
+            JITEnabler.setDebuggerListening(true)
+        }
 
         reattachOrphanedProcesses()
 
         attachQueue.async {
-            dispatchPrecondition(condition: .onQueue(self.attachQueue))
-            // Ordered behind reattachOrphanedProcesses, which hops to
-            // this same serial queue - so by here the pass has decided
-            // what it is re-attaching.
-            //
-            // Live session present: the tunnel survived and children are
-            // still being serviced, so trapping is restored exactly as
-            // it was before.
-            //
-            // None live: everything is mid-re-attach, and runDebugService
-            // arms the flag itself when a loop actually starts. Leaving
-            // it off until then costs interpreted JavaScript for a
-            // second or two and removes the window in which a surviving,
-            // still-CS_DEBUGGED child can trap into a debugger that is
-            // not there.
-            let hasLiveSession = self.ledger.attachedSnapshot().contains {
-                JITEnabler.hasActiveDebugSession(forPID: $0)
-            }
-            if hasLiveSession {
-                JITEnabler.setDebuggerListening(true)
-            } else {
-                logger("jitListening: not re-arming at foreground - no live debug session yet, runDebugService arms it when a loop starts")
-            }
             DispatchQueue.main.async(execute: completion)
         }
     }
     
     /// Attaches anything that arrived while inactive.
     func applicationDidBecomeActive() {
-        Self.setApplicationActiveMirror(true)
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.ledger.markApplicationActive()
@@ -1467,25 +1341,6 @@ extension JITController {
                     var skipReason: String? = nil
                     if self.ledger.isRejected(pid) {
                         skipReason = "process type was rejected by shouldAttach - does not need JIT"
-                    } else if let type = self.ledger.knownType(pid), !self.shouldAttach(to: type) {
-                        // ADDED - see
-                        // fix_reattach_respects_process_type.py.
-                        //
-                        // isRejected above is only ever populated by
-                        // childProcessDidStart's shouldAttach guard, and
-                        // when the Helper claims a pid first that guard
-                        // is never reached - childProcessDidStart lands
-                        // in the already-claimed branch and returns. So
-                        // gpu, rdd, socket and utility children arrived
-                        // here with nothing to stop them, and the
-                        // request file carries only a pid and a token.
-                        //
-                        // The ledger has known the type since
-                        // noteChild ran. Marked rejected as well as
-                        // skipped, so the answer is cached and the next
-                        // request for this pid short-circuits above.
-                        self.ledger.markRejected(pid)
-                        skipReason = "processType " + type + " is not attachable - does not need JIT"
                     } else if self.ledger.isAttached(pid) {
                         skipReason = "already attached by the native path"
                     }
