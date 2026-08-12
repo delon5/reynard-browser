@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1491 @@
+@@ -0,0 +1,1587 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -361,6 +361,84 @@ index 000000000000..661d75d2d5f1
 +      [aKey, surfaceId]() { ReynardAVPlayerSendFrame(aKey, surfaceId); }));
 +}
 +
++// CONTENT PROCESS diagnostics.
++//
++// Counted in the notify functions when they run in a content process,
++// which is only ever from ContentChild's Recv handlers - in the parent
++// those same functions serve the Swift host instead. Main thread only
++// there, so plain integers rather than atomics.
++static uint32_t sContentRecvMetadata = 0;
++static uint32_t sContentRecvTime = 0;
++static uint32_t sContentRecvFrame = 0;
++
++static uintptr_t sContentAlivePlayerId = 0;
++static uint32_t sContentAliveTicks = 0;
++static const uint32_t kContentAliveTicks = 20;
++
++static void ScheduleContentAliveTick();
++
++// Defined further down, after the broker; declared here because the
++// tick reports whether the decoder is still registered and this block
++// sits above it.
++static std::unordered_map<uintptr_t, AVPlayerDecoder*>& PlayersById();
++
++// The heartbeat. The app process is provably sending (B2c: owner=1
++// sent=1) and nothing arrives, which is either a content main thread
++// that stopped running its event queue or a delivery path that stopped
++// delivering. A line a second from inside that process separates the
++// two: if it keeps printing, the thread is fine and the messages are
++// not arriving; if it stops, the tick number says when the thread went.
++//
++// The registry values are printed beside the counters because they are
++// what the messages fill - so one line covers both "is anything
++// running" and "did anything arrive".
++static void ContentAliveTick() {
++  MOZ_ASSERT(NS_IsMainThread());
++  sContentAliveTicks++;
++
++  double position = -1.0;
++  double duration = -1.0;
++  if (Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++          AVPlayerPlaybackRegistry::Get(sContentAlivePlayerId)) {
++    if (snapshot->mPosition.IsValid()) {
++      position = snapshot->mPosition.ToSeconds();
++    }
++    if (snapshot->mDuration.IsValid()) {
++      duration = snapshot->mDuration.ToSeconds();
++    }
++  }
++
++  printf_stderr(
++      "avPlayer: content alive tick=%u player=%llu recv(meta=%u time=%u "
++      "frame=%u) pos=%.3f dur=%.3f decoder=%d\n",
++      sContentAliveTicks, (unsigned long long)sContentAlivePlayerId,
++      sContentRecvMetadata, sContentRecvTime, sContentRecvFrame, position,
++      duration,
++      PlayersById().count(sContentAlivePlayerId) ? 1 : 0);
++
++  if (sContentAliveTicks < kContentAliveTicks) {
++    ScheduleContentAliveTick();
++  }
++}
++
++// Reschedules itself rather than holding an nsITimer: nsThreadUtils.h is
++// already here, there is no timer to keep alive or cancel, and it
++// disarms by simply not scheduling again.
++//
++// &ContentAliveTick, not ContentAliveTick. NS_NewRunnableFunction
++// deduces through a forwarding reference and stores
++// std::remove_reference_t<Function> as a data member, so a function
++// NAME - an lvalue of function type - deduces to void(&)(), strips to
++// void(), and a data member cannot have function type
++// ("data member instantiated with function type" out of
++// nsThreadUtils.h). The address is a plain void(*)(), which stores and
++// calls fine.
++static void ScheduleContentAliveTick() {
++  NS_DelayedDispatchToCurrentThread(
++      NS_NewRunnableFunction("ReynardAVPlayerContentAlive", &ContentAliveTick),
++      1000);
++}
++
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
@@ -611,6 +689,12 @@ index 000000000000..661d75d2d5f1
 +        (unsigned long long)static_cast<uint64_t>(cc->GetID()),
 +        (unsigned long long)((static_cast<uint64_t>(cc->GetID()) << 32) |
 +                             (static_cast<uint64_t>(mPlayerId) & 0xffffffff)));
++    // Twenty seconds of heartbeat, starting now. Re-armed per load: a
++    // second element restarts the count against its own player rather
++    // than reporting the first one's forever.
++    sContentAlivePlayerId = mPlayerId;
++    sContentAliveTicks = 0;
++    ScheduleContentAliveTick();
 +  } else {
 +    mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
 +    if (!mPlayerId) {
@@ -1217,6 +1301,13 @@ index 000000000000..661d75d2d5f1
 +      "avPlayer: metadata callback player=%llu geckoMain=%d - dispatching\n",
 +      (unsigned long long)aPlayerId, NS_IsMainThread() ? 1 : 0);
 +
++  // In a content process this can only have come from
++  // ContentChild::RecvAVPlayerMetadata; in the parent it is the Swift
++  // host, which the counter is not about.
++  if (XRE_IsContentProcess()) {
++    mozilla::sContentRecvMetadata++;
++  }
++
 +  // A player some content process asked for. Everything below this
 +  // point looks the decoder up in PlayersById, which in the parent is
 +  // empty for a brokered player - that lookup failing is precisely why
@@ -1391,6 +1482,9 @@ index 000000000000..661d75d2d5f1
 +// main-thread runnable queued to poke the reader.
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyTime(uintptr_t aPlayerId,
 +                                                     double aSeconds) {
++  if (XRE_IsContentProcess()) {
++    mozilla::sContentRecvTime++;
++  }
 +  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
 +    // Bounded on the Swift side: pushTime drops anything within 10 ms
 +    // of the last report, so this is at most ~100 async messages a
@@ -1453,6 +1547,8 @@ index 000000000000..661d75d2d5f1
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyFrameSurface(
 +    uintptr_t aPlayerId, uint32_t aSurfaceId) {
 +  MOZ_ASSERT(NS_IsMainThread());
++  // Content-side by construction: nothing in the app process calls this.
++  mozilla::sContentRecvFrame++;
 +  auto surface = CFTypeRefPtr<IOSurfaceRef>::WrapUnderCreateRule(
 +      ::IOSurfaceLookup(static_cast<IOSurfaceID>(aSurfaceId)));
 +  if (!surface) {
