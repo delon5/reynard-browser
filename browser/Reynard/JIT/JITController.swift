@@ -935,7 +935,28 @@ final class JITController {
         preflightWatchdogLock.unlock()
     }
     
+    /// Transport failures the tunnel recovery already handles. Codes from
+    /// JITErrors.h: RemoteServerConnectFailed and DebugProxyConnectFailed.
+    private static let recoverableTransportCodes: Set<Int> = [9, 10, -9, -10]
+
     private func handleJITFailure(error: NSError) {
+        // A dead tunnel is not a JIT failure. Backgrounding kills it every
+        // time, so the first attach after resume fails at
+        // remote_server_connect_rsd - and JITEnabler already drops the
+        // cached provider and retries on a rebuilt one, which the device
+        // log confirms works ("retry on the rebuilt tunnel SUCCEEDED").
+        // Presenting the full-screen "Failed to enable JIT / Error -9" for
+        // a condition that self-heals is simply wrong, and because
+        // pendingFailureAction defers it to didBecomeActive it appears on
+        // RETURN from background, blaming the resume for something that
+        // happened during the sleep.
+        //
+        // Left to the enablement path only: a genuine failure (bad pairing
+        // file, VPN off, DDI missing) has its own code and still presents.
+        if Self.recoverableTransportCodes.contains(error.code) {
+            logger("jitFailure: transport error \(error.code) suppressed - the tunnel rebuild handles it")
+            return
+        }
         DispatchQueue.main.async {
             guard !self.hasHandledFailure else {
                 return

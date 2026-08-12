@@ -2,7 +2,7 @@ diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
 index 1de5f331b0a3..560c1b904458 100644
 --- a/dom/ipc/ContentChild.h
 +++ b/dom/ipc/ContentChild.h
-@@ -167,14 +167,14 @@ class ContentChild final : public PContentChild,
+@@ -167,16 +167,26 @@ class ContentChild final : public PContentChild,
        Endpoint<PImageBridgeChild>&& aImageBridge,
        Endpoint<PVRManagerChild>&& aVRBridge,
        Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -19,3 +19,15 @@ index 1de5f331b0a3..560c1b904458 100644
  
    mozilla::ipc::IPCResult RecvReinitRenderingForDeviceReset();
  
++  // Reynard: reports from the AVPlayer this process asked the app
++  // process to own. See PContent.ipdl's AVPlayerCreate.
++  mozilla::ipc::IPCResult RecvAVPlayerMetadata(const uint64_t& aPlayerId,
++                                               const double& aDurationSeconds,
++                                               const int32_t& aWidth,
++                                               const int32_t& aHeight);
++  mozilla::ipc::IPCResult RecvAVPlayerTime(const uint64_t& aPlayerId,
++                                           const double& aSeconds);
++  mozilla::ipc::IPCResult RecvAVPlayerEnded(const uint64_t& aPlayerId);
++
+   mozilla::ipc::IPCResult RecvSetProcessSandbox(
+       const Maybe<FileDescriptor>& aBroker);

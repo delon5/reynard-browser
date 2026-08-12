@@ -2,7 +2,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
 index 23fb64851635..6afd9d5f25df 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,6 +571,20 @@ parent:
+@@ -571,9 +571,37 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -23,7 +23,24 @@ index 23fb64851635..6afd9d5f25df 100644
      async PExtensions();
  
  child:
-@@ -604,7 +608,8 @@ child:
++    // Reynard: the return path for the brokered player. The app process
++    // owns the AVPlayer (AVPlayerCreate, above), so every report it
++    // produces - metadata, position, end of stream - is raised in a
++    // process that has no decoder to hand it to. These carry it back to
++    // the process that asked for the player.
++    //
++    // aPlayerId is the CONTENT-side id, unchanged: ContentParent strips
++    // its own child id off the composite key before sending, so the
++    // child looks the player up exactly as it named it.
++    async AVPlayerMetadata(uint64_t aPlayerId, double aDurationSeconds,
++                           int32_t aWidth, int32_t aHeight);
++    async AVPlayerTime(uint64_t aPlayerId, double aSeconds);
++    async AVPlayerEnded(uint64_t aPlayerId);
++
+     async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
+                            ManagedEndpoint<PWindowGlobalChild> windowEp,
+                            TabId tabId,
+@@ -604,7 +632,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -33,7 +50,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +619,8 @@ child:
+@@ -614,7 +643,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

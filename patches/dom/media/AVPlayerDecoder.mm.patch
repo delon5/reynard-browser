@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1109 @@
+@@ -0,0 +1,1253 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -33,7 +33,10 @@ index 000000000000..661d75d2d5f1
 +// SendAVPlayerCreate / SendAVPlayerControl - the player lives in the
 +// app process, because iOS refuses this one an audio session.
 +#include "mozilla/dom/ContentChild.h"
-+#include "nsXULAppAPI.h"  // XRE_IsContentProcess
++#include "nsXULAppAPI.h"  // XRE_IsContentProcess, XRE_IsParentProcess
++// The brokered-player reverse map is read from the Swift host's own
++// queues, not just Gecko's main thread, so it takes a real lock.
++#include "mozilla/StaticMutex.h"
 +
 +#include <cmath>
 +#include <unordered_map>
@@ -105,6 +108,95 @@ index 000000000000..661d75d2d5f1
 +  return sBrokeredPlayers;
 +}
 +
++// Defined in dom/ipc/ContentParent.cpp: the trip home for a report the
++// app process raised about a player a content process owns. Declared
++// here rather than through a header for the same reason ContentParent
++// declares this file's functions inline - neither directory should grow
++// an include path for three prototypes.
++void ReynardAVPlayerSendMetadata(uint64_t aKey, double aDurationSeconds,
++                                 int32_t aWidth, int32_t aHeight);
++void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds);
++void ReynardAVPlayerSendEnded(uint64_t aKey);
++
++// PARENT PROCESS ONLY: BrokeredPlayers read backwards - the host id the
++// Swift side reports against, mapped to the composite key that names
++// the owning content process and its own id for the player.
++//
++// Unlike BrokeredPlayers this cannot be main-thread-only. The callbacks
++// that read it are documented any-thread (ReynardAVPlayerNotifyTime is
++// called straight off the display link at up to 120 Hz), so a lock is
++// the only honest guard.
++static StaticMutex sBrokeredKeysMutex MOZ_UNANNOTATED;
++
++// Callers hold sBrokeredKeysMutex.
++static std::unordered_map<uintptr_t, uint64_t>& BrokeredKeys() {
++  static std::unordered_map<uintptr_t, uint64_t> sBrokeredKeys;
++  return sBrokeredKeys;
++}
++
++// The composite key for a host player, or 0 when this player is not
++// brokered - a parent-process player of our own, or any id at all in a
++// content process, where the map is empty by construction.
++static uint64_t BrokeredKeyFor(uintptr_t aHostId) {
++  if (!XRE_IsParentProcess()) {
++    return 0;
++  }
++  StaticMutexAutoLock lock(sBrokeredKeysMutex);
++  auto& keys = BrokeredKeys();
++  auto entry = keys.find(aHostId);
++  return entry == keys.end() ? 0 : entry->second;
++}
++
++// The three forwards below only guarantee the main thread; ContentParent
++// does the actual send, because IPC actors live there.
++static void ForwardMetadataToOwner(uint64_t aKey, double aDurationSeconds,
++                                   int32_t aWidth, int32_t aHeight) {
++  printf_stderr(
++      "avPlayer: forwarding metadata for key %llu (%.3fs %dx%d) to its "
++      "content process\n",
++      (unsigned long long)aKey, aDurationSeconds, aWidth, aHeight);
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendMetadata(aKey, aDurationSeconds, aWidth, aHeight);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerSendMetadata",
++      [aKey, aDurationSeconds, aWidth, aHeight]() {
++        ReynardAVPlayerSendMetadata(aKey, aDurationSeconds, aWidth, aHeight);
++      }));
++}
++
++static void ForwardTimeToOwner(uint64_t aKey, double aSeconds) {
++  // Once. At up to 100 reports a second an unconditional printf here
++  // is its own outage; the question it answers - does the position
++  // reach the owning process at all - is answered by the first one.
++  static bool sReportedFirstForward = false;
++  if (!sReportedFirstForward) {
++    sReportedFirstForward = true;
++    printf_stderr("avPlayer: forwarding positions for key %llu (first %.3f)\n",
++                  (unsigned long long)aKey, aSeconds);
++  }
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendTime(aKey, aSeconds);
++    return;
++  }
++  NS_DispatchToMainThread(
++      NS_NewRunnableFunction("ReynardAVPlayerSendTime", [aKey, aSeconds]() {
++        ReynardAVPlayerSendTime(aKey, aSeconds);
++      }));
++}
++
++static void ForwardEndedToOwner(uint64_t aKey) {
++  printf_stderr("avPlayer: forwarding end of stream for key %llu\n",
++                (unsigned long long)aKey);
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendEnded(aKey);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerSendEnded", [aKey]() { ReynardAVPlayerSendEnded(aKey); }));
++}
++
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
@@ -121,6 +213,13 @@ index 000000000000..661d75d2d5f1
 +    return;
 +  }
 +  BrokeredPlayers()[aKey] = static_cast<uintptr_t>(playerId);
++  {
++    // The reverse entry, written before the first callback can fire:
++    // the Swift side starts observing inside createPlayerWithUrl, so a
++    // metadata or position report can already be on its way.
++    StaticMutexAutoLock lock(sBrokeredKeysMutex);
++    BrokeredKeys()[static_cast<uintptr_t>(playerId)] = aKey;
++  }
 +  printf_stderr(
 +      "avPlayer: broker created host player %llu for key %llu (%s)\n",
 +      (unsigned long long)playerId, (unsigned long long)aKey, aUrl.get());
@@ -161,6 +260,10 @@ index 000000000000..661d75d2d5f1
 +    case kAVPlayerDestroy:
 +      [host destroy:playerId];
 +      players.erase(entry);
++      {
++        StaticMutexAutoLock lock(sBrokeredKeysMutex);
++        BrokeredKeys().erase(playerId);
++      }
 +      break;
 +    default:
 +      break;
@@ -505,7 +608,19 @@ index 000000000000..661d75d2d5f1
 +
 +double AVPlayerDecoder::GetCurrentTime() {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  if (mPlayerId) {
++  if (mPlayerId && XRE_IsContentProcess()) {
++    // There is no host in this process to ask - and asking anyway is
++    // worse than useless: AVPlayerHost() is nil here, a message to nil
++    // returns 0.0, and 0.0 passes the `>= 0` test below as a perfectly
++    // valid position. The element's clock would sit at zero however
++    // many positions arrived. They arrive over PContent's AVPlayerTime
++    // and land in the registry, so that is what to read.
++    Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++        AVPlayerPlaybackRegistry::Get(mPlayerId);
++    if (snapshot && snapshot->mPosition.IsValid()) {
++      return snapshot->mPosition.ToSeconds();
++    }
++  } else if (mPlayerId) {
 +    const double seconds = [AVPlayerHost() currentTime:mPlayerId];
 +    if (seconds >= 0) {
 +      return seconds;
@@ -518,7 +633,16 @@ index 000000000000..661d75d2d5f1
 +
 +double AVPlayerDecoder::GetDuration() {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  if (mPlayerId) {
++  if (mPlayerId && XRE_IsContentProcess()) {
++    // Same nil-host reasoning as GetCurrentTime. The registry is filled
++    // by the AVPlayerMetadata message.
++    Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++        AVPlayerPlaybackRegistry::Get(mPlayerId);
++    if (snapshot && snapshot->mDuration.IsValid() &&
++        snapshot->mDuration.IsPositive()) {
++      return snapshot->mDuration.ToSeconds();
++    }
++  } else if (mPlayerId) {
 +    const double seconds = [AVPlayerHost() duration:mPlayerId];
 +    if (seconds > 0) {
 +      return seconds;
@@ -919,6 +1043,15 @@ index 000000000000..661d75d2d5f1
 +      "avPlayer: metadata callback player=%llu geckoMain=%d - dispatching\n",
 +      (unsigned long long)aPlayerId, NS_IsMainThread() ? 1 : 0);
 +
++  // A player some content process asked for. Everything below this
++  // point looks the decoder up in PlayersById, which in the parent is
++  // empty for a brokered player - that lookup failing is precisely why
++  // the app-process player played to nobody.
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ForwardMetadataToOwner(key, aDurationSeconds, aWidth, aHeight);
++    return;
++  }
++
 +  // Straight into the playback registry, on the caller's thread: the
 +  // demux task queue snapshots the registry in GetTrackDemuxer, and
 +  // that read must not depend on the main-thread hop below having run.
@@ -1075,6 +1208,13 @@ index 000000000000..661d75d2d5f1
 +// main-thread runnable queued to poke the reader.
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyTime(uintptr_t aPlayerId,
 +                                                     double aSeconds) {
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    // Bounded on the Swift side: pushTime drops anything within 10 ms
++    // of the last report, so this is at most ~100 async messages a
++    // second for a playing element, not one per display-link tick.
++    mozilla::ForwardTimeToOwner(key, aSeconds);
++    return;
++  }
 +  if (!mozilla::AVPlayerPlaybackRegistry::UpdatePosition(aPlayerId,
 +                                                         aSeconds)) {
 +    return;
@@ -1099,6 +1239,10 @@ index 000000000000..661d75d2d5f1
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId) {
 +  printf_stderr("avPlayer: ended callback player=%llu\n",
 +                (unsigned long long)aPlayerId);
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ForwardEndedToOwner(key);
++    return;
++  }
 +  if (!mozilla::AVPlayerPlaybackRegistry::NotifyEnded(aPlayerId)) {
 +    return;
 +  }

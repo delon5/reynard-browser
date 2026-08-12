@@ -139,3 +139,59 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
+@@ -8006,6 +8079,55 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+ }
+ 
+ }  // namespace dom
+ }  // namespace mozilla
+ 
++#if defined(MOZ_WIDGET_UIKIT)
++namespace mozilla {
++
++// Called from dom/media/AVPlayerDecoder.mm when a report arrives for a
++// player some content process asked this one to own. Main thread only:
++// IPC actors are.
++//
++// AT GLOBAL SCOPE, after the file's namespaces close, and not beside
++// the Recv bodies above - those are inside mozilla::dom, where
++// `namespace mozilla {` reopens as mozilla::dom::mozilla and the
++// definitions would never match AVPlayerDecoder.mm's declarations.
++// That is the failure commit 121a177d fixed; this is the same trap.
++//
++// aKey is the composite (childID << 32 | playerId) AVPlayerBrokerKey
++// built on the way in, so the owning process and the id it chose both
++// fall straight out of it. A process that has since gone away answers
++// nullptr, which is an ordinary teardown race and not an error.
++static dom::ContentParent* AVPlayerOwner(uint64_t aKey) {
++  MOZ_ASSERT(NS_IsMainThread());
++  dom::ContentProcessManager* cpm = dom::ContentProcessManager::GetSingleton();
++  if (!cpm) {
++    return nullptr;
++  }
++  return cpm->GetContentProcessById(dom::ContentParentId(aKey >> 32));
++}
++
++void ReynardAVPlayerSendMetadata(uint64_t aKey, double aDurationSeconds,
++                                 int32_t aWidth, int32_t aHeight) {
++  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
++    (void)cp->SendAVPlayerMetadata(aKey & 0xffffffff, aDurationSeconds, aWidth,
++                                   aHeight);
++  }
++}
++
++void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds) {
++  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
++    (void)cp->SendAVPlayerTime(aKey & 0xffffffff, aSeconds);
++  }
++}
++
++void ReynardAVPlayerSendEnded(uint64_t aKey) {
++  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
++    (void)cp->SendAVPlayerEnded(aKey & 0xffffffff);
++  }
++}
++
++}  // namespace mozilla
++#endif
++
+ NS_IMPL_ISUPPORTS(ParentIdleListener, nsIObserver)
