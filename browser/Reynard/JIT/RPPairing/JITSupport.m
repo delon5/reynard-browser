@@ -12,7 +12,12 @@
 
 // For childProcessRunState - see fix_report_child_run_state.py.
 #import <sys/sysctl.h>
-#import <libproc.h>
+// proc_bsdinfo and PROC_PIDTBSDINFO live here; libproc.h itself is not on
+// the Reynard Helper target's header search path, and that target compiles
+// this file too - so the one call is declared rather than included.
+#import <sys/proc_info.h>
+extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer,
+                        int buffersize);
 
 #include <arpa/inet.h>
 #include <notify.h>
