@@ -302,9 +302,33 @@ static void jitHangBacktraceHandler(int signalNumber) {
                     logger([NSString stringWithFormat:
                         @"tunnelRecovery: (pid %d) retry on the rebuilt tunnel FAILED - reporting", pid]);
                 } else {
+                    // The provider was already replaced by whichever
+                    // attach lost the race to report this same dead
+                    // tunnel. Retry too - this branch is BETTER placed
+                    // than the one above, because a good provider
+                    // already exists and needs no rebuild.
+                    //
+                    // Without this, a resume with N processes attaching
+                    // at once recovered exactly ONE of them: the first
+                    // failure invalidated and retried, every other
+                    // failure landed here and simply returned NO. The
+                    // device log is unambiguous - 8158 SUCCEEDED while
+                    // 8164 and 8149 returned success=NO code=-9 in the
+                    // same millisecond - and that is what "losing JIT
+                    // after sleep" actually was.
                     logger([NSString stringWithFormat:
-                        @"tunnelRecovery: (pid %d) transport failure %ld against an already-replaced provider - leaving the new one alone",
+                        @"tunnelRecovery: (pid %d) transport failure %ld against an already-replaced provider - retrying on it",
                         pid, (long)failureCode]);
+                    NSError *retryError = nil;
+                    DeviceProvider *current = [self getProviderForPID:pid error:&retryError];
+                    if (current && connectDebugSession(current, &session, @"10.7.0.1", pid, error)) {
+                        logger([NSString stringWithFormat:
+                            @"tunnelRecovery: (pid %d) retry on the replacement tunnel SUCCEEDED", pid]);
+                        provider = current;
+                        goto sessionConnected;
+                    }
+                    logger([NSString stringWithFormat:
+                        @"tunnelRecovery: (pid %d) retry on the replacement tunnel FAILED - reporting", pid]);
                 }
             }
             return NO;
