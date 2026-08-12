@@ -12,12 +12,10 @@
 
 // For childProcessRunState - see fix_report_child_run_state.py.
 #import <sys/sysctl.h>
-// proc_bsdinfo and PROC_PIDTBSDINFO live here; libproc.h itself is not on
-// the Reynard Helper target's header search path, and that target compiles
-// this file too - so the one call is declared rather than included.
-#import <sys/proc_info.h>
-extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer,
-                        int buffersize);
+// sysctl only. The Reynard Helper target compiles this file and has
+// neither libproc.h nor sys/proc_info.h on its header search path, so the
+// proc_pidinfo cross-check is not available here. KERN_PROC_PID answers
+// the same question - p_stat, and SSTOP is the value that matters.
 
 #include <arpa/inet.h>
 #include <notify.h>
@@ -287,21 +285,10 @@ NSString *childProcessRunState(int32_t pid) {
         viaSysctl = [NSString stringWithFormat:@"sysctl:e%d", errno];
     }
 
-    NSString *viaProcInfo = nil;
-    struct proc_bsdinfo bsdInfo;
-    memset(&bsdInfo, 0, sizeof(bsdInfo));
-    int written = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, sizeof(bsdInfo));
-    if (written == (int)sizeof(bsdInfo)) {
-        viaProcInfo = runStateName((int)bsdInfo.pbi_status);
-    } else {
-        viaProcInfo = [NSString stringWithFormat:@"proc:e%d", errno];
-    }
-
-    // Both printed rather than one preferred: they are the measurement.
-    if ([viaSysctl isEqualToString:viaProcInfo]) {
-        return viaSysctl;
-    }
-    return [NSString stringWithFormat:@"%@/%@", viaSysctl, viaProcInfo];
+    // One route rather than two - see the include note above. errno is
+    // carried in the string on failure, so a sandbox refusal is visible
+    // rather than silently reading as "not stopped".
+    return viaSysctl;
 }
 
 BOOL processIsDebugged(int32_t pid) {
