@@ -309,7 +309,22 @@ public final class AVPlayerHost: NSObject {
         let videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String:
                 Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary,
+            // IOSurfaceIsGlobal, so the surface AVFoundation decodes
+            // into can be found by IOSurfaceLookup in ANOTHER process.
+            // The player runs here in the app process while the decoder
+            // that publishes frames runs in a content process, and
+            // Gecko's only cross-process handle for a surface is its
+            // global id - it sets exactly this key on every surface it
+            // creates itself, see MacIOSurface::CreateBiPlanarSurface.
+            //
+            // Deprecated by Apple and honoured anyway. If a future iOS
+            // stops honouring it the decoder notices the lookup it
+            // cannot satisfy and asks this process to copy into a
+            // surface Gecko made instead, so this is an optimisation
+            // rather than a requirement.
+            kCVPixelBufferIOSurfacePropertiesKey as String: [
+                "IOSurfaceIsGlobal": true,
+            ] as [String: Any] as CFDictionary,
         ])
         var displayLink: CADisplayLink?
         /// Diagnostics for the pull loop - see pullFrames.

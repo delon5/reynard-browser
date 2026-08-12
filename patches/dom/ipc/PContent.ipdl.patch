@@ -2,7 +2,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
 index 23fb64851635..6afd9d5f25df 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,9 +571,37 @@ parent:
+@@ -571,9 +571,49 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -19,6 +19,12 @@ index 23fb64851635..6afd9d5f25df 100644
 +    // target and is ignored otherwise.
 +    async AVPlayerCreate(uint64_t aPlayerId, nsCString aUrl);
 +    async AVPlayerControl(uint64_t aPlayerId, uint32_t aOp, double aArg);
++
++    // A frame's surface id could not be resolved in this process, so
++    // the app process must copy into a surface Gecko created - which
++    // carries kIOSurfaceIsGlobal - rather than publishing
++    // AVFoundation's own. Sent at most a handful of times per process.
++    async AVPlayerFrameFallback(uint64_t aPlayerId);
 +
      async PExtensions();
  
@@ -37,10 +43,16 @@ index 23fb64851635..6afd9d5f25df 100644
 +    async AVPlayerTime(uint64_t aPlayerId, double aSeconds);
 +    async AVPlayerEnded(uint64_t aPlayerId);
 +
++    // A decoded frame, named by the global IOSurface id its pixels
++    // live in. Nothing is copied and nothing large crosses: both
++    // processes end up addressing the same surface, which is how
++    // Gecko already hands video to the compositor.
++    async AVPlayerFrame(uint64_t aPlayerId, uint32_t aSurfaceId);
++
      async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
                             ManagedEndpoint<PWindowGlobalChild> windowEp,
                             TabId tabId,
-@@ -604,7 +632,8 @@ child:
+@@ -604,7 +644,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -50,7 +62,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +643,8 @@ child:
+@@ -614,7 +655,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

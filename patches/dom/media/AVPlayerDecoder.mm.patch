@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1253 @@
+@@ -0,0 +1,1483 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -117,6 +117,7 @@ index 000000000000..661d75d2d5f1
 +                                 int32_t aWidth, int32_t aHeight);
 +void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds);
 +void ReynardAVPlayerSendEnded(uint64_t aKey);
++void ReynardAVPlayerSendFrame(uint64_t aKey, uint32_t aSurfaceId);
 +
 +// PARENT PROCESS ONLY: BrokeredPlayers read backwards - the host id the
 +// Swift side reports against, mapped to the composite key that names
@@ -197,6 +198,169 @@ index 000000000000..661d75d2d5f1
 +      "ReynardAVPlayerSendEnded", [aKey]() { ReynardAVPlayerSendEnded(aKey); }));
 +}
 +
++// PARENT PROCESS: what this process is holding on behalf of one
++// brokered player's frames.
++//
++// mInFlight is the reason this exists at all. The Swift host releases
++// its CVPixelBuffer the moment the callback returns, and the message
++// naming the surface is asynchronous - so with nothing holding a
++// reference here, AVFoundation's pool can recycle the surface before
++// the content process has looked it up, and the element would show a
++// frame that is already being overwritten. Four deep is ~65 ms at 60
++// fps: far longer than an IPC hop, short enough that a paused player
++// is not sitting on the pool's whole allocation.
++//
++// mCopy is set when the content process reports a surface id it could
++// not resolve. See ReynardAVPlayerBrokerFrameFallback.
++static const size_t kFramesInFlight = 4;
++
++struct BrokeredFrames {
++  bool mCopy = false;
++  size_t mNext = 0;
++  RefPtr<MacIOSurface> mInFlight[kFramesInFlight];
++};
++
++// Callers hold sBrokeredKeysMutex.
++static std::unordered_map<uintptr_t, BrokeredFrames>& BrokeredFrameStates() {
++  static std::unordered_map<uintptr_t, BrokeredFrames> sBrokeredFrameStates;
++  return sBrokeredFrameStates;
++}
++
++// Called from dom/ipc/ContentParent.cpp when the content process could
++// not find a surface this one published. From here on that player's
++// frames are copied into surfaces Gecko created, which carry
++// kIOSurfaceIsGlobal by construction and therefore always resolve.
++void ReynardAVPlayerBrokerFrameFallback(uint64_t aKey) {
++  MOZ_ASSERT(NS_IsMainThread());
++  auto& players = BrokeredPlayers();
++  auto entry = players.find(aKey);
++  if (entry == players.end()) {
++    return;
++  }
++  StaticMutexAutoLock lock(sBrokeredKeysMutex);
++  BrokeredFrames& state = BrokeredFrameStates()[entry->second];
++  if (!state.mCopy) {
++    state.mCopy = true;
++    printf_stderr(
++        "avPlayer: content cannot look up our surfaces - copying frames for "
++        "host player %llu from here on\n",
++        (unsigned long long)entry->second);
++  }
++}
++
++// A copy of aSource into a surface THIS process created, which is what
++// makes it findable elsewhere: CreateBiPlanarSurface sets
++// kIOSurfaceIsGlobal, AVFoundation's pool only does so if asked and
++// might one day stop.
++//
++// NV12 only - two planes, which is what the video output is configured
++// for and what MacIOSurfaceTextureHostOGL requires at the other end.
++static already_AddRefed<MacIOSurface> CopyToGlobalSurface(
++    MacIOSurface* aSource) {
++  if (aSource->GetPlaneCount() != 2) {
++    return nullptr;
++  }
++  const gfx::IntSize ySize(
++      static_cast<int32_t>(aSource->GetDevicePixelWidth(0)),
++      static_cast<int32_t>(aSource->GetDevicePixelHeight(0)));
++  const gfx::IntSize cbcrSize(
++      static_cast<int32_t>(aSource->GetDevicePixelWidth(1)),
++      static_cast<int32_t>(aSource->GetDevicePixelHeight(1)));
++  RefPtr<MacIOSurface> copy = MacIOSurface::CreateBiPlanarSurface(
++      ySize, cbcrSize, gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT,
++      gfx::YUVColorSpace::BT709, gfx::TransferFunction::BT709,
++      gfx::ColorRange::LIMITED, gfx::ColorDepth::COLOR_8,
++      MacIOSurface::AllowAlpha::No);
++  if (!copy) {
++    return nullptr;
++  }
++  if (!aSource->Lock(/* aReadOnly */ true)) {
++    return nullptr;
++  }
++  if (!copy->Lock(/* aReadOnly */ false)) {
++    aSource->Unlock(/* aReadOnly */ true);
++    return nullptr;
++  }
++  for (size_t plane = 0; plane < 2; ++plane) {
++    const uint8_t* from =
++        static_cast<const uint8_t*>(aSource->GetBaseAddressOfPlane(plane));
++    uint8_t* to = static_cast<uint8_t*>(copy->GetBaseAddressOfPlane(plane));
++    if (!from || !to) {
++      continue;
++    }
++    // Row by row: the two allocators pad rows differently, so the
++    // strides are not the same number and a single memcpy would shear
++    // the picture.
++    const size_t fromStride = aSource->GetBytesPerRow(plane);
++    const size_t toStride = copy->GetBytesPerRow(plane);
++    const size_t rowBytes = fromStride < toStride ? fromStride : toStride;
++    const size_t fromRows = aSource->GetDevicePixelHeight(plane);
++    const size_t toRows = copy->GetDevicePixelHeight(plane);
++    const size_t rows = fromRows < toRows ? fromRows : toRows;
++    for (size_t row = 0; row < rows; ++row) {
++      memcpy(to + row * toStride, from + row * fromStride, rowBytes);
++    }
++  }
++  copy->Unlock(/* aReadOnly */ false);
++  aSource->Unlock(/* aReadOnly */ true);
++  return copy.forget();
++}
++
++// A decoded frame on its way to the content process that owns the
++// player. Only the surface's global id crosses; the pixels stay where
++// AVFoundation decoded them, or - in copy mode - where the copy above
++// put them.
++static void ForwardFrameToOwner(uint64_t aKey, uintptr_t aHostId,
++                                IOSurfaceRef aSurface) {
++  RefPtr<MacIOSurface> surface = new MacIOSurface(
++      CFTypeRefPtr<IOSurfaceRef>::WrapUnderGetRule(aSurface),
++      gfx::YUVColorSpace::BT709, gfx::TransferFunction::BT709,
++      MacIOSurface::AllowAlpha::No);
++
++  bool copyMode;
++  {
++    StaticMutexAutoLock lock(sBrokeredKeysMutex);
++    copyMode = BrokeredFrameStates()[aHostId].mCopy;
++  }
++  if (copyMode) {
++    RefPtr<MacIOSurface> copy = CopyToGlobalSurface(surface);
++    if (!copy) {
++      static bool sWarnedCopyFailed = false;
++      if (!sWarnedCopyFailed) {
++        sWarnedCopyFailed = true;
++        printf_stderr("avPlayer: frame copy FAILED - no video will appear\n");
++      }
++      return;
++    }
++    surface = std::move(copy);
++  }
++
++  const uint32_t surfaceId = static_cast<uint32_t>(surface->GetIOSurfaceID());
++  {
++    StaticMutexAutoLock lock(sBrokeredKeysMutex);
++    BrokeredFrames& state = BrokeredFrameStates()[aHostId];
++    state.mInFlight[state.mNext] = surface;
++    state.mNext = (state.mNext + 1) % kFramesInFlight;
++  }
++
++  // Once. This runs per frame.
++  static bool sReportedFirstFrameForward = false;
++  if (!sReportedFirstFrameForward) {
++    sReportedFirstFrameForward = true;
++    printf_stderr(
++        "avPlayer: forwarding frames for key %llu (first surface %u, copy=%d)\n",
++        (unsigned long long)aKey, surfaceId, copyMode ? 1 : 0);
++  }
++
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendFrame(aKey, surfaceId);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerSendFrame",
++      [aKey, surfaceId]() { ReynardAVPlayerSendFrame(aKey, surfaceId); }));
++}
++
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
@@ -263,6 +427,8 @@ index 000000000000..661d75d2d5f1
 +      {
 +        StaticMutexAutoLock lock(sBrokeredKeysMutex);
 +        BrokeredKeys().erase(playerId);
++        // Releases whatever frames were still held for the far side.
++        BrokeredFrameStates().erase(playerId);
 +      }
 +      break;
 +    default:
@@ -1127,6 +1293,15 @@ index 000000000000..661d75d2d5f1
 +    return;
 +  }
 +
++  // A player some content process owns. The pixels stay in this
++  // process's address space and only the surface's id crosses - every
++  // one of these frames was decoded, handed over and dropped for want
++  // of a decoder until this line existed.
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ForwardFrameToOwner(key, aPlayerId, ioSurface);
++    return;
++  }
++
 +  // Retained across the thread hop and adopted by the CFTypeRefPtr on
 +  // the far side. The caller's buffer may be released the moment this
 +  // returns, and the runnable outlives that.
@@ -1256,4 +1431,59 @@ index 000000000000..661d75d2d5f1
 +        }
 +        entry->second->NotifyPlaybackPoke();
 +      }));
++}
++
++// CONTENT PROCESS: the far end of ReynardAVPlayerSendFrame. A frame the
++// app process decoded, named by the global id of the surface holding
++// its pixels.
++//
++// The surface is turned back into a CVPixelBuffer and handed to the
++// ordinary frame path above rather than duplicating its colour,
++// container and first-frame handling: the two differ only in how the
++// surface was found, and BrokeredKeyFor answers 0 here, so that path
++// runs to completion instead of forwarding again.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyFrameSurface(
++    uintptr_t aPlayerId, uint32_t aSurfaceId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  auto surface = CFTypeRefPtr<IOSurfaceRef>::WrapUnderCreateRule(
++      ::IOSurfaceLookup(static_cast<IOSurfaceID>(aSurfaceId)));
++  if (!surface) {
++    // The app process published a surface this process cannot reach,
++    // which means AVFoundation's pool did not honour IOSurfaceIsGlobal.
++    // Ask for copies into surfaces Gecko created, which always resolve.
++    //
++    // Bounded rather than sent per frame: if the copies cannot be found
++    // either then nothing can, and sixty messages a second would only
++    // make the log unreadable.
++    static uint32_t sFallbackRequests = 0;
++    if (sFallbackRequests < 8) {
++      sFallbackRequests++;
++      printf_stderr(
++          "avPlayer: IOSurfaceLookup FAILED for surface %u - asking the app "
++          "process to copy frames\n",
++          aSurfaceId);
++      if (mozilla::dom::ContentChild* cc =
++              mozilla::dom::ContentChild::GetSingleton()) {
++        cc->SendAVPlayerFrameFallback(static_cast<uint64_t>(aPlayerId));
++      }
++    }
++    return;
++  }
++
++  CVPixelBufferRef pixelBuffer = nullptr;
++  if (::CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surface.get(),
++                                         nullptr, &pixelBuffer) !=
++          kCVReturnSuccess ||
++      !pixelBuffer) {
++    static bool sWarnedNoPixelBuffer = false;
++    if (!sWarnedNoPixelBuffer) {
++      sWarnedNoPixelBuffer = true;
++      printf_stderr(
++          "avPlayer: CVPixelBufferCreateWithIOSurface failed for surface %u\n",
++          aSurfaceId);
++    }
++    return;
++  }
++  ReynardAVPlayerNotifyFrame(aPlayerId, pixelBuffer);
++  ::CFRelease(pixelBuffer);
 +}

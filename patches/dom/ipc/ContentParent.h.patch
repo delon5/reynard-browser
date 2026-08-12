@@ -2,7 +2,7 @@ diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
 index 8cca90086a07..ccabf1e2f072 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
-@@ -746,6 +746,17 @@ class ContentParent final : public PContentParent,
+@@ -746,6 +746,18 @@ class ContentParent final : public PContentParent,
        const OriginAttributes& aOriginAttributes, uint64_t aInnerWindowId,
        const nsCString& aPartitionKey, BlobURLDataRequestResolver&& aResolver);
  
@@ -16,6 +16,7 @@ index 8cca90086a07..ccabf1e2f072 100644
 +  mozilla::ipc::IPCResult RecvAVPlayerControl(const uint64_t& aPlayerId,
 +                                              const uint32_t& aOp,
 +                                              const double& aArg);
++  mozilla::ipc::IPCResult RecvAVPlayerFrameFallback(const uint64_t& aPlayerId);
 +
   protected:
    bool CheckBrowsingContextEmbedder(CanonicalBrowsingContext* aBC,
