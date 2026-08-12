@@ -128,7 +128,21 @@ final class ToolbarController {
         let condensed = browserChrome.isScrollCondensed
         let floats = Prefs.AppearanceSettings.pillFloatsOverPage
         let maxHeight = condensed ? 0 : maxToolbarOffset
-        let margin = (condensed && floats) ? Prefs.AppearanceSettings.pillSafeAreaInset : 0
+        // env, NOT the compositor margin. This is what worked before the
+        // merge and what I replaced while chasing Facebook's banner - a
+        // page that reads env(safe-area-inset-bottom) lifts its own
+        // bottom controls clear of the pill, which is how YouTube and
+        // Twitch were correct. The compositor fixed-layer margin was
+        // swapped in on the theory that it reaches pages env cannot; it
+        // has never been observed to move anything on this port, so the
+        // swap cost the sites that worked and bought nothing.
+        //
+        // Facebook's "Open app" banner is fixed to bottom:0 and reads no
+        // env, so it stays under the pill while floating. That is the
+        // real limit of float mode, and stop mode is the answer for it -
+        // not zeroing env for every other site.
+        let env = (condensed && floats) ? Prefs.AppearanceSettings.pillSafeAreaInset : 0
+        let margin: CGFloat = 0
 
         // The pill's real top edge in window coordinates, next to what
         // the page is being told, so a capture shows the gap and its
@@ -141,14 +155,14 @@ final class ToolbarController {
         // the page is free to paint under the pill no matter what the
         // engine was told.
         let contentBottom = contentView.convert(contentView.bounds, to: rootView).maxY
-        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) margin=\(margin) pillTop=\(pillTop) contentBottom=\(contentBottom) viewH=\(rootView.bounds.height)")
+        NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) env=\(env) pillTop=\(pillTop) contentBottom=\(contentBottom) viewH=\(rootView.bounds.height)")
 
         // Both together - see setCondensedChrome. Setting them in two
         // calls meant whichever ran first sent with the other's stale
         // value, which is how the pill's margin ended up on the
         // dynamic-toolbar path as offset=180.
         contentView.setCondensedChrome(condensed: condensed, pillMargin: margin)
-        contentView.setSafeAreaInsetBottom(0)
+        contentView.setSafeAreaInsetBottom(env)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
             topOffset: maxTopToolbarOffset
