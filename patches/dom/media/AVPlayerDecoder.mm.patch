@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1876 @@
+@@ -0,0 +1,1901 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1042,7 +1042,11 @@ index 000000000000..661d75d2d5f1
 +  // URL is already in hand. AVFoundation's own redirects remain
 +  // invisible to us, so a redirected stream is treated as its
 +  // pre-redirect origin - the same limitation HLSDecoder has.
-+  UpdateCurrentPrincipal(spec);
++  //
++  // NOT notifying the element here: it has no decoder until
++  // FinishDecoderSetup runs, which is after this returns, and it
++  // notifies itself the moment it does.
++  UpdateCurrentPrincipal(spec, /* aNotifyElement */ false);
 +  printf_stderr("avPlayer: content principal set from %s\n", spec.get());
 +
 +  return rv;
@@ -1282,7 +1286,8 @@ index 000000000000..661d75d2d5f1
 +  return principal.forget();
 +}
 +
-+void AVPlayerDecoder::UpdateCurrentPrincipal(nsCString aMediaUrl) {
++void AVPlayerDecoder::UpdateCurrentPrincipal(nsCString aMediaUrl,
++                                             bool aNotifyElement) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +
 +  nsCOMPtr<nsIURI> finalURI;
@@ -1311,8 +1316,28 @@ index 000000000000..661d75d2d5f1
 +    mContentPrincipal = std::move(principal);
 +  }
 +
-+  // Without this the element never learns the principal moved.
-+  MediaDecoder::NotifyPrincipalChanged();
++  // Without this the element never learns the principal moved - but
++  // ONLY once it has a decoder to be told about.
++  //
++  // HTMLMediaElement::NotifyDecoderPrincipalChanged does
++  // `mDecoder->UpdateSameOriginStatus(...)` with no null check
++  // (HTMLMediaElement.cpp:7146), and mDecoder is assigned in
++  // FinishDecoderSetup -> SetDecoder, which the element runs only after
++  // decoder->Load() has RETURNED. Calling this from inside Load was a
++  // null dereference at UpdateSameOriginStatus + 0, fault address 0x1bc
++  // - the offset of mSameOriginMedia - killing the content process a
++  // millisecond after "Load done", on every single media load. With a
++  // debugger attached the same fault froze the main thread instead,
++  // which is what the wedge hunt was chasing.
++  //
++  // Nothing is lost by staying quiet during Load: FinishDecoderSetup
++  // calls NotifyDecoderPrincipalChanged() itself immediately after
++  // SetDecoder (HTMLMediaElement.cpp:5774), so the element picks the
++  // principal up a few instructions later from a place where its
++  // decoder exists.
++  if (aNotifyElement) {
++    MediaDecoder::NotifyPrincipalChanged();
++  }
 +}
 +
 +void AVPlayerDecoder::NotifyDataArrived() {

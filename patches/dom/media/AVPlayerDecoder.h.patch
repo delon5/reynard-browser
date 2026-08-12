@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..72f80c12573a
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,211 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -167,7 +167,14 @@ index 000000000000..72f80c12573a
 +    return true;
 +  }
 +
-+  void UpdateCurrentPrincipal(nsCString aMediaUrl);
++  // aNotifyElement=false while the element has no decoder yet - which
++  // is the whole of Load(). HTMLMediaElement assigns mDecoder in
++  // FinishDecoderSetup, AFTER Load() returns, and
++  // NotifyDecoderPrincipalChanged dereferences it without checking, so
++  // telling it during Load is a null dereference and a dead content
++  // process. See the definition.
++  void UpdateCurrentPrincipal(nsCString aMediaUrl,
++                              bool aNotifyElement = true);
 +
 +  // Principal for the RESOLVED media url, built from a fresh
 +  // channel carrying the element's CORS flags - mirrors
