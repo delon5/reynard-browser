@@ -63,6 +63,16 @@ void recordDebugLoopWaiting(int32_t pid, BOOL waiting);
 /// fix_stop_trapping_on_background.py.
 void setDebuggerListeningState(uint64_t listening);
 
+/// Arms or disarms trapping for ONE content process, alongside the
+/// process-wide switch above. Both have to be armed before a content
+/// process will execute its brk. See fix_per_pid_debugger_listening.py.
+///
+/// Armed by runDebugService when a loop starts, disarmed first thing in
+/// its teardown - so a session that ends for a per-process reason and
+/// then fails its detach disarms exactly one child, and no amount of
+/// attach churn elsewhere can re-arm it.
+void setDebugSessionListeningForPID(int32_t pid, BOOL listening);
+
 /// Cancels any in-flight debug proxy call, releasing threads parked in
 /// a read, WITHOUT tearing sessions down. Call at willResignActive -
 /// see fix_split_cancel_from_detach.py.

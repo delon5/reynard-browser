@@ -2,7 +2,7 @@ diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutab
 index cea7d764..4e912f86 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
-@@ -14,6 +14,14 @@
+@@ -14,6 +14,15 @@
  
  #include <errno.h>
  
@@ -10,6 +10,7 @@ index cea7d764..4e912f86 100644
 +#  include <libkern/OSCacheControl.h>
 +#  include <mach/mach.h>
 +#  include <signal.h>
++#  include <stdio.h>
 +#  include <string.h>
 +#  include <unistd.h>
 +#endif
@@ -17,7 +18,7 @@ index cea7d764..4e912f86 100644
  #include "jsfriendapi.h"
  
  #include "gc/Memory.h"
-@@ -26,6 +33,7 @@
+@@ -26,6 +34,7 @@
  #include "util/RandomSeed.h"
  #include "util/WindowsWrapper.h"
  #include "vm/MutexIDs.h"
@@ -25,7 +26,7 @@ index cea7d764..4e912f86 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +55,329 @@
+@@ -47,6 +56,362 @@
  using namespace js;
  using namespace js::jit;
  
@@ -164,6 +165,7 @@ index cea7d764..4e912f86 100644
 +// cannot be derived without it. notify.h is plain C.
 +static bool DebuggerIsListening() {
 +  static int sToken = NOTIFY_TOKEN_INVALID;
++  static int sSelfToken = NOTIFY_TOKEN_INVALID;
 +  static bool sRegistered = false;
 +  static bool sReportedFailure = false;
 +
@@ -173,9 +175,32 @@ index cea7d764..4e912f86 100644
 +        NOTIFY_STATUS_OK) {
 +      sToken = NOTIFY_TOKEN_INVALID;
 +    }
++
++    // ADDED - the per-process key. See
++    // fix_per_pid_debugger_listening.py's docstring.
++    //
++    // The key above answers "is the debugger up at all". It cannot
++    // answer "is anything servicing ME", and the two diverge every
++    // time one session ends while others keep running - a failed
++    // detach, a rejected RX allocation, a malformed stop packet. This
++    // process is then left CS_DEBUGGED with debugserver still holding
++    // its Mach exception port and no loop sending continue, while the
++    // next attach anywhere in the app re-arms the process-wide key
++    // back to 1 behind it. Trapping here would stop this thread
++    // forever - the SIGTRAP backstop below cannot help, because a
++    // debugger holding the exception port receives EXC_BREAKPOINT
++    // instead of the signal handler.
++    char selfName[80];
++    int written = snprintf(selfName, sizeof(selfName),
++                           "com.minh-ton.Reynard.JITDebuggerListening.%d",
++                           static_cast<int>(getpid()));
++    if (written > 0 && static_cast<size_t>(written) < sizeof(selfName) &&
++        notify_register_check(selfName, &sSelfToken) != NOTIFY_STATUS_OK) {
++      sSelfToken = NOTIFY_TOKEN_INVALID;
++    }
 +  }
 +
-+  if (sToken == NOTIFY_TOKEN_INVALID) {
++  if (sToken == NOTIFY_TOKEN_INVALID || sSelfToken == NOTIFY_TOKEN_INVALID) {
 +    // Registration failed. Do NOT trap - a process that skips the trap
 +    // runs interpreted, which is slow but alive; one that traps with
 +    // nobody listening freezes and takes the app with it.
@@ -188,11 +213,20 @@ index cea7d764..4e912f86 100644
 +    return false;
 +  }
 +
++  // Both must say yes. The process-wide key is the master switch that
++  // the background teardown and a dead tunnel clear; the per-process
++  // key is set by this pid's own runDebugService loop when it starts
++  // and cleared first thing in its teardown, whatever ended it.
 +  uint64_t state = 0;
-+  if (notify_get_state(sToken, &state) != NOTIFY_STATUS_OK) {
++  if (notify_get_state(sToken, &state) != NOTIFY_STATUS_OK || state == 0) {
 +    return false;
 +  }
-+  return state != 0;
++
++  uint64_t selfState = 0;
++  if (notify_get_state(sSelfToken, &selfState) != NOTIFY_STATUS_OK) {
++    return false;
++  }
++  return selfState != 0;
 +}
 +
 +static bool ProcessHasDebuggerAttached() {
@@ -355,7 +389,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +785,246 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +819,246 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -602,7 +636,7 @@ index cea7d764..4e912f86 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +989,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +1023,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -630,7 +664,7 @@ index cea7d764..4e912f86 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +1044,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +1078,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -662,7 +696,7 @@ index cea7d764..4e912f86 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +1075,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +1109,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -680,7 +714,7 @@ index cea7d764..4e912f86 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +1092,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +1126,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -736,7 +770,7 @@ index cea7d764..4e912f86 100644
  #  endif
  }
  #endif
-@@ -722,8 +1250,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1284,42 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -779,7 +813,7 @@ index cea7d764..4e912f86 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1305,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1339,20 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -800,7 +834,7 @@ index cea7d764..4e912f86 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1477,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1511,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -818,7 +852,7 @@ index cea7d764..4e912f86 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1507,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1541,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
    return execMemory.containsAddress(p);
  }
  
@@ -838,7 +872,7 @@ index cea7d764..4e912f86 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1569,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1603,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  

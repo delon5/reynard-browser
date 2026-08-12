@@ -1383,6 +1383,81 @@ BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
 // One flag rather than one per process: every session shares a single
 // tunnel and they fail together - the logs show six loops ending within
 // the same millisecond when it dies.
+// ADDED - see fix_per_pid_debugger_listening.py's docstring.
+//
+// pid -> the notify token for that pid's own listening key. The token is
+// held for the whole life of the session rather than registered and
+// cancelled around each set: the state lives on the NAME, and a name
+// with no registered client can be reaped, which would lose the arm
+// between this process setting it and the content process reading it.
+static NSMutableDictionary<NSNumber *, NSNumber *> *debugListeningTokens(void) {
+    static NSMutableDictionary<NSNumber *, NSNumber *> *tokens;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        tokens = [NSMutableDictionary dictionary];
+    });
+    return tokens;
+}
+
+// Its own lock rather than debugSessionStateQueue. That queue is held by
+// every runDebugService iteration and is the one cancelAllDebugSessionCalls
+// was moved off the main thread to avoid blocking on
+// (fix_lifecycle_calls_off_main_thread.py); this is a two-line critical
+// section with no FFI inside it and no reason to join that traffic.
+static NSLock *debugListeningTokenLock(void) {
+    static NSLock *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lock = [[NSLock alloc] init];
+    });
+    return lock;
+}
+
+void setDebugSessionListeningForPID(int32_t pid, BOOL listening) {
+    if (pid <= 0) return;
+
+    NSLock *lock = debugListeningTokenLock();
+    [lock lock];
+
+    NSNumber *existing = debugListeningTokens()[@(pid)];
+    int token = existing != nil ? existing.intValue : NOTIFY_TOKEN_INVALID;
+
+    if (token == NOTIFY_TOKEN_INVALID) {
+        if (!listening) {
+            // Never armed, so there is nothing to disarm. The teardown
+            // calls this unconditionally, including for loops that
+            // joined a standing teardown and never armed at all.
+            [lock unlock];
+            return;
+        }
+
+        char name[80];
+        int written = snprintf(name, sizeof(name),
+                               "com.minh-ton.Reynard.JITDebuggerListening.%d", pid);
+        if (written <= 0 || (size_t)written >= sizeof(name)) {
+            [lock unlock];
+            return;
+        }
+
+        if (notify_register_check(name, &token) != NOTIFY_STATUS_OK) {
+            [lock unlock];
+            logger([NSString stringWithFormat:@"jitListening: (pid %d) notify_register_check FAILED - this process will not trap, so it runs interpreted", pid]);
+            return;
+        }
+        debugListeningTokens()[@(pid)] = @(token);
+    }
+
+    notify_set_state(token, listening ? 1 : 0);
+
+    if (!listening) {
+        notify_cancel(token);
+        [debugListeningTokens() removeObjectForKey:@(pid)];
+    }
+    [lock unlock];
+
+    logger([NSString stringWithFormat:@"jitListening: (pid %d) %@", pid, listening ? @"ARMED - this process may trap" : @"DISARMED - this process will not trap"]);
+}
+
 void setDebuggerListeningState(uint64_t listening) {
     static int token = NOTIFY_TOKEN_INVALID;
     static dispatch_once_t onceToken;
@@ -1441,6 +1516,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
             @"runDebugService: (pid %d) attach landed after teardown - joining it instead of re-arming", pid]);
     } else {
         setDebuggerListeningState(1);
+        // ADDED - see fix_per_pid_debugger_listening.py. The
+        // process-wide switch above says the debugger is up; this says
+        // that THIS pid has a loop about to service it.
+        setDebugSessionListeningForPID(pid, YES);
     }
     
     // DIAGNOSTIC TEST - this loop runs for the entire lifetime of the
@@ -1800,6 +1879,22 @@ void runDebugService(int32_t pid, DebugSession *session) {
     }
     
     logger([NSString stringWithFormat:@"runDebugService: (pid %d) loop exiting after %ld iterations, %.0fms total, exitPacketPresent=%d, detachedByCommand=%d", pid, (long)debugServiceIteration, (CFAbsoluteTimeGetCurrent() - debugServiceLoopStart) * 1000.0, exitPacketPresent, detachedByCommand]);
+
+    // ADDED - see fix_per_pid_debugger_listening.py's docstring.
+    //
+    // FIRST thing in the teardown, before the detach below is even
+    // attempted. From here on nothing is servicing this pid, and that
+    // is true whether the detach succeeds, fails both attempts, or is
+    // skipped as transport-already-dead. The old process-wide flag
+    // could not say this: it was cleared only for a transport failure
+    // or a failed detach, and re-armed by the next attach anywhere in
+    // the app - roughly every 24 seconds at the observed churn.
+    //
+    // The target may still be RUNNING here (a loop whose continue was
+    // aborted leaves it running), so this is not merely belt and
+    // braces - it is the window in which it would otherwise trap into
+    // a debugger with no loop behind it.
+    setDebugSessionListeningForPID(pid, NO);
     
     // CHANGED - skips the detach when the connection has already died.
     // After a long background, every loop fails at once on resume with
