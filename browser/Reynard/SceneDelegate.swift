@@ -174,6 +174,36 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            // ADDED - see
+            // fix_reattach_timer_rechecks_foreground.py's docstring.
+            //
+            // Two seconds is enough time for the scene to background
+            // again, and this block had no way to notice. On 2026-08-12
+            // the app became active at 19:12:33.085 and backgrounded at
+            // 19:12:34.124 - 278ms before this fired. It ran anyway,
+            // logged "childCensus at foreground" for an app that was
+            // not in the foreground, and started five vAttaches. Three
+            // of those targets were still stopped 165 seconds later
+            // when FrontBoard killed the app for the unanswered XPC.
+            //
+            // applicationState rather than our own flag, for the reason
+            // in fix_check_real_app_state_before_attach.py: iOS wakes a
+            // backgrounded app periodically and the flag goes
+            // stale-true across those wakes. This block is already on
+            // the main queue, where reading it is legal.
+            //
+            // The background task is ended on the way out - held across
+            // these two seconds, it was asking iOS for runtime in order
+            // to do the thing that kills the app.
+            guard UIApplication.shared.applicationState == .active else {
+                logger("reattachSkip: the +2s timer fired but the app is no longer active - not re-attaching")
+                if reattachTask != .invalid {
+                    reattachApplication.endBackgroundTask(reattachTask)
+                    reattachTask = .invalid
+                }
+                return
+            }
+
             // Restored alongside the re-attach, not before it: the
             // sessions it creates are what make trapping safe again.
             // See fix_stop_trapping_on_background.py.
