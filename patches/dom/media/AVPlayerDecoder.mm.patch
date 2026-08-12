@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1483 @@
+@@ -0,0 +1,1491 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -601,8 +601,16 @@ index 000000000000..661d75d2d5f1
 +      return NS_ERROR_NOT_AVAILABLE;
 +    }
 +    cc->SendAVPlayerCreate(static_cast<uint64_t>(mPlayerId), spec);
-+    printf_stderr("avPlayer: brokering player %llu to the app process\n",
-+                  (unsigned long long)mPlayerId);
++    // The child id too: the parent composes it with this player id into
++    // the key every report travels under, so printing both ends of that
++    // arithmetic makes a mismatch visible instead of inferred.
++    printf_stderr(
++        "avPlayer: brokering player %llu to the app process (childID=%llu, "
++        "key=%llu)\n",
++        (unsigned long long)mPlayerId,
++        (unsigned long long)static_cast<uint64_t>(cc->GetID()),
++        (unsigned long long)((static_cast<uint64_t>(cc->GetID()) << 32) |
++                             (static_cast<uint64_t>(mPlayerId) & 0xffffffff)));
 +  } else {
 +    mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
 +    if (!mPlayerId) {

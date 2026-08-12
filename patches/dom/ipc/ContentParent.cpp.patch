@@ -10,7 +10,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  #include "nsDebugImpl.h"
  #include "nsDirectoryServiceDefs.h"
  #include "nsDocShell.h"
-@@ -334,6 +335,23 @@
+@@ -334,6 +335,31 @@
  #include "nsIToolkitProfile.h"
  #include "nsIToolkitProfileService.h"
  
@@ -28,13 +28,21 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl);
 +void ReynardAVPlayerBrokerControl(uint64_t aKey, uint32_t aOp, double aArg);
 +void ReynardAVPlayerBrokerFrameFallback(uint64_t aKey);
++
++// These two are defined at the END of this file rather than in
++// AVPlayerDecoder.mm - they are ours - but they are called from
++// ContentParent methods, which sit inside mozilla::dom in between. The
++// declaration has to come first, and it has to be here for the same
++// scoping reason as the block it shares.
++void ReynardAVPlayerNoteOwner(uint64_t aKey, dom::ContentParent* aOwner);
++void ReynardAVPlayerForgetOwner(uint64_t aChildID);
 +}  // namespace mozilla
 +#endif
 +
  #ifdef MOZ_WMF_CDM
  #  include "mozilla/EMEUtils.h"
  #  include "nsIWindowsMediaFoundationCDMOriginsListService.h"
-@@ -1956,6 +1974,25 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
+@@ -1956,6 +1982,29 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
    MOZ_FUZZING_IPC_DROP_PEER("ContentParent::ActorDestroy");
  #endif
  
@@ -55,12 +63,16 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +      "calledClose=%d\n",
 +      static_cast<unsigned long long>(static_cast<uint64_t>(this->ChildID())),
 +      static_cast<int>(why), mCalledClose ? 1 : 0);
++  // Every brokered player this process owned dies with it. Dropping
++  // the entries here is what keeps the registry from ever holding a
++  // pointer to a destroyed actor: ActorDestroy always runs first.
++  ReynardAVPlayerForgetOwner(static_cast<uint64_t>(this->ChildID()));
 +#endif
 +
    if (mSendShutdownTimer) {
      mSendShutdownTimer->Cancel();
      mSendShutdownTimer = nullptr;
-@@ -3007,14 +3044,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+@@ -3007,14 +3056,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -78,7 +90,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
    } else {
      // This can fail if we've already started shutting down the compositor
      // thread. See Bug 1562763 comment 8. On Android this can fail we are are
-@@ -3193,16 +3231,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+@@ -3193,16 +3243,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -98,7 +110,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -7985,6 +8024,47 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -7985,6 +8036,52 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  
@@ -122,8 +134,13 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +
 +IPCResult ContentParent::RecvAVPlayerCreate(const uint64_t& aPlayerId,
 +                                            const nsCString& aUrl) {
-+  ReynardAVPlayerBrokerCreate(
-+      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId), aUrl);
++  const uint64_t key =
++      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId);
++  // Recorded rather than looked up later: THIS actor is the owner by
++  // definition - it is the one asking for the player - so the reports
++  // travelling back need no id lookup that could answer nullptr.
++  ReynardAVPlayerNoteOwner(key, this);
++  ReynardAVPlayerBrokerCreate(key, aUrl);
 +  return IPC_OK();
 +}
 +
@@ -146,7 +163,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
-@@ -8006,6 +8086,61 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+@@ -8006,6 +8103,131 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
  }
  
  }  // namespace dom
@@ -169,38 +186,108 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +// built on the way in, so the owning process and the id it chose both
 +// fall straight out of it. A process that has since gone away answers
 +// nullptr, which is an ordinary teardown race and not an error.
++// Leaked deliberately, like the maps in AVPlayerDecoder.mm and
++// AVPlayerDemuxer.cpp: a late report racing shutdown must find an empty
++// map, never a destroyed one. Main thread only, like every actor.
++static nsTHashMap<nsUint64HashKey, dom::ContentParent*>& AVPlayerOwners() {
++  static auto* sOwners = new nsTHashMap<nsUint64HashKey, dom::ContentParent*>();
++  return *sOwners;
++}
++
++void ReynardAVPlayerNoteOwner(uint64_t aKey, dom::ContentParent* aOwner) {
++  MOZ_ASSERT(NS_IsMainThread());
++  AVPlayerOwners().InsertOrUpdate(aKey, aOwner);
++}
++
++void ReynardAVPlayerForgetOwner(uint64_t aChildID) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Every key a process owns carries its child id in the high half, so
++  // one pass drops all of that process's players.
++  for (auto iter = AVPlayerOwners().Iter(); !iter.Done(); iter.Next()) {
++    if ((iter.Key() >> 32) == aChildID) {
++      iter.Remove();
++    }
++  }
++}
++
 +static dom::ContentParent* AVPlayerOwner(uint64_t aKey) {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  dom::ContentProcessManager* cpm = dom::ContentProcessManager::GetSingleton();
-+  if (!cpm) {
-+    return nullptr;
++
++  dom::ContentParent* recorded = AVPlayerOwners().Get(aKey);
++
++  // The id lookup this used to rely on, kept as a fallback and reported
++  // once beside the registry's answer. If GetContentProcessById is the
++  // reason nothing was arriving, this line is where it says so.
++  dom::ContentParent* lookedUp = nullptr;
++  if (dom::ContentProcessManager* cpm =
++          dom::ContentProcessManager::GetSingleton()) {
++    lookedUp = cpm->GetContentProcessById(dom::ContentParentId(aKey >> 32));
 +  }
-+  return cpm->GetContentProcessById(dom::ContentParentId(aKey >> 32));
++
++  static bool sReportedOwner = false;
++  if (!sReportedOwner) {
++    sReportedOwner = true;
++    printf_stderr(
++        "avPlayer: owner for key %llu childID=%llu recorded=%d lookup=%d "
++        "same=%d\n",
++        static_cast<unsigned long long>(aKey),
++        static_cast<unsigned long long>(aKey >> 32), recorded ? 1 : 0,
++        lookedUp ? 1 : 0, (recorded && recorded == lookedUp) ? 1 : 0);
++  }
++
++  return recorded ? recorded : lookedUp;
 +}
 +
 +void ReynardAVPlayerSendMetadata(uint64_t aKey, double aDurationSeconds,
 +                                 int32_t aWidth, int32_t aHeight) {
-+  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
-+    (void)cp->SendAVPlayerMetadata(aKey & 0xffffffff, aDurationSeconds, aWidth,
-+                                   aHeight);
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerMetadata(aKey & 0xffffffff,
++                                                   aDurationSeconds, aWidth,
++                                                   aHeight);
++  // Once per kind. These four lines are the whole point of this
++  // change: owner=0 means the parent had nobody to send to, sent=0
++  // means the channel refused, and owner=1 sent=1 with no matching
++  // "recv" line in the content process means the child is not draining
++  // its queue - which is a different bug in a different place.
++  static bool sReportedMetadata = false;
++  if (!sReportedMetadata) {
++    sReportedMetadata = true;
++    printf_stderr("avPlayer: send metadata key=%llu owner=%d sent=%d\n",
++                  static_cast<unsigned long long>(aKey), cp ? 1 : 0,
++                  sent ? 1 : 0);
 +  }
 +}
 +
 +void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds) {
-+  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
-+    (void)cp->SendAVPlayerTime(aKey & 0xffffffff, aSeconds);
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerTime(aKey & 0xffffffff, aSeconds);
++  static bool sReportedTime = false;
++  if (!sReportedTime) {
++    sReportedTime = true;
++    printf_stderr("avPlayer: send time key=%llu owner=%d sent=%d\n",
++                  static_cast<unsigned long long>(aKey), cp ? 1 : 0,
++                  sent ? 1 : 0);
 +  }
 +}
 +
 +void ReynardAVPlayerSendEnded(uint64_t aKey) {
-+  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
-+    (void)cp->SendAVPlayerEnded(aKey & 0xffffffff);
-+  }
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerEnded(aKey & 0xffffffff);
++  printf_stderr("avPlayer: send ended key=%llu owner=%d sent=%d\n",
++                static_cast<unsigned long long>(aKey), cp ? 1 : 0,
++                sent ? 1 : 0);
 +}
 +
 +void ReynardAVPlayerSendFrame(uint64_t aKey, uint32_t aSurfaceId) {
-+  if (dom::ContentParent* cp = AVPlayerOwner(aKey)) {
-+    (void)cp->SendAVPlayerFrame(aKey & 0xffffffff, aSurfaceId);
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerFrame(aKey & 0xffffffff, aSurfaceId);
++  static bool sReportedFrame = false;
++  if (!sReportedFrame) {
++    sReportedFrame = true;
++    printf_stderr(
++        "avPlayer: send frame key=%llu surface=%u owner=%d sent=%d\n",
++        static_cast<unsigned long long>(aKey), aSurfaceId, cp ? 1 : 0,
++        sent ? 1 : 0);
 +  }
 +}
 +

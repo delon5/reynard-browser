@@ -81,7 +81,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1673,6 +1698,45 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
+@@ -1673,6 +1698,69 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
      }
    }
    return IPC_OK();
@@ -98,9 +98,19 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +// is what paces AVPlayerDemuxer's synthetic samples, and then pokes the
 +// decoder through PlayersById. aPlayerId is this process's own id, so
 +// there is nothing to translate.
++// Each of the four logs once ON ENTRY, before calling into the C entry
++// point. A message that arrives and then fails inside still proves it
++// arrived, which is the question the app-process log cannot answer.
 +mozilla::ipc::IPCResult ContentChild::RecvAVPlayerMetadata(
 +    const uint64_t& aPlayerId, const double& aDurationSeconds,
 +    const int32_t& aWidth, const int32_t& aHeight) {
++  static bool sReportedMetadata = false;
++  if (!sReportedMetadata) {
++    sReportedMetadata = true;
++    printf_stderr("avPlayer: recv metadata player=%llu %.3fs %dx%d\n",
++                  static_cast<unsigned long long>(aPlayerId), aDurationSeconds,
++                  aWidth, aHeight);
++  }
 +  ReynardAVPlayerNotifyMetadata(static_cast<uintptr_t>(aPlayerId),
 +                                aDurationSeconds, aWidth, aHeight);
 +  return IPC_OK();
@@ -108,18 +118,32 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +
 +mozilla::ipc::IPCResult ContentChild::RecvAVPlayerTime(
 +    const uint64_t& aPlayerId, const double& aSeconds) {
++  static bool sReportedTime = false;
++  if (!sReportedTime) {
++    sReportedTime = true;
++    printf_stderr("avPlayer: recv time player=%llu %.3f\n",
++                  static_cast<unsigned long long>(aPlayerId), aSeconds);
++  }
 +  ReynardAVPlayerNotifyTime(static_cast<uintptr_t>(aPlayerId), aSeconds);
 +  return IPC_OK();
 +}
 +
 +mozilla::ipc::IPCResult ContentChild::RecvAVPlayerEnded(
 +    const uint64_t& aPlayerId) {
++  printf_stderr("avPlayer: recv ended player=%llu\n",
++                static_cast<unsigned long long>(aPlayerId));
 +  ReynardAVPlayerNotifyEnded(static_cast<uintptr_t>(aPlayerId));
 +  return IPC_OK();
 +}
 +
 +mozilla::ipc::IPCResult ContentChild::RecvAVPlayerFrame(
 +    const uint64_t& aPlayerId, const uint32_t& aSurfaceId) {
++  static bool sReportedFrame = false;
++  if (!sReportedFrame) {
++    sReportedFrame = true;
++    printf_stderr("avPlayer: recv frame player=%llu surface=%u\n",
++                  static_cast<unsigned long long>(aPlayerId), aSurfaceId);
++  }
 +  ReynardAVPlayerNotifyFrameSurface(static_cast<uintptr_t>(aPlayerId),
 +                                    aSurfaceId);
 +  return IPC_OK();
@@ -127,7 +151,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +#endif
 +
  #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
-@@ -1734,7 +1798,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
+@@ -1734,7 +1822,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
    sandboxEnabled = (GetEffectiveContentSandboxLevel() >= 1);
    DisconnectWindowServer(sandboxEnabled);
  #  elif defined(XP_IOS)
