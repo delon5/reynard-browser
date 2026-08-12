@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1785 @@
+@@ -0,0 +1,1876 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -46,6 +46,7 @@ index 000000000000..661d75d2d5f1
 +#include <unistd.h>
 +// Unwinding the main thread when it stops: Mach for suspend/resume and
 +// the register state, dladdr for a name against each frame.
++#include <cstdio>
 +#include <cstring>
 +#include <dlfcn.h>
 +#include <mach/mach.h>
@@ -423,6 +424,88 @@ index 000000000000..661d75d2d5f1
 +// Safe by construction: the thread is suspended for the walk, and every
 +// frame is bounds-checked against the thread's real stack before it is
 +// read, so a garbage frame pointer ends the walk instead of faulting.
++#if defined(__aarch64__)
++// One address, named as precisely as this process can name it.
++//
++// The OFFSET is the point. dladdr answers with the nearest EXPORTED
++// symbol at or below the address, and most of libxul is not exported -
++// so a small offset means the symbol really is the function, while a
++// large one means the pc is in some hidden function after it and the
++// name is only a signpost. The previous dump printed the name without
++// the offset, which is why "MediaDecoder::UpdateSameOriginStatus" could
++// not be taken at face value.
++static void DescribeAddress(const char* aLabel, uint64_t aAddr) {
++  const char* symbol = "?";
++  const char* image = "?";
++  uint64_t offset = 0;
++  Dl_info info;
++  if (aAddr && dladdr((const void*)aAddr, &info)) {
++    if (info.dli_sname) {
++      symbol = info.dli_sname;
++    }
++    if (info.dli_saddr) {
++      offset = aAddr - (uint64_t)info.dli_saddr;
++    }
++    if (info.dli_fname) {
++      const char* slash = strrchr(info.dli_fname, '/');
++      image = slash ? slash + 1 : info.dli_fname;
++    }
++  }
++  printf_stderr("avPlayer:   %-4s 0x%016llx  %s + %llu  (%s)\n", aLabel,
++                (unsigned long long)aAddr, symbol,
++                (unsigned long long)offset, image);
++}
++
++// Walks a frame-pointer chain and SAYS WHY IT STOPPED. The last dump
++// printed one frame and fell silent, which reads the same as "there is
++// nothing above" and as "the chain was unusable" - two very different
++// facts.
++static uint32_t WalkFrames(uint64_t aFp, const uint8_t* aStackBottom,
++                           const uint8_t* aStackTop, uint32_t aFirstIndex) {
++  uint64_t fp = aFp;
++  uint32_t printed = 0;
++  for (uint32_t frame = 0; frame < 24; frame++) {
++    const uint8_t* frameAddr = (const uint8_t*)fp;
++    if (!fp) {
++      printf_stderr("avPlayer:   (walk stopped: fp is null)\n");
++      break;
++    }
++    if (fp & 0xf) {
++      printf_stderr("avPlayer:   (walk stopped: fp 0x%016llx is misaligned)\n",
++                    (unsigned long long)fp);
++      break;
++    }
++    if (frameAddr < aStackBottom || frameAddr + 16 > aStackTop) {
++      printf_stderr(
++          "avPlayer:   (walk stopped: fp 0x%016llx is outside the stack "
++          "0x%016llx-0x%016llx)\n",
++          (unsigned long long)fp, (unsigned long long)(uintptr_t)aStackBottom,
++          (unsigned long long)(uintptr_t)aStackTop);
++      break;
++    }
++
++    // arm64 frame record: [fp] = caller's fp, [fp+8] = return address.
++    uint64_t record[2] = {0, 0};
++    memcpy(record, frameAddr, sizeof(record));
++
++    char label[8];
++    snprintf(label, sizeof(label), "#%02u", aFirstIndex + frame);
++    DescribeAddress(label, record[1]);
++    printed++;
++
++    if (record[0] <= fp) {
++      printf_stderr(
++          "avPlayer:   (walk stopped: fp did not increase: 0x%016llx -> "
++          "0x%016llx)\n",
++          (unsigned long long)fp, (unsigned long long)record[0]);
++      break;
++    }
++    fp = record[0];
++  }
++  return printed;
++}
++#endif
++
 +static void DumpMainThreadStack() {
 +#if defined(__aarch64__)
 +  if (!sContentMainThreadKnown) {
@@ -455,39 +538,47 @@ index 000000000000..661d75d2d5f1
 +    return;
 +  }
 +
-+  uint64_t pc = (uint64_t)arm_thread_state64_get_pc(state);
-+  uint64_t fp = (uint64_t)arm_thread_state64_get_fp(state);
++  const uint64_t pc = (uint64_t)arm_thread_state64_get_pc(state);
++  const uint64_t lr = (uint64_t)arm_thread_state64_get_lr(state);
++  const uint64_t sp = (uint64_t)arm_thread_state64_get_sp(state);
++  const uint64_t fp = (uint64_t)arm_thread_state64_get_fp(state);
 +
-+  for (uint32_t frame = 0; frame < 24 && pc; frame++) {
-+    const char* symbol = "?";
-+    const char* image = "?";
-+    Dl_info info;
-+    if (dladdr((const void*)pc, &info)) {
-+      if (info.dli_sname) {
-+        symbol = info.dli_sname;
-+      }
-+      if (info.dli_fname) {
-+        const char* slash = strrchr(info.dli_fname, '/');
-+        image = slash ? slash + 1 : info.dli_fname;
-+      }
-+    }
-+    printf_stderr("avPlayer:   #%02u 0x%016llx  %s  (%s)\n", frame,
-+                  (unsigned long long)pc, symbol, image);
++  DescribeAddress("pc", pc);
++  DescribeAddress("lr", lr);
++  printf_stderr(
++      "avPlayer:   sp=0x%016llx fp=0x%016llx x0=0x%llx x1=0x%llx x2=0x%llx "
++      "x3=0x%llx\n",
++      (unsigned long long)sp, (unsigned long long)fp,
++      (unsigned long long)state.__x[0], (unsigned long long)state.__x[1],
++      (unsigned long long)state.__x[2], (unsigned long long)state.__x[3]);
 +
-+    // arm64 frame record: [fp] = caller's fp, [fp+8] = return address.
-+    const uint8_t* frameAddr = (const uint8_t*)fp;
-+    if (!fp || (fp & 0xf) || frameAddr < stackBottom ||
-+        frameAddr + 16 > stackTop) {
-+      break;
-+    }
-+    uint64_t record[2] = {0, 0};
-+    memcpy(record, frameAddr, sizeof(record));
-+    if (record[0] <= fp) {
-+      // Frame pointers walk upwards. Anything else is garbage.
-+      break;
-+    }
-+    fp = record[0];
-+    pc = record[1];
++  // THE QUESTION. If the instruction under the pc is a brk then this
++  // thread trapped - an assertion or MOZ_CRASH - and something is
++  // holding it stopped rather than letting the process die, which is
++  // exactly what an attached debugger does. Anything else means the
++  // thread is genuinely executing, and lr says what called it.
++  //
++  // Read only after dladdr has confirmed the pc is inside a mapped
++  // image: a wedged process must not be turned into a crashed one by
++  // the thing measuring it.
++  Dl_info pcInfo;
++  if (pc && dladdr((const void*)pc, &pcInfo)) {
++    uint32_t insn = 0;
++    memcpy(&insn, (const void*)pc, sizeof(insn));
++    const bool isBrk = (insn & 0xffe0001f) == 0xd4200000;
++    printf_stderr("avPlayer:   insn@pc = 0x%08x%s\n", insn,
++                  isBrk ? "  <-- BRK: this thread TRAPPED (assertion or "
++                          "MOZ_CRASH) and is being held stopped"
++                        : "");
++  }
++
++  const uint32_t walked = WalkFrames(fp, stackBottom, stackTop, 1);
++  if (!walked) {
++    // No usable frame record - a trap, or a prologue that has not set
++    // fp up yet. lr is then the best caller we have, and it was printed
++    // above.
++    printf_stderr(
++        "avPlayer:   (no frames from fp; lr above is the likely caller)\n");
 +  }
 +
 +  thread_resume(machThread);

@@ -127,6 +127,17 @@ void resetJITEndpointMonitor(void);
 // Settings lives) and the Helper (where self-enable runs).
 BOOL hasAnyActiveJITSessionAcrossProcesses(void);
 
+/// A short description of what the kernel says pid is doing right now -
+/// "RUN", "SLEEP", "STOP", "ZOMB", "IDL", or a reason it could not be
+/// read. See fix_report_child_run_state.py.
+///
+/// STOP is the one that matters: a content process in that state cannot
+/// answer the synchronous XPC iOS sends every extension on a lifecycle
+/// transition, which is the 0x8BADF00D this whole subsystem keeps
+/// producing - and no existing instrument can see it, because a stopped
+/// child has no debug loop left to appear in any loop dump.
+NSString *childProcessRunState(int32_t pid);
+
 /// Kernel ground truth for whether a process carries CS_DEBUGGED, the
 /// hard precondition for JIT. Mirrors DolphiniOS's
 /// checkIfProcessIsDebugged. Takes a pid rather than checking self,

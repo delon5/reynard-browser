@@ -352,11 +352,21 @@ final class JITController {
             logger("\(label): \(self.ledger.announcedChildTotal()) child(ren) announced this launch, \(census.count) alive")
             for entry in census {
                 let session = JITEnabler.hasActiveDebugSession(forPID: entry.pid)
+                // ADDED - see fix_report_child_run_state.py's docstring.
+                //
+                // The missing column. This dump runs at the foreground
+                // handshake precisely because that is where the app dies,
+                // and until now it could say a child was alive and
+                // sessionless without being able to say whether it was
+                // RUNNING. STOP here names the extension that is not
+                // answering the synchronous XPC.
+                let runState = JITEnabler.runState(forPID: entry.pid)
                 logger(String(
-                    format: "  %@: pid %d type=%@ attached=%@ session=%@",
+                    format: "  %@: pid %d type=%@ attached=%@ session=%@ state=%@",
                     label, entry.pid, entry.type,
                     entry.attached ? "yes" : "NO",
-                    session ? "yes" : "NO"
+                    session ? "yes" : "NO",
+                    runState
                 ))
             }
         }

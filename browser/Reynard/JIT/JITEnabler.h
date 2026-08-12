@@ -83,6 +83,10 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// in JITSupport.h, which Swift cannot see directly.
 + (BOOL)hasActiveDebugSessionForPID:(int32_t)pid NS_SWIFT_NAME(hasActiveDebugSession(forPID:));
 
+/// What the kernel says this child is doing - RUN, SLEEP, STOP, ZOMB, or
+/// why it could not be read. See fix_report_child_run_state.py.
++ (NSString *)runStateForPID:(int32_t)pid NS_SWIFT_NAME(runState(forPID:));
+
 // Clears the cached DeviceProvider (getProviderForPID's own
 // sharedProvider) so the next call is forced to establish a fresh
 // connection instead of reusing one that may be poisoned by a timed-

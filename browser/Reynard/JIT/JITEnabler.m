@@ -649,6 +649,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     setDebuggerListeningState(listening ? 1 : 0);
 }
 
++ (NSString *)runStateForPID:(int32_t)pid {
+    return childProcessRunState(pid);
+}
+
 + (void)interruptAttachingDebugSessions {
     interruptAttachingDebugSessions();
 }

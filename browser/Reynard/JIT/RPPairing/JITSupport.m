@@ -10,6 +10,10 @@
 #import "JITUtils.h"
 #import "IdeviceFFI.h"
 
+// For childProcessRunState - see fix_report_child_run_state.py.
+#import <sys/sysctl.h>
+#import <libproc.h>
+
 #include <arpa/inet.h>
 #include <notify.h>
 #include <errno.h>
@@ -244,6 +248,56 @@ static void removePIDFromSharedActiveSessions(int32_t pid) {
 #define REYNARD_CS_DEBUGGED 0x10000000
 
 extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+// ADDED - see fix_report_child_run_state.py's docstring.
+//
+// Two independent routes to the same field, because a cross-process query
+// under the app sandbox may simply be refused - csops already returns
+// EPERM here eight times out of eight - and finding that out for one of
+// them should not cost the answer from the other. Both results are
+// reported, with errno when they fail, so one capture settles which (if
+// either) is usable.
+static NSString *runStateName(int stat) {
+    switch (stat) {
+        case SIDL:   return @"IDL";
+        case SRUN:   return @"RUN";
+        case SSLEEP: return @"SLEEP";
+        case SSTOP:  return @"STOP";
+        case SZOMB:  return @"ZOMB";
+        default:     return [NSString stringWithFormat:@"?%d", stat];
+    }
+}
+
+NSString *childProcessRunState(int32_t pid) {
+    if (pid <= 0) return @"n/a";
+
+    NSString *viaSysctl = nil;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    struct kinfo_proc info;
+    size_t length = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &length, NULL, 0) == 0 && length > 0) {
+        viaSysctl = runStateName(info.kp_proc.p_stat);
+    } else {
+        viaSysctl = [NSString stringWithFormat:@"sysctl:e%d", errno];
+    }
+
+    NSString *viaProcInfo = nil;
+    struct proc_bsdinfo bsdInfo;
+    memset(&bsdInfo, 0, sizeof(bsdInfo));
+    int written = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdInfo, sizeof(bsdInfo));
+    if (written == (int)sizeof(bsdInfo)) {
+        viaProcInfo = runStateName((int)bsdInfo.pbi_status);
+    } else {
+        viaProcInfo = [NSString stringWithFormat:@"proc:e%d", errno];
+    }
+
+    // Both printed rather than one preferred: they are the measurement.
+    if ([viaSysctl isEqualToString:viaProcInfo]) {
+        return viaSysctl;
+    }
+    return [NSString stringWithFormat:@"%@/%@", viaSysctl, viaProcInfo];
+}
 
 BOOL processIsDebugged(int32_t pid) {
     if (pid <= 0) return NO;
