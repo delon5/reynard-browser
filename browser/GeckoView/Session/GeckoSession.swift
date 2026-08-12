@@ -621,6 +621,16 @@ public class GeckoSession {
         window?.setDynamicToolbarMaxHeight(max(0, height))
     }
     
+    /// Compositor fixed-layer margin only - lifts position:fixed and
+    /// sticky bottom layers without telling nsPresContext a toolbar
+    /// moved. The condensed pill wants exactly this and nothing else;
+    /// setContentBottomOffset also drives the dynamic-toolbar offset,
+    /// where a positive value is out of range and corrupts the visual
+    /// viewport.
+    public func setFixedLayerMarginBottom(_ margin: CGFloat) {
+        window?.setFixedLayerMarginBottom(margin)
+    }
+
     public func setContentBottomOffset(_ offset: CGFloat) {
         window?.setFixedBottomOffset(offset)
     }

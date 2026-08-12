@@ -1,5 +1,5 @@
 diff --git a/widget/uikit/nsWindow.mm b/widget/uikit/nsWindow.mm
-index ffb8da937efa..8a5f91da6735 100644
+index ffb8da937efa..9dd0f5694d61 100644
 --- a/widget/uikit/nsWindow.mm
 +++ b/widget/uikit/nsWindow.mm
 @@ -2,20 +2,18 @@
@@ -385,11 +385,11 @@ index ffb8da937efa..8a5f91da6735 100644
 +    }
    }
 -}
--
+ 
 -- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
 -  ALOG("[ChildView[%p] touchesEnded", self);
 -  if (!mGeckoChild) return;
- 
+-
 -  [self sendTouchEvent:eTouchEnd touches:touches widget:mGeckoChild];
 -  for (UITouch* touch : touches) {
 -    [mTouches removeObjectForKey:touch];
@@ -411,7 +411,10 @@ index ffb8da937efa..8a5f91da6735 100644
 -  if (!mGeckoChild) return;
 +- (void)traitCollectionDidChange:(UITraitCollection*)previousTraitCollection {
 +  [super traitCollectionDidChange:previousTraitCollection];
-+
+ 
+-  [self sendTouchEvent:eTouchMove
+-               touches:[event allTouches]
+-                widget:mGeckoChild];
 +  self.backgroundColor = [UIColor systemBackgroundColor];
 +
 +  if (previousTraitCollection &&
@@ -419,10 +422,7 @@ index ffb8da937efa..8a5f91da6735 100644
 +          previousTraitCollection.userInterfaceStyle) {
 +    return;
 +  }
- 
--  [self sendTouchEvent:eTouchMove
--               touches:[event allTouches]
--                widget:mGeckoChild];
++
 +  nsLookAndFeel::SetSystemUsesDarkTheme(
 +      self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
  }
@@ -437,8 +437,8 @@ index ffb8da937efa..8a5f91da6735 100644
                          self.frame.size.width * scaleFactor,
                          self.frame.size.height * scaleFactor, false);
 +  [self updateSafeAreaInsets];
- }
- 
++}
++
 +- (void)setSafeAreaInsetBottom:(CGFloat)inset {
 +  const CGFloat scale = [self contentScaleFactor];
 +  const LayoutDeviceIntCoord scaled =
@@ -448,8 +448,8 @@ index ffb8da937efa..8a5f91da6735 100644
 +  }
 +  mArtificialBottomInset = scaled;
 +  [self updateSafeAreaInsets];
-+}
-+
+ }
+ 
 +- (void)updateSafeAreaInsets {
 +  UIWindow* window = self.window;
 +  if (!mGeckoChild || !window || !window.screen) {
@@ -1079,14 +1079,14 @@ index ffb8da937efa..8a5f91da6735 100644
 +      hadFirstResponder || aAction.UserMightRequestOpenVKB() ||
 +      (aAction.mFocusChange == InputContextAction::GOT_FOCUS &&
 +       (focusFromPointerInput || focusFromKeyboardInput));
- 
--  if (aAction.UserMightRequestOpenVKB() || changingEnabledState) {
++
 +  const bool shouldWaitForPasswordAutofillFocus =
 +      shouldBecomeFirstResponder && !hadFirstResponder &&
 +      aContext.IsPasswordEditor() &&
 +      (aAction.mFocusChange == InputContextAction::GOT_FOCUS ||
 +       mNativeView->mEditable.mWaitingForPasswordAutofillFocus);
-+
+ 
+-  if (aAction.UserMightRequestOpenVKB() || changingEnabledState) {
 +  if (shouldWaitForPasswordAutofillFocus) {
 +    mNativeView->mEditable.mWaitingForPasswordAutofillFocus = YES;
 +  } else if (shouldBecomeFirstResponder) {
@@ -1225,11 +1225,35 @@ index ffb8da937efa..8a5f91da6735 100644
  int32_t nsWindow::RoundsWidgetCoordinatesTo() {
    if (BackingScaleFactor() == 2.0) {
      return 2;
-@@ -1117,10 +1470,174 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1117,10 +1470,198 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return 1;
  }
  
 +// Toolbar and safe-area state
++
++void nsWindow::SetFixedLayerMarginBottom(ScreenIntCoord aMargin) {
++  // The compositor half of UpdateDynamicToolbarOffset, and ONLY that.
++  //
++  // That function feeds one value to two consumers: the APZ fixed-layer
++  // margin, which lifts position:fixed bottom layers, and
++  // nsPresContext's dynamic-toolbar offset. The condensed pill wants the
++  // first alone. Sent through the other entry point its +180 (60pt)
++  // arrived as a toolbar offset, where a device capture caught
++  //
++  //   toolbarTrace: nsPresContext RECEIVED offset=180 max=426
++  //
++  // and nsPresContext computed mDynamicToolbarHeight = 426 + 180 = 606 -
++  // a 202pt toolbar that does not exist - then shrank the visual
++  // viewport to match, which is what pushed m.facebook.com's fixed
++  // banner off screen. A dynamic-toolbar offset is only ever NEGATIVE,
++  // 0 down to -max as the toolbar hides; a positive one is out of range
++  // by construction.
++  if (mCompositorSession) {
++    if (auto controller = mCompositorSession->GetUiCompositorControllerChild()) {
++      controller->SetFixedBottomOffset(aMargin);
++    }
++  }
++}
 +
 +void nsWindow::UpdateDynamicToolbarOffset(ScreenIntCoord aOffset) {
 +  if (mWidgetListener) {
@@ -1400,7 +1424,7 @@ index ffb8da937efa..8a5f91da6735 100644
  void nsWindow::HandleMainThreadCATransaction() {
    // Trigger a synchronous OMTC composite. This will call NextSurface and
    // NotifySurfaceReady on the compositor thread to update mNativeLayerRoot's
-@@ -1176,6 +1693,12 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1176,6 +1717,12 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
  }
  
  void nsWindow::MaybeScheduleUnsuspendAsyncCATransactions() {
@@ -1413,7 +1437,7 @@ index ffb8da937efa..8a5f91da6735 100644
    if (mNativeLayerRoot->AreOffMainThreadCommitsSuspended() &&
        !mUnsuspendAsyncCATransactionsRunnable) {
      mUnsuspendAsyncCATransactionsRunnable = NewCancelableRunnableMethod(
-@@ -1198,6 +1721,53 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1198,6 +1745,53 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    }
  }
  
@@ -1467,7 +1491,7 @@ index ffb8da937efa..8a5f91da6735 100644
  EventDispatcher* nsWindow::GetEventDispatcher() const {
    if (mIOSView) {
      return mIOSView->mEventDispatcher;
-@@ -1205,28 +1775,131 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
+@@ -1205,28 +1799,131 @@ - (UIAccessibilityContainerType)accessibilityContainerType {
    return nullptr;
  }
  
@@ -1613,7 +1637,7 @@ index ffb8da937efa..8a5f91da6735 100644
  NS_IMPL_ISUPPORTS(IOSView, nsIGeckoViewEventDispatcher, nsIGeckoViewView)
  
  nsresult IOSView::GetInitData(JSContext* aCx,
-@@ -1247,6 +1920,59 @@ - (UIView*)view {
+@@ -1247,6 +1944,66 @@ - (UIView*)view {
    return mWindow ? (UIView*)mWindow->GetNativeData(NS_NATIVE_WIDGET) : nil;
  }
  
@@ -1645,6 +1669,13 @@ index ffb8da937efa..8a5f91da6735 100644
 +  }
 +}
 +
++- (void)setFixedLayerMarginBottom:(CGFloat)margin {
++  if (mWindow) {
++    mWindow->SetFixedLayerMarginBottom(
++        ScreenIntCoord(lround(margin * mWindow->BackingScaleFactor())));
++  }
++}
++
 +- (void)updateScreenOrientation:(NSInteger)interfaceOrientation {
 +  if (!mWindow) {
 +    return;
@@ -1673,7 +1704,7 @@ index ffb8da937efa..8a5f91da6735 100644
  - (void)close {
    if (mWindow) {
      if (IOSView* iosView = mWindow->GetIOSView()) {
-@@ -1260,6 +1986,16 @@ - (void)close {
+@@ -1260,6 +2017,16 @@ - (void)close {
      mOuterWindow = nullptr;
    }
  }
@@ -1690,7 +1721,7 @@ index ffb8da937efa..8a5f91da6735 100644
  @end
  
  id<GeckoViewWindow> GeckoViewOpenWindow(NSString* aId,
-@@ -1302,6 +2038,7 @@ - (void)close {
+@@ -1302,6 +2069,7 @@ - (void)close {
    MOZ_ASSERT(window);
  
    window->SetIOSView(iosView.forget());

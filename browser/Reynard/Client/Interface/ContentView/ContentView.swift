@@ -389,9 +389,21 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             return
         }
         contentBottomOffset = offset
-        NSLog("dynToolbar: fixed-layer bottom margin %.1f (toolbar %.1f/%.1f, pill %.1f)",
-              offset, toolbarTopOffset, toolbarBottomOffset, floatingChromeInset)
-        session?.setContentBottomOffset(offset)
+        NSLog("dynToolbar: fixed-layer bottom margin %.1f (toolbar %.1f/%.1f, pill %.1f, condensed %d)",
+              offset, toolbarTopOffset, toolbarBottomOffset, floatingChromeInset,
+              isChromeCondensed ? 1 : 0)
+        // Two different engine entry points, because they mean different
+        // things. The pill's clearance is a compositor margin and nothing
+        // more; the toolbar's offset genuinely moves the dynamic toolbar
+        // and must reach nsPresContext. Sending the pill's POSITIVE value
+        // through the toolbar path made nsPresContext compute a 202pt
+        // toolbar that does not exist and shrink the visual viewport to
+        // match - which is what pushed Facebook's fixed banner off screen.
+        if isChromeCondensed {
+            session?.setFixedLayerMarginBottom(offset)
+        } else {
+            session?.setContentBottomOffset(offset)
+        }
     }
     
     private func toolbarAlignedTransform(translationX: CGFloat) -> CGAffineTransform {
