@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1587 @@
+@@ -0,0 +1,1649 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -37,6 +37,13 @@ index 000000000000..661d75d2d5f1
 +// The brokered-player reverse map is read from the Swift host's own
 +// queues, not just Gecko's main thread, so it takes a real lock.
 +#include "mozilla/StaticMutex.h"
++// The content-process diagnostics below are written on Gecko's main
++// thread and read from a watchdog thread that deliberately is not one
++// of Gecko's, so the counters are atomic and the probe is a bare
++// pthread.
++#include "mozilla/Atomics.h"
++#include <pthread.h>
++#include <unistd.h>
 +
 +#include <cmath>
 +#include <unordered_map>
@@ -365,15 +372,63 @@ index 000000000000..661d75d2d5f1
 +//
 +// Counted in the notify functions when they run in a content process,
 +// which is only ever from ContentChild's Recv handlers - in the parent
-+// those same functions serve the Swift host instead. Main thread only
-+// there, so plain integers rather than atomics.
-+static uint32_t sContentRecvMetadata = 0;
-+static uint32_t sContentRecvTime = 0;
-+static uint32_t sContentRecvFrame = 0;
++// those same functions serve the Swift host instead. Written on the
++// main thread; read from the watchdog thread below, which is why they
++// are atomic. Relaxed is right: nothing is published through them, they
++// are only ever read as a number in a log line.
++static Atomic<uint32_t, Relaxed> sContentRecvMetadata(0);
++static Atomic<uint32_t, Relaxed> sContentRecvTime(0);
++static Atomic<uint32_t, Relaxed> sContentRecvFrame(0);
 +
 +static uintptr_t sContentAlivePlayerId = 0;
-+static uint32_t sContentAliveTicks = 0;
++static Atomic<uint32_t, Relaxed> sContentAliveTicks(0);
 +static const uint32_t kContentAliveTicks = 20;
++
++// THE POINT OF THIS BUILD. A raw pthread: no event loop, no XPCOM, no
++// timer, no dispatch queue - nothing a wedged main thread or a stalled
++// Gecko queue can hold up. Every previous instrument was downstream of
++// the thing under test, which is why B3's silence was unreadable.
++//
++//   t advances, main stays 0 -> the process is alive and its MAIN
++//                               THREAD is wedged.
++//   nothing prints at all    -> the WHOLE PROCESS is frozen, which
++//                               Gecko cannot cause: that is the OS
++//                               suspending the extension.
++//   both advance             -> the main thread is fine and the
++//                               messages genuinely are not arriving.
++//
++// Twenty seconds and then it exits, so a long session is not spammed.
++static void* ContentWatchdogThread(void*) {
++  for (uint32_t t = 1; t <= kContentAliveTicks; t++) {
++    sleep(1);
++    printf_stderr(
++        "avPlayer: content watchdog t=%u main=%u recv(meta=%u time=%u "
++        "frame=%u)\n",
++        t, (uint32_t)sContentAliveTicks, (uint32_t)sContentRecvMetadata,
++        (uint32_t)sContentRecvTime, (uint32_t)sContentRecvFrame);
++  }
++  printf_stderr("avPlayer: content watchdog finished\n");
++  return nullptr;
++}
++
++static void StartContentWatchdog() {
++  // Once per process. A second load re-arms the main-thread tick but
++  // does not need a second watchdog: the question it answers is about
++  // the process, not the player.
++  static bool sWatchdogStarted = false;
++  if (sWatchdogStarted) {
++    return;
++  }
++  sWatchdogStarted = true;
++
++  pthread_t thread;
++  if (pthread_create(&thread, nullptr, ContentWatchdogThread, nullptr) != 0) {
++    printf_stderr("avPlayer: content watchdog FAILED to start\n");
++    return;
++  }
++  // Detached: nothing joins it, and it must not keep anything alive.
++  pthread_detach(thread);
++}
 +
 +static void ScheduleContentAliveTick();
 +
@@ -411,9 +466,9 @@ index 000000000000..661d75d2d5f1
 +  printf_stderr(
 +      "avPlayer: content alive tick=%u player=%llu recv(meta=%u time=%u "
 +      "frame=%u) pos=%.3f dur=%.3f decoder=%d\n",
-+      sContentAliveTicks, (unsigned long long)sContentAlivePlayerId,
-+      sContentRecvMetadata, sContentRecvTime, sContentRecvFrame, position,
-+      duration,
++      (uint32_t)sContentAliveTicks, (unsigned long long)sContentAlivePlayerId,
++      (uint32_t)sContentRecvMetadata, (uint32_t)sContentRecvTime,
++      (uint32_t)sContentRecvFrame, position, duration,
 +      PlayersById().count(sContentAlivePlayerId) ? 1 : 0);
 +
 +  if (sContentAliveTicks < kContentAliveTicks) {
@@ -695,6 +750,13 @@ index 000000000000..661d75d2d5f1
 +    sContentAlivePlayerId = mPlayerId;
 +    sContentAliveTicks = 0;
 +    ScheduleContentAliveTick();
++    // Printed HERE, before either probe can report, so that silence
++    // afterwards is unambiguous: this line present and no watchdog
++    // output means the process stopped, not that the build lacked the
++    // probe. Not knowing which cost a whole round.
++    printf_stderr("avPlayer: content watchdog ARMED player=%llu\n",
++                  (unsigned long long)mPlayerId);
++    StartContentWatchdog();
 +  } else {
 +    mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
 +    if (!mPlayerId) {
