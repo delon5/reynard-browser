@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,1649 @@
+@@ -0,0 +1,1785 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -44,6 +44,11 @@ index 000000000000..661d75d2d5f1
 +#include "mozilla/Atomics.h"
 +#include <pthread.h>
 +#include <unistd.h>
++// Unwinding the main thread when it stops: Mach for suspend/resume and
++// the register state, dladdr for a name against each frame.
++#include <cstring>
++#include <dlfcn.h>
++#include <mach/mach.h>
 +
 +#include <cmath>
 +#include <unordered_map>
@@ -382,7 +387,7 @@ index 000000000000..661d75d2d5f1
 +
 +static uintptr_t sContentAlivePlayerId = 0;
 +static Atomic<uint32_t, Relaxed> sContentAliveTicks(0);
-+static const uint32_t kContentAliveTicks = 20;
++static const uint32_t kContentAliveTicks = 60;
 +
 +// THE POINT OF THIS BUILD. A raw pthread: no event loop, no XPCOM, no
 +// timer, no dispatch queue - nothing a wedged main thread or a stalled
@@ -398,23 +403,136 @@ index 000000000000..661d75d2d5f1
 +//                               messages genuinely are not arriving.
 +//
 +// Twenty seconds and then it exits, so a long session is not spammed.
++// Recorded on Gecko's main thread, read from the watchdog thread. Set
++// once, before the watchdog exists, so no synchronisation is needed
++// beyond the ordering pthread_create itself provides.
++static pthread_t sContentMainThread;
++static bool sContentMainThreadKnown = false;
++
++static void ScheduleContentAliveTick();
++
++// Walks the MAIN thread's stack from this one.
++//
++// This is the only question left. If the thread is parked in
++// mach_msg / CFRunLoop / nsAppShell::Run then nothing is blocking it
++// and the wakeup that should follow a cross-thread dispatch is not
++// arriving - an event-loop bug in the port, not media. If it is sitting
++// in a lock, a sync IPC send, or an audio or graphics call, that frame
++// names the owner and the fix follows from it.
++//
++// Safe by construction: the thread is suspended for the walk, and every
++// frame is bounds-checked against the thread's real stack before it is
++// read, so a garbage frame pointer ends the walk instead of faulting.
++static void DumpMainThreadStack() {
++#if defined(__aarch64__)
++  if (!sContentMainThreadKnown) {
++    printf_stderr("avPlayer: no main thread recorded - cannot unwind\n");
++    return;
++  }
++
++  const uint8_t* stackTop =
++      (const uint8_t*)pthread_get_stackaddr_np(sContentMainThread);
++  const size_t stackSize = pthread_get_stacksize_np(sContentMainThread);
++  const uint8_t* stackBottom = stackTop - stackSize;
++
++  mach_port_t machThread = pthread_mach_thread_np(sContentMainThread);
++  if (machThread == MACH_PORT_NULL) {
++    printf_stderr("avPlayer: no mach port for the main thread\n");
++    return;
++  }
++  if (thread_suspend(machThread) != KERN_SUCCESS) {
++    printf_stderr("avPlayer: thread_suspend failed - cannot unwind\n");
++    return;
++  }
++
++  arm_thread_state64_t state;
++  mach_msg_type_number_t stateCount = ARM_THREAD_STATE64_COUNT;
++  kern_return_t kr = thread_get_state(machThread, ARM_THREAD_STATE64,
++                                      (thread_state_t)&state, &stateCount);
++  if (kr != KERN_SUCCESS) {
++    printf_stderr("avPlayer: thread_get_state failed (%d)\n", (int)kr);
++    thread_resume(machThread);
++    return;
++  }
++
++  uint64_t pc = (uint64_t)arm_thread_state64_get_pc(state);
++  uint64_t fp = (uint64_t)arm_thread_state64_get_fp(state);
++
++  for (uint32_t frame = 0; frame < 24 && pc; frame++) {
++    const char* symbol = "?";
++    const char* image = "?";
++    Dl_info info;
++    if (dladdr((const void*)pc, &info)) {
++      if (info.dli_sname) {
++        symbol = info.dli_sname;
++      }
++      if (info.dli_fname) {
++        const char* slash = strrchr(info.dli_fname, '/');
++        image = slash ? slash + 1 : info.dli_fname;
++      }
++    }
++    printf_stderr("avPlayer:   #%02u 0x%016llx  %s  (%s)\n", frame,
++                  (unsigned long long)pc, symbol, image);
++
++    // arm64 frame record: [fp] = caller's fp, [fp+8] = return address.
++    const uint8_t* frameAddr = (const uint8_t*)fp;
++    if (!fp || (fp & 0xf) || frameAddr < stackBottom ||
++        frameAddr + 16 > stackTop) {
++      break;
++    }
++    uint64_t record[2] = {0, 0};
++    memcpy(record, frameAddr, sizeof(record));
++    if (record[0] <= fp) {
++      // Frame pointers walk upwards. Anything else is garbage.
++      break;
++    }
++    fp = record[0];
++    pc = record[1];
++  }
++
++  thread_resume(machThread);
++#else
++  printf_stderr("avPlayer: stack walk is arm64-only\n");
++#endif
++}
++
 +static void* ContentWatchdogThread(void*) {
++  uint32_t lastMain = (uint32_t)sContentAliveTicks;
++  uint32_t stuckSeconds = 0;
++
 +  for (uint32_t t = 1; t <= kContentAliveTicks; t++) {
 +    sleep(1);
++    const uint32_t mainTicks = (uint32_t)sContentAliveTicks;
 +    printf_stderr(
 +        "avPlayer: content watchdog t=%u main=%u recv(meta=%u time=%u "
 +        "frame=%u)\n",
-+        t, (uint32_t)sContentAliveTicks, (uint32_t)sContentRecvMetadata,
++        t, mainTicks, (uint32_t)sContentRecvMetadata,
 +        (uint32_t)sContentRecvTime, (uint32_t)sContentRecvFrame);
++
++    if (mainTicks == lastMain) {
++      stuckSeconds++;
++    } else {
++      stuckSeconds = 0;
++      lastMain = mainTicks;
++    }
++
++    // Twice: a stack that has not moved between 5 s and 30 s is stuck,
++    // one that has moved is making progress too slowly to tick.
++    if (stuckSeconds == 5 || stuckSeconds == 30) {
++      printf_stderr(
++          "avPlayer: MAIN THREAD WEDGED - no events for %us, unwinding it\n",
++          stuckSeconds);
++      DumpMainThreadStack();
++      printf_stderr("avPlayer: end of main thread stack\n");
++    }
 +  }
 +  printf_stderr("avPlayer: content watchdog finished\n");
 +  return nullptr;
 +}
 +
 +static void StartContentWatchdog() {
-+  // Once per process. A second load re-arms the main-thread tick but
-+  // does not need a second watchdog: the question it answers is about
-+  // the process, not the player.
++  // Once per process. The question it answers is about the process, not
++  // the player, so a second load does not need a second thread.
 +  static bool sWatchdogStarted = false;
 +  if (sWatchdogStarted) {
 +    return;
@@ -428,6 +546,27 @@ index 000000000000..661d75d2d5f1
 +  }
 +  // Detached: nothing joins it, and it must not keep anything alive.
 +  pthread_detach(thread);
++}
++
++// Called from ContentChild as the process comes up, and again from
++// Load(). Every content process reports, not only one that loaded a
++// video - if a plain page's main thread stops too, then media was only
++// the messenger and the bug is somewhere much more general.
++void ReynardStartContentWatchdog() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!XRE_IsContentProcess()) {
++    return;
++  }
++  static bool sArmed = false;
++  if (sArmed) {
++    return;
++  }
++  sArmed = true;
++
++  sContentMainThread = pthread_self();
++  sContentMainThreadKnown = true;
++  ScheduleContentAliveTick();
++  StartContentWatchdog();
 +}
 +
 +static void ScheduleContentAliveTick();
@@ -747,16 +886,13 @@ index 000000000000..661d75d2d5f1
 +    // Twenty seconds of heartbeat, starting now. Re-armed per load: a
 +    // second element restarts the count against its own player rather
 +    // than reporting the first one's forever.
++    // The tick counter is NOT reset here any more: the watchdog reads
++    // it to decide whether the main thread is moving, and a reset in
++    // the middle of a run would read as a stall that is not there.
 +    sContentAlivePlayerId = mPlayerId;
-+    sContentAliveTicks = 0;
-+    ScheduleContentAliveTick();
-+    // Printed HERE, before either probe can report, so that silence
-+    // afterwards is unambiguous: this line present and no watchdog
-+    // output means the process stopped, not that the build lacked the
-+    // probe. Not knowing which cost a whole round.
 +    printf_stderr("avPlayer: content watchdog ARMED player=%llu\n",
 +                  (unsigned long long)mPlayerId);
-+    StartContentWatchdog();
++    ReynardStartContentWatchdog();
 +  } else {
 +    mPlayerId = [host createPlayerWithUrl:[NSString stringWithUTF8String:spec.get()]];
 +    if (!mPlayerId) {

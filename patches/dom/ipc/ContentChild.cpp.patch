@@ -2,7 +2,7 @@ diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
 index d77bf2ae523c..2d586d1c2f9c 100644
 --- a/dom/ipc/ContentChild.cpp
 +++ b/dom/ipc/ContentChild.cpp
-@@ -146,6 +146,30 @@
+@@ -146,6 +146,38 @@
  #include "nsRefreshDriver.h"
  #include "nsSandboxFlags.h"
  
@@ -28,20 +28,32 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId);
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyFrameSurface(
 +    uintptr_t aPlayerId, uint32_t aSurfaceId);
++
++// Also AVPlayerDecoder.mm, but C++ and in namespace mozilla: the probe
++// that reports whether THIS process's main thread is still running
++// events. Started here rather than from the media path so that a tab
++// with no video reports too.
++namespace mozilla {
++void ReynardStartContentWatchdog();
++}
 +#endif
 +
  #if defined(MOZ_SANDBOX)
  #  if defined(XP_WIN)
  #    include "mozilla/sandboxTarget.h"
-@@ -683,6 +707,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetXPCOMProcessAttributes(
+@@ -683,6 +715,11 @@ mozilla::ipc::IPCResult ContentChild::RecvSetXPCOMProcessAttributes(
    LookAndFeel::EnsureInit();
    InitSharedUASheets(std::move(aSharedUASheetHandle), aSharedUASheetAddress);
    InitXPCOM(aXPCOMInit, aInitialData, aIsReadyForBackgroundProcessing);
 +  CubebUtils::InitAudioIPCConnection();
++  // Early, and on the main thread: from here on, one line a second says
++  // whether this process's main thread is still running its event
++  // queue. See ReynardStartContentWatchdog.
++  ReynardStartContentWatchdog();
    InitGraphicsDeviceData(aXPCOMInit.contentDeviceData());
    RefPtr<net::ChildDNSService> dnsServiceChild =
        dont_AddRef(net::ChildDNSService::GetSingleton());
-@@ -1565,7 +1590,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+@@ -1565,7 +1602,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
      Endpoint<PImageBridgeChild>&& aImageBridge,
      Endpoint<PVRManagerChild>&& aVRBridge,
      Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -50,7 +62,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    MOZ_ASSERT(namespaces.Length() == 4);
    const uint32_t compositorManagerNamespace = namespaces[0];
    const uint32_t compositorBridgeNamespace = namespaces[1];
-@@ -1579,8 +1604,8 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+@@ -1579,8 +1616,8 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
    // should crash itself (because we are actually talking to the UI process). If
    // there are localized failures (e.g. failed to spawn a thread), then it
    // should MOZ_RELEASE_ASSERT or MOZ_CRASH as necessary instead.
@@ -61,7 +73,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1614,7 +1639,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+@@ -1614,7 +1651,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
      Endpoint<PImageBridgeChild>&& aImageBridge,
      Endpoint<PVRManagerChild>&& aVRBridge,
      Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -70,7 +82,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    MOZ_ASSERT(namespaces.Length() == 4);
    const uint32_t compositorManagerNamespace = namespaces[0];
    const uint32_t compositorBridgeNamespace = namespaces[1];
-@@ -1624,8 +1649,8 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+@@ -1624,8 +1661,8 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
    nsTArray<RefPtr<BrowserChild>> tabs = BrowserChild::GetAll();
  
    // Re-establish singleton bridges to the compositor.
@@ -81,7 +93,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1673,6 +1698,69 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
+@@ -1673,6 +1710,69 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
      }
    }
    return IPC_OK();
@@ -151,7 +163,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +#endif
 +
  #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
-@@ -1734,7 +1822,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
+@@ -1734,7 +1834,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
    sandboxEnabled = (GetEffectiveContentSandboxLevel() >= 1);
    DisconnectWindowServer(sandboxEnabled);
  #  elif defined(XP_IOS)
