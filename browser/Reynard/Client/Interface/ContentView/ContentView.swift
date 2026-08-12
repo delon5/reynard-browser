@@ -358,6 +358,28 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         syncContentBottomOffset()
     }
     
+    /// Both at once, then ONE sync.
+    ///
+    /// These two were set in separate calls, and syncContentBottomOffset
+    /// routes on isChromeCondensed - compositor margin when condensed,
+    /// dynamic-toolbar offset otherwise. Whichever went first therefore
+    /// sent with the other's stale value, and a device capture caught
+    /// the consequence: the pill's +60 was sent while the flag still
+    /// read false, took the TOOLBAR path, and arrived as
+    /// "nsPresContext RECEIVED offset=180 max=426" - the exact bug
+    /// SetFixedLayerMarginBottom was added to remove. Flipping the order
+    /// only moves the hazard to the other value, so set both, then sync
+    /// once.
+    func setCondensedChrome(condensed: Bool, pillMargin: CGFloat) {
+        guard condensed != isChromeCondensed
+                || pillMargin != floatingChromeInset else {
+            return
+        }
+        isChromeCondensed = condensed
+        floatingChromeInset = pillMargin
+        syncContentBottomOffset()
+    }
+    
     private func syncContentBottomOffset() {
         // REPLACES, not adds. While the pill is showing the toolbar is
         // not on screen, but ToolbarController goes on sliding it, so

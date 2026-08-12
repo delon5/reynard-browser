@@ -143,11 +143,11 @@ final class ToolbarController {
         let contentBottom = contentView.convert(contentView.bounds, to: rootView).maxY
         NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) margin=\(margin) pillTop=\(pillTop) contentBottom=\(contentBottom) viewH=\(rootView.bounds.height)")
 
-        // Inset BEFORE the condensed flag: setChromeCondensed re-syncs
-        // the margin, and it must not do that while still holding the
-        // previous inset.
-        contentView.setFloatingChromeInset(margin)
-        contentView.setChromeCondensed(condensed)
+        // Both together - see setCondensedChrome. Setting them in two
+        // calls meant whichever ran first sent with the other's stale
+        // value, which is how the pill's margin ended up on the
+        // dynamic-toolbar path as offset=180.
+        contentView.setCondensedChrome(condensed: condensed, pillMargin: margin)
         contentView.setSafeAreaInsetBottom(0)
         contentView.setToolbarLimits(
             maxHeight: maxHeight,
