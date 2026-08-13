@@ -1,9 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
-index 000000000000..661d75d2d5f1
+index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,2214 @@
+@@ -0,0 +1,2219 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -774,6 +774,8 @@ index 000000000000..661d75d2d5f1
 +      1000);
 +}
 +
++static void PushStoredAppCertificate(uint64_t aKey, NSUInteger aPlayerId);
++
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
@@ -805,6 +807,9 @@ index 000000000000..661d75d2d5f1
 +  // orders createPlayer against setServerCertificate: a second
 +  // protected element on a page that has already negotiated once
 +  // arrives in exactly this order.
++  //
++  // Forward-declared: the definition sits below with the rest of the
++  // certificate store, and this is the only call above it.
 +  PushStoredAppCertificate(aKey, playerId);
 +}
 +
