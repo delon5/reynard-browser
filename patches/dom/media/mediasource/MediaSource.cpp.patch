@@ -25,7 +25,7 @@ diff --git a/dom/media/mediasource/MediaSource.cpp b/dom/media/mediasource/Media
 
  struct JSContext;
  class JSObject;
-@@ -420,6 +423,36 @@
+@@ -420,6 +424,60 @@
    mDecoder->DecodeError(aError);
  }
 
@@ -54,9 +54,33 @@ diff --git a/dom/media/mediasource/MediaSource.cpp b/dom/media/mediasource/Media
 +  }
 +  nsString customUserAgent;
 +  docShell->GetBrowsingContext()->GetCustomUserAgent(customUserAgent);
-+  // Only the Safari-iOS spoof contains "iPhone"; the Android-Firefox
-+  // and Chrome spoofs do not, and an empty override is the native UA.
-+  return customUserAgent.Find(u"iPhone"_ns) == kNotFound;
++  // Every Safari shape, not just the iPhone one.
++  //
++  // The original test was `Find("iPhone")`, which was right when the
++  // only Safari spoof available contained it. iPadOS Safari sends a
++  // MACINTOSH user agent - that is what makes it desktop-class, and
++  // what gets it past a site's mobile-app gate - so it walked straight
++  // through, MSE stayed visible, and max.com's player chose
++  // MSE+FairPlay: a path that ends at FairPlayCDMProxy::Decrypt's
++  // MOZ_ASSERT_UNREACHABLE, because FairPlay never hands out a clear
++  // sample. "Couldn't Play Content" on a page that had otherwise
++  // authenticated, entitled and loaded.
++  //
++  // Chrome is excluded deliberately: its UA also carries "Macintosh"
++  // and "Safari", but a page given a Chrome UA expects Widevine, and
++  // taking MSE away from it breaks the ordinary non-DRM video that
++  // would otherwise work. Firefox desktop spoofs carry "Macintosh"
++  // without "Safari", so they are unaffected either way.
++  //
++  // An empty override is the native UA and is never hidden from - this
++  // only ever applies to a document that was given an override.
++  const bool isSafariSpoof =
++      customUserAgent.Find(u"iPhone"_ns) != kNotFound ||
++      customUserAgent.Find(u"iPad"_ns) != kNotFound ||
++      (customUserAgent.Find(u"Macintosh"_ns) != kNotFound &&
++       customUserAgent.Find(u"Safari"_ns) != kNotFound &&
++       customUserAgent.Find(u"Chrome"_ns) == kNotFound);
++  return !isSafariSpoof;
 +}
 +
  /* static */
