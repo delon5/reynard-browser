@@ -494,6 +494,176 @@ static void scheduleSelfDebuggedCheck(int attemptsRemaining) {
 // Helper extension, which is the debuggee - the main app is the
 // debugger and never carries CS_DEBUGGED, so checking there would
 // always and correctly read false.
+// ADDED - see fix_child_heartbeat_instrument.py's docstring.
+//
+// Two keys per process, ticked from two different queues, so a reader can
+// tell a STOPPED process (both stale) from one whose MAIN THREAD is
+// wedged (main stale, background fresh). A single heartbeat can express
+// neither distinction.
+//
+// The value is milliseconds on the CFAbsoluteTime reference, which both
+// sides share, so the reader subtracts without any clock agreement
+// beyond that. 0 means never ticked, and is reported as such rather than
+// as stale - see the docstring on why that distinction is load-bearing.
+static const uint64_t kHeartbeatIntervalMs = 250;
+static const double kHeartbeatStaleMs = 1500.0;
+
+static NSString *heartbeatName(int32_t pid, BOOL isMain) {
+    return [NSString stringWithFormat:@"com.minh-ton.Reynard.ChildHeartbeat.%@.%d",
+            isMain ? @"main" : @"bg", pid];
+}
+
+static void scheduleHeartbeatTick(int token, dispatch_queue_t queue) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(kHeartbeatIntervalMs * NSEC_PER_MSEC)),
+                   queue, ^{
+        notify_set_state(token, (uint64_t)(CFAbsoluteTimeGetCurrent() * 1000.0));
+        scheduleHeartbeatTick(token, queue);
+    });
+}
+
+void startChildHeartbeat(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        int32_t pid = (int32_t)getpid();
+
+        // Registered but NOT ticked here. The first tick has to come from
+        // the queue itself, or a main queue that never drains would look
+        // alive purely because registration ran on some other thread.
+        int mainToken = NOTIFY_TOKEN_INVALID;
+        if (notify_register_check(heartbeatName(pid, YES).UTF8String, &mainToken) == NOTIFY_STATUS_OK) {
+            notify_set_state(mainToken, 0);
+            scheduleHeartbeatTick(mainToken, dispatch_get_main_queue());
+        }
+
+        int bgToken = NOTIFY_TOKEN_INVALID;
+        if (notify_register_check(heartbeatName(pid, NO).UTF8String, &bgToken) == NOTIFY_STATUS_OK) {
+            notify_set_state(bgToken, 0);
+            scheduleHeartbeatTick(bgToken, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        }
+    });
+}
+
+// pid -> type, owned here rather than read back from AttachLedger. The
+// dump has to work while attachQueue is blocked, which is precisely when
+// it is worth having.
+static NSMutableDictionary<NSNumber *, NSString *> *heartbeatChildTypes(void) {
+    static NSMutableDictionary<NSNumber *, NSString *> *types;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        types = [NSMutableDictionary dictionary];
+    });
+    return types;
+}
+
+static NSLock *heartbeatChildLock(void) {
+    static NSLock *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lock = [[NSLock alloc] init];
+    });
+    return lock;
+}
+
+void recordChildForHeartbeat(int32_t pid, NSString *processType) {
+    if (pid <= 0) return;
+
+    NSLock *lock = heartbeatChildLock();
+    [lock lock];
+    heartbeatChildTypes()[@(pid)] = processType ?: @"?";
+    [lock unlock];
+}
+
+// -1 through ageMsOut means the key exists but has never been ticked.
+// NO means the key could not be read at all.
+static BOOL readHeartbeatAge(int32_t pid, BOOL isMain, double *ageMsOut) {
+    int token = NOTIFY_TOKEN_INVALID;
+    if (notify_register_check(heartbeatName(pid, isMain).UTF8String, &token) != NOTIFY_STATUS_OK) {
+        return NO;
+    }
+
+    uint64_t state = 0;
+    BOOL ok = notify_get_state(token, &state) == NOTIFY_STATUS_OK;
+    notify_cancel(token);
+    if (!ok) return NO;
+
+    if (state == 0) {
+        *ageMsOut = -1.0;
+        return YES;
+    }
+    *ageMsOut = (CFAbsoluteTimeGetCurrent() * 1000.0) - (double)state;
+    return YES;
+}
+
+static NSString *heartbeatDescription(int32_t pid) {
+    double mainAge = -1.0, bgAge = -1.0;
+    BOOL mainRead = readHeartbeatAge(pid, YES, &mainAge);
+    BOOL bgRead = readHeartbeatAge(pid, NO, &bgAge);
+
+    NSString *mainDesc = !mainRead ? @"main=?"
+        : (mainAge < 0 ? @"main=never" : [NSString stringWithFormat:@"main=%.0fms", mainAge]);
+    NSString *bgDesc = !bgRead ? @"bg=?"
+        : (bgAge < 0 ? @"bg=never" : [NSString stringWithFormat:@"bg=%.0fms", bgAge]);
+
+    // A verdict only where both sides actually ticked. "never" is an
+    // instrument problem, not a process problem, and must not be dressed
+    // up as one.
+    NSString *verdict = @"";
+    if (mainAge >= 0 && bgAge >= 0) {
+        BOOL mainStale = mainAge > kHeartbeatStaleMs;
+        BOOL bgStale = bgAge > kHeartbeatStaleMs;
+        if (mainStale && bgStale) {
+            verdict = @"  <<< STOPPED - cannot answer XPC";
+        } else if (mainStale) {
+            verdict = @"  <<< MAIN THREAD WEDGED";
+        }
+    }
+
+    return [NSString stringWithFormat:@"%@ %@%@", mainDesc, bgDesc, verdict];
+}
+
+void dumpChildHeartbeats(const char *label) {
+    NSString *tag = [NSString stringWithUTF8String:label ?: "heartbeat"];
+
+    NSLock *lock = heartbeatChildLock();
+    [lock lock];
+    NSDictionary<NSNumber *, NSString *> *snapshot = [heartbeatChildTypes() copy];
+    [lock unlock];
+
+    NSArray<NSNumber *> *pids = [snapshot.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray<NSNumber *> *dead = [NSMutableArray array];
+    NSUInteger live = 0;
+
+    for (NSNumber *key in pids) {
+        if (!pidIsAlive((pid_t)key.intValue)) {
+            [dead addObject:key];
+            continue;
+        }
+        live++;
+    }
+
+    logger([NSString stringWithFormat:@"%@: %lu live child(ren), interval %llums, stale over %.0fms",
+            tag, (unsigned long)live, (unsigned long long)kHeartbeatIntervalMs, kHeartbeatStaleMs]);
+
+    for (NSNumber *key in pids) {
+        if ([dead containsObject:key]) continue;
+        int32_t pid = key.intValue;
+        logger([NSString stringWithFormat:@"%@:   pid %d type=%@ %@",
+                tag, pid, snapshot[key], heartbeatDescription(pid)]);
+    }
+
+    if (dead.count > 0) {
+        [lock lock];
+        [heartbeatChildTypes() removeObjectsForKeys:dead];
+        [lock unlock];
+    }
+}
+
+__attribute__((constructor))
+static void ReynardStartChildHeartbeat(void) {
+    startChildHeartbeat();
+}
+
 __attribute__((constructor))
 static void ReynardStartSelfDebuggedReporting(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];

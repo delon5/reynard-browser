@@ -53,6 +53,21 @@ void dumpDebugLoopState(void);
 /// fix_dump_loops_at_background.py.
 void dumpDebugLoopStateLabelled(const char *label);
 
+/// Starts THIS process's own pair of heartbeat tickers - one on the main
+/// queue, one on a background queue. Idempotent; a constructor calls it,
+/// so both the app and every Helper get one. See
+/// fix_child_heartbeat_instrument.py.
+void startChildHeartbeat(void);
+
+/// Remembers a child so the hang-time dump can list it WITHOUT touching
+/// the Swift ledger or its attach queue - either may be blocked at
+/// exactly the moment the dump matters.
+void recordChildForHeartbeat(int32_t pid, NSString *processType);
+
+/// One line per live child: both heartbeat ages, and a verdict when they
+/// disagree. Safe from any thread - takes only its own lock.
+void dumpChildHeartbeats(const char *label);
+
 /// Records whether a loop is blocked in its continue - the state that
 /// tells a healthy loop from one whose target is stopped. See
 /// fix_track_loop_waiting_state.py.

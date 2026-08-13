@@ -339,6 +339,11 @@ final class JITController {
     /// three child types were invisible to every existing instrument, so
     /// this is the list to diff against a hang.
     func dumpChildCensus(labelled label: String) {
+        // Before the hop, deliberately - this half needs no queue, so it
+        // still prints if attachQueue is wedged. See
+        // fix_child_heartbeat_instrument.py.
+        JITEnabler.dumpChildHeartbeats(labelled: label)
+
         attachQueue.async {
             // Prune first: childTypes is purely diagnostic, the dump
             // below only ever showed live children anyway, and without
@@ -599,6 +604,12 @@ final class JITController {
         // attaching - socket/gpu/rdd are rejected below and would
         // otherwise never appear in any diagnostic.
         attachQueue.async { self.ledger.noteChild(pid, type: processType) }
+
+        // ADDED - see fix_child_heartbeat_instrument.py. Recorded
+        // synchronously and into the ObjC layer's own map, NOT the
+        // ledger: the hang-time dump has to work while attachQueue is
+        // blocked, which is exactly when it earns its keep.
+        JITEnabler.recordChildForHeartbeat(pid, type: processType)
 
         // Read here because applicationState is main-thread only, and the
         // decision below runs on the attach queue. See

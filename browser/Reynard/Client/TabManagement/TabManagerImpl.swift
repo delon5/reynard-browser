@@ -471,6 +471,16 @@ final class TabManagerImplementation: NSObject, TabManager {
         // likeliest reason. This says which one. See
         // fix_dump_loop_state_on_hang.py.
         JITEnabler.dumpDebugLoopState()
+
+        // ADDED - see fix_child_heartbeat_instrument.py's docstring.
+        //
+        // The loop dump above reports registered debug loops, and by hang
+        // time there are usually none - every capture so far ends
+        // "hangDump: 0 session(s) registered", which is accurate and
+        // names nobody. This is the moment that can actually identify the
+        // extension the main thread is blocked on, because it runs from
+        // this background queue while that thread is stuck.
+        JITEnabler.dumpChildHeartbeats(labelled: "hangHeartbeat")
         
         store.emergencyPersistTabs(
             regularTabs: snapshot.regularTabs,

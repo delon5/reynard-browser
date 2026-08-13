@@ -645,6 +645,14 @@ static void jitHangBacktraceHandler(int signalNumber) {
     dumpDebugLoopStateLabelled(label.UTF8String);
 }
 
++ (void)recordChildForHeartbeat:(int32_t)pid type:(NSString *)processType {
+    recordChildForHeartbeat(pid, processType);
+}
+
++ (void)dumpChildHeartbeatsLabelled:(NSString *)label {
+    dumpChildHeartbeats(label.UTF8String);
+}
+
 + (void)setDebuggerListening:(BOOL)listening {
     setDebuggerListeningState(listening ? 1 : 0);
 }

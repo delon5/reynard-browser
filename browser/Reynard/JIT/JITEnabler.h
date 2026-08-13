@@ -66,6 +66,15 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// for a hang-time one.
 + (void)dumpDebugLoopStateLabelled:(NSString *)label NS_SWIFT_NAME(dumpDebugLoopState(labelled:));
 
+/// Records a child for the heartbeat dump. See
+/// fix_child_heartbeat_instrument.py.
++ (void)recordChildForHeartbeat:(int32_t)pid type:(NSString *)processType NS_SWIFT_NAME(recordChildForHeartbeat(_:type:));
+
+/// Dumps every live child's two heartbeat ages. Safe from any thread, and
+/// deliberately independent of the attach queue - at hang time that queue
+/// may be the thing that is blocked.
++ (void)dumpChildHeartbeatsLabelled:(NSString *)label NS_SWIFT_NAME(dumpChildHeartbeats(labelled:));
+
 /// Tells content processes whether trapping into the debugger is safe.
 ///
 /// Cleared before a suspension rather than after one has gone wrong: a
