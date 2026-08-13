@@ -524,6 +524,48 @@ static void jitHangBacktraceHandler(int signalNumber) {
         
         logger([NSString stringWithFormat:@"Attach response for pid %d: %@ (call took %.0fms)", pid, attachResponse.length > 0 ? @"<stop packet>" : @"<no response>", (attachCallEnd - attachCallStart) * 1000.0]);
         
+        // ADDED - see fix_pass_fault_signals_through.py's docstring.
+        //
+        // Sent once, immediately after the attach, before any continue.
+        // 0x0a is SIGBUS and 0x0b is SIGSEGV - the two an EXC_BAD_ACCESS
+        // arrives as. It tells debugserver to deliver them to the child
+        // and keep it RUNNING instead of stopping it and waiting for us.
+        //
+        // Not a behaviour change in the normal case: the non-breakpoint
+        // branch already answers these with vCont;S<sig>, which is step
+        // DELIVERING that signal, so the child's own handler runs either
+        // way. What this removes is the stop, the round trip, and - the
+        // reason it is here - the dependency on this app being alive and
+        // connected at the instant the child faults.
+        //
+        // A child stopped by a fault while the app is suspended is
+        // stopped for good: the tunnel dies during the suspension
+        // (measured, 45s background, 5 sockets NotConnected), the detach
+        // never lands, and debugserver is torn down without lifting the
+        // stop. That child cannot answer the synchronous XPC on the next
+        // foreground, and the watchdog takes the app for it. 2026-08-14
+        // 07:02, pid 21688, frozen 230s with five healthy siblings and
+        // zero debug sessions registered.
+        //
+        // SIGTRAP is deliberately absent. That is brk #0xf00d, and the
+        // W^X mediation needs it to keep stopping the target.
+        //
+        // Unsupported is safe: debugserver answers an unknown Q packet
+        // with an empty response and nothing changes.
+        {
+            NSString *passSignalsResponse = nil;
+            NSError *passSignalsError = nil;
+            if (sendDebugCommand(session.debugProxy, @"QPassSignals:0a;0b;", &passSignalsResponse, &passSignalsError)) {
+                if ([passSignalsResponse isEqualToString:@"OK"]) {
+                    logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals accepted - SIGBUS/SIGSEGV will not stop this process", pid]);
+                } else {
+                    logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals NOT SUPPORTED (response %@) - faults will still stop this process", pid, passSignalsResponse.length > 0 ? passSignalsResponse : @"<empty>"]);
+                }
+            } else {
+                logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals send FAILED: %@", pid, passSignalsError.localizedDescription ?: @"(no error set)"]);
+            }
+        }
+        
         if (hasTXMSupport) {
             registerJITEndpointForPID(pid, @"10.7.0.1", 49152);
             

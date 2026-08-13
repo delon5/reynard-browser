@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1041 @@
+@@ -0,0 +1,1126 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -441,6 +441,32 @@ index 000000000000..c20df0f7f09f
 +      aPromiseId, "FairPlay requires iOS 11 or later"_ns);
 +}
 +
++// A content id that identifies nothing.
++//
++// The page derives its generateRequest identifier from the init data
++// the 'encrypted' event carried, and Gecko deliberately strips that
++// data when the media is cross-origin: HTMLMediaElement::
++// DispatchEncrypted checks IsCORSSameOrigin(), which asks
++// NodePrincipal()->Subsumes(the decoder's content principal). A
++// streaming service serves its HLS from a CDN origin while the
++// document does not, so the check fails and the event arrives empty.
++//
++// Prime Video then concatenates an empty content id perfectly
++// faithfully, and generateRequest comes through as the bare scheme:
++//
++//   avPlayer: FairPlay generateRequest key=... id=skd:// type=skd 6 bytes
++//
++// That is not an identifier, it is the absence of one. The app process
++// is the side that knows the real value, so this shape is what lets
++// the two halves be paired.
++//
++// Narrow on purpose. A well-formed content id still has to match
++// exactly; this never pairs two real ids with each other.
++static bool ReynardIsDegenerateFairPlayContentId(const nsACString& aId) {
++  return aId.IsEmpty() || aId.EqualsLiteral("skd:") ||
++         aId.EqualsLiteral("skd://");
++}
++
 +void FairPlayCDMProxy::CreateSession(uint32_t aCreateSessionToken,
 +                                     dom::MediaKeySessionType aSessionType,
 +                                     PromiseId aPromiseId,
@@ -518,6 +544,36 @@ index 000000000000..c20df0f7f09f
 +      OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
 +                       dom::MediaKeyMessageType::License_request, *pending);
 +      return;
++    }
++
++    // The same claim, for a session whose content id identifies
++    // nothing - see ReynardIsDegenerateFairPlayContentId. Only when
++    // there is exactly ONE parked SPC: with several in flight there is
++    // no honest way to say which this session meant, and picking one
++    // would answer the wrong key request silently.
++    if (ReynardIsDegenerateFairPlayContentId(contentId) &&
++        mRemotePendingSpc.Count() == 1) {
++      nsCString realId;
++      for (auto iter = mRemotePendingSpc.Iter(); !iter.Done(); iter.Next()) {
++        realId = iter.Key();
++        break;
++      }
++      if (Maybe<nsTArray<uint8_t>> adopted = mRemotePendingSpc.Extract(realId)) {
++        printf_stderr(
++            "avPlayer: FairPlay SPC parked under %s adopted by a session "
++            "with no content id (%zu bytes)\n",
++            realId.get(), (size_t)adopted->Length());
++        // ADOPT, do not alias. UpdateSession tags the CKC by looking
++        // the content id up from the session, so leaving the
++        // degenerate id in place would send the app process the same
++        // unmatchable "skd://" on the way back.
++        mRemoteSessionByContentId.Remove(contentId);
++        mRemoteSessionByContentId.InsertOrUpdate(realId, nsCString(sessionId));
++        mRemoteContentIdBySession.InsertOrUpdate(nsCString(sessionId), realId);
++        OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
++                         dom::MediaKeyMessageType::License_request, *adopted);
++        return;
++      }
 +    }
 +
 +    RemoteKeyRequest request;
@@ -1006,6 +1062,35 @@ index 000000000000..c20df0f7f09f
 +  nsCString contentId(aContentId);
 +  nsCString sessionId;
 +  if (!mRemoteSessionByContentId.Get(contentId, &sessionId)) {
++    // Before parking: a session may already be waiting under a content
++    // id that identifies nothing, because the page never received the
++    // init data to build one from. See
++    // ReynardIsDegenerateFairPlayContentId. This side holds the real
++    // identifier, so this is the moment the two halves can be joined.
++    nsCString degenerateId;
++    for (auto iter = mRemoteSessionByContentId.Iter(); !iter.Done();
++         iter.Next()) {
++      if (ReynardIsDegenerateFairPlayContentId(iter.Key())) {
++        degenerateId = iter.Key();
++        sessionId = iter.Data();
++        break;
++      }
++    }
++    if (!sessionId.IsEmpty()) {
++      printf_stderr(
++          "avPlayer: FairPlay SPC for %s adopted by session %s, which had "
++          "no content id (%zu bytes)\n",
++          contentId.get(), sessionId.get(), (size_t)aSpc.Length());
++      // ADOPT, do not alias - the CKC leg looks the content id up from
++      // the session and must find the real one.
++      mRemoteSessionByContentId.Remove(degenerateId);
++      mRemoteSessionByContentId.InsertOrUpdate(contentId, sessionId);
++      mRemoteContentIdBySession.InsertOrUpdate(sessionId, contentId);
++      OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
++                       dom::MediaKeyMessageType::License_request, aSpc);
++      return;
++    }
++
 +    // The page has not called generateRequest for this identifier yet
 +    // - it is still handling the 'encrypted' event the SAME key
 +    // request produced. Held until CreateSession claims it, which is
