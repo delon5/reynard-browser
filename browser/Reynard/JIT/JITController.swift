@@ -400,39 +400,30 @@ final class JITController {
     func performForegroundReattach(completion: @escaping () -> Void) {
         dumpChildCensus(labelled: "childCensus at foreground")
 
-        // MOVED - see
-        // fix_arm_trapping_only_with_a_live_session.py's docstring. The
-        // arm used to sit here, ahead of the re-attach pass, so trapping
-        // came back on before any of the sessions that make it safe
-        // existed. It now happens below, after the pass, and only if a
-        // session is genuinely live.
+        // Re-armed here, ahead of the re-attach pass, deliberately.
+        //
+        // This was briefly gated on a live session existing
+        // (fix_arm_trapping_only_with_a_live_session.py), because the
+        // process-wide key alone could not tell a child with a loop from
+        // one without, and a surviving CS_DEBUGGED child could trap into
+        // nothing. fix_per_pid_debugger_listening.py closed that at the
+        // only place that can actually know: a child now also needs
+        // com.minh-ton.Reynard.JITDebuggerListening.<its own pid>, which
+        // its own runDebugService arms when the loop starts and clears
+        // first thing in the teardown.
+        //
+        // With that gate in place this key is a master switch again, and
+        // holding it off until some other pid answers only costs
+        // interpreted JavaScript at the moment JIT is most wanted - a
+        // foreground, a PiP restore, a CarPlay resume. See
+        // revert_arm_trapping_only_with_a_live_session.py.
+        attachQueue.async {
+            JITEnabler.setDebuggerListening(true)
+        }
 
         reattachOrphanedProcesses()
 
         attachQueue.async {
-            dispatchPrecondition(condition: .onQueue(self.attachQueue))
-            // Ordered behind reattachOrphanedProcesses, which hops to
-            // this same serial queue - so by here the pass has decided
-            // what it is re-attaching.
-            //
-            // Live session present: the tunnel survived and children are
-            // still being serviced, so trapping is restored exactly as
-            // it was before.
-            //
-            // None live: everything is mid-re-attach, and runDebugService
-            // arms the flag itself when a loop actually starts. Leaving
-            // it off until then costs interpreted JavaScript for a
-            // second or two and removes the window in which a surviving,
-            // still-CS_DEBUGGED child can trap into a debugger that is
-            // not there.
-            let hasLiveSession = self.ledger.attachedSnapshot().contains {
-                JITEnabler.hasActiveDebugSession(forPID: $0)
-            }
-            if hasLiveSession {
-                JITEnabler.setDebuggerListening(true)
-            } else {
-                logger("jitListening: not re-arming at foreground - no live debug session yet, runDebugService arms it when a loop starts")
-            }
             DispatchQueue.main.async(execute: completion)
         }
     }
