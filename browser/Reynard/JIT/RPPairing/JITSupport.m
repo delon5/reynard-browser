@@ -1577,6 +1577,37 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
 // suspension rather than only reacting to a failure. See
 // fix_stop_trapping_on_background.py.
 
+// ADDED - see fix_resume_before_detach.py's docstring.
+//
+// Clears a stop that our own 0x03 interrupt put the target into, so the
+// detach that follows leaves it RUNNING.
+//
+// Raw and unwaited-for, exactly like the interrupt byte in
+// interruptLiveDebugSessions: vCont;C resumes, and waiting for the stop
+// packet it eventually produces would re-block the loop a microsecond
+// before it detaches - the opposite of the point. 0x13 is 19, SIGCONT,
+// the signal that clears a BSD process stop.
+//
+// The heartbeat instrument is what showed this was needed: on
+// 2026-08-13 all seven sessions logged "Detach response OK" and four of
+// them were still stopped 39 seconds later.
+static void resumeInterruptStoppedTarget(DebugProxyHandle *debugProxy,
+                                         NSString *threadID, int32_t pid) {
+    if (!debugProxy || threadID.length == 0) return;
+
+    NSString *packet = gdbFramedPacket([NSString stringWithFormat:@"vCont;C13:%@", threadID]);
+    const char *bytes = packet.UTF8String;
+    if (!bytes) return;
+
+    IdeviceFfiError *sendError = debug_proxy_send_raw(debugProxy, (const uint8_t *)bytes, strlen(bytes));
+    if (sendError) {
+        idevice_error_free(sendError);
+        logger([NSString stringWithFormat:@"resumeBeforeDetach: (pid %d) SIGCONT send FAILED - it may stay stopped", pid]);
+        return;
+    }
+    logger([NSString stringWithFormat:@"resumeBeforeDetach: (pid %d) sent SIGCONT to thread %@ before detaching", pid, threadID]);
+}
+
 BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     NSString *detachResponse = nil;
     NSError *detachError = nil;
@@ -1791,6 +1822,12 @@ void runDebugService(int32_t pid, DebugSession *session) {
     uint64_t stoppedAtUnservicedBrkPC = 0;
     NSString *stoppedAtUnservicedBrkThreadID = nil;
 
+    // ADDED - fix_resume_before_detach.py. Non-nil while this target is
+    // stopped by a soft signal we declined to forward - i.e. by our own
+    // 0x03 interrupt. The detach path clears the stop before sending D,
+    // because D on its own demonstrably does not.
+    NSString *stoppedBySoftSignalThreadID = nil;
+
     // ADDED - non-breakpoint stops (real faults in the target) were
     // continued in complete silence past iteration 3. Capture 16: a
     // content process sat in a 100Hz EXC_BAD_ACCESS loop for 2295
@@ -1814,6 +1851,18 @@ void runDebugService(int32_t pid, DebugSession *session) {
             commandError = nil;
             
             if (shouldDetachDebugSessionPID(pid)) {
+                // ADDED - fix_resume_before_detach.py.
+                //
+                // If our own interrupt is what stopped this target, clear
+                // that before detaching. Seven sessions detached cleanly
+                // on 2026-08-13 and four were still stopped 39 seconds
+                // later, unable to answer the synchronous XPC on the next
+                // foreground - which is the 0x8BADF00D.
+                if (stoppedBySoftSignalThreadID) {
+                    resumeInterruptStoppedTarget(session->debugProxy,
+                                                 stoppedBySoftSignalThreadID, pid);
+                    stoppedBySoftSignalThreadID = nil;
+                }
                 detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
                 if (detachedByCommand) {
                     logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach requested and completed at iteration %ld", pid, (long)debugServiceIteration]);
@@ -2017,16 +2066,36 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // the detach runs and RESUMES the target, which is what
                 // the interrupt existed to enable. With no detach pending
                 // it sends a plain continue instead. Both are right.
+                // CORRECTED - the signal numbers here were wrong in four
+                // of five places. See fix_resume_before_detach.py. On
+                // Darwin 0x13 is SIGCONT, which is the signal that
+                // UN-stops a process - skipping it was backwards.
+                // Inert in practice (only 0x11 and 0x09 have ever
+                // appeared) but a list whose job is "never let this stop
+                // the target" must not contain the one that starts it.
                 NSString *stopMedata = packetField(stopResponse, @"medata");
                 BOOL isSoftSignal = [stopMedata isEqualToString:@"10003"];
                 BOOL isStopOrKillSignal =
                     [signal isEqualToString:@"11"] ||   // SIGSTOP
-                    [signal isEqualToString:@"13"] ||   // SIGTSTP
-                    [signal isEqualToString:@"14"] ||   // SIGTTIN
-                    [signal isEqualToString:@"15"] ||   // SIGTTOU
+                    [signal isEqualToString:@"12"] ||   // SIGTSTP
+                    [signal isEqualToString:@"15"] ||   // SIGTTIN
+                    [signal isEqualToString:@"16"] ||   // SIGTTOU
                     [signal isEqualToString:@"09"];     // SIGKILL
 
                 if (signal && isSoftSignal && isStopOrKillSignal) {
+                    // Remembered, not acted on here. The target is
+                    // stopped from this moment, and the ONLY safe place
+                    // to clear that is immediately before the detach -
+                    // resuming now would just re-block this loop in a
+                    // continue and it would never reach the detach flag
+                    // it was interrupted to see.
+                    //
+                    // SIGKILL is excluded: the process is already going,
+                    // and the kernel enforces it regardless (confirmed -
+                    // an X09 exit packet arrives ~3ms later).
+                    if (![signal isEqualToString:@"09"]) {
+                        stoppedBySoftSignalThreadID = threadID;
+                    }
                     logger([NSString stringWithFormat:@"stopSignalSkip: (pid %d) soft signal 0x%@ would stop the target - NOT forwarding, letting the loop detach or continue instead (iteration %ld)", pid, signal, (long)debugServiceIteration]);
                     continue;
                 }
