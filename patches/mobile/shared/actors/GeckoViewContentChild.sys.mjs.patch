@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,651 @@
+@@ -17,6 +17,741 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -177,22 +177,57 @@ index 9ca6e15..799455c 100644
 +    return bytes.byteLength > 4 && bytes[0] === 0x30 && bytes[1] === 0x82;
 +  }
 +
++  function hexOf(bytes, from, count) {
++    var out = "";
++    for (var i = from; i < from + count && i < bytes.byteLength; i++) {
++      var h = bytes[i].toString(16);
++      out += (h.length < 2 ? "0" + h : h) + " ";
++    }
++    return out.replace(/ $/, "");
++  }
++
 +  // Recover the three fields by ARITHMETIC, not by scanning.
 +  //
-+  // A printable-run scan cannot work here and it is worth being
-+  // explicit about why: a 36-character content id has byteLength 72,
-+  // so the length field following the URI starts 0x48 0x00, and
-+  // 0x0048 is the perfectly printable UTF-16 unit 'H'. A scan would
-+  // swallow it and split one unit late. Instead try every possible
-+  // split and accept only the one where the two declared lengths land
-+  // exactly on the end of the buffer - at most one can.
++  // Two things rule scanning out. A 36-character content id has
++  // byteLength 72, so the length field after the prefix begins
++  // 0x48 0x00 - and 0x0048 is the perfectly printable UTF-16 unit
++  // 'H', which a printable-run scan would swallow. And the prefix may
++  // be EMPTY, which is the case that actually matters.
++  //
++  // Why empty. Gecko strips the init data from a cross-origin
++  // 'encrypted' event: HTMLMediaElement::DispatchEncrypted checks
++  // IsCORSSameOrigin() - NodePrincipal()->Subsumes(the decoder's
++  // content principal) - and, failing it, constructs the event with
++  // no data at all. Prime Video's HLS is served from a CDN origin
++  // while the document is www.primevideo.com, so it fails, and the
++  // capture reads
++  //
++  //   avPlayer:  dispatching 'encrypted' (skd, 42 bytes)
++  //   webkitEME: encrypted -> webkitneedkey, 0 bytes
++  //
++  // That is the normal case, not a fault: every streaming service
++  // serves media from a separate origin. The page does not need us to
++  // tell it the key URI - it wrote the playlist URL - so it carries
++  // on and concatenates Apple's structure with an empty prefix:
++  //
++  //   0 + 4 + 72 + 4 + 1169 = 1249 bytes, which is what was measured.
++  //
++  // Requiring the prefix to start "skd:" therefore threw away the one
++  // buffer carrying the certificate.
++  //
++  // Still no guessing: a split is accepted only when both declared
++  // lengths land exactly on the end of the buffer, and the id length
++  // is even because the id is UTF-16. Where more than one balances,
++  // the DER-looking certificate wins and the ambiguity is printed.
 +  function parseAppleConcat(bytes) {
 +    var total = bytes.byteLength;
-+    // "skd://" is 6 units, and the trailer is at least 8 bytes.
-+    for (var units = 6; units * 2 + 8 <= total; units++) {
-+      var initLen = units * 2;
-+      var idLen = readU32LE(bytes, initLen);
-+      var certOff = initLen + 4 + idLen;
++    var found = [];
++    for (var prefixLen = 0; prefixLen + 8 <= total; prefixLen += 2) {
++      var idLen = readU32LE(bytes, prefixLen);
++      if (idLen % 2 !== 0) {
++        continue;  // the content id is UTF-16, so its byte length is even
++      }
++      var certOff = prefixLen + 4 + idLen;
 +      if (certOff + 4 > total) {
 +        continue;
 +      }
@@ -200,17 +235,25 @@ index 9ca6e15..799455c 100644
 +      if (certLen === 0 || certOff + 4 + certLen !== total) {
 +        continue;
 +      }
-+      var uri = stringFromUtf16(bytes.subarray(0, initLen));
-+      if (uri.indexOf("skd:") !== 0) {
-+        continue;
-+      }
-+      return {
-+        uri: uri,
-+        id: stringFromUtf16(bytes.subarray(initLen + 4, certOff)),
++      found.push({
++        prefix: stringFromUtf16(bytes.subarray(0, prefixLen)),
++        id: stringFromUtf16(bytes.subarray(prefixLen + 4, certOff)),
 +        certificate: bytes.slice(certOff + 4),
-+      };
++      });
 +    }
-+    return null;
++    if (!found.length) {
++      return null;
++    }
++    for (var i = 0; i < found.length; i++) {
++      if (looksLikeDER(found[i].certificate)) {
++        if (found.length > 1) {
++          debug("note:", found.length, "layouts balanced; took the DER one");
++        }
++        return found[i];
++      }
++    }
++    debug("note:", found.length, "layouts balanced, none DER; took the first");
++    return found[0];
 +  }
 +
 +  // What the page hands createSession() may be Apple's concatenation,
@@ -225,18 +268,34 @@ index 9ca6e15..799455c 100644
 +
 +    var concat = parseAppleConcat(bytes);
 +    if (concat) {
++      // Apple's sample puts the key URI in the prefix. The prefix is
++      // empty whenever Gecko stripped the init data from a
++      // cross-origin 'encrypted' event, so rebuild it from the
++      // content id - which is exactly the string extractContentId()
++      // took the id out of in the first place.
++      //
++      // This URI has to match the one the app process parked, or
++      // FairPlayCDMProxy will not pair the request with it. Both are
++      // on stdout now, so a mismatch is one line to spot.
++      var uri = concat.prefix;
++      var rebuilt = false;
++      if (uri.indexOf("skd:") !== 0) {
++        uri = "skd://" + concat.id;
++        rebuilt = true;
++      }
 +      debug(
-+        "createSession initData is Apple's concatenation:",
-+        concat.uri,
-+        "id",
-+        concat.id,
-+        "cert",
++        "createSession initData is Apple's concatenation;",
++        rebuilt ? "uri REBUILT from id:" : "uri from prefix:",
++        uri,
++        "| prefix",
++        concat.prefix.length,
++        "chars | cert",
 +        concat.certificate.byteLength,
 +        looksLikeDER(concat.certificate) ? "bytes (DER)" : "bytes (NOT DER)"
 +      );
 +      return {
 +        type: "skd",
-+        data: utf8FromString(concat.uri),
++        data: utf8FromString(uri),
 +        certificate: concat.certificate,
 +      };
 +    }
@@ -251,8 +310,23 @@ index 9ca6e15..799455c 100644
 +      debug("createSession initData looked UTF-8 skd:", asUtf8);
 +      return { type: "skd", data: bytes, certificate: null };
 +    }
-+    // Not an skd URI: fMP4 key id / sinf box. Passed through untouched.
-+    debug("createSession initData is binary,", bytes.byteLength, "bytes");
++    // Not an skd URI and not Apple's concatenation: fMP4 key id /
++    // sinf box. Passed through untouched.
++    //
++    // The hex is here because reaching this branch means every
++    // reading above was wrong, and a capture that shows only a byte
++    // count leaves the next round guessing at the layout again. Head
++    // and tail are enough to decode Apple's structure by hand: the
++    // trailer is the last four bytes' little-endian length plus its
++    // certificate.
++    debug(
++      "createSession initData is binary,",
++      bytes.byteLength,
++      "bytes | head",
++      hexOf(bytes, 0, 24),
++      "| tail",
++      hexOf(bytes, Math.max(0, bytes.byteLength - 8), 8)
++    );
 +    return { type: "sinf", data: bytes, certificate: null };
 +  }
 +
@@ -612,12 +686,28 @@ index 9ca6e15..799455c 100644
 +      if (!(target instanceof HTMLMediaElement)) {
 +        return;
 +      }
-+      var initData = e.initData ? new Uint8Array(e.initData) : new Uint8Array(0);
++      var raw = null;
++      try {
++        raw = e.initData;
++      } catch (err) {
++        debug("encrypted: reading initData threw:", err);
++      }
++      var initData = raw ? new Uint8Array(raw) : new Uint8Array(0);
 +      var text = bytesToUtf8(initData);
 +      var out = initData;
 +      if (text.indexOf("skd:") === 0 || text.indexOf("skd://") >= 0) {
 +        out = utf16FromString(text);
 +        debug("encrypted -> webkitneedkey, skd re-encoded UTF-16:", text);
++      } else if (!initData.byteLength) {
++        // Expected, not a fault. Gecko constructs MediaEncryptedEvent
++        // with no data when IsCORSSameOrigin() fails, and a streaming
++        // service always serves its media from a separate CDN origin.
++        // The page knows its own key URI regardless, and the
++        // certificate reaches us through createSession instead.
++        debug(
++          "encrypted -> webkitneedkey, no init data",
++          raw ? "(empty buffer)" : "(absent - cross-origin media, expected)"
++        );
 +      } else {
 +        debug("encrypted -> webkitneedkey,", initData.byteLength, "bytes");
 +      }
@@ -654,7 +744,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +712,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +802,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -991,7 +1081,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1159,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1249,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1010,7 +1100,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1186,77 @@
+@@ -199,14 +1276,77 @@
      return false;
    }
 +
