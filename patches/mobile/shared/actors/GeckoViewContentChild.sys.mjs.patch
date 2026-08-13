@@ -2,7 +2,505 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -67,6 +67,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -17,6 +17,497 @@
+ 
+ const SCREEN_ORIENTATION_PORTRAIT = 0;
+ const SCREEN_ORIENTATION_LANDSCAPE = 1;
++
++// Reynard: Apple's legacy prefixed EME (WebKitMediaKeys), implemented
++// over standard EME, for the Safari-targeted players that use it.
++//
++// Prime Video's HLS path calls video.webkitSetMediaKeys() and threw
++// "not a function" four times in one device capture. Everything under
++// it already works - the same log shows the AVPlayer pipeline taking a
++// native HLS stream, painting 1280x720 frames, raising the key request
++// and relaying it to the content process - so this one missing API is
++// what stops the licence exchange.
++//
++// Embedded rather than shipped as a resource:// file on purpose: no
++// jar.mn entry, no packaging step, nothing to get out of sync with the
++// actor that uses it.
++const WEBKIT_MEDIA_KEYS_SHIM = `
++/*
++ * webkitmediakeys-shim.js - Apple's legacy prefixed EME, implemented on
++ * top of standard EME.
++ *
++ * WHY
++ *   Safari-targeted FairPlay pages - Apple's own FPS sample among them -
++ *   do not use standard EME. They use the prefixed API:
++ *
++ *     video.addEventListener('webkitneedkey', e => {
++ *       if (!video.webkitKeys)
++ *         video.webkitSetMediaKeys(new WebKitMediaKeys('com.apple.fps.1_0'));
++ *       const session = video.webkitKeys.createSession('video/mp4', e.initData);
++ *       session.addEventListener('webkitkeymessage', …);  // SPC
++ *       session.update(ckc);
++ *     });
++ *
++ *   Gecko implements none of it, so those pages fail at feature
++ *   detection - before any of this browser's FairPlay work runs. The
++ *   prefixed API is a thin syntactic layer over standard EME, and the
++ *   standard path is proven working on device (access -> createMediaKeys
++ *   -> setServerCertificate -> generateRequest('skd') -> SPC -> CKC ->
++ *   key status usable), so this bridges the two.
++ *
++ * SCOPE
++ *   This changes WHICH PAGES can reach the pipeline. It does not change
++ *   what the pipeline can decrypt: native-HLS FairPlay works, MSE+
++ *   FairPlay (Netflix's shape) still cannot, because per-sample
++ *   decryption needs AVSampleBufferAttachContentKey, which Apple
++ *   authorizes only for WebKit.
++ *
++ * THE TRANSCODE THAT MATTERS
++ *   Safari's webkitneedkey initData is the skd:// URI in UTF-16 - Apple's
++ *   sample reads it back with 'new Uint16Array(initData.buffer)'. Standard
++ *   EME's 'encrypted' event here carries UTF-8, which is also what
++ *   generateRequest('skd') expects. So this shim transcodes UTF-8 -> UTF-16
++ *   when synthesising webkitneedkey, and UTF-16 -> UTF-8 when createSession
++ *   hands the data back. Get it wrong and the content id is mangled and the
++ *   key server rejects the SPC.
++ *
++ * USAGE
++ *   Load before page scripts (document-start). Idempotent and inert on a
++ *   browser that already has the real thing.
++ */
++(function () {
++  "use strict";
++
++  if (typeof window === "undefined" || window.WebKitMediaKeys) {
++    return;  // real Safari, or already installed
++  }
++  if (!window.MediaKeys || !navigator.requestMediaKeySystemAccess) {
++    return;  // no standard EME to build on
++  }
++
++  var LOG = "webkitEME:";
++  function debug() {
++    try {
++      console.debug.apply(console, [LOG].concat([].slice.call(arguments)));
++    } catch (e) {}
++  }
++
++  // ---- init-data encoding helpers ---------------------------------------
++
++  function bytesToUtf8(buf) {
++    var view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
++    try {
++      return new TextDecoder("utf-8").decode(view);
++    } catch (e) {
++      return "";
++    }
++  }
++
++  // Safari hands the URI back as UTF-16 code units; Apple's sample does
++  // String.fromCharCode.apply(null, new Uint16Array(initData.buffer)).
++  function utf16FromString(str) {
++    var units = new Uint16Array(str.length);
++    for (var i = 0; i < str.length; i++) {
++      units[i] = str.charCodeAt(i);
++    }
++    return new Uint8Array(units.buffer);
++  }
++
++  function stringFromUtf16(buf) {
++    var view = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
++    if (view.byteLength % 2 !== 0) {
++      return "";
++    }
++    // The byteOffset may be non-zero, and Uint16Array demands alignment.
++    var copy = new Uint8Array(view);
++    var units = new Uint16Array(copy.buffer);
++    var out = "";
++    for (var i = 0; i < units.length; i++) {
++      out += String.fromCharCode(units[i]);
++    }
++    return out;
++  }
++
++  function utf8FromString(str) {
++    try {
++      return new TextEncoder().encode(str);
++    } catch (e) {
++      var out = new Uint8Array(str.length);
++      for (var i = 0; i < str.length; i++) {
++        out[i] = str.charCodeAt(i) & 0xff;
++      }
++      return out;
++    }
++  }
++
++  // What the page hands createSession() may be UTF-16 (a Safari-shaped
++  // page echoing our webkitneedkey) or UTF-8 (a page that built it
++  // itself). Detect an skd:// URI either way and normalise to what
++  // generateRequest wants.
++  function normaliseInitData(initData) {
++    var bytes =
++      initData instanceof Uint8Array
++        ? initData
++        : new Uint8Array(initData.buffer || initData);
++
++    var asUtf16 = stringFromUtf16(bytes);
++    if (asUtf16.indexOf("skd:") === 0 || asUtf16.indexOf("skd://") >= 0) {
++      debug("createSession initData looked UTF-16 skd:", asUtf16);
++      return { type: "skd", data: utf8FromString(asUtf16) };
++    }
++    var asUtf8 = bytesToUtf8(bytes);
++    if (asUtf8.indexOf("skd:") === 0 || asUtf8.indexOf("skd://") >= 0) {
++      debug("createSession initData looked UTF-8 skd:", asUtf8);
++      return { type: "skd", data: bytes };
++    }
++    // Not an skd URI: fMP4 key id / sinf box. Passed through untouched.
++    debug("createSession initData is binary,", bytes.byteLength, "bytes");
++    return { type: "sinf", data: bytes };
++  }
++
++  // ---- isTypeSupported ---------------------------------------------------
++  //
++  // Prefixed isTypeSupported is SYNCHRONOUS; requestMediaKeySystemAccess is
++  // not. Answer optimistically for FairPlay key systems (this build
++  // supports com.apple.fps and its versioned aliases) and warm a cache in
++  // the background so later calls are truthful.
++
++  var supportCache = Object.create(null);
++
++  function warmSupport(keySystem, contentType) {
++    var key = keySystem + "|" + (contentType || "");
++    if (key in supportCache) {
++      return;
++    }
++    supportCache[key] = true;
++    var config = [
++      {
++        initDataTypes: ["skd", "sinf", "cenc"],
++        videoCapabilities: [
++          { contentType: contentType || 'video/mp4; codecs="avc1.4d401e"' },
++        ],
++      },
++    ];
++    navigator.requestMediaKeySystemAccess(keySystem, config).then(
++      function () {
++        supportCache[key] = true;
++      },
++      function (err) {
++        debug("isTypeSupported cache:", keySystem, "unsupported:", err && err.name);
++        supportCache[key] = false;
++      }
++    );
++  }
++
++  // ---- WebKitMediaKeySession --------------------------------------------
++
++  function WebKitMediaKeySession(mediaKeys, mimeType, initData) {
++    var self = this;
++    this._listeners = Object.create(null);
++    this.sessionId = "";
++    this.error = null;
++    this.keySystem = mediaKeys.keySystem;
++    this._session = null;
++
++    var normalised = normaliseInitData(initData);
++
++    mediaKeys._whenReady(function (keys, failure) {
++      if (!keys) {
++        self._fail(failure);
++        return;
++      }
++      var session;
++      try {
++        session = keys.createSession("temporary");
++      } catch (e) {
++        self._fail(e);
++        return;
++      }
++      self._session = session;
++
++      session.addEventListener("message", function (e) {
++        self.sessionId = session.sessionId || "";
++        debug("message ->  webkitkeymessage,", e.message.byteLength, "bytes");
++        var evt = new Event("webkitkeymessage");
++        evt.message = new Uint8Array(e.message);
++        // Safari also exposes these on the event.
++        evt.sessionId = self.sessionId;
++        evt.destinationURL = null;
++        self._dispatch(evt);
++      });
++
++      session.addEventListener("keystatuseschange", function () {
++        var usable = false;
++        try {
++          session.keyStatuses.forEach(function (status) {
++            if (status === "usable") usable = true;
++          });
++        } catch (e) {}
++        if (usable) {
++          debug("key usable -> webkitkeyadded");
++          self._dispatch(new Event("webkitkeyadded"));
++        }
++      });
++
++      session
++        .generateRequest(normalised.type, normalised.data)
++        .then(
++          function () {
++            self.sessionId = session.sessionId || "";
++            debug("generateRequest OK, type", normalised.type);
++          },
++          function (err) {
++            self._fail(err);
++          }
++        );
++    });
++  }
++
++  WebKitMediaKeySession.prototype._dispatch = function (evt) {
++    var list = this._listeners[evt.type];
++    if (list) {
++      for (var i = 0; i < list.length; i++) {
++        try {
++          list[i].call(this, evt);
++        } catch (e) {
++          debug("listener threw:", e);
++        }
++      }
++    }
++    var inline = this["on" + evt.type];
++    if (typeof inline === "function") {
++      try {
++        inline.call(this, evt);
++      } catch (e) {}
++    }
++  };
++
++  WebKitMediaKeySession.prototype._fail = function (err) {
++    debug("session error:", err);
++    this.error = { code: 1, systemCode: 0, message: String(err && (err.message || err)) };
++    var evt = new Event("webkitkeyerror");
++    evt.error = this.error;
++    this._dispatch(evt);
++  };
++
++  WebKitMediaKeySession.prototype.addEventListener = function (type, fn) {
++    (this._listeners[type] || (this._listeners[type] = [])).push(fn);
++  };
++
++  WebKitMediaKeySession.prototype.removeEventListener = function (type, fn) {
++    var list = this._listeners[type];
++    if (!list) return;
++    var i = list.indexOf(fn);
++    if (i >= 0) list.splice(i, 1);
++  };
++
++  WebKitMediaKeySession.prototype.update = function (response) {
++    var self = this;
++    var bytes =
++      response instanceof Uint8Array
++        ? response
++        : new Uint8Array(response.buffer || response);
++    debug("update() with", bytes.byteLength, "bytes");
++    if (!this._session) {
++      this._fail(new Error("update() before the session was ready"));
++      return;
++    }
++    this._session.update(bytes).then(
++      function () {
++        debug("update resolved");
++        // keystatuseschange usually fires and raises webkitkeyadded; this
++        // is the belt-and-braces path for CDMs that do not report statuses.
++        var hasStatuses = false;
++        try {
++          self._session.keyStatuses.forEach(function () {
++            hasStatuses = true;
++          });
++        } catch (e) {}
++        if (!hasStatuses) {
++          self._dispatch(new Event("webkitkeyadded"));
++        }
++      },
++      function (err) {
++        self._fail(err);
++      }
++    );
++  };
++
++  WebKitMediaKeySession.prototype.close = function () {
++    if (this._session) {
++      try {
++        this._session.close();
++      } catch (e) {}
++    }
++  };
++
++  // ---- WebKitMediaKeys ---------------------------------------------------
++
++  function WebKitMediaKeys(keySystem) {
++    if (!(this instanceof WebKitMediaKeys)) {
++      throw new TypeError("WebKitMediaKeys requires 'new'");
++    }
++    debug("new WebKitMediaKeys(" + keySystem + ")");
++    this.keySystem = keySystem;
++    this._keys = null;
++    this._failure = null;
++    this._waiters = [];
++
++    var self = this;
++    var config = [
++      {
++        initDataTypes: ["skd", "sinf", "cenc"],
++        videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.4d401e"' }],
++        audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
++      },
++    ];
++    navigator
++      .requestMediaKeySystemAccess(keySystem, config)
++      .then(function (access) {
++        return access.createMediaKeys();
++      })
++      .then(
++        function (keys) {
++          debug("createMediaKeys OK");
++          self._keys = keys;
++          self._drain();
++        },
++        function (err) {
++          debug("createMediaKeys FAILED:", err);
++          self._failure = err;
++          self._drain();
++        }
++      );
++  }
++
++  // The prefixed API is synchronous; the standard one is not. Anything
++  // that needs the MediaKeys object queues here until it exists.
++  WebKitMediaKeys.prototype._whenReady = function (fn) {
++    if (this._keys || this._failure) {
++      fn(this._keys, this._failure);
++      return;
++    }
++    this._waiters.push(fn);
++  };
++
++  WebKitMediaKeys.prototype._drain = function () {
++    var waiters = this._waiters;
++    this._waiters = [];
++    for (var i = 0; i < waiters.length; i++) {
++      waiters[i](this._keys, this._failure);
++    }
++  };
++
++  WebKitMediaKeys.prototype.createSession = function (mimeType, initData) {
++    debug("createSession(" + mimeType + ")");
++    return new WebKitMediaKeySession(this, mimeType, initData);
++  };
++
++  WebKitMediaKeys.prototype.setServerCertificate = function (cert) {
++    var self = this;
++    return new Promise(function (resolve, reject) {
++      self._whenReady(function (keys, failure) {
++        if (!keys) {
++          reject(failure);
++          return;
++        }
++        keys.setServerCertificate(cert).then(resolve, reject);
++      });
++    });
++  };
++
++  WebKitMediaKeys.isTypeSupported = function (keySystem, contentType) {
++    warmSupport(keySystem, contentType);
++    var key = keySystem + "|" + (contentType || "");
++    var answer = supportCache[key];
++    debug("isTypeSupported(" + keySystem + ", " + contentType + ") ->", answer);
++    return answer !== false;
++  };
++
++  // ---- HTMLMediaElement surface -----------------------------------------
++
++  var pendingKeys = new WeakMap();
++
++  Object.defineProperty(HTMLMediaElement.prototype, "webkitKeys", {
++    configurable: true,
++    enumerable: false,
++    get: function () {
++      return pendingKeys.get(this) || null;
++    },
++  });
++
++  HTMLMediaElement.prototype.webkitSetMediaKeys = function (mediaKeys) {
++    var el = this;
++    debug("webkitSetMediaKeys()");
++    pendingKeys.set(this, mediaKeys);
++    if (!mediaKeys) {
++      if (el.setMediaKeys) el.setMediaKeys(null);
++      return;
++    }
++    mediaKeys._whenReady(function (keys, failure) {
++      if (!keys) {
++        debug("webkitSetMediaKeys: no MediaKeys:", failure);
++        return;
++      }
++      el.setMediaKeys(keys).then(
++        function () {
++          debug("setMediaKeys OK");
++        },
++        function (err) {
++          debug("setMediaKeys FAILED:", err);
++        }
++      );
++    });
++  };
++
++  // Standard 'encrypted' -> prefixed 'webkitneedkey', with the init data
++  // re-encoded to the UTF-16 shape Safari pages expect.
++  document.addEventListener(
++    "encrypted",
++    function (e) {
++      var target = e.target;
++      if (!(target instanceof HTMLMediaElement)) {
++        return;
++      }
++      var initData = e.initData ? new Uint8Array(e.initData) : new Uint8Array(0);
++      var text = bytesToUtf8(initData);
++      var out = initData;
++      if (text.indexOf("skd:") === 0 || text.indexOf("skd://") >= 0) {
++        out = utf16FromString(text);
++        debug("encrypted -> webkitneedkey, skd re-encoded UTF-16:", text);
++      } else {
++        debug("encrypted -> webkitneedkey,", initData.byteLength, "bytes");
++      }
++      var evt = new Event("webkitneedkey");
++      evt.initData = out;
++      target.dispatchEvent(evt);
++      if (typeof target.onwebkitneedkey === "function") {
++        try {
++          target.onwebkitneedkey(evt);
++        } catch (err) {}
++      }
++    },
++    true  // capture: reach the element before page listeners on the target
++  );
++
++  window.WebKitMediaKeys = WebKitMediaKeys;
++  window.WebKitMediaKeySession = WebKitMediaKeySession;
++  debug("installed over standard EME");
++})();
++
++`;
++
++// Only these hosts. The shim no-ops on a page that never touches
++// prefixed EME, but DOMWindowCreated fires for EVERY window - the
++// actor is registered allFrames - and a sandbox eval per subframe
++// across the whole web is not a cost worth paying for a handful of
++// sites. Matched on exact host or any subdomain.
++const WEBKIT_MEDIA_KEYS_SHIM_HOSTS = [
++  "primevideo.com",
++  "max.com",
++  "hbomax.com",
++  "disneyplus.com",
++];
+ 
+ const lazy = {};
+ 
+@@ -67,6 +558,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -339,7 +837,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +514,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1005,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -358,3 +856,67 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
+@@ -199,14 +1032,63 @@
+     return false;
+   }
++
++  // Reynard: install Apple's legacy prefixed EME before page script.
++  //
++  // DOMWindowCreated, not pageshow or DOMContentLoaded: a player
++  // feature-detects its EME during boot, so a shim that lands after
++  // load has already missed. runUserScript cannot serve here either -
++  // both its callers fire at onPageStop.
++  //
++  // Same sandbox shape as runUserScript below: the content window as
++  // principal and prototype, Xrays off, so the shim sees and modifies
++  // the page's own globals rather than Gecko's privileged view.
++  maybeInstallWebKitMediaKeysShim() {
++    const { contentWindow } = this;
++    if (!contentWindow) {
++      return;
++    }
++    try {
++      if (
++        !Services.prefs.getBoolPref(
++          "media.reynard.eme.webkitmediakeys-shim.enabled",
++          true
++        )
++      ) {
++        return;
++      }
++      const host = contentWindow.location?.hostname ?? "";
++      const wanted = WEBKIT_MEDIA_KEYS_SHIM_HOSTS.some(
++        domain => host === domain || host.endsWith("." + domain)
++      );
++      if (!wanted) {
++        return;
++      }
++      const sandbox = Cu.Sandbox(contentWindow, {
++        sandboxPrototype: contentWindow,
++        wantXrays: false,
++      });
++      Cu.evalInSandbox(WEBKIT_MEDIA_KEYS_SHIM, sandbox);
++      debug`webkitmediakeys shim installed for ${host}`;
++    } catch (e) {
++      // Never let this break a page load. A site that does not need
++      // the shim must not notice it failed to install.
++      warn`webkitmediakeys shim failed: ${e}`;
++    }
++  }
+ 
+   // eslint-disable-next-line complexity
+   handleEvent(aEvent) {
+     debug`handleEvent: ${aEvent.type}`;
+ 
+     switch (aEvent.type) {
++      case "DOMWindowCreated": {
++        this.maybeInstallWebKitMediaKeysShim();
++        break;
++      }
++
+       case "pageshow": {
+         this.receivedPageShow();
+         break;
+       }
+ 
+       case "mozcaretstatechanged":

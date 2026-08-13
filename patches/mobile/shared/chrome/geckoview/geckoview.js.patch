@@ -1,0 +1,17 @@
+diff --git a/mobile/shared/chrome/geckoview/geckoview.js b/mobile/shared/chrome/geckoview/geckoview.js
+--- a/mobile/shared/chrome/geckoview/geckoview.js
++++ b/mobile/shared/chrome/geckoview/geckoview.js
+@@ -472,8 +472,13 @@
+             },
+             child: {
+               esModuleURI: "resource:///actors/GeckoViewContentChild.sys.mjs",
+               events: {
+                 mozcaretstatechanged: { capture: true, mozSystemGroup: true },
+                 pageshow: { mozSystemGroup: true },
++                // Reynard: document-start, for the WebKitMediaKeys shim.
++                // A player feature-detects during boot, so pageshow and
++                // DOMContentLoaded are both too late - see
++                // GeckoViewContentChild.maybeInstallWebKitMediaKeysShim.
++                DOMWindowCreated: {},
+               },
+             },
