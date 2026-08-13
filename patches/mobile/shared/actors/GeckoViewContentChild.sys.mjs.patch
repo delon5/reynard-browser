@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,497 @@
+@@ -17,6 +17,651 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -76,8 +76,19 @@ index 9ca6e15..799455c 100644
 +
 +  var LOG = "webkitEME:";
 +  function debug() {
++    var args = [].slice.call(arguments);
 +    try {
-+      console.debug.apply(console, [LOG].concat([].slice.call(arguments)));
++      console.debug.apply(console, [LOG].concat(args));
++    } catch (e) {}
++    // console.debug does not reach a device capture, and being blind
++    // here is what made the certificate bug expensive to find: the
++    // log showed the pipeline stalling with no trace of what this
++    // shim had decided. __reynardEmeLog is exported into the sandbox
++    // by the actor and writes to stdout, beside the avPlayer: lines.
++    try {
++      if (typeof __reynardEmeLog === "function") {
++        __reynardEmeLog(args.join(" "));
++      }
 +    } catch (e) {}
 +  }
 +
@@ -129,29 +140,120 @@ index 9ca6e15..799455c 100644
 +    }
 +  }
 +
-+  // What the page hands createSession() may be UTF-16 (a Safari-shaped
-+  // page echoing our webkitneedkey) or UTF-8 (a page that built it
-+  // itself). Detect an skd:// URI either way and normalise to what
-+  // generateRequest wants.
++  // ---- Apple's concatenated init data -----------------------------------
++  //
++  // The prefixed API has NO setServerCertificate - the method does not
++  // exist in it. A Safari-targeted page has exactly one channel for
++  // the FPS application certificate: it concatenates it INTO the init
++  // data handed to createSession.
++  //
++  //   [initData][u32le idLength][id][u32le certLength][cert]
++  //
++  // initData is the skd:// URI as UTF-16 code units, id is the content
++  // id as UTF-16, both lengths little-endian. That is Apple's
++  // concatInitDataIdAndCertificate() from the prefixed FPS sample.
++  //
++  // Reading it back matters twice over. The certificate is what
++  // FairPlayCDMProxy is waiting for - without it every key request
++  // parks at "no app certificate yet", no message is ever produced,
++  // the session never gets a sessionId, and the page's own timeout
++  // closes it. And the URI has to be separated out regardless,
++  // because generateRequest("skd") wants the bare URI, not the blob.
++
++  function readU32LE(bytes, offset) {
++    return (
++      (bytes[offset] |
++        (bytes[offset + 1] << 8) |
++        (bytes[offset + 2] << 16) |
++        (bytes[offset + 3] << 24)) >>>
++      0
++    );
++  }
++
++  function looksLikeDER(bytes) {
++    // An FPS application certificate is DER: SEQUENCE, long-form
++    // length. Not load-bearing - it only decides what gets logged -
++    // but it turns "we found something" into "we found a certificate".
++    return bytes.byteLength > 4 && bytes[0] === 0x30 && bytes[1] === 0x82;
++  }
++
++  // Recover the three fields by ARITHMETIC, not by scanning.
++  //
++  // A printable-run scan cannot work here and it is worth being
++  // explicit about why: a 36-character content id has byteLength 72,
++  // so the length field following the URI starts 0x48 0x00, and
++  // 0x0048 is the perfectly printable UTF-16 unit 'H'. A scan would
++  // swallow it and split one unit late. Instead try every possible
++  // split and accept only the one where the two declared lengths land
++  // exactly on the end of the buffer - at most one can.
++  function parseAppleConcat(bytes) {
++    var total = bytes.byteLength;
++    // "skd://" is 6 units, and the trailer is at least 8 bytes.
++    for (var units = 6; units * 2 + 8 <= total; units++) {
++      var initLen = units * 2;
++      var idLen = readU32LE(bytes, initLen);
++      var certOff = initLen + 4 + idLen;
++      if (certOff + 4 > total) {
++        continue;
++      }
++      var certLen = readU32LE(bytes, certOff);
++      if (certLen === 0 || certOff + 4 + certLen !== total) {
++        continue;
++      }
++      var uri = stringFromUtf16(bytes.subarray(0, initLen));
++      if (uri.indexOf("skd:") !== 0) {
++        continue;
++      }
++      return {
++        uri: uri,
++        id: stringFromUtf16(bytes.subarray(initLen + 4, certOff)),
++        certificate: bytes.slice(certOff + 4),
++      };
++    }
++    return null;
++  }
++
++  // What the page hands createSession() may be Apple's concatenation,
++  // or UTF-16 (a Safari-shaped page echoing our webkitneedkey), or
++  // UTF-8 (a page that built it itself). Normalise to what
++  // generateRequest wants, and surface any certificate found.
 +  function normaliseInitData(initData) {
 +    var bytes =
 +      initData instanceof Uint8Array
 +        ? initData
 +        : new Uint8Array(initData.buffer || initData);
 +
++    var concat = parseAppleConcat(bytes);
++    if (concat) {
++      debug(
++        "createSession initData is Apple's concatenation:",
++        concat.uri,
++        "id",
++        concat.id,
++        "cert",
++        concat.certificate.byteLength,
++        looksLikeDER(concat.certificate) ? "bytes (DER)" : "bytes (NOT DER)"
++      );
++      return {
++        type: "skd",
++        data: utf8FromString(concat.uri),
++        certificate: concat.certificate,
++      };
++    }
++
 +    var asUtf16 = stringFromUtf16(bytes);
 +    if (asUtf16.indexOf("skd:") === 0 || asUtf16.indexOf("skd://") >= 0) {
 +      debug("createSession initData looked UTF-16 skd:", asUtf16);
-+      return { type: "skd", data: utf8FromString(asUtf16) };
++      return { type: "skd", data: utf8FromString(asUtf16), certificate: null };
 +    }
 +    var asUtf8 = bytesToUtf8(bytes);
 +    if (asUtf8.indexOf("skd:") === 0 || asUtf8.indexOf("skd://") >= 0) {
 +      debug("createSession initData looked UTF-8 skd:", asUtf8);
-+      return { type: "skd", data: bytes };
++      return { type: "skd", data: bytes, certificate: null };
 +    }
 +    // Not an skd URI: fMP4 key id / sinf box. Passed through untouched.
 +    debug("createSession initData is binary,", bytes.byteLength, "bytes");
-+    return { type: "sinf", data: bytes };
++    return { type: "sinf", data: bytes, certificate: null };
 +  }
 +
 +  // ---- isTypeSupported ---------------------------------------------------
@@ -205,42 +307,81 @@ index 9ca6e15..799455c 100644
 +        self._fail(failure);
 +        return;
 +      }
-+      var session;
-+      try {
-+        session = keys.createSession("temporary");
-+      } catch (e) {
-+        self._fail(e);
-+        return;
++
++      // The certificate has to be in place BEFORE generateRequest.
++      // This is not stylistic: FairPlayCDMProxy refuses the request
++      // outright without one -
++      //
++      //   "setServerCertificate must be called before generateRequest"
++      //
++      // - and that refusal is invisible from here. No message, so no
++      // sessionId, so the page's own timeout closes a session that
++      // never started, which shows up as
++      //
++      //   InvalidStateError: MediaKeySession.Close() called before
++      //   sessionId set by CDM
++      //
++      // while AVFoundation gives up separately with CoreMediaError
++      // -19152 and the item sits at itemStatus=0 forever.
++      var ready;
++      if (normalised.certificate) {
++        ready = keys.setServerCertificate(normalised.certificate).then(
++          function () {
++            debug(
++              "setServerCertificate OK,",
++              normalised.certificate.byteLength,
++              "bytes"
++            );
++          },
++          function (err) {
++            // Not fatal. A CDM may refuse a certificate it already
++            // holds, and generateRequest is still worth trying.
++            debug("setServerCertificate FAILED:", err);
++          }
++        );
++      } else {
++        debug(
++          "no certificate in createSession initData - the key request",
++          "will park unless one arrived another way"
++        );
++        ready = Promise.resolve();
 +      }
-+      self._session = session;
 +
-+      session.addEventListener("message", function (e) {
-+        self.sessionId = session.sessionId || "";
-+        debug("message ->  webkitkeymessage,", e.message.byteLength, "bytes");
-+        var evt = new Event("webkitkeymessage");
-+        evt.message = new Uint8Array(e.message);
-+        // Safari also exposes these on the event.
-+        evt.sessionId = self.sessionId;
-+        evt.destinationURL = null;
-+        self._dispatch(evt);
-+      });
-+
-+      session.addEventListener("keystatuseschange", function () {
-+        var usable = false;
++      ready.then(function () {
++        var session;
 +        try {
-+          session.keyStatuses.forEach(function (status) {
-+            if (status === "usable") usable = true;
-+          });
-+        } catch (e) {}
-+        if (usable) {
-+          debug("key usable -> webkitkeyadded");
-+          self._dispatch(new Event("webkitkeyadded"));
++          session = keys.createSession("temporary");
++        } catch (e) {
++          self._fail(e);
++          return;
 +        }
-+      });
++        self._session = session;
 +
-+      session
-+        .generateRequest(normalised.type, normalised.data)
-+        .then(
++        session.addEventListener("message", function (e) {
++          self.sessionId = session.sessionId || "";
++          debug("message ->  webkitkeymessage,", e.message.byteLength, "bytes");
++          var evt = new Event("webkitkeymessage");
++          evt.message = new Uint8Array(e.message);
++          // Safari also exposes these on the event.
++          evt.sessionId = self.sessionId;
++          evt.destinationURL = null;
++          self._dispatch(evt);
++        });
++
++        session.addEventListener("keystatuseschange", function () {
++          var usable = false;
++          try {
++            session.keyStatuses.forEach(function (status) {
++              if (status === "usable") usable = true;
++            });
++          } catch (e) {}
++          if (usable) {
++            debug("key usable -> webkitkeyadded");
++            self._dispatch(new Event("webkitkeyadded"));
++          }
++        });
++
++        session.generateRequest(normalised.type, normalised.data).then(
 +          function () {
 +            self.sessionId = session.sessionId || "";
 +            debug("generateRequest OK, type", normalised.type);
@@ -249,6 +390,7 @@ index 9ca6e15..799455c 100644
 +            self._fail(err);
 +          }
 +        );
++      });
 +    });
 +  }
 +
@@ -325,7 +467,19 @@ index 9ca6e15..799455c 100644
 +  WebKitMediaKeySession.prototype.close = function () {
 +    if (this._session) {
 +      try {
-+        this._session.close();
++        // close() returns a PROMISE. The try/catch below only ever
++        // caught a synchronous throw, so a rejection went unhandled
++        // and surfaced in the device log as
++        //
++        //   InvalidStateError: MediaKeySession.Close() called before
++        //   sessionId set by CDM
++        //
++        // which is a symptom of the licence exchange never starting,
++        // not a fault of its own - but one worth not printing.
++        var closing = this._session.close();
++        if (closing && typeof closing.catch === "function") {
++          closing.catch(function () {});
++        }
 +      } catch (e) {}
 +    }
 +  };
@@ -500,7 +654,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +558,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +712,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -837,7 +991,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1005,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1159,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -856,7 +1010,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1032,63 @@
+@@ -199,14 +1186,77 @@
      return false;
    }
 +
@@ -895,6 +1049,20 @@ index 9ca6e15..799455c 100644
 +        sandboxPrototype: contentWindow,
 +        wantXrays: false,
 +      });
++      // The shim's console.debug does not reach a device capture, and
++      // that blindness is what made the certificate bug expensive:
++      // the log showed the pipeline stalling with no trace of what
++      // the shim had decided, and its involvement had to be inferred
++      // from a capability-string fingerprint. dump() from chrome goes
++      // straight to stdout, beside the avPlayer: lines.
++      //
++      // Defined on the SANDBOX, not the window: page script cannot
++      // see it, while the shim's closures can.
++      Cu.exportFunction(
++        message => dump("webkitEME: " + message + "\n"),
++        sandbox,
++        { defineAs: "__reynardEmeLog" }
++      );
 +      Cu.evalInSandbox(WEBKIT_MEDIA_KEYS_SHIM, sandbox);
 +      debug`webkitmediakeys shim installed for ${host}`;
 +    } catch (e) {
