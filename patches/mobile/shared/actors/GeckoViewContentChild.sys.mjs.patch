@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,741 @@
+@@ -17,6 +17,792 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -469,9 +469,59 @@ index 9ca6e15..799455c 100644
 +  }
 +
 +  WebKitMediaKeySession.prototype._dispatch = function (evt) {
++    // These events never pass through an EventTarget - _dispatch calls
++    // listeners directly - so target and srcElement would be null, and
++    // that is where Apple's prefixed sample gets the session from:
++    //
++    //   function licenseRequestReady(event) {
++    //       let session = event.target;
++    //       ...
++    //       session.update(new Uint8Array(request.response));
++    //   }
++    //
++    // A device capture caught the page asking for the other spelling
++    // by name - "can't access property srcElement" - and, once the SPC
++    // was arriving, throwing its own error object the moment the
++    // webkitkeymessage landed, never calling update(), and timing out
++    // twenty seconds later with the content state still "Waiting".
++    //
++    // defineProperty, not assignment: target is a read-only accessor
++    // on Event.prototype, and this shim runs under "use strict" where
++    // assigning to one throws. An own property shadows it cleanly.
++    try {
++      Object.defineProperty(evt, "target", { value: this, configurable: true });
++      Object.defineProperty(evt, "srcElement", {
++        value: this,
++        configurable: true,
++      });
++      Object.defineProperty(evt, "currentTarget", {
++        value: this,
++        configurable: true,
++      });
++    } catch (e) {
++      debug("could not set event target:", e);
++    }
++    if (evt.keySystem === undefined) {
++      evt.keySystem = this.keySystem;
++    }
++
 +    var list = this._listeners[evt.type];
++    var count = list ? list.length : 0;
++    var inline = this["on" + evt.type];
++    var hasInline = typeof inline === "function";
++    // Worth a line: from outside, "the page ignored our event" and
++    // "the page never subscribed" look identical, and they need
++    // opposite fixes.
++    debug(
++      "dispatch",
++      evt.type,
++      "->",
++      count,
++      "listener(s)",
++      hasInline ? "+ inline handler" : "no inline handler"
++    );
 +    if (list) {
-+      for (var i = 0; i < list.length; i++) {
++      for (var i = 0; i < count; i++) {
 +        try {
 +          list[i].call(this, evt);
 +        } catch (e) {
@@ -479,11 +529,12 @@ index 9ca6e15..799455c 100644
 +        }
 +      }
 +    }
-+    var inline = this["on" + evt.type];
-+    if (typeof inline === "function") {
++    if (hasInline) {
 +      try {
 +        inline.call(this, evt);
-+      } catch (e) {}
++      } catch (e) {
++        debug("inline handler threw:", e);
++      }
 +    }
 +  };
 +
@@ -744,7 +795,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +802,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +853,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -1081,7 +1132,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1249,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1300,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1100,7 +1151,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1276,77 @@
+@@ -199,14 +1327,77 @@
      return false;
    }
 +

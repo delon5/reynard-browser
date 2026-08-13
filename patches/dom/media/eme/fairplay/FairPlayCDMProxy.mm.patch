@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1126 @@
+@@ -0,0 +1,1133 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -563,12 +563,9 @@ index 000000000000..c20df0f7f09f
 +            "avPlayer: FairPlay SPC parked under %s adopted by a session "
 +            "with no content id (%zu bytes)\n",
 +            realId.get(), (size_t)adopted->Length());
-+        // ADOPT, do not alias. UpdateSession tags the CKC by looking
-+        // the content id up from the session, so leaving the
-+        // degenerate id in place would send the app process the same
-+        // unmatchable "skd://" on the way back.
-+        mRemoteSessionByContentId.Remove(contentId);
-+        mRemoteSessionByContentId.InsertOrUpdate(realId, nsCString(sessionId));
++        // Reverse mapping only - see DeliverRemoteKeyMessage for why
++        // re-filing under the real id strands every later session.
++        // UpdateSession reads this direction to tag the CKC.
 +        mRemoteContentIdBySession.InsertOrUpdate(nsCString(sessionId), realId);
 +        OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
 +                         dom::MediaKeyMessageType::License_request, *adopted);
@@ -1081,10 +1078,20 @@ index 000000000000..c20df0f7f09f
 +          "avPlayer: FairPlay SPC for %s adopted by session %s, which had "
 +          "no content id (%zu bytes)\n",
 +          contentId.get(), sessionId.get(), (size_t)aSpc.Length());
-+      // ADOPT, do not alias - the CKC leg looks the content id up from
-+      // the session and must find the real one.
-+      mRemoteSessionByContentId.Remove(degenerateId);
-+      mRemoteSessionByContentId.InsertOrUpdate(contentId, sessionId);
++      // Record the REVERSE mapping only, and leave the degenerate
++      // entry alone.
++      //
++      // Re-filing under the real id was the obvious move and it was
++      // wrong: it pinned this session there for the life of the
++      // proxy, so a retry - which builds a new session, again with no
++      // content id - lost every later SPC to the first one. A capture
++      // showed all three attempts delivered to the same session while
++      // two newer ones waited.
++      //
++      // Left where it is, the degenerate entry is overwritten by each
++      // new CreateSession, so the NEWEST session always receives. The
++      // session -> id direction is the half UpdateSession needs, to
++      // tag the CKC with something the app process can match.
 +      mRemoteContentIdBySession.InsertOrUpdate(sessionId, contentId);
 +      OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
 +                       dom::MediaKeyMessageType::License_request, aSpc);
