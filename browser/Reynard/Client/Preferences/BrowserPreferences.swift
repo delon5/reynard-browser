@@ -86,6 +86,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
             key("CompatibilitySettings", "useAndroidUserAgent"): true,
             key("CompatibilitySettings", "hideMediaSourceForSafariUA"): true,
+            key("CompatibilitySettings", "useSafariUserAgentForStreaming"): true,
             
             // Browsing
             key("BrowsingSettings", "requestDesktopWebsite"): UIDevice.current.userInterfaceIdiom == .pad,
@@ -891,6 +892,18 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "CompatibilitySettings", key: "hideMediaSourceForSafariUA")
+            }
+        }
+
+        /// Whether known streaming services get a Safari-on-iPhone user
+        /// agent automatically. Without one they are offered Widevine,
+        /// which has no iOS build - see UserAgentPolicy.
+        static var useSafariUserAgentForStreaming: Bool {
+            get {
+                prefs.bool(forSetting: "CompatibilitySettings", key: "useSafariUserAgentForStreaming")
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings", key: "useSafariUserAgentForStreaming")
             }
         }
         

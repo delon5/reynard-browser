@@ -1116,6 +1116,20 @@ void cancelAllDebugSessionCalls(void) {
 // Called from applicationDidBecomeActive, so attaches made from here on
 // are wanted again. Without it the first background would disable
 // trapping for the rest of the launch.
+// ADDED - see fix_no_jit_promise_during_teardown.py's docstring.
+//
+// dispatch_sync rather than async: the caller needs the answer, and this
+// touches nothing but a BOOL on the state queue. Every other reader of
+// that queue does the same (shouldDetachDebugSessionPID,
+// hasActiveDebugSessionForPID).
+BOOL debuggerTeardownRequested(void) {
+    __block BOOL requested = NO;
+    dispatch_sync(debugSessionStateQueue(), ^{
+        requested = sDebuggerTeardownRequested;
+    });
+    return requested;
+}
+
 void clearDebuggerTeardownRequest(void) {
     dispatch_async(debugSessionStateQueue(), ^{
         if (!sDebuggerTeardownRequested) {

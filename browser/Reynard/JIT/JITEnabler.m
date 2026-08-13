@@ -629,6 +629,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     clearDebuggerTeardownRequest();
 }
 
++ (BOOL)isDebuggerTeardownRequested {
+    return debuggerTeardownRequested();
+}
+
 + (void)cancelAllDebugSessionCalls {
     cancelAllDebugSessionCalls();
 }

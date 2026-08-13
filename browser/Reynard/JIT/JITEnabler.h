@@ -48,6 +48,11 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// cannot see directly.
 + (void)clearDebuggerTeardownRequest NS_SWIFT_NAME(clearDebuggerTeardownRequest());
 
+/// Whether a background teardown is standing, so the attach paths can
+/// avoid promising JIT they are about to withdraw. See
+/// fix_no_jit_promise_during_teardown.py.
++ (BOOL)isDebuggerTeardownRequested NS_SWIFT_NAME(isDebuggerTeardownRequested());
+
 /// Cancels in-flight debug proxy calls without tearing sessions down.
 /// Wraps the C function in JITSupport.h, which Swift cannot see
 /// directly - that header is not in the bridging header.

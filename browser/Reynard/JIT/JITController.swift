@@ -934,6 +934,25 @@ final class JITController {
         }
         
         if success {
+            // ADDED - see fix_no_jit_promise_during_teardown.py's
+            // docstring.
+            //
+            // The attach succeeded, but if a background teardown is
+            // standing then runDebugService is about to find it, join it
+            // and detach without ever arming this pid - the
+            // "attach landed after teardown" path. Telling the child YES
+            // here leaves it with the JIT backend enabled and no debugger
+            // to mediate its W^X writes, and it then faults on every one
+            // until the SIGBUS cap kills it at 4096. Three content
+            // processes died that way on 2026-08-13.
+            //
+            // FALSE drops it to the interpreter instead - slow, alive,
+            // and the fallback this codebase already uses everywhere.
+            if JITEnabler.isDebuggerTeardownRequested() {
+                logger(String(format: "attachToProcess: pid %d attach succeeded but a teardown is standing - reporting FALSE so it does not enable JIT it cannot use", pid))
+                ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
+                return
+            }
             logger(String(format: "attachToProcess: pid %d reporting TRUE (native path)", pid))
             ReportJITStatusForChild(pid, true, newJITRuntimeInfo())
         } else {
@@ -1684,8 +1703,27 @@ extension JITController {
     // blocking its main thread for the full timeout.
     fileprivate func attachToHelperProcess(pid: Int32) -> (Bool, String?) {
         let (success, error) = boundedEnableJIT(forPID: pid)
-        logger(String(format: "attachToHelperProcess: reporting JIT status to child pid %d (success=%@)", pid, success ? "YES" : "NO"))
-        ReportJITStatusForChild(pid, success, newJITRuntimeInfo())
+
+        // Same guard as attachToProcess - see
+        // fix_no_jit_promise_during_teardown.py. This path reports for
+        // the Helper-claimed pids, and the 2026-08-13 capture has it
+        // making the same doomed promise:
+        //
+        //   19:43:20.458  attachToHelperProcess: reporting JIT status to
+        //                 child pid 16731 (success=YES)
+        //   19:43:20.458  runDebugService: (pid 16731) attach landed after
+        //                 teardown - joining it instead of re-arming
+        //   19:43:20.470  detach requested and completed at iteration 1
+        //
+        // The Helper's own result file still reports the attach's real
+        // outcome; only what the CHILD is told about JIT changes, which
+        // is the thing that decides whether it enables the backend.
+        let reportable = success && !JITEnabler.isDebuggerTeardownRequested()
+        if success && !reportable {
+            logger(String(format: "attachToHelperProcess: pid %d attach succeeded but a teardown is standing - reporting FALSE so it does not enable JIT it cannot use", pid))
+        }
+        logger(String(format: "attachToHelperProcess: reporting JIT status to child pid %d (success=%@)", pid, reportable ? "YES" : "NO"))
+        ReportJITStatusForChild(pid, reportable, newJITRuntimeInfo())
         return (success, error?.localizedDescription)
     }
 }

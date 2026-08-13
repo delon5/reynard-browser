@@ -16,6 +16,49 @@ struct UserAgentConfiguration {
 }
 
 struct UserAgentPolicy {
+    // MARK: - FairPlay Streaming
+
+    /// Safari on iPhone, tracking the device's real OS version so the
+    /// string does not go stale. Same construction FaviconStore uses
+    /// for its metadata fetches.
+    ///
+    /// The iPhone form even on iPad, deliberately. It is what makes
+    /// MediaSource::VisibleForCurrentGlobal hide window.MediaSource for
+    /// these documents - that check tests the override for "iPhone" -
+    /// and hiding MSE is the point: a player that finds MSE picks
+    /// MSE+FairPlay, which this engine cannot serve. An iPad UA would
+    /// leave MSE visible and walk the player into the path that does
+    /// not work.
+    static let safariMobileUserAgent: String = {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let osVersion = "\(version.majorVersion)_\(version.minorVersion)"
+        let safariVersion = "\(version.majorVersion).\(version.minorVersion)"
+        return "Mozilla/5.0 (iPhone; CPU iPhone OS \(osVersion) like Mac OS X) "
+            + "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            + "Version/\(safariVersion) Mobile/15E148 Safari/604.1"
+    }()
+
+    /// Services that hand FairPlay over native HLS to Safari on iOS,
+    /// and Widevine to anything that looks like Firefox.
+    ///
+    /// netflix.com is deliberately absent: its player is MSE+EME only
+    /// and never offers an HLS URL to a browser, so a Safari user agent
+    /// changes nothing there. bitmovin.com is absent too - its DRM demo
+    /// works today under the default user agent, and this list should
+    /// not perturb the one known-good test.
+    ///
+    /// Matched by DomainMatcher, so subdomains are covered.
+    static let fairPlayStreamingDomains = [
+        "primevideo.com",
+        "max.com",
+        "hbomax.com",
+        "disneyplus.com",
+        "hulu.com",
+        "peacocktv.com",
+        "paramountplus.com",
+        "tv.apple.com",
+    ]
+
     // MARK: - Policy Resolution
 
     func configuration(for url: String, prefersDesktopMode: Bool) -> UserAgentConfiguration {
@@ -68,6 +111,30 @@ struct UserAgentPolicy {
             if !trimmedCustomUserAgent.isEmpty {
                 return UserAgentConfiguration(override: trimmedCustomUserAgent, forcesMobileMode: false)
             }
+        }
+
+        // A streaming service will only offer FairPlay to something
+        // that looks like Safari on iPhone. Given a Firefox user agent
+        // it offers Widevine instead - which has no iOS build and never
+        // will - so the request is made, refused, and the site reports
+        // the browser as unsupported without either side ever
+        // mentioning FairPlay. The AVPlayer pipeline is never reached.
+        //
+        // Placed BELOW the per-site override and the global custom user
+        // agent on purpose: a string entered by hand is more specific
+        // than this list and should win. Placed ABOVE the Google and
+        // Android heuristics for the same reason in reverse - the
+        // compatibility user agent is the general case, and would
+        // otherwise stomp the one setting these sites actually need.
+        if Prefs.CompatibilitySettings.useSafariUserAgentForStreaming,
+           let host,
+           Self.fairPlayStreamingDomains.contains(where: {
+               DomainMatcher.matches(host: host, domain: $0)
+           }) {
+            return UserAgentConfiguration(
+                override: Self.safariMobileUserAgent,
+                forcesMobileMode: false
+            )
         }
 
         // I have so many people reporting broken UI issues, login

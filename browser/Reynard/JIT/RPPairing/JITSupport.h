@@ -38,6 +38,14 @@ void requestDetachForAllDebugSessions(void);
 /// for the rest of the launch.
 void clearDebuggerTeardownRequest(void);
 
+/// Whether a background teardown is currently standing.
+///
+/// Read-only counterpart to the above, for the attach paths: a child told
+/// JIT is ready while this is YES has its session detached before it can
+/// use it, and then faults on every W^X write until the SIGBUS cap kills
+/// it. See fix_no_jit_promise_during_teardown.py.
+BOOL debuggerTeardownRequested(void);
+
 /// Sends the GDB interrupt byte to every live debug session, so a loop
 /// blocked in its continue can act on a pending detach request. See
 /// fix_interrupt_before_detach.py.

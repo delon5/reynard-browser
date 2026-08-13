@@ -28,7 +28,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("Media", comment: ""),
                     footerTitle: NSLocalizedString(
-                        "Hide Media Source Extensions on sites using an iPhone Safari user agent, so video players pick the native HLS path - the only one that can carry FairPlay in this browser. Real iPhone Safari does not expose MSE either.",
+                        "Streaming services only offer FairPlay to Safari; given any other user agent they offer Widevine, which does not exist on iOS. These two settings work together: the first asks for FairPlay, the second hides Media Source Extensions so the player picks the native HLS path that can carry it. Real iPhone Safari does not expose MSE either.",
                         comment: ""
                     )
                 )
@@ -48,6 +48,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     }
     
     private enum MediaRow: CaseIterable {
+        case useSafariForStreaming
         case hideMediaSource
     }
     
@@ -55,6 +56,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     private let customUserAgentSwitch = UISwitch()
     private let enablePerSiteOverridesSwitch = UISwitch()
     private let hideMediaSourceSwitch = UISwitch()
+    private let safariStreamingSwitch = UISwitch()
     
     private var displayedUserAgentRows: [UserAgentRow] {
         var rows: [UserAgentRow] = [.useAndroidUserAgent, .useCustomUserAgent]
@@ -188,6 +190,12 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         }
         
         switch MediaRow.allCases[row] {
+        case .useSafariForStreaming:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Safari User Agent for Streaming", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = safariStreamingSwitch
+            return cell
         case .hideMediaSource:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
             cell.textLabel?.text = NSLocalizedString("Hide Media Source (MSE)", comment: "")
@@ -249,6 +257,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         customUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useCustomUserAgent
         enablePerSiteOverridesSwitch.isOn = Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides
         hideMediaSourceSwitch.isOn = Prefs.CompatibilitySettings.hideMediaSourceForSafariUA
+        safariStreamingSwitch.isOn = Prefs.CompatibilitySettings.useSafariUserAgentForStreaming
     }
     
     private func configureSwitches() {
@@ -256,6 +265,13 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         customUserAgentSwitch.addTarget(self, action: #selector(applyCustomUserAgentPreference), for: .valueChanged)
         enablePerSiteOverridesSwitch.addTarget(self, action: #selector(applyPerSiteOverridesPreference), for: .valueChanged)
         hideMediaSourceSwitch.addTarget(self, action: #selector(applyHideMediaSourcePreference), for: .valueChanged)
+        safariStreamingSwitch.addTarget(self, action: #selector(applySafariStreamingPreference), for: .valueChanged)
+    }
+
+    // Takes effect on the next navigation, like every other user agent
+    // setting here - there is nothing to push to the engine.
+    @objc private func applySafariStreamingPreference() {
+        Prefs.CompatibilitySettings.useSafariUserAgentForStreaming = safariStreamingSwitch.isOn
     }
     
     @objc private func applyPerSiteOverridesPreference() {
