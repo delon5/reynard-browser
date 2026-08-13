@@ -1,0 +1,14 @@
+diff --git a/dom/media/mediaelement/HTMLMediaElement.h b/dom/media/mediaelement/HTMLMediaElement.h
+--- a/dom/media/mediaelement/HTMLMediaElement.h
++++ b/dom/media/mediaelement/HTMLMediaElement.h
+@@ -589,7 +589,10 @@
+ 
+   bool HasVideo() const { return mMediaInfo.HasVideo(); }
+ 
+   bool IsEncrypted() const override { return mIsEncrypted; }
++
++  // WebKit HLS extension - see HTMLMediaElement.webidl.
++  void GetStartDate(JSContext* aCx, JS::MutableHandle<JS::Value> aRetval);
+ 
+ #ifdef MOZ_WMF_CDM
+   bool IsUsingWMFCDM() const override;

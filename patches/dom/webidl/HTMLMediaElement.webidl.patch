@@ -1,0 +1,16 @@
+diff --git a/dom/webidl/HTMLMediaElement.webidl b/dom/webidl/HTMLMediaElement.webidl
+--- a/dom/webidl/HTMLMediaElement.webidl
++++ b/dom/webidl/HTMLMediaElement.webidl
+@@ -54,7 +54,12 @@
+   undefined updateCueDisplay();
+   [ChromeOnly]
+   readonly attribute boolean isEncrypted;
+   // TODO: Bug 847376 - readonly attribute any startDate;
++  // Reynard: WebKit's HLS extension, which Safari-targeted players
++  // call unconditionally - Prime Video threw on it 399 times in one
++  // session. Upstream leaves it as the TODO above; this implements it.
++  [Pref="media.reynard.hls.getstartdate.enabled"]
++  any getStartDate();
+   readonly attribute boolean paused;
+   [SetterThrows]
+            attribute double defaultPlaybackRate;

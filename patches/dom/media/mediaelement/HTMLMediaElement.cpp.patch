@@ -2,10 +2,16 @@ diff --git a/dom/media/mediaelement/HTMLMediaElement.cpp b/dom/media/mediaelemen
 index dbf941c..6357b9b 100644
 --- a/dom/media/mediaelement/HTMLMediaElement.cpp
 +++ b/dom/media/mediaelement/HTMLMediaElement.cpp
-@@ -13,6 +13,11 @@
+@@ -13,6 +13,17 @@
  #include "AudioStreamTrack.h"
  #include "AutoplayPolicy.h"
  #include "ChannelMediaDecoder.h"
++// JS::NewDateObject and JS::TimeClip, for GetStartDate below. Outside
++// the UIKit block on purpose: the WebIDL binding calls the method on
++// every platform this tree builds, so the definition cannot be
++// conditional even though only the iOS pipeline has a caller.
++#include "js/Date.h"
++#include <limits>
 +#ifdef MOZ_WIDGET_UIKIT
 +#  include "AVPlayerDecoder.h"
 +#  include "mozilla/Debug.h"     // printf_stderr
@@ -14,7 +20,7 @@ index dbf941c..6357b9b 100644
  #include "CrossGraphPort.h"
  #include "DOMMediaStream.h"
  #include "DecoderDoctorDiagnostics.h"
-@@ -5747,6 +5750,29 @@ nsresult HTMLMediaElement::InitializeDecoderForChannel(
+@@ -5747,6 +5758,29 @@ nsresult HTMLMediaElement::InitializeDecoderForChannel(
    }
  #endif
  
@@ -44,7 +50,7 @@ index dbf941c..6357b9b 100644
    RefPtr<ChannelMediaDecoder> decoder =
        ChannelMediaDecoder::Create(decoderInit, &diagnostics);
    if (!decoder) {
-@@ -7875,4 +7901,24 @@
+@@ -7875,4 +7909,24 @@
    if (MozAudioCaptured()) {
 +#ifdef MOZ_WIDGET_UIKIT
 +    // Reynard: FairPlay decrypts inside AVFoundation and Gecko never
@@ -69,3 +75,32 @@ index dbf941c..6357b9b 100644
      return nullptr;
 +    }
    }
+@@ -8701,6 +8755,28 @@
+ };
+ #endif
+ 
++// WebKit's HLS extension: the stream's EXT-X-PROGRAM-DATE-TIME as a
++// Date, or an INVALID Date when the stream has none.
++//
++// Not a stub. VOD carries no program date time - which is every stream
++// this pipeline serves - and an invalid Date is exactly what Safari
++// returns for one. What matters to a page is that the method EXISTS:
++// Prime Video calls it unconditionally on its HLS path and threw
++// "getStartDate is not a function" 399 times in a single device
++// session, which is what stopped its player before it ever reached the
++// licence exchange.
++void HTMLMediaElement::GetStartDate(JSContext* aCx,
++                                    JS::MutableHandle<JS::Value> aRetval) {
++  JS::Rooted<JSObject*> date(
++      aCx, JS::NewDateObject(
++               aCx, JS::TimeClip(std::numeric_limits<double>::quiet_NaN())));
++  if (!date) {
++    aRetval.setNull();
++    return;
++  }
++  aRetval.setObject(*date);
++}
++
+ }  // namespace mozilla::dom
+ 
+ #undef LOG

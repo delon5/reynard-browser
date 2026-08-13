@@ -247,7 +247,7 @@ index 3d33f9916a24..7315821b5984 100644
      value: false
    #else
      value: true
-@@ -13156,6 +13197,41 @@
+@@ -13156,6 +13197,53 @@
    value: true
    mirror: always
  
@@ -258,6 +258,18 @@ index 3d33f9916a24..7315821b5984 100644
 +# steers them to native HLS + FairPlay. Consulted by
 +# MediaSource::VisibleForCurrentGlobal.
 +- name: media.reynard.mediasource.hide-for-iphone-ua
++  type: bool
++  value: true
++  mirror: always
++
++# Expose HTMLMediaElement.getStartDate(), WebKit's HLS extension.
++# Safari-targeted players call it unconditionally - Prime Video threw
++# "getStartDate is not a function" 399 times in one device session,
++# which stopped its player before the licence exchange. Gecko has never
++# implemented it (upstream leaves a TODO for bug 847376). Off restores
++# the old behaviour without a rebuild, for a site that feature-detects
++# on its absence.
++- name: media.reynard.hls.getstartdate.enabled
 +  type: bool
 +  value: true
 +  mirror: always
@@ -289,7 +301,7 @@ index 3d33f9916a24..7315821b5984 100644
  # Hls
  - name: media.hls.enabled
    type: RelaxedAtomicBool
-@@ -15074,7 +15150,10 @@
+@@ -15074,7 +15162,10 @@
  - name: network.process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -301,7 +313,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: false # see bug 1641427
  #else
    value: true
-@@ -15123,7 +15202,13 @@
+@@ -15123,7 +15214,13 @@
  - name: network.http.network_access_on_socket_process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -315,7 +327,7 @@ index 3d33f9916a24..7315821b5984 100644
  
  # Telemetry of traffic categories. Whether or not to enable HttpTrafficAnalyzer.
  - name: network.traffic_analyzer.enabled
-@@ -19129,7 +19214,7 @@
+@@ -19129,7 +19226,7 @@
  # If the service is available, set threads to low-power mode when in the background.
  - name: threads.use_low_power.enabled
    type: RelaxedAtomicBool
@@ -324,7 +336,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19138,10 +19223,10 @@
+@@ -19138,10 +19235,10 @@
  
  
  # If the process priority is set to background, put the main thread in the background.
@@ -337,7 +349,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19296,7 +19381,7 @@
+@@ -19296,7 +19393,7 @@
  # Use 17 for Ctrl, 18 for Alt, 91 or 224 for Meta, 0 for none.
  - name: ui.key.accelKey
    type: uint32_t
@@ -346,7 +358,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: 224
  #else
    value: 17
-@@ -19938,7 +20023,7 @@
+@@ -19938,7 +20035,7 @@
  # on a platform that supports the GPU process, else true.
  - name: webgl.allow-in-parent
    type: bool

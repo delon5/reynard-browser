@@ -1155,17 +1155,50 @@ void requestDetachForAllDebugSessions(void) {
         // teardown instead of re-arming the debugger behind it.
         sDebuggerTeardownRequested = YES;
 
-        logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s)", (unsigned long)active.count]);
+        // CHANGED - fix_no_interrupt_at_background.py. The live count
+        // used to come from the interrupt line; it is still worth having
+        // now that nothing interrupts them. Read here because this block
+        // already owns the queue - a dispatch_sync from the caller would
+        // re-block the main thread this function was made async to spare.
+        logger([NSString stringWithFormat:@"requestDetachForAllDebugSessions: requested detach for %lu active session(s), %lu live session(s) left running", (unsigned long)active.count, (unsigned long)debugSessionProxies().count]);
     });
 
-    // After the flag is set, so every interrupted loop finds the request
-    // waiting when it comes back round. See
-    // fix_interrupt_before_detach.py.
+    // REMOVED - see fix_no_interrupt_at_background.py.
     //
-    // Without this the request sits unread against loops blocked in a
-    // continue, which for an idle page may be minutes away from
-    // returning on its own.
-    interruptLiveDebugSessions();
+    // This used to call interruptLiveDebugSessions() so a loop blocked in
+    // its continue would come back round and see the flag set above. The
+    // 0x03 byte does that by making debugserver STOP the target, on the
+    // assumption that the detach which follows resumes it.
+    //
+    // It does not, roughly half the time. Two instrumented captures, with
+    // nothing else touching a child in between:
+    //
+    //   2026-08-13 20:31  interrupted 7, all 7 logged "Detach response
+    //                     OK", 4 still stopped 39.6s later
+    //   2026-08-13 22:28  interrupted 5, 5 still stopped 28.4s later
+    //
+    // A stopped extension cannot answer the synchronous XPC iOS sends
+    // every hosted extension on the next lifecycle transition, and the
+    // watchdog takes the app for it.
+    //
+    // The cost of not interrupting: a loop parked in a continue will not
+    // notice the flag until its target next traps, so sessions persist
+    // across a background rather than draining. That is accepted
+    // deliberately - a loop sitting in a continue leaves its target
+    // RUNNING, and running is the state that answers XPC.
+    //
+    // setDebuggerListening(false) still runs before this, so nothing
+    // traps during or after the teardown; and with the per-pid key a
+    // child whose loop is gone cannot trap either, so a session that
+    // outlives a dead tunnel degrades to interpreted rather than to
+    // stopped. fix_no_teardown_while_system_media_active.py already skips
+    // this whole path while PiP or CarPlay audio is live, and that path
+    // has produced no stopped child.
+    //
+    // interruptLiveDebugSessions() itself stays, and is still called from
+    // the HangWatchdog escalation - a last resort on an already-hung app,
+    // which is a different trade from routine teardown.
+    logger(@"backgroundInterrupt: skipped - not stopping live targets to deliver a detach flag they can read on their own");
 }
 
 // ADDED - see fix_reattach_orphaned_sessions_on_foreground.py.
@@ -1577,37 +1610,6 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
 // suspension rather than only reacting to a failure. See
 // fix_stop_trapping_on_background.py.
 
-// ADDED - see fix_resume_before_detach.py's docstring.
-//
-// Clears a stop that our own 0x03 interrupt put the target into, so the
-// detach that follows leaves it RUNNING.
-//
-// Raw and unwaited-for, exactly like the interrupt byte in
-// interruptLiveDebugSessions: vCont;C resumes, and waiting for the stop
-// packet it eventually produces would re-block the loop a microsecond
-// before it detaches - the opposite of the point. 0x13 is 19, SIGCONT,
-// the signal that clears a BSD process stop.
-//
-// The heartbeat instrument is what showed this was needed: on
-// 2026-08-13 all seven sessions logged "Detach response OK" and four of
-// them were still stopped 39 seconds later.
-static void resumeInterruptStoppedTarget(DebugProxyHandle *debugProxy,
-                                         NSString *threadID, int32_t pid) {
-    if (!debugProxy || threadID.length == 0) return;
-
-    NSString *packet = gdbFramedPacket([NSString stringWithFormat:@"vCont;C13:%@", threadID]);
-    const char *bytes = packet.UTF8String;
-    if (!bytes) return;
-
-    IdeviceFfiError *sendError = debug_proxy_send_raw(debugProxy, (const uint8_t *)bytes, strlen(bytes));
-    if (sendError) {
-        idevice_error_free(sendError);
-        logger([NSString stringWithFormat:@"resumeBeforeDetach: (pid %d) SIGCONT send FAILED - it may stay stopped", pid]);
-        return;
-    }
-    logger([NSString stringWithFormat:@"resumeBeforeDetach: (pid %d) sent SIGCONT to thread %@ before detaching", pid, threadID]);
-}
-
 BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     NSString *detachResponse = nil;
     NSError *detachError = nil;
@@ -1822,12 +1824,6 @@ void runDebugService(int32_t pid, DebugSession *session) {
     uint64_t stoppedAtUnservicedBrkPC = 0;
     NSString *stoppedAtUnservicedBrkThreadID = nil;
 
-    // ADDED - fix_resume_before_detach.py. Non-nil while this target is
-    // stopped by a soft signal we declined to forward - i.e. by our own
-    // 0x03 interrupt. The detach path clears the stop before sending D,
-    // because D on its own demonstrably does not.
-    NSString *stoppedBySoftSignalThreadID = nil;
-
     // ADDED - non-breakpoint stops (real faults in the target) were
     // continued in complete silence past iteration 3. Capture 16: a
     // content process sat in a 100Hz EXC_BAD_ACCESS loop for 2295
@@ -1851,18 +1847,6 @@ void runDebugService(int32_t pid, DebugSession *session) {
             commandError = nil;
             
             if (shouldDetachDebugSessionPID(pid)) {
-                // ADDED - fix_resume_before_detach.py.
-                //
-                // If our own interrupt is what stopped this target, clear
-                // that before detaching. Seven sessions detached cleanly
-                // on 2026-08-13 and four were still stopped 39 seconds
-                // later, unable to answer the synchronous XPC on the next
-                // foreground - which is the 0x8BADF00D.
-                if (stoppedBySoftSignalThreadID) {
-                    resumeInterruptStoppedTarget(session->debugProxy,
-                                                 stoppedBySoftSignalThreadID, pid);
-                    stoppedBySoftSignalThreadID = nil;
-                }
                 detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
                 if (detachedByCommand) {
                     logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach requested and completed at iteration %ld", pid, (long)debugServiceIteration]);
@@ -2083,19 +2067,6 @@ void runDebugService(int32_t pid, DebugSession *session) {
                     [signal isEqualToString:@"09"];     // SIGKILL
 
                 if (signal && isSoftSignal && isStopOrKillSignal) {
-                    // Remembered, not acted on here. The target is
-                    // stopped from this moment, and the ONLY safe place
-                    // to clear that is immediately before the detach -
-                    // resuming now would just re-block this loop in a
-                    // continue and it would never reach the detach flag
-                    // it was interrupted to see.
-                    //
-                    // SIGKILL is excluded: the process is already going,
-                    // and the kernel enforces it regardless (confirmed -
-                    // an X09 exit packet arrives ~3ms later).
-                    if (![signal isEqualToString:@"09"]) {
-                        stoppedBySoftSignalThreadID = threadID;
-                    }
                     logger([NSString stringWithFormat:@"stopSignalSkip: (pid %d) soft signal 0x%@ would stop the target - NOT forwarding, letting the loop detach or continue instead (iteration %ld)", pid, signal, (long)debugServiceIteration]);
                     continue;
                 }
