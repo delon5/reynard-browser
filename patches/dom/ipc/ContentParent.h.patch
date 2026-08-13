@@ -2,7 +2,7 @@ diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
 index 8cca90086a07..ccabf1e2f072 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
-@@ -746,6 +746,18 @@ class ContentParent final : public PContentParent,
+@@ -746,6 +746,29 @@ class ContentParent final : public PContentParent,
        const OriginAttributes& aOriginAttributes, uint64_t aInnerWindowId,
        const nsCString& aPartitionKey, BlobURLDataRequestResolver&& aResolver);
  
@@ -17,6 +17,17 @@ index 8cca90086a07..ccabf1e2f072 100644
 +                                              const uint32_t& aOp,
 +                                              const double& aArg);
 +  mozilla::ipc::IPCResult RecvAVPlayerFrameFallback(const uint64_t& aPlayerId);
++
++  // Reynard FairPlay: the content process holds the EME objects, this
++  // one holds the AVContentKeySession. See PContent.ipdl.
++  mozilla::ipc::IPCResult RecvAVPlayerSetAppCertificate(
++      nsTArray<uint8_t>&& aCert);
++  mozilla::ipc::IPCResult RecvAVPlayerKeyGenerateRequest(
++      const uint64_t& aPlayerId, const nsCString& aContentId,
++      const nsCString& aInitDataType, nsTArray<uint8_t>&& aInitData);
++  mozilla::ipc::IPCResult RecvAVPlayerKeyResponse(
++      const uint64_t& aPlayerId, const nsCString& aContentId,
++      nsTArray<uint8_t>&& aResponse);
 +
   protected:
    bool CheckBrowsingContextEmbedder(CanonicalBrowsingContext* aBC,

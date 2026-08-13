@@ -2,7 +2,7 @@ diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
 index d77bf2ae523c..2d586d1c2f9c 100644
 --- a/dom/ipc/ContentChild.cpp
 +++ b/dom/ipc/ContentChild.cpp
-@@ -146,6 +146,42 @@
+@@ -146,6 +146,54 @@
  #include "nsRefreshDriver.h"
  #include "nsSandboxFlags.h"
  
@@ -39,13 +39,25 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +// with no video reports too.
 +namespace mozilla {
 +void ReynardStartContentWatchdog();
++// Reynard FairPlay: the far ends of AVPlayerKeyEncrypted and
++// AVPlayerKeyMessage. The first is AVPlayerDecoder.mm's existing
++// entry point - the one FairPlayCDMProxy's in-process delegate used to
++// call - reached now from the app process instead. The second is in
++// dom/media/eme/fairplay/FairPlayCDMProxy.mm, which owns the registry
++// that maps a player back to the proxy waiting on it.
++void ReynardAVPlayerDispatchEncrypted(uintptr_t aPlayerId,
++                                      nsTArray<uint8_t>&& aInitData,
++                                      const nsAString& aInitDataType);
++void ReynardFairPlayDeliverKeyMessage(uintptr_t aPlayerId,
++                                      const nsACString& aContentId,
++                                      nsTArray<uint8_t>&& aSpc);
 +}
 +#endif
 +
  #if defined(MOZ_SANDBOX)
  #  if defined(XP_WIN)
  #    include "mozilla/sandboxTarget.h"
-@@ -683,6 +719,11 @@ mozilla::ipc::IPCResult ContentChild::RecvSetXPCOMProcessAttributes(
+@@ -683,6 +731,11 @@ mozilla::ipc::IPCResult ContentChild::RecvSetXPCOMProcessAttributes(
    LookAndFeel::EnsureInit();
    InitSharedUASheets(std::move(aSharedUASheetHandle), aSharedUASheetAddress);
    InitXPCOM(aXPCOMInit, aInitialData, aIsReadyForBackgroundProcessing);
@@ -57,7 +69,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    InitGraphicsDeviceData(aXPCOMInit.contentDeviceData());
    RefPtr<net::ChildDNSService> dnsServiceChild =
        dont_AddRef(net::ChildDNSService::GetSingleton());
-@@ -1565,7 +1606,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+@@ -1565,7 +1618,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
      Endpoint<PImageBridgeChild>&& aImageBridge,
      Endpoint<PVRManagerChild>&& aVRBridge,
      Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -66,7 +78,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    MOZ_ASSERT(namespaces.Length() == 4);
    const uint32_t compositorManagerNamespace = namespaces[0];
    const uint32_t compositorBridgeNamespace = namespaces[1];
-@@ -1579,8 +1620,8 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+@@ -1579,8 +1632,8 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
    // should crash itself (because we are actually talking to the UI process). If
    // there are localized failures (e.g. failed to spawn a thread), then it
    // should MOZ_RELEASE_ASSERT or MOZ_CRASH as necessary instead.
@@ -77,7 +89,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1614,7 +1655,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+@@ -1614,7 +1667,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
      Endpoint<PImageBridgeChild>&& aImageBridge,
      Endpoint<PVRManagerChild>&& aVRBridge,
      Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -86,7 +98,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    MOZ_ASSERT(namespaces.Length() == 4);
    const uint32_t compositorManagerNamespace = namespaces[0];
    const uint32_t compositorBridgeNamespace = namespaces[1];
-@@ -1624,8 +1665,8 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+@@ -1624,8 +1677,8 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
    nsTArray<RefPtr<BrowserChild>> tabs = BrowserChild::GetAll();
  
    // Re-establish singleton bridges to the compositor.
@@ -97,7 +109,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1673,6 +1714,101 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
+@@ -1673,6 +1726,129 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
      }
    }
    return IPC_OK();
@@ -141,6 +153,34 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +                  static_cast<unsigned long long>(aPlayerId), aSeconds);
 +  }
 +  ReynardAVPlayerNotifyTime(static_cast<uintptr_t>(aPlayerId), aSeconds);
++  return IPC_OK();
++}
++
++// FairPlay: rare enough that both of these log every time. The pair of
++// them IS the licence conversation as the page sees it - an
++// 'encrypted' event, then a 'message' event - so if a DRM stream
++// stalls, the absence of one of these lines says which half stopped.
++mozilla::ipc::IPCResult ContentChild::RecvAVPlayerKeyEncrypted(
++    const uint64_t& aPlayerId, const nsCString& aInitDataType,
++    nsTArray<uint8_t>&& aInitData) {
++  printf_stderr("avPlayer: recv encrypted player=%llu type=%s %zu bytes\n",
++                static_cast<unsigned long long>(aPlayerId),
++                aInitDataType.get(),
++                static_cast<size_t>(aInitData.Length()));
++  mozilla::ReynardAVPlayerDispatchEncrypted(
++      static_cast<uintptr_t>(aPlayerId), std::move(aInitData),
++      NS_ConvertUTF8toUTF16(aInitDataType));
++  return IPC_OK();
++}
++
++mozilla::ipc::IPCResult ContentChild::RecvAVPlayerKeyMessage(
++    const uint64_t& aPlayerId, const nsCString& aContentId,
++    nsTArray<uint8_t>&& aSpc) {
++  printf_stderr("avPlayer: recv key message player=%llu id=%s %zu bytes\n",
++                static_cast<unsigned long long>(aPlayerId), aContentId.get(),
++                static_cast<size_t>(aSpc.Length()));
++  mozilla::ReynardFairPlayDeliverKeyMessage(static_cast<uintptr_t>(aPlayerId),
++                                            aContentId, std::move(aSpc));
 +  return IPC_OK();
 +}
 +
@@ -199,7 +239,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +#endif
 +
  #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
-@@ -1734,7 +1870,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
+@@ -1734,7 +1910,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
    sandboxEnabled = (GetEffectiveContentSandboxLevel() >= 1);
    DisconnectWindowServer(sandboxEnabled);
  #  elif defined(XP_IOS)

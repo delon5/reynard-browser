@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,130 @@
+@@ -18,16 +18,158 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -104,6 +104,34 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +// rest of this protocol, so a host without it keeps the old behaviour.
 +- (void)useContentKeySession:(AVContentKeySession*)session
 +                   forPlayer:(NSUInteger)playerId;
++
++// FairPlay, once the key session moved to the app process.
++//
++// Both methods above are for the case where FairPlayCDMProxy and the
++// asset are in the SAME process, which they are not: the proxy lives
++// wherever the media element does - a content process - while
++// addContentKeyRecipient takes an AVURLAsset, and the asset is here.
++// So the session is created here, per player, and these three carry
++// the page's half of the licence exchange across.
++//
++// The application certificate. Per player rather than per process at
++// this layer, because the host indexes everything by player; the
++// broker in AVPlayerDecoder.mm is what fans one certificate out to
++// every player the sending content process owns.
++- (void)setAppCertificate:(NSData*)certificate
++                forPlayer:(NSUInteger)playerId;
++// generateRequest(): produce an SPC for this identifier. If the asset
++// already raised a request for it - the usual case, since the page is
++// replying to an 'encrypted' event that came from exactly that
++// request - the held one is used rather than asking for a duplicate.
++- (void)generateKeyRequest:(NSUInteger)playerId
++                 contentId:(NSString*)contentId
++              initDataType:(NSString*)initDataType
++                  initData:(NSData*)initData;
++// update(): the CKC from the page's licence server.
++- (void)provideKeyResponse:(NSUInteger)playerId
++                 contentId:(NSString*)contentId
++                  response:(NSData*)response;
 +@end
 +
 +// The reverse direction, and the only one there is.
@@ -133,7 +161,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +169,44 @@
+@@ -55,8 +197,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -178,7 +206,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +215,58 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +243,83 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
@@ -233,6 +261,31 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +// element fire "ended" at the stream's real end. Same threading
 +// contract as the position callback above.
 +MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId);
++
++// FairPlay, app process -> Gecko, the reverse of the three protocol
++// methods above.
++//
++// The asset reached a key it has no licence for. The page has to hear
++// about that as an 'encrypted' event, and only the process holding the
++// media element can fire one - AVPlayerDemuxer never sees this stream,
++// so no ordinary demuxer path produces it. aInitDataType is "skd" for
++// HLS and "sinf" for fragmented MP4.
++MOZ_EXPORT void ReynardFairPlayNotifyEncrypted(uintptr_t aPlayerId,
++                                               const char* aInitDataType,
++                                               const uint8_t* aInitData,
++                                               size_t aInitDataLength);
++
++// The SPC makeStreamingContentKeyRequestDataForApp produced, on its way
++// to becoming the EME session's 'message' event. aContentId is the
++// identifier in the encoding both processes key by: the skd:// URI for
++// HLS, base64 of the raw key id for fragmented MP4.
++//
++// Both are main-thread only, which the key session's delegate queue
++// (DispatchQueue.main) satisfies in this process.
++MOZ_EXPORT void ReynardFairPlayNotifyKeyMessage(uintptr_t aPlayerId,
++                                                const char* aContentId,
++                                                const uint8_t* aSpc,
++                                                size_t aSpcLength);
 +
  MOZ_END_EXTERN_C
  

@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..c20df0f7f09f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,846 @@
+@@ -0,0 +1,1041 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +14,14 @@ index 000000000000..c20df0f7f09f
 +#include "mozilla/dom/MediaKeyMessageEventBinding.h"
 +#include "mozilla/dom/MediaKeySession.h"
 +#include "nsThreadUtils.h"
++// SendAVPlayerSetAppCertificate and friends - the AVContentKeySession
++// lives in the app process, because the asset does.
++#include "mozilla/dom/ContentChild.h"
++#include "nsXULAppAPI.h"  // XRE_IsContentProcess
++// The player -> proxy registry below is read from the IPC path, not
++// only from wherever the proxy was made.
++#include "mozilla/StaticMutex.h"
++#include "mozilla/Debug.h"  // printf_stderr
 +
 +#import <AVFoundation/AVFoundation.h>
 +
@@ -328,14 +336,32 @@ index 000000000000..c20df0f7f09f
 +  return host;
 +}
 +
++// Remote-mode proxies by the player they are bound to, so an SPC
++// arriving from the app process finds the one waiting on it.
++//
++// Raw pointers, cleared in Shutdown - which CDMProxy guarantees runs,
++// the same contract PlayersById relies on in AVPlayerDecoder.mm. A
++// StaticMutex rather than a main-thread assertion because the IPC path
++// and the bind path are different callers and this costs nothing.
++static StaticMutex sRemoteProxiesMutex;
++static nsTHashMap<nsUint64HashKey, FairPlayCDMProxy*>& RemoteProxies() {
++  static auto* proxies = new nsTHashMap<nsUint64HashKey, FairPlayCDMProxy*>();
++  return *proxies;
++}
++
 +FairPlayCDMProxy::FairPlayCDMProxy(dom::MediaKeys* aKeys,
 +                                   const nsAString& aKeySystem,
 +                                   bool aDistinctiveIdentifierRequired,
 +                                   bool aPersistentStateRequired)
 +    : CDMProxy(aKeys, aKeySystem, aDistinctiveIdentifierRequired,
-+               aPersistentStateRequired) {
++               aPersistentStateRequired),
++      // Decided by WHERE this proxy is, not by a pref: a proxy in a
++      // content process can never reach the asset, and one in the
++      // parent always can.
++      mRemote(XRE_IsContentProcess()) {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  EME_LOG("FairPlayCDMProxy::FairPlayCDMProxy({})", fmt::ptr(this));
++  EME_LOG("FairPlayCDMProxy::FairPlayCDMProxy({}) remote={}", fmt::ptr(this),
++          mRemote);
 +}
 +
 +FairPlayCDMProxy::~FairPlayCDMProxy() {
@@ -347,6 +373,17 @@ index 000000000000..c20df0f7f09f
 +                            const nsAString& aName) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  EME_LOG("FairPlayCDMProxy::Init({})", fmt::ptr(this));
++
++  if (mRemote) {
++    // Nothing to create and nothing to wait for. The session belongs
++    // to the app process, and every byte of the licence exchange
++    // travels over PContent from the entry points below.
++    printf_stderr("avPlayer: FairPlay proxy in REMOTE mode\n");
++    if (!mKeys.IsNull()) {
++      mKeys->OnCDMCreated(aPromiseId, 0);
++    }
++    return;
++  }
 +
 +  if (@available(iOS 11.0, macOS 10.13, *)) {
 +    AVContentKeySession* session = [AVContentKeySession
@@ -411,7 +448,9 @@ index 000000000000..c20df0f7f09f
 +                                     nsTArray<uint8_t>& aInitData) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +
-+  if (!mKeySession || !mDelegate) {
++  // In remote mode there is no local session to check - the app
++  // process owns it, and this half only mints ids and relays bytes.
++  if (!mRemote && (!mKeySession || !mDelegate)) {
 +    RejectPromiseWithStateError(aPromiseId,
 +                                "FairPlay session is not initialised"_ns);
 +    return;
@@ -449,6 +488,52 @@ index 000000000000..c20df0f7f09f
 +    // MP4 could then never be answered. base64 round-trips any bytes and
 +    // matches sessionIdForRequest, which keys the same way.
 +    identifierKey = [keyId base64EncodedStringWithOptions:0];
++  }
++
++  if (mRemote) {
++    if (!identifierKey) {
++      RejectPromiseWithStateError(
++          aPromiseId, "FairPlay init data has no usable identifier"_ns);
++      return;
++    }
++    nsCString contentId([identifierKey UTF8String]);
++    mRemoteSessionByContentId.InsertOrUpdate(contentId, nsCString(sessionId));
++    mRemoteContentIdBySession.InsertOrUpdate(nsCString(sessionId), contentId);
++
++    // Same order as the local path: EME expects the session to exist
++    // immediately, with the licence request following as a message.
++    OnSetSessionId(aCreateSessionToken, NS_ConvertUTF8toUTF16(sessionId));
++    ResolvePromise(aPromiseId);
++
++    // The SPC is often already here. AVFoundation raises its key
++    // request as soon as the playlist reaches EXT-X-KEY, the page
++    // hears that as 'encrypted', and this generateRequest is the
++    // reply - by which time the app process has usually produced the
++    // SPC and sent it down.
++    if (Maybe<nsTArray<uint8_t>> pending =
++            mRemotePendingSpc.Extract(contentId)) {
++      printf_stderr(
++          "avPlayer: FairPlay SPC was already waiting for %s (%zu bytes)\n",
++          contentId.get(), (size_t)pending->Length());
++      OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
++                       dom::MediaKeyMessageType::License_request, *pending);
++      return;
++    }
++
++    RemoteKeyRequest request;
++    request.mContentId = contentId;
++    request.mInitDataType = initDataType;
++    request.mInitData = aInitData.Clone();
++    if (!mBoundPlayerId) {
++      // SetCDMProxy has not named the player yet. Parked rather than
++      // sent to nobody; BindToPlayer flushes.
++      printf_stderr("avPlayer: FairPlay parking generateRequest for %s\n",
++                    contentId.get());
++      mRemoteParkedRequests.AppendElement(std::move(request));
++      return;
++    }
++    SendRemoteKeyRequest(request);
++    return;
 +  }
 +
 +  [mDelegate rememberSession:sessionIdNS forIdentifier:identifierKey];
@@ -502,6 +587,16 @@ index 000000000000..c20df0f7f09f
 +  mAppCertificate = aCert.Clone();
 +  EME_LOG("FairPlayCDMProxy::SetServerCertificate({}) {} bytes",
 +          fmt::ptr(this), mAppCertificate.Length());
++  if (mRemote) {
++    // The app process is holding every key request it has raised so
++    // far waiting for exactly this - without a certificate there is no
++    // SPC to make - so this send is what unblocks the licence flow.
++    printf_stderr("avPlayer: FairPlay certificate up, %zu bytes\n",
++                  (size_t)mAppCertificate.Length());
++    if (dom::ContentChild* cc = dom::ContentChild::GetSingleton()) {
++      cc->SendAVPlayerSetAppCertificate(mAppCertificate);
++    }
++  }
 +  ResolvePromise(aPromiseId);
 +}
 +
@@ -510,26 +605,49 @@ index 000000000000..c20df0f7f09f
 +                                     nsTArray<uint8_t>& aResponse) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +
-+  if (!mDelegate) {
++  if (!mRemote && !mDelegate) {
 +    RejectPromiseWithStateError(aPromiseId,
 +                                "FairPlay session is not initialised"_ns);
 +    return;
 +  }
 +
-+  NSString* sessionId =
-+      [NSString stringWithUTF8String:NS_ConvertUTF16toUTF8(aSessionId).get()];
-+  AVContentKeyRequest* request = [mDelegate requestForSession:sessionId];
-+  if (!request) {
-+    RejectPromiseWithStateError(
-+        aPromiseId, "No pending FairPlay key request for this session"_ns);
-+    return;
-+  }
++  if (mRemote) {
++    // The AVContentKeyRequest this CKC answers is parked in the app
++    // process, under the content id this session was created for.
++    // NS_ConvertUTF16toUTF8 declared directly, not wrapped in an
++    // nsCString: `nsCString x(NS_ConvertUTF16toUTF8(aSessionId));` is a
++    // most-vexing-parse - the inner parentheses read as a parameter
++    // declaration and x becomes a function. Same idiom the key-status
++    // block further down already uses.
++    NS_ConvertUTF16toUTF8 sessionIdKey(aSessionId);
++    nsCString contentId;
++    if (!mRemoteContentIdBySession.Get(sessionIdKey, &contentId)) {
++      RejectPromiseWithStateError(
++          aPromiseId, "No pending FairPlay key request for this session"_ns);
++      return;
++    }
++    printf_stderr("avPlayer: FairPlay CKC up for %s, %zu bytes\n",
++                  contentId.get(), (size_t)aResponse.Length());
++    if (dom::ContentChild* cc = dom::ContentChild::GetSingleton()) {
++      cc->SendAVPlayerKeyResponse(static_cast<uint64_t>(mBoundPlayerId),
++                                  contentId, aResponse);
++    }
++  } else {
++    NSString* sessionId =
++        [NSString stringWithUTF8String:NS_ConvertUTF16toUTF8(aSessionId).get()];
++    AVContentKeyRequest* request = [mDelegate requestForSession:sessionId];
++    if (!request) {
++      RejectPromiseWithStateError(
++          aPromiseId, "No pending FairPlay key request for this session"_ns);
++      return;
++    }
 +
-+  NSData* ckc = [NSData dataWithBytes:aResponse.Elements()
-+                               length:aResponse.Length()];
-+  AVContentKeyResponse* response = [AVContentKeyResponse
-+      contentKeyResponseWithFairPlayStreamingKeyResponseData:ckc];
-+  [request processContentKeyResponse:response];
++    NSData* ckc = [NSData dataWithBytes:aResponse.Elements()
++                                 length:aResponse.Length()];
++    AVContentKeyResponse* response = [AVContentKeyResponse
++        contentKeyResponseWithFairPlayStreamingKeyResponseData:ckc];
++    [request processContentKeyResponse:response];
++  }
 +
 +  // The CKC is handed to AVFoundation synchronously and there is no
 +  // callback that says "key now usable", so usability is declared at
@@ -633,6 +751,22 @@ index 000000000000..c20df0f7f09f
 +  mBoundPlayerId = aPlayerId;
 +  EME_LOG("FairPlayCDMProxy::BindToPlayer({}) player={}", fmt::ptr(this),
 +          (unsigned long long)aPlayerId);
++  if (mRemote) {
++    {
++      StaticMutexAutoLock lock(sRemoteProxiesMutex);
++      RemoteProxies().InsertOrUpdate(static_cast<uint64_t>(aPlayerId), this);
++    }
++    // Anything the page asked for before this bind had no id to be
++    // addressed to. Moved out first: SendRemoteKeyRequest cannot
++    // re-enter this list, but taking the array by value makes that
++    // true by construction rather than by reading the callee.
++    nsTArray<RemoteKeyRequest> parked = std::move(mRemoteParkedRequests);
++    for (const RemoteKeyRequest& request : parked) {
++      printf_stderr("avPlayer: FairPlay replaying generateRequest for %s\n",
++                    request.mContentId.get());
++      SendRemoteKeyRequest(request);
++    }
++  }
 +  PublishKeySessionIfBound();
 +  // Anything that arrived before this bind is parked in the delegate,
 +  // waiting for exactly this moment - a key request that lost the race
@@ -681,6 +815,10 @@ index 000000000000..c20df0f7f09f
 +  MOZ_ASSERT(NS_IsMainThread());
 +  EME_LOG("FairPlayCDMProxy::Shutdown({})", fmt::ptr(this));
 +
++  if (mRemote && mBoundPlayerId) {
++    StaticMutexAutoLock lock(sRemoteProxiesMutex);
++    RemoteProxies().Remove(static_cast<uint64_t>(mBoundPlayerId));
++  }
 +  if (mDelegate) {
 +    [mDelegate detach];
 +    [mDelegate release];
@@ -848,5 +986,62 @@ index 000000000000..c20df0f7f09f
 +  return mOwnerThread ? mOwnerThread->IsOnCurrentThread() : NS_IsMainThread();
 +}
 +#endif
++
++void FairPlayCDMProxy::SendRemoteKeyRequest(
++    const RemoteKeyRequest& aRequest) {
++  MOZ_ASSERT(NS_IsMainThread());
++  dom::ContentChild* cc = dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  cc->SendAVPlayerKeyGenerateRequest(static_cast<uint64_t>(mBoundPlayerId),
++                                     aRequest.mContentId,
++                                     aRequest.mInitDataType,
++                                     aRequest.mInitData);
++}
++
++void FairPlayCDMProxy::DeliverRemoteKeyMessage(const nsACString& aContentId,
++                                               nsTArray<uint8_t>&& aSpc) {
++  MOZ_ASSERT(NS_IsMainThread());
++  nsCString contentId(aContentId);
++  nsCString sessionId;
++  if (!mRemoteSessionByContentId.Get(contentId, &sessionId)) {
++    // The page has not called generateRequest for this identifier yet
++    // - it is still handling the 'encrypted' event the SAME key
++    // request produced. Held until CreateSession claims it, which is
++    // the ordinary order rather than an edge case.
++    printf_stderr("avPlayer: FairPlay SPC parked for %s (%zu bytes)\n",
++                  contentId.get(), (size_t)aSpc.Length());
++    mRemotePendingSpc.InsertOrUpdate(contentId, std::move(aSpc));
++    return;
++  }
++  printf_stderr("avPlayer: FairPlay SPC -> session %s (%zu bytes)\n",
++                sessionId.get(), (size_t)aSpc.Length());
++  OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
++                   dom::MediaKeyMessageType::License_request, aSpc);
++}
++
++// The far end of ContentChild::RecvAVPlayerKeyMessage. A free function
++// because ContentChild.cpp is plain C++ and must not see this file's
++// Objective-C, and because the registry it needs lives here.
++void ReynardFairPlayDeliverKeyMessage(uintptr_t aPlayerId,
++                                      const nsACString& aContentId,
++                                      nsTArray<uint8_t>&& aSpc) {
++  MOZ_ASSERT(NS_IsMainThread());
++  RefPtr<FairPlayCDMProxy> proxy;
++  {
++    StaticMutexAutoLock lock(sRemoteProxiesMutex);
++    proxy = RemoteProxies().Get(static_cast<uint64_t>(aPlayerId));
++  }
++  if (!proxy) {
++    // Teardown race, or a key request for a player whose element has
++    // no MediaKeys - dropped, like every other unknown-id path in this
++    // pipeline.
++    printf_stderr("avPlayer: FairPlay SPC for unknown player %llu\n",
++                  (unsigned long long)aPlayerId);
++    return;
++  }
++  proxy->DeliverRemoteKeyMessage(aContentId, std::move(aSpc));
++}
 +
 +}  // namespace mozilla

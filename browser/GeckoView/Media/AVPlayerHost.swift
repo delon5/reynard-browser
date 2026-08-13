@@ -164,6 +164,49 @@ public final class AVPlayerHost: NSObject {
         avLog("EME key session bound to player \(playerId)")
     }
 
+    // MARK: - FairPlay, relayed from the content process
+
+    /// The FPS application certificate, from the page's
+    /// setServerCertificate. Until this arrives there is no SPC to
+    /// make, so the delegate holds every key request it has raised.
+    @objc public func setAppCertificate(_ certificate: Data,
+                                        forPlayer playerId: UInt) {
+        guard let delegate = withState({ players[playerId]?.delegate }) else {
+            avLog("app certificate for player \(playerId), which has no "
+                  + "delegate of ours")
+            return
+        }
+        delegate.setAppCertificate(certificate)
+    }
+
+    /// generateRequest(): produce an SPC covering this identifier.
+    @objc public func generateKeyRequest(_ playerId: UInt,
+                                         contentId: String,
+                                         initDataType: String,
+                                         initData: Data) {
+        guard let entry = withState({ players[playerId] }),
+              let delegate = entry.delegate else {
+            avLog("generateRequest for player \(playerId), which has no "
+                  + "delegate of ours")
+            return
+        }
+        delegate.generateRequest(contentId: contentId,
+                                 initDataType: initDataType,
+                                 initData: initData,
+                                 session: entry.keySession)
+    }
+
+    /// update(): the CKC from the page's licence server.
+    @objc public func provideKeyResponse(_ playerId: UInt,
+                                         contentId: String,
+                                         response: Data) {
+        guard let delegate = withState({ players[playerId]?.delegate }) else {
+            avLog("CKC for player \(playerId), which has no delegate of ours")
+            return
+        }
+        delegate.provideResponse(response, contentId: contentId)
+    }
+
     /// DIAGNOSTIC + likely fix for "play() ignored": the AVPlayer runs
     /// in a content-process extension, and iOS media services refuse to
     /// start a playback timebase for a process with no active playback
@@ -403,6 +446,33 @@ public final class AVPlayerHost: NSObject {
         // decoder with no EME involved: it never receives a licence, so
         // its delegate just reports the request and fails it, which is
         // the same behaviour as before this pipeline knew about EME.
+        // The id is allocated FIRST: the key session's delegate is
+        // per player and carries the id in every message it sends
+        // Gecko, so it cannot be built after the entry is.
+        let id = withState { () -> UInt in
+            let allocated = nextID
+            nextID += 1
+            return allocated
+        }
+
+        // The key session is PER PLAYER and lives HERE, in the app
+        // process, because addContentKeyRecipient takes an AVURLAsset
+        // and this is where the asset is.
+        //
+        // useContentKeySession(_:) below only ever worked when
+        // FairPlayCDMProxy ran in the same process, which it does not:
+        // the proxy lives wherever the media element does - a content
+        // process - so its publish set emeContentKeySession on the
+        // CONTENT process's host instance while every asset was
+        // created on this one. Every player therefore fell through to
+        // the licence-less local session, which is why FairPlay
+        // reached "key status: usable" and the item still failed with
+        // Code=-1. Gecko's EME objects now reach this session over
+        // PContent instead; see ContentKeyDelegate.
+        //
+        // The publish is still honoured when it does arrive - a
+        // single-process build has the proxy right here - so nothing
+        // that used to work stops.
         let keySession: AVContentKeySession
         let delegate: ContentKeyDelegate?
         if let published = emeContentKeySession {
@@ -411,11 +481,11 @@ public final class AVPlayerHost: NSObject {
             avLog("using the EME-published content key session")
         } else {
             let owned = AVContentKeySession(keySystem: .fairPlayStreaming)
-            let ownedDelegate = ContentKeyDelegate()
+            let ownedDelegate = ContentKeyDelegate(playerId: id)
             owned.setDelegate(ownedDelegate, queue: .main)
             keySession = owned
             delegate = ownedDelegate
-            avLog("no EME session published - using a local one (no licence)")
+            avLog("content key session created for player \(id)")
         }
         keySession.addContentKeyRecipient(asset)
 
@@ -427,12 +497,7 @@ public final class AVPlayerHost: NSObject {
 
         let entry = Player(player: player, item: item, asset: asset,
                            keySession: keySession, delegate: delegate)
-        let id = withState { () -> UInt in
-            let id = nextID
-            nextID += 1
-            players[id] = entry
-            return id
-        }
+        withState { players[id] = entry }
 
         observeMetadata(of: item, playerId: id, storingInto: entry)
         startFrameDelivery(for: id)
@@ -1017,26 +1082,228 @@ public final class AVPlayerHost: NSObject {
 
 /// Handles the key request AVFoundation raises for a protected asset.
 ///
-/// Left deliberately incomplete: the SPC goes to a licence server whose
-/// URL and certificate are per-deployment, and inventing one here would
-/// be a guess. The request is logged so the negotiation is visible, which
-/// is more than the earlier probes ever got - AVContentKeySession never
-/// called back at all when the recipient was not an AVURLAsset.
+/// No longer incomplete. The licence server's URL and certificate are
+/// per-deployment and are the PAGE's business, which is exactly the
+/// point: this delegate never talks to a licence server. It moves four
+/// pieces of data across the process boundary and lets Gecko's EME
+/// implementation - MediaKeys, MediaKeySession, the page's own fetch -
+/// do the negotiating, in the process where the page is.
+///
+///   identifier out  ->  the element's 'encrypted' event
+///   certificate in  <-  setServerCertificate
+///   SPC out         ->  the session's 'message' event
+///   CKC in          <-  update()
+///
+/// Everything here runs on the main queue, which in the APP process is
+/// also Gecko's main thread, so the C entry points need no hop. (In a
+/// content process the two differ - see ReynardAVPlayerNotifyMetadata
+/// in AVPlayerDecoder.mm - but a key session is never in one any more,
+/// which is the whole reason this file changed.)
 final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
+    private let playerId: UInt
+    /// Nil until the page hands one over, which is the NORMAL state for
+    /// the first key request: AVFoundation reaches EXT-X-KEY well
+    /// before the page has built its MediaKeys.
+    private var appCertificate: Data?
+    /// Live requests by content id - the skd:// URI for HLS, base64 of
+    /// the raw key id for fragmented MP4. The same encoding
+    /// FairPlayCDMProxy keys by, which is what lets the two sides agree
+    /// without inventing a request id to echo.
+    private var requests: [String: AVContentKeyRequest] = [:]
+    /// Content ids whose request is waiting for a certificate.
+    private var awaitingCertificate: [String] = []
+
+    init(playerId: UInt) {
+        self.playerId = playerId
+    }
+
+    /// The one encoding both processes key by.
+    static func contentIdKey(for request: AVContentKeyRequest) -> String? {
+        if let string = request.identifier as? String { return string }
+        if let data = request.identifier as? Data {
+            // Raw key-id bytes are rarely valid UTF-8, so base64 rather
+            // than a string decode that would usually yield nil.
+            return data.base64EncodedString()
+        }
+        return nil
+    }
+
+    func setAppCertificate(_ certificate: Data) {
+        appCertificate = certificate
+        avLog("app certificate set for player \(playerId), "
+              + "\(certificate.count) bytes")
+        let pending = awaitingCertificate
+        awaitingCertificate = []
+        for contentId in pending {
+            guard let request = requests[contentId] else { continue }
+            makeSPC(for: request, contentId: contentId)
+        }
+    }
+
+    /// generateRequest() from the page. If the asset already raised a
+    /// request for this identifier - the usual case, since the page is
+    /// replying to the 'encrypted' event that came out of it - the held
+    /// request is used rather than asking AVFoundation for a duplicate.
+    func generateRequest(contentId: String, initDataType: String,
+                         initData: Data, session: AVContentKeySession) {
+        if let existing = requests[contentId] {
+            avLog("generateRequest adopting the held request for \(contentId)")
+            makeSPC(for: existing, contentId: contentId)
+            return
+        }
+        let identifier: Any = initDataType == "skd"
+            ? (String(data: initData, encoding: .utf8) ?? contentId)
+            : initData
+        avLog("generateRequest asking AVFoundation for \(contentId)")
+        session.processContentKeyRequest(withIdentifier: identifier,
+                                         initializationData: initData,
+                                         options: nil)
+    }
+
+    func provideResponse(_ ckc: Data, contentId: String) {
+        guard let request = requests[contentId] else {
+            avLog("CKC for \(contentId) with no pending request")
+            return
+        }
+        request.processContentKeyResponse(
+            AVContentKeyResponse(fairPlayStreamingKeyResponseData: ckc))
+        avLog("CKC applied for \(contentId), \(ckc.count) bytes")
+    }
+
+    private func makeSPC(for request: AVContentKeyRequest,
+                         contentId: String) {
+        guard let certificate = appCertificate else {
+            // HELD, not failed. Failing a key request does not decline
+            // one key, it fails the WHOLE ITEM permanently - and the
+            // certificate is still on its way, because the page cannot
+            // call setServerCertificate until it has handled the
+            // 'encrypted' event this same request just raised.
+            if !awaitingCertificate.contains(contentId) {
+                awaitingCertificate.append(contentId)
+            }
+            avLog("no app certificate yet - holding \(contentId)")
+            return
+        }
+        // The ASSET ID, not the whole URI. Apple's HLS Catalog With FPS
+        // sample (FairPlay Streaming Server SDK,
+        // Shared/Managers/ContentKeyDelegate.swift) does exactly this:
+        //
+        //   let contentKeyIdentifierURL = URL(string: identifierString)
+        //   let assetIDString = contentKeyIdentifierURL.host
+        //   let assetIDData = assetIDString.data(using: .utf8)
+        //   ... contentIdentifier: assetIDData
+        //
+        // The identifier arrives as skd://<asset-id>, and the asset id
+        // is what goes into the SPC's asset-ID TLLV and what the key
+        // server matches its key against. Passing the whole skd:// URI
+        // produces a well-formed SPC the server answers wrongly or
+        // refuses - a failure that looks like a server problem and is
+        // not one. The full URI still travels to the page as the
+        // 'encrypted' init data, which is what a KSM protocol wants as
+        // its "uri" field.
+        let contentIdData: Data?
+        if let identifier = request.identifier as? String {
+            let assetId = URL(string: identifier)?.host ?? identifier
+            contentIdData = Data(assetId.utf8)
+        } else {
+            contentIdData = request.identifier as? Data
+        }
+        request.makeStreamingContentKeyRequestData(
+            forApp: certificate,
+            contentIdentifier: contentIdData,
+            // Version 1, explicitly, exactly as Apple's sample does.
+            // Left nil this negotiates a default that not every key
+            // server module accepts.
+            options: [AVContentKeyRequestProtocolVersionsKey: [1]]
+        ) { spc, error in
+            // AVFoundation calls back on its own queue; the C entry
+            // point wants Gecko's main thread, which here is this one.
+            DispatchQueue.main.async {
+                guard let spc = spc, error == nil else {
+                    avLog("SPC FAILED for \(contentId): "
+                          + "\(error?.localizedDescription ?? "no data")")
+                    return
+                }
+                avLog("SPC ready for \(contentId), \(spc.count) bytes")
+                spc.withUnsafeBytes { raw in
+                    ReynardFairPlayNotifyKeyMessage(
+                        self.playerId, contentId,
+                        raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+                }
+            }
+        }
+    }
+
     func contentKeySession(_ session: AVContentKeySession,
                            didProvide keyRequest: AVContentKeyRequest) {
-        let identifier = (keyRequest.identifier as? String) ?? "<none>"
-        avLog("content key requested for \(identifier)")
+        guard let contentId = Self.contentIdKey(for: keyRequest) else {
+            avLog("content key request with an identifier we cannot key by")
+            return
+        }
+        requests[contentId] = keyRequest
+        avLog("content key requested for \(contentId) on player \(playerId)")
 
-        // Without a licence server the request cannot be satisfied.
-        // Failing it explicitly is better than leaving it pending, which
-        // stalls playback with no diagnosis.
-        keyRequest.processContentKeyResponseError(
-            NSError(domain: "ReynardAVPlayer", code: -1, userInfo: [
-                NSLocalizedDescriptionKey:
-                    "No FairPlay licence server configured"
-            ])
-        )
+        // The page has to hear about this as an 'encrypted' event.
+        // Nothing else can raise one: Gecko's demuxer never sees this
+        // stream, so this delegate is the only source there is - and
+        // that event is what eventually produces both the certificate
+        // and the licence.
+        let initDataType: String
+        let initData: Data
+        if let skd = keyRequest.identifier as? String {
+            initDataType = "skd"
+            initData = Data(skd.utf8)
+        } else {
+            initDataType = "sinf"
+            initData = (keyRequest.identifier as? Data) ?? Data()
+        }
+        initData.withUnsafeBytes { raw in
+            ReynardFairPlayNotifyEncrypted(
+                playerId, initDataType,
+                raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+        }
+
+        // Attempted immediately in case the certificate is already
+        // here - a second protected element on a page that has already
+        // negotiated once arrives in exactly that order.
+        //
+        // What used to be here was processContentKeyResponseError -
+        // "No FairPlay licence server configured" - which failed the
+        // request outright. That does not decline one key; it fails the
+        // WHOLE ITEM, permanently, which is the Code=-1 itemStatus=2
+        // every protected stream ended on.
+        makeSPC(for: keyRequest, contentId: contentId)
+    }
+
+    /// A key ROTATION - the stream moved to a new key mid-playback,
+    /// which every long-form service does. Same handling: the page gets
+    /// another 'encrypted', asks for another licence, and the new key
+    /// replaces the old one. Without this the picture freezes at the
+    /// first key change, which is minutes into a film rather than at
+    /// its start, so it is the kind of gap that looks like a different
+    /// bug entirely.
+    func contentKeySession(
+        _ session: AVContentKeySession,
+        didProvideRenewingContentKeyRequest keyRequest: AVContentKeyRequest
+    ) {
+        contentKeySession(session, didProvide: keyRequest)
+    }
+
+    /// Worth retrying, unlike a native app's: the licence round trip
+    /// here crosses to another process, out to the page's JavaScript,
+    /// over the network to a key server, and all the way back. A
+    /// timeout on that path says "slow", not "refused".
+    func contentKeySession(_ session: AVContentKeySession,
+                           shouldRetry keyRequest: AVContentKeyRequest,
+                           reason: AVContentKeyRequestRetryReason) -> Bool {
+        switch reason {
+        case .timedOut, .receivedResponseWithExpiredLease,
+             .receivedObsoleteContentKey:
+            avLog("retrying a content key request - \(reason.rawValue)")
+            return true
+        default:
+            return false
+        }
     }
 
     func contentKeySession(_ session: AVContentKeySession,

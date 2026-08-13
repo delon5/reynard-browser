@@ -10,7 +10,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  #include "nsDebugImpl.h"
  #include "nsDirectoryServiceDefs.h"
  #include "nsDocShell.h"
-@@ -334,6 +335,31 @@
+@@ -334,6 +335,42 @@
  #include "nsIToolkitProfile.h"
  #include "nsIToolkitProfileService.h"
  
@@ -28,6 +28,17 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl);
 +void ReynardAVPlayerBrokerControl(uint64_t aKey, uint32_t aOp, double aArg);
 +void ReynardAVPlayerBrokerFrameFallback(uint64_t aKey);
++// The FairPlay half, same file, same reasoning. The certificate is
++// keyed by CHILD id rather than by player: it arrives from MediaKeys,
++// which outlives and predates any one element.
++void ReynardAVPlayerBrokerSetAppCertificate(uint64_t aChildID,
++                                            const nsTArray<uint8_t>& aCert);
++void ReynardAVPlayerBrokerGenerateKeyRequest(
++    uint64_t aKey, const nsCString& aContentId, const nsCString& aInitDataType,
++    const nsTArray<uint8_t>& aInitData);
++void ReynardAVPlayerBrokerKeyResponse(uint64_t aKey,
++                                      const nsCString& aContentId,
++                                      const nsTArray<uint8_t>& aResponse);
 +
 +// These two are defined at the END of this file rather than in
 +// AVPlayerDecoder.mm - they are ours - but they are called from
@@ -42,7 +53,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  #ifdef MOZ_WMF_CDM
  #  include "mozilla/EMEUtils.h"
  #  include "nsIWindowsMediaFoundationCDMOriginsListService.h"
-@@ -1956,6 +1982,29 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
+@@ -1956,6 +1993,29 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
    MOZ_FUZZING_IPC_DROP_PEER("ContentParent::ActorDestroy");
  #endif
  
@@ -72,7 +83,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
    if (mSendShutdownTimer) {
      mSendShutdownTimer->Cancel();
      mSendShutdownTimer = nullptr;
-@@ -3007,14 +3056,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+@@ -3007,14 +3067,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -90,7 +101,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
    } else {
      // This can fail if we've already started shutting down the compositor
      // thread. See Bug 1562763 comment 8. On Android this can fail we are are
-@@ -3193,16 +3243,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+@@ -3193,16 +3254,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -110,7 +121,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -7985,6 +8036,52 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -7985,6 +8047,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  
@@ -158,12 +169,40 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId));
 +  return IPC_OK();
 +}
++
++IPCResult ContentParent::RecvAVPlayerSetAppCertificate(
++    nsTArray<uint8_t>&& aCert) {
++  // No player id on purpose - see PContent.ipdl. The broker stores it
++  // against this child and pushes it into every player the child owns,
++  // including ones created after this point.
++  ReynardAVPlayerBrokerSetAppCertificate(static_cast<uint64_t>(ChildID()),
++                                         aCert);
++  return IPC_OK();
++}
++
++IPCResult ContentParent::RecvAVPlayerKeyGenerateRequest(
++    const uint64_t& aPlayerId, const nsCString& aContentId,
++    const nsCString& aInitDataType, nsTArray<uint8_t>&& aInitData) {
++  ReynardAVPlayerBrokerGenerateKeyRequest(
++      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId),
++      aContentId, aInitDataType, aInitData);
++  return IPC_OK();
++}
++
++IPCResult ContentParent::RecvAVPlayerKeyResponse(
++    const uint64_t& aPlayerId, const nsCString& aContentId,
++    nsTArray<uint8_t>&& aResponse) {
++  ReynardAVPlayerBrokerKeyResponse(
++      AVPlayerBrokerKey(static_cast<uint64_t>(ChildID()), aPlayerId),
++      aContentId, aResponse);
++  return IPC_OK();
++}
 +#endif
 +
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
-@@ -8006,6 +8103,186 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+@@ -8006,6 +8142,218 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
  }
  
  }  // namespace dom
@@ -276,6 +315,38 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +  printf_stderr("avPlayer: send ended key=%llu owner=%d sent=%d\n",
 +                static_cast<unsigned long long>(aKey), cp ? 1 : 0,
 +                sent ? 1 : 0);
++}
++
++// FairPlay, app process -> content process. Both of these are RARE -
++// a handful per stream, not per frame - so each one logs.
++//
++// The asset wants a key nobody has claimed. Becomes the element's
++// 'encrypted' event over there, which is what starts the page's whole
++// EME flow: this pipeline's demuxer never sees the stream, so nothing
++// else can raise that event.
++void ReynardFairPlaySendEncrypted(uint64_t aKey,
++                                  const nsCString& aInitDataType,
++                                  const nsTArray<uint8_t>& aInitData) {
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerKeyEncrypted(
++                              aKey & 0xffffffff, aInitDataType, aInitData);
++  printf_stderr(
++      "avPlayer: send encrypted key=%llu type=%s bytes=%zu owner=%d sent=%d\n",
++      static_cast<unsigned long long>(aKey), aInitDataType.get(),
++      static_cast<size_t>(aInitData.Length()), cp ? 1 : 0, sent ? 1 : 0);
++}
++
++// The SPC. Becomes the EME session's 'message' event, which the page
++// posts to its licence server.
++void ReynardFairPlaySendKeyMessage(uint64_t aKey, const nsCString& aContentId,
++                                   const nsTArray<uint8_t>& aSpc) {
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerKeyMessage(aKey & 0xffffffff,
++                                                     aContentId, aSpc);
++  printf_stderr(
++      "avPlayer: send key message key=%llu id=%s bytes=%zu owner=%d sent=%d\n",
++      static_cast<unsigned long long>(aKey), aContentId.get(),
++      static_cast<size_t>(aSpc.Length()), cp ? 1 : 0, sent ? 1 : 0);
 +}
 +
 +void ReynardAVPlayerSendFrame(uint64_t aKey, uint32_t aSurfaceId) {

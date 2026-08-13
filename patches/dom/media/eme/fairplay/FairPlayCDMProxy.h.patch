@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6fb7f0dd6c7d
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,226 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -145,6 +145,30 @@ index 000000000000..6fb7f0dd6c7d
 +  bool MaybeForwardUnsolicitedKeyRequest(nsTArray<uint8_t>&& aInitData,
 +                                         const nsACString& aInitDataType);
 +
++  // REMOTE MODE - true whenever this proxy is in a content process,
++  // which is every proxy a page can create.
++  //
++  // AVContentKeySession decrypts an AVURLAsset registered on it with
++  // addContentKeyRecipient, and that method takes an AVURLAsset and
++  // nothing else. Since the player moved to the app process the asset
++  // is over there, so a session built HERE is attached to nothing: the
++  // licence exchange on it succeeds, keyStatuses says usable, and the
++  // item still fails, because the keys and the asset never met. In
++  // remote mode no session is created here at all and the licence
++  // bytes travel over PContent instead - see the AVPlayerKey* messages
++  // in PContent.ipdl.
++  //
++  // The non-remote path below is unchanged and still runs for a
++  // single-process build, where the publish does reach the host that
++  // owns the asset.
++  const bool mRemote;
++
++  // Remote mode: an SPC arrived from the app process for this content
++  // id. Delivered as the session's 'message' event, or held if the page
++  // has not called generateRequest for that identifier yet.
++  void DeliverRemoteKeyMessage(const nsACString& aContentId,
++                               nsTArray<uint8_t>&& aSpc);
++
 +  // The application certificate, supplied by the page through
 +  // setServerCertificate. makeStreamingContentKeyRequestDataForApp
 +  // cannot produce an SPC without it, so a generateRequest before one
@@ -172,6 +196,31 @@ index 000000000000..6fb7f0dd6c7d
 +  ~FairPlayCDMProxy();
 +
 +  void RejectPromiseWithStateError(PromiseId aId, const nsCString& aReason);
++
++  // Remote mode only. Content ids are the shared name between the two
++  // processes - the skd:// URI for HLS, base64 of the raw key id for
++  // fragmented MP4 - because the app process has no notion of an EME
++  // session, and both sides already keyed by exactly that string
++  // before any of this crossed a process boundary.
++  nsTHashMap<nsCStringHashKey, nsCString> mRemoteSessionByContentId;
++  nsTHashMap<nsCStringHashKey, nsCString> mRemoteContentIdBySession;
++  // An SPC that arrived before the page called generateRequest for it,
++  // which is the ORDINARY order: AVFoundation raises its key request
++  // as soon as the playlist reaches EXT-X-KEY, and everything the page
++  // does is a reply to the 'encrypted' event that produced.
++  nsTHashMap<nsCStringHashKey, nsTArray<uint8_t>> mRemotePendingSpc;
++
++  // A generateRequest that arrived before AVPlayerDecoder::SetCDMProxy
++  // named the player, so there was no id to address it to. Flushed by
++  // BindToPlayer. Without this the request is silently dropped when the
++  // page is quick.
++  struct RemoteKeyRequest {
++    nsCString mContentId;
++    nsCString mInitDataType;
++    nsTArray<uint8_t> mInitData;
++  };
++  nsTArray<RemoteKeyRequest> mRemoteParkedRequests;
++  void SendRemoteKeyRequest(const RemoteKeyRequest& aRequest);
 +
 +  AVContentKeySession* mKeySession = nullptr;
 +  FairPlayKeyDelegate* mDelegate = nullptr;

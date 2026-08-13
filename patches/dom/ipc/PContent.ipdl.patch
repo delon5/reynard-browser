@@ -2,7 +2,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
 index 23fb64851635..6afd9d5f25df 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,9 +571,61 @@ parent:
+@@ -571,9 +571,105 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -26,6 +26,34 @@ index 23fb64851635..6afd9d5f25df 100644
 +    // AVFoundation's own. Sent at most a handful of times per process.
 +    async AVPlayerFrameFallback(uint64_t aPlayerId);
 +
++    // Reynard FairPlay: the AVContentKeySession lives in the APP process
++    // too, and for the same kind of reason the player does.
++    // addContentKeyRecipient accepts an AVURLAsset and nothing else,
++    // and since AVPlayerCreate the asset is over there - so a session
++    // built here is attached to nothing, however correct the licence
++    // exchange on it. Only the EME objects stay in this process, and
++    // the page's half of the round trip travels over these three.
++    //
++    // The application certificate is per-PROCESS rather than
++    // per-player: setServerCertificate lands on MediaKeys, which
++    // exists well before any element has a src, so there is no player
++    // to hang it on yet.
++    async AVPlayerSetAppCertificate(uint8_t[] aCert);
++
++    // generateRequest(): ask AVFoundation for an SPC covering this
++    // identifier. aContentId is that identifier in the encoding BOTH
++    // sides key by - the skd:// URI for HLS, base64 of the raw key id
++    // for fragmented MP4 - which is what lets these messages carry no
++    // invented request id to echo back.
++    async AVPlayerKeyGenerateRequest(uint64_t aPlayerId,
++                                     nsCString aContentId,
++                                     nsCString aInitDataType,
++                                     uint8_t[] aInitData);
++
++    // update(): the CKC the page got back from its licence server.
++    async AVPlayerKeyResponse(uint64_t aPlayerId, nsCString aContentId,
++                              uint8_t[] aResponse);
++
      async PExtensions();
  
  child:
@@ -42,6 +70,22 @@ index 23fb64851635..6afd9d5f25df 100644
 +                           int32_t aWidth, int32_t aHeight);
 +    async AVPlayerTime(uint64_t aPlayerId, double aSeconds);
 +    async AVPlayerEnded(uint64_t aPlayerId);
++
++    // Reynard FairPlay, the other direction.
++    //
++    // The asset reached an EXT-X-KEY nothing has claimed yet. The page
++    // has to hear about that as an 'encrypted' event, and only this
++    // process can raise one - AVPlayerDemuxer never sees the stream,
++    // so no ordinary demuxer path can produce it.
++    async AVPlayerKeyEncrypted(uint64_t aPlayerId, nsCString aInitDataType,
++                               uint8_t[] aInitData);
++
++    // The SPC AVFoundation produced, which becomes the EME session's
++    // 'message' event. Keyed by content id, not by session: the app
++    // process has no notion of an EME session, and the identifier is
++    // the one name both sides already agree on.
++    async AVPlayerKeyMessage(uint64_t aPlayerId, nsCString aContentId,
++                             uint8_t[] aSpc);
 +
 +    // A decoded frame, named by the global IOSurface id its pixels
 +    // live in. Nothing is copied and nothing large crosses: both
@@ -64,7 +108,7 @@ index 23fb64851635..6afd9d5f25df 100644
      async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
                             ManagedEndpoint<PWindowGlobalChild> windowEp,
                             TabId tabId,
-@@ -604,7 +656,8 @@ child:
+@@ -604,7 +700,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -74,7 +118,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +667,8 @@ child:
+@@ -614,7 +711,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

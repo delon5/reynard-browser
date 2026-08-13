@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..661d75d2d5f1
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,2031 @@
+@@ -0,0 +1,2214 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -130,6 +130,19 @@ index 000000000000..661d75d2d5f1
 +                                 int32_t aWidth, int32_t aHeight);
 +void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds);
 +void ReynardAVPlayerSendEnded(uint64_t aKey);
++// FairPlay, the same direction: app process -> the content process
++// that asked for this player.
++void ReynardFairPlaySendEncrypted(uint64_t aKey,
++                                  const nsCString& aInitDataType,
++                                  const nsTArray<uint8_t>& aInitData);
++void ReynardFairPlaySendKeyMessage(uint64_t aKey, const nsCString& aContentId,
++                                   const nsTArray<uint8_t>& aSpc);
++// Defined in dom/media/eme/fairplay/FairPlayCDMProxy.mm - the
++// single-process delivery path, for a build where the proxy and the
++// asset are already in the same place.
++void ReynardFairPlayDeliverKeyMessage(uintptr_t aPlayerId,
++                                      const nsACString& aContentId,
++                                      nsTArray<uint8_t>&& aSpc);
 +void ReynardAVPlayerSendFrame(uint64_t aKey, uint32_t aSurfaceId);
 +void ReynardAVPlayerSendFrameData(uint64_t aKey, const uint8_t* aY,
 +                                  uint32_t aYStride, const uint8_t* aCbCr,
@@ -787,6 +800,120 @@ index 000000000000..661d75d2d5f1
 +  printf_stderr(
 +      "avPlayer: broker created host player %llu for key %llu (%s)\n",
 +      (unsigned long long)playerId, (unsigned long long)aKey, aUrl.get());
++  // If this child already handed over a FairPlay certificate, the new
++  // player needs it before its asset reaches an EXT-X-KEY. Nothing
++  // orders createPlayer against setServerCertificate: a second
++  // protected element on a page that has already negotiated once
++  // arrives in exactly this order.
++  PushStoredAppCertificate(aKey, playerId);
++}
++
++// The FairPlay application certificate, per CONTENT PROCESS.
++//
++// setServerCertificate lands on MediaKeys, which exists before any
++// element has a src, so there is no player to hang it on when it
++// arrives. Stored against the child id and pushed into every player
++// that child owns - including ones created later, which is why
++// ReynardAVPlayerBrokerCreate consults this too.
++//
++// Leaked deliberately, like BrokeredPlayers beside it: main-thread
++// only, and a static destructor running during shutdown would race
++// teardown for no benefit.
++static std::unordered_map<uint64_t, nsTArray<uint8_t>>& AppCertificates() {
++  static auto* certificates =
++      new std::unordered_map<uint64_t, nsTArray<uint8_t>>();
++  return *certificates;
++}
++
++static void PushAppCertificate(id<GeckoAVPlayerHost> aHost,
++                               NSUInteger aPlayerId,
++                               const nsTArray<uint8_t>& aCert) {
++  if (aCert.IsEmpty() ||
++      ![aHost respondsToSelector:@selector(setAppCertificate:forPlayer:)]) {
++    return;
++  }
++  [aHost setAppCertificate:[NSData dataWithBytes:aCert.Elements()
++                                          length:aCert.Length()]
++                 forPlayer:aPlayerId];
++}
++
++// Called from ReynardAVPlayerBrokerCreate, so a player created after
++// the page has already handed over its certificate starts with it.
++static void PushStoredAppCertificate(uint64_t aKey, NSUInteger aPlayerId) {
++  auto entry = AppCertificates().find(aKey >> 32);
++  if (entry == AppCertificates().end()) {
++    return;
++  }
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (host) {
++    PushAppCertificate(host, aPlayerId, entry->second);
++  }
++}
++
++void ReynardAVPlayerBrokerSetAppCertificate(uint64_t aChildID,
++                                            const nsTArray<uint8_t>& aCert) {
++  MOZ_ASSERT(NS_IsMainThread());
++  AppCertificates()[aChildID] = aCert.Clone();
++  printf_stderr("avPlayer: FairPlay app certificate for child %llu, %zu bytes\n",
++                (unsigned long long)aChildID,
++                (size_t)aCert.Length());
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (!host) {
++    return;
++  }
++  // Every player this child already owns. The certificate normally
++  // arrives after the first key request - the page cannot call
++  // setServerCertificate until it has handled the 'encrypted' event
++  // that request produced - and the host is holding those requests
++  // waiting for exactly this.
++  for (const auto& player : BrokeredPlayers()) {
++    if ((player.first >> 32) == aChildID) {
++      PushAppCertificate(host, static_cast<NSUInteger>(player.second),
++                         aCert);
++    }
++  }
++}
++
++void ReynardAVPlayerBrokerGenerateKeyRequest(
++    uint64_t aKey, const nsCString& aContentId, const nsCString& aInitDataType,
++    const nsTArray<uint8_t>& aInitData) {
++  MOZ_ASSERT(NS_IsMainThread());
++  auto& players = BrokeredPlayers();
++  auto entry = players.find(aKey);
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (entry == players.end() || !host ||
++      ![host respondsToSelector:@selector(generateKeyRequest:contentId:initDataType:initData:)]) {
++    return;
++  }
++  printf_stderr(
++      "avPlayer: FairPlay generateRequest key=%llu id=%s type=%s %zu bytes\n",
++      (unsigned long long)aKey, aContentId.get(), aInitDataType.get(),
++      (size_t)aInitData.Length());
++  [host generateKeyRequest:static_cast<NSUInteger>(entry->second)
++                 contentId:[NSString stringWithUTF8String:aContentId.get()]
++              initDataType:[NSString stringWithUTF8String:aInitDataType.get()]
++                  initData:[NSData dataWithBytes:aInitData.Elements()
++                                          length:aInitData.Length()]];
++}
++
++void ReynardAVPlayerBrokerKeyResponse(uint64_t aKey,
++                                      const nsCString& aContentId,
++                                      const nsTArray<uint8_t>& aResponse) {
++  MOZ_ASSERT(NS_IsMainThread());
++  auto& players = BrokeredPlayers();
++  auto entry = players.find(aKey);
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (entry == players.end() || !host ||
++      ![host respondsToSelector:@selector(provideKeyResponse:contentId:response:)]) {
++    return;
++  }
++  printf_stderr("avPlayer: FairPlay CKC key=%llu id=%s %zu bytes\n",
++                (unsigned long long)aKey, aContentId.get(),
++                (size_t)aResponse.Length());
++  [host provideKeyResponse:static_cast<NSUInteger>(entry->second)
++                 contentId:[NSString stringWithUTF8String:aContentId.get()]
++                  response:[NSData dataWithBytes:aResponse.Elements()
++                                          length:aResponse.Length()]];
 +}
 +
 +void ReynardAVPlayerBrokerControl(uint64_t aKey, uint32_t aOp, double aArg) {
@@ -1884,6 +2011,62 @@ index 000000000000..661d75d2d5f1
 +        }
 +        entry->second->NotifyPlaybackPoke();
 +      }));
++}
++
++// APP PROCESS: the asset wants a key nothing has claimed yet.
++//
++// AVFoundation raises this the moment the playlist reaches its
++// EXT-X-KEY, long before the page has built any EME object. It has to
++// reach the page as an 'encrypted' event, and only the content process
++// can fire one, so this crosses back.
++//
++// Main thread, unlike the position callback: the key session's
++// delegate queue is DispatchQueue.main, and in the APP process that is
++// Gecko's main thread. (In a content process it would not be - see
++// ReynardAVPlayerNotifyMetadata - but the key session is never in a
++// content process any more, which is the whole point of this round.)
++extern "C" MOZ_EXPORT void ReynardFairPlayNotifyEncrypted(
++    uintptr_t aPlayerId, const char* aInitDataType, const uint8_t* aInitData,
++    size_t aInitDataLength) {
++  MOZ_ASSERT(NS_IsMainThread());
++  nsTArray<uint8_t> initData;
++  if (aInitData && aInitDataLength) {
++    initData.AppendElements(aInitData, aInitDataLength);
++  }
++  nsCString initDataType(aInitDataType ? aInitDataType : "");
++  printf_stderr("avPlayer: FairPlay encrypted player=%llu type=%s %zu bytes\n",
++                (unsigned long long)aPlayerId, initDataType.get(),
++                (size_t)initData.Length());
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ReynardFairPlaySendEncrypted(key, initDataType, initData);
++    return;
++  }
++  // Single process: the decoder is right here.
++  mozilla::ReynardAVPlayerDispatchEncrypted(
++      aPlayerId, std::move(initData), NS_ConvertUTF8toUTF16(initDataType));
++}
++
++// APP PROCESS: the SPC AVFoundation produced for a content id. Becomes
++// the EME session's 'message' event over in the content process, which
++// is what the page posts to its licence server.
++extern "C" MOZ_EXPORT void ReynardFairPlayNotifyKeyMessage(
++    uintptr_t aPlayerId, const char* aContentId, const uint8_t* aSpc,
++    size_t aSpcLength) {
++  MOZ_ASSERT(NS_IsMainThread());
++  nsTArray<uint8_t> spc;
++  if (aSpc && aSpcLength) {
++    spc.AppendElements(aSpc, aSpcLength);
++  }
++  nsCString contentId(aContentId ? aContentId : "");
++  printf_stderr("avPlayer: FairPlay SPC player=%llu id=%s %zu bytes\n",
++                (unsigned long long)aPlayerId, contentId.get(),
++                (size_t)spc.Length());
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ReynardFairPlaySendKeyMessage(key, contentId, spc);
++    return;
++  }
++  mozilla::ReynardFairPlayDeliverKeyMessage(aPlayerId, contentId,
++                                            std::move(spc));
 +}
 +
 +// CONTENT PROCESS: the far end of ReynardAVPlayerSendFrame. A frame the
