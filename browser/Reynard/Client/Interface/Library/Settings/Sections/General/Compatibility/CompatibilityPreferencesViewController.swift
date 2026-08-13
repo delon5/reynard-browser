@@ -28,7 +28,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("Media", comment: ""),
                     footerTitle: NSLocalizedString(
-                        "Streaming services only offer FairPlay to Safari; given any other user agent they offer Widevine, which does not exist on iOS. These two settings work together: the first asks for FairPlay, the second hides Media Source Extensions so the player picks the native HLS path that can carry it. Real iPhone Safari does not expose MSE either.",
+                        "Streaming services only offer FairPlay to Safari; given any other user agent they offer Widevine, which does not exist on iOS. These two settings work together: the first asks for FairPlay, the second hides Media Source Extensions so the player picks the native HLS path that can carry it. Real iPhone Safari does not expose MSE either. HLS-Only FairPlay is the other half of that: it stops the engine offering the fragmented-MP4 key formats, which only MSE can use, so a player is refused outright instead of being led into a path that cannot work.",
                         comment: ""
                     )
                 )
@@ -50,12 +50,14 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     private enum MediaRow: CaseIterable {
         case useSafariForStreaming
         case hideMediaSource
+        case fairPlayHLSOnly
     }
     
     private let androidUserAgentSwitch = UISwitch()
     private let customUserAgentSwitch = UISwitch()
     private let enablePerSiteOverridesSwitch = UISwitch()
     private let hideMediaSourceSwitch = UISwitch()
+    private let fairPlayHLSOnlySwitch = UISwitch()
     private let safariStreamingSwitch = UISwitch()
     
     private var displayedUserAgentRows: [UserAgentRow] {
@@ -202,6 +204,12 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             cell.selectionStyle = .none
             cell.accessoryView = hideMediaSourceSwitch
             return cell
+        case .fairPlayHLSOnly:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("HLS-Only FairPlay", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = fairPlayHLSOnlySwitch
+            return cell
         }
     }
     
@@ -257,6 +265,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         customUserAgentSwitch.isOn = Prefs.CompatibilitySettings.useCustomUserAgent
         enablePerSiteOverridesSwitch.isOn = Prefs.CompatibilitySettings.enablePerSiteUserAgentOverrides
         hideMediaSourceSwitch.isOn = Prefs.CompatibilitySettings.hideMediaSourceForSafariUA
+        fairPlayHLSOnlySwitch.isOn = Prefs.CompatibilitySettings.fairPlayHLSOnlyInitData
         safariStreamingSwitch.isOn = Prefs.CompatibilitySettings.useSafariUserAgentForStreaming
     }
     
@@ -265,6 +274,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         customUserAgentSwitch.addTarget(self, action: #selector(applyCustomUserAgentPreference), for: .valueChanged)
         enablePerSiteOverridesSwitch.addTarget(self, action: #selector(applyPerSiteOverridesPreference), for: .valueChanged)
         hideMediaSourceSwitch.addTarget(self, action: #selector(applyHideMediaSourcePreference), for: .valueChanged)
+        fairPlayHLSOnlySwitch.addTarget(self, action: #selector(applyFairPlayHLSOnlyPreference), for: .valueChanged)
         safariStreamingSwitch.addTarget(self, action: #selector(applySafariStreamingPreference), for: .valueChanged)
     }
 
@@ -282,6 +292,13 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     @objc private func applyHideMediaSourcePreference() {
         Prefs.CompatibilitySettings.hideMediaSourceForSafariUA = hideMediaSourceSwitch.isOn
         MediaCompatibilityPolicyController.applyMediaSourceVisibility()
+    }
+
+    // Read when a page builds its key system configuration, so it takes
+    // effect on the next load rather than needing a restart.
+    @objc private func applyFairPlayHLSOnlyPreference() {
+        Prefs.CompatibilitySettings.fairPlayHLSOnlyInitData = fairPlayHLSOnlySwitch.isOn
+        MediaCompatibilityPolicyController.applyFairPlayInitDataPolicy()
     }
     
     @objc private func applyCustomUserAgentPreference() {

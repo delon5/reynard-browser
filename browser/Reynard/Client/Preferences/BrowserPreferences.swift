@@ -86,6 +86,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "androidUserAgentDomains"): [],
             key("CompatibilitySettings", "useAndroidUserAgent"): true,
             key("CompatibilitySettings", "hideMediaSourceForSafariUA"): true,
+            key("CompatibilitySettings", "fairPlayHLSOnlyInitData"): true,
             key("CompatibilitySettings", "useSafariUserAgentForStreaming"): true,
             
             // Browsing
@@ -892,6 +893,18 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "CompatibilitySettings", key: "hideMediaSourceForSafariUA")
+            }
+        }
+
+        /// Whether FairPlay advertises only the `skd` init data type -
+        /// the HLS form, and the only one this engine can serve. See
+        /// media.reynard.fairplay.hls-only-initdata.
+        static var fairPlayHLSOnlyInitData: Bool {
+            get {
+                prefs.bool(forSetting: "CompatibilitySettings", key: "fairPlayHLSOnlyInitData")
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings", key: "fairPlayHLSOnlyInitData")
             }
         }
 

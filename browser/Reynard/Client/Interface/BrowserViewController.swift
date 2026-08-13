@@ -360,6 +360,11 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         // HTTPS-only mode
         HTTPSOnlyModePolicyController.applyHTTPSOnlyMode()
         MediaCompatibilityPolicyController.applyMediaSourceVisibility()
+        // The other half of the same decision, and applied here for the
+        // same reason: without it the switch only takes effect when
+        // toggled, so turning it OFF would silently revert to on at the
+        // next launch - the StaticPrefList default is true.
+        MediaCompatibilityPolicyController.applyFairPlayInitDataPolicy()
         
         // HLS/FairPlay through AVFoundation
         AVPlayerPolicyController.applyAVPlayerHLS()

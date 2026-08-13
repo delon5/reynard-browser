@@ -19,4 +19,15 @@ enum MediaCompatibilityPolicyController {
                 Prefs.CompatibilitySettings.hideMediaSourceForSafariUA,
         ])
     }
+
+    /// The other half of the same decision. Hiding MSE steers a player
+    /// away from MSE+FairPlay; this stops the engine advertising the
+    /// init data types that mean MSE+FairPlay in the first place, so
+    /// the player is refused rather than misled.
+    static func applyFairPlayInitDataPolicy() {
+        GeckoRuntime.setDefaultPrefs([
+            "media.reynard.fairplay.hls-only-initdata":
+                Prefs.CompatibilitySettings.fairPlayHLSOnlyInitData,
+        ])
+    }
 }
