@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,2219 @@
+@@ -0,0 +1,2259 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -2030,7 +2030,8 @@ index 000000000000..aec25c5a8025
 +// Gecko's main thread. (In a content process it would not be - see
 +// ReynardAVPlayerNotifyMetadata - but the key session is never in a
 +// content process any more, which is the whole point of this round.)
-+extern "C" MOZ_EXPORT void ReynardFairPlayNotifyEncrypted(
++extern "C" MOZ_EXPORT __attribute__((used)) void
++ReynardFairPlayNotifyEncrypted(
 +    uintptr_t aPlayerId, const char* aInitDataType, const uint8_t* aInitData,
 +    size_t aInitDataLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
@@ -2054,7 +2055,8 @@ index 000000000000..aec25c5a8025
 +// APP PROCESS: the SPC AVFoundation produced for a content id. Becomes
 +// the EME session's 'message' event over in the content process, which
 +// is what the page posts to its licence server.
-+extern "C" MOZ_EXPORT void ReynardFairPlayNotifyKeyMessage(
++extern "C" MOZ_EXPORT __attribute__((used)) void
++ReynardFairPlayNotifyKeyMessage(
 +    uintptr_t aPlayerId, const char* aContentId, const uint8_t* aSpc,
 +    size_t aSpcLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
@@ -2073,6 +2075,44 @@ index 000000000000..aec25c5a8025
 +  mozilla::ReynardFairPlayDeliverKeyMessage(aPlayerId, contentId,
 +                                            std::move(spc));
 +}
++
++// The two functions above are called ONLY from Swift, and that is the
++// whole reason this array has to exist.
++//
++// libxul is linked and dead-stripped BEFORE AVPlayerHost.o is linked
++// against it. A symbol with no reference from inside libxul is not a
++// dead-strip root, so it does not survive to the point where Swift
++// asks for it. MOZ_EXPORT does not save it either: default visibility
++// marks a symbol exportable, not reachable.
++//
++// Every other Reynard* entry point in this file escapes by accident -
++// each is called by a ContentChild Recv* handler, which is a reference
++// from inside libxul. Grep those and you find two apiece; grep these
++// two and you find none. Without this array the app link fails with
++//
++//   Undefined symbols for architecture arm64:
++//     "_ReynardFairPlayNotifyEncrypted", referenced from:
++//         GeckoView.ContentKeyDelegate.contentKeySession(...)
++//             in AVPlayerHost.o
++//
++// which names the Swift caller and says nothing about the cause. It
++// compiles cleanly and nm finds the symbol in AVPlayerDecoder.o, so
++// every obvious check says the code is fine.
++//
++// __attribute__((used)) makes THIS array a dead-strip root - clang
++// emits .no_dead_strip for it on Mach-O - and the array references
++// both functions, so they become reachable and are kept. Local and
++// inert: no linker flag, no export list, nothing else in libxul
++// affected. Both functions share the signature (uintptr_t, const
++// char*, const uint8_t*, size_t), so one array type holds them with
++// no casts.
++//
++// ADD ANY FUTURE SWIFT-ONLY ENTRY POINT HERE.
++__attribute__((used)) static void (*const kReynardFairPlayLinkAnchor[])(
++    uintptr_t, const char*, const uint8_t*, size_t) = {
++    &ReynardFairPlayNotifyEncrypted,
++    &ReynardFairPlayNotifyKeyMessage,
++};
 +
 +// CONTENT PROCESS: the far end of ReynardAVPlayerSendFrame. A frame the
 +// app process decoded, named by the global id of the surface holding
