@@ -53,7 +53,7 @@ index 58158272ebca..f8d1c8715c87 100644
      requests.AppendElement(KeySystemConfigRequest{
          aKeySystem, DecryptionInfo::Software, aIsPrivateBrowsing});
    }
-@@ -670,8 +698,30 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
+@@ -670,8 +698,38 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
      // and subtype names are case-insensitive."'. We're using
      // nsContentTypeParser and that is case-insensitive and converts all its
      // parameter outputs to lower case.)
@@ -74,18 +74,60 @@ index 58158272ebca..f8d1c8715c87 100644
 +    // The segments behind an HLS playlist are fMP4 or TS carrying H264
 +    // and AAC, which is exactly what mMP4 advertises, so the MP4
 +    // container support is the right answer for them.
-+    if (!supportedInMP4 && IsFairPlayKeySystem(aKeySystem.mKeySystem) &&
++    //
++    // Named rather than tested inline because the major-type check
++    // further down needs the same answer - see the second half of this
++    // change. Hoisted OUT of the !supportedInMP4 test on purpose: the
++    // flag says what the content type IS, not what MP4Decoder happened
++    // to answer first.
++    const bool isFairPlayHLS =
++        IsFairPlayKeySystem(aKeySystem.mKeySystem) &&
 +        (containerType.Type() == MEDIAMIMETYPE("application/vnd.apple.mpegurl") ||
 +         containerType.Type() == MEDIAMIMETYPE("application/x-mpegurl") ||
 +         containerType.Type() == MEDIAMIMETYPE("audio/mpegurl") ||
-+         containerType.Type() == MEDIAMIMETYPE("audio/x-mpegurl"))) {
++         containerType.Type() == MEDIAMIMETYPE("audio/x-mpegurl"));
++    if (!supportedInMP4 && isFairPlayHLS) {
 +      supportedInMP4 = true;
 +    }
 +#endif
      if (supportedInMP4 && !aKeySystem.mMP4.IsSupported()) {
        EME_LOG(
            "MediaKeySystemConfiguration (label='{}') "
-@@ -1198,6 +1248,43 @@ MediaKeySystemAccess::GetSupportedConfig(MediaKeySystemAccessRequest* aRequest,
+@@ -747,7 +805,32 @@ static Sequence<MediaKeySystemMediaCapability> GetSupportedCapabilities(
+
+     // If container type is not strictly a audio/video type, continue to the
+     // next iteration.
+-    const auto majorType = GetMajorType(containerType.Type());
++    auto majorType = GetMajorType(containerType.Type());
++#ifdef MOZ_WIDGET_UIKIT
++    // The LAST gate an HLS capability has to pass, and the one still
++    // shut. An HLS playlist is a container, not a track: its MIME major
++    // type is "application", so GetMajorType answers Invalid and the
++    // capability is dropped two lines below - even though the block
++    // above has already decided this is FairPlay-over-HLS and pointed it
++    // at the MP4 container support.
++    //
++    // Apple's own EME sample lists the playlist under videoCapabilities:
++    //
++    //   videoCapabilities: [{ contentType: 'application/vnd.apple.mpegurl',
++    //                         robustness: '' }]
++    //
++    // so the side the CALLER asked on is the answer. That also keeps the
++    // majorType != aCodecType check just below passing, and satisfies
++    // CanDecryptAndDecode's MOZ_ASSERT(aCodecType != Invalid).
++    //
++    // Only two of the four HLS spellings ever got this far without it:
++    // audio/mpegurl and audio/x-mpegurl have an audio major type.
++    // application/vnd.apple.mpegurl - the one Apple's sample and every
++    // Safari-targeted player uses - did not.
++    if (majorType == Invalid && isFairPlayHLS) {
++      majorType = aCodecType;
++    }
++#endif
+     if (majorType == Invalid) {
+       EME_LOG(
+           "MediaKeySystemConfiguration (label='{}') "
+@@ -1198,6 +1281,43 @@ MediaKeySystemAccess::GetSupportedConfig(MediaKeySystemAccessRequest* aRequest,
                     }
                   }
                 }
