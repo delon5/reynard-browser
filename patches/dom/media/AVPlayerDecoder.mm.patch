@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,2259 @@
+@@ -0,0 +1,2268 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -2030,7 +2030,14 @@ index 000000000000..aec25c5a8025
 +// Gecko's main thread. (In a content process it would not be - see
 +// ReynardAVPlayerNotifyMetadata - but the key session is never in a
 +// content process any more, which is the whole point of this round.)
-+extern "C" MOZ_EXPORT __attribute__((used)) void
++// Visibility written out rather than through MOZ_EXPORT. That macro is
++// defined to NOTHING by GeckoViewSwiftSupport.h's #else branch when
++// MOZILLA_CLIENT is unset, and a definition that silently loses its
++// visibility attribute under -fvisibility=hidden links as a LOCAL
++// symbol - `t`, not `T` - which is exactly what the device showed. An
++// attribute spelled out cannot expand to nothing.
++extern "C" __attribute__((visibility("default")))
++__attribute__((used)) void
 +ReynardFairPlayNotifyEncrypted(
 +    uintptr_t aPlayerId, const char* aInitDataType, const uint8_t* aInitData,
 +    size_t aInitDataLength) {
@@ -2055,7 +2062,9 @@ index 000000000000..aec25c5a8025
 +// APP PROCESS: the SPC AVFoundation produced for a content id. Becomes
 +// the EME session's 'message' event over in the content process, which
 +// is what the page posts to its licence server.
-+extern "C" MOZ_EXPORT __attribute__((used)) void
++// Same reasoning as ReynardFairPlayNotifyEncrypted above.
++extern "C" __attribute__((visibility("default")))
++__attribute__((used)) void
 +ReynardFairPlayNotifyKeyMessage(
 +    uintptr_t aPlayerId, const char* aContentId, const uint8_t* aSpc,
 +    size_t aSpcLength) {
