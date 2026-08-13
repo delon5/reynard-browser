@@ -1295,7 +1295,7 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
     /// timeout on that path says "slow", not "refused".
     func contentKeySession(_ session: AVContentKeySession,
                            shouldRetry keyRequest: AVContentKeyRequest,
-                           reason: AVContentKeyRequestRetryReason) -> Bool {
+                           reason: AVContentKeyRequest.RetryReason) -> Bool {
         switch reason {
         case .timedOut, .receivedResponseWithExpiredLease,
              .receivedObsoleteContentKey:
