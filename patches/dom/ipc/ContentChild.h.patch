@@ -2,7 +2,7 @@ diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
 index 1de5f331b0a3..560c1b904458 100644
 --- a/dom/ipc/ContentChild.h
 +++ b/dom/ipc/ContentChild.h
-@@ -167,16 +167,28 @@ class ContentChild final : public PContentChild,
+@@ -167,16 +167,32 @@ class ContentChild final : public PContentChild,
        Endpoint<PImageBridgeChild>&& aImageBridge,
        Endpoint<PVRManagerChild>&& aVRBridge,
        Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -30,6 +30,10 @@ index 1de5f331b0a3..560c1b904458 100644
 +  mozilla::ipc::IPCResult RecvAVPlayerEnded(const uint64_t& aPlayerId);
 +  mozilla::ipc::IPCResult RecvAVPlayerFrame(const uint64_t& aPlayerId,
 +                                            const uint32_t& aSurfaceId);
++  mozilla::ipc::IPCResult RecvAVPlayerFrameData(
++      const uint64_t& aPlayerId, mozilla::ipc::Shmem&& aPixels,
++      const int32_t& aWidth, const int32_t& aHeight,
++      const uint32_t& aYStride, const uint32_t& aCbCrStride);
 +
    mozilla::ipc::IPCResult RecvSetProcessSandbox(
        const Maybe<FileDescriptor>& aBroker);

@@ -2,7 +2,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
 index 23fb64851635..6afd9d5f25df 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,9 +571,49 @@ parent:
+@@ -571,9 +571,61 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -49,10 +49,22 @@ index 23fb64851635..6afd9d5f25df 100644
 +    // Gecko already hands video to the compositor.
 +    async AVPlayerFrame(uint64_t aPlayerId, uint32_t aSurfaceId);
 +
++    // The pixels themselves, because that id cannot be resolved:
++    // IOSurfaceLookup finds nothing across processes on iOS, not even a
++    // surface Gecko created with kIOSurfaceIsGlobal, so the message
++    // above is dead on this platform and kept only for the day it is
++    // not. The two NV12 planes travel in a Shmem with their strides,
++    // and the content process copies them into a surface IT creates -
++    // which does reach the compositor, since that is how the
++    // placeholder is displayed today.
++    async AVPlayerFrameData(uint64_t aPlayerId, Shmem aPixels,
++                            int32_t aWidth, int32_t aHeight,
++                            uint32_t aYStride, uint32_t aCbCrStride);
++
      async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
                             ManagedEndpoint<PWindowGlobalChild> windowEp,
                             TabId tabId,
-@@ -604,7 +644,8 @@ child:
+@@ -604,7 +656,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -62,7 +74,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +655,8 @@ child:
+@@ -614,7 +667,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

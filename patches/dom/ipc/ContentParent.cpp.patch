@@ -163,7 +163,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
-@@ -8006,6 +8103,131 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+@@ -8006,6 +8103,186 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
  }
  
  }  // namespace dom
@@ -288,6 +288,61 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +        "avPlayer: send frame key=%llu surface=%u owner=%d sent=%d\n",
 +        static_cast<unsigned long long>(aKey), aSurfaceId, cp ? 1 : 0,
 +        sent ? 1 : 0);
++  }
++}
++
++// The frame itself, one Shmem per frame, because naming the surface
++// does not work on iOS: IOSurfaceLookup resolves nothing across
++// processes there, so the pixels have to move.
++//
++// Row by row, not one memcpy: the strides come from two different
++// allocators and are not the same number, and a straight copy would
++// shear the picture.
++//
++// A Shmem per frame is not free - allocation plus a copy here and
++// another on the far side. The cheap version is a pool the child hands
++// back, the way PCameras does with ReleaseFrame; this is the version
++// that makes a picture appear.
++void ReynardAVPlayerSendFrameData(uint64_t aKey, const uint8_t* aY,
++                                  uint32_t aYStride, const uint8_t* aCbCr,
++                                  uint32_t aCbCrStride, int32_t aWidth,
++                                  int32_t aHeight) {
++  MOZ_ASSERT(NS_IsMainThread());
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  if (!cp || !aY || !aCbCr || aWidth <= 0 || aHeight <= 0) {
++    return;
++  }
++
++  const size_t yRows = size_t(aHeight);
++  const size_t cbcrRows = size_t((aHeight + 1) / 2);
++  const size_t yBytes = size_t(aYStride) * yRows;
++  const size_t cbcrBytes = size_t(aCbCrStride) * cbcrRows;
++
++  mozilla::ipc::Shmem shmem;
++  if (!cp->AllocShmem(yBytes + cbcrBytes, &shmem)) {
++    static bool sWarnedAlloc = false;
++    if (!sWarnedAlloc) {
++      sWarnedAlloc = true;
++      printf_stderr("avPlayer: AllocShmem failed for a %zu byte frame\n",
++                    yBytes + cbcrBytes);
++    }
++    return;
++  }
++
++  uint8_t* out = shmem.get<uint8_t>();
++  memcpy(out, aY, yBytes);
++  memcpy(out + yBytes, aCbCr, cbcrBytes);
++
++  const bool sent = cp->SendAVPlayerFrameData(aKey & 0xffffffff,
++                                              std::move(shmem), aWidth,
++                                              aHeight, aYStride, aCbCrStride);
++  static bool sReportedFrameData = false;
++  if (!sReportedFrameData) {
++    sReportedFrameData = true;
++    printf_stderr(
++        "avPlayer: send frame data key=%llu %dx%d bytes=%zu sent=%d\n",
++        static_cast<unsigned long long>(aKey), aWidth, aHeight,
++        yBytes + cbcrBytes, sent ? 1 : 0);
 +  }
 +}
 +
