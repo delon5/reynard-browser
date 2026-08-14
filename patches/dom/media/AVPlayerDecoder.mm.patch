@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2323 @@
+@@ -0,0 +0,2365 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -809,6 +809,48 @@ index 000000000000..aec25c5a8025
 +}
 +
 +static void PushStoredAppCertificate(uint64_t aKey, NSUInteger aPlayerId);
++
++// Called by NativeLayerCA when it builds a layer for a DRM-marked
++// surface. Protected frames cannot be copied, so AVFoundation must own
++// the path to the screen and the player has to be bound to a layer that
++// is really in the view hierarchy.
++//
++// The compositor knows only that the surface was marked DRM - one bit,
++// no player id. It does not need one: this runs in the same process as
++// the host, so the host is asked which player is protected and the id
++// never crosses a boundary. That matters because 58fd2b0 established a
++// global IOSurface id does not resolve across processes on iOS at all.
++//
++// Hops to main because the compositor thread is where this is called
++// from, and both the host's state and a CALayer's player binding belong
++// on main. The layer is retained across the hop.
++void ReynardAVPlayerAttachLayer(void* aLayer) {
++  if (!aLayer) {
++    return;
++  }
++  id retained = [(id)aLayer retain];
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerAttachLayer", [retained]() {
++        id<GeckoAVPlayerHost> host = AVPlayerHost();
++        if (!host ||
++            ![host respondsToSelector:@selector(protectedPlayerId)] ||
++            ![host respondsToSelector:@selector(attachLayer:to:)]) {
++          printf_stderr("avPlayer: attachLayer - host cannot take a layer\n");
++          [retained release];
++          return;
++        }
++        NSUInteger playerId = [host protectedPlayerId];
++        if (!playerId) {
++          printf_stderr("avPlayer: attachLayer - no protected player yet\n");
++          [retained release];
++          return;
++        }
++        [host attachLayer:(AVPlayerLayer*)retained to:playerId];
++        printf_stderr("avPlayer: attachLayer - bound layer to player %lu\n",
++                      (unsigned long)playerId);
++        [retained release];
++      }));
++}
 +
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());

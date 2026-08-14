@@ -2,6 +2,21 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 index 94efd9b6c370..9039890c772e 100644
 --- a/gfx/layers/NativeLayerCA.mm
 +++ b/gfx/layers/NativeLayerCA.mm
+@@ -37,5 +37,14 @@
+ @interface CALayer (PrivateSetContentsOpaque)
+ - (void)setContentsOpaque:(BOOL)opaque;
+ @end
++
++// Defined in dom/media/AVPlayerDecoder.mm, at global scope for the same
++// reason the broker entry points are: the call sites sit inside
++// namespaces where `namespace mozilla {` would reopen as a nested one.
++//
++// Hands a layer built here to the AVPlayer that owns the protected
++// stream. Declared rather than included because gfx/layers needs no new
++// include path for one function, and both halves live in libxul.
++void ReynardAVPlayerAttachLayer(void* aLayer);
+ 
+ namespace mozilla {
 @@ -167,6 +167,7 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
  
    [mOnscreenRootCALayer release];
@@ -109,6 +124,37 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
+@@ -1772,15 +1803,30 @@
+ #endif
++        // A DRM-marked surface here is protected video driven by the
++        // AVPlayer, and AVSampleBufferDisplayLayer is the wrong shape
++        // for it: nothing will ever enqueue a CMSampleBuffer, because
++        // the frames cannot be read by the CPU at all. AVFoundation has
++        // to draw them itself, so build the layer it draws into and
++        // hand it to the player. The placeholder in
++        // AVPlayerDecoder::PublishPlaceholderFrame exists precisely so
++        // a layer of the right geometry is here to be replaced.
++        if (mIsDRM) {
++          mContentCALayer = [[AVPlayerLayer layer] retain];
++          ((AVPlayerLayer*)mContentCALayer).videoGravity =
++              AVLayerVideoGravityResizeAspect;
++          ReynardAVPlayerAttachLayer(mContentCALayer);
++        } else {
+         mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
+         CMTimebaseRef timebase;
+ #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
+         CMTimebaseCreateWithSourceClock(kCFAllocatorDefault,
+                                         CMClockGetHostTimeClock(), &timebase);
+ #else
+         CMTimebaseCreateWithMasterClock(kCFAllocatorDefault,
+                                         CMClockGetHostTimeClock(), &timebase);
+ #endif
+         CMTimebaseSetRate(timebase, 1.0f);
+         [(AVSampleBufferDisplayLayer*)mContentCALayer
+             setControlTimebase:timebase];
+         CFRelease(timebase);
++        }
+       } else {
 @@ -1810,7 +1830,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      }
    }

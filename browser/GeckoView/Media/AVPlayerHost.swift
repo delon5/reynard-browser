@@ -65,6 +65,18 @@ public final class AVPlayerHost: NSObject {
     /// outliving its decoder - or the reverse - cannot dereference
     /// anything freed.
     private var players: [UInt: Player] = [:]
+    /// The player most recently handed a FairPlay licence, or 0.
+    ///
+    /// The compositor builds a layer for protected video knowing only
+    /// that the surface was marked DRM - one bit, with no player id and
+    /// no way to carry one, since a global IOSurface id does not resolve
+    /// across processes on iOS. It does not need to: the compositor and
+    /// this host share a process, so the id never crosses a boundary and
+    /// this answers which player the layer belongs to.
+    ///
+    /// A licence rather than a key session, deliberately: every player
+    /// has a session, only a protected one is ever given a CKC.
+    private var lastProtectedPlayerId: UInt = 0
     // Display link -> player id. Kept out of the Player so the link never
     // holds a strong reference back to the object whose lifetime it is
     // supposed to follow.
@@ -204,7 +216,13 @@ public final class AVPlayerHost: NSObject {
             avLog("CKC for player \(playerId), which has no delegate of ours")
             return
         }
+        withState { lastProtectedPlayerId = playerId }
         delegate.provideResponse(response, contentId: contentId)
+    }
+
+    /// The player a protected layer should bind to, or 0 if none.
+    @objc public func protectedPlayerId() -> UInt {
+        withState { lastProtectedPlayerId }
     }
 
     /// DIAGNOSTIC + likely fix for "play() ignored": the AVPlayer runs

@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,158 @@
+@@ -18,16 +18,180 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -15,6 +15,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol SwiftEventDispatcher;
 +@protocol GeckoAVPlayerHost;
 +@class AVContentKeySession;
++@class AVPlayerLayer;
 +
 +typedef NS_ENUM(NSInteger, GeckoInputHandling) {
 +  GeckoInputHandlingUnhandled = 0,
@@ -132,6 +133,27 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +- (void)provideKeyResponse:(NSUInteger)playerId
 +                 contentId:(NSString*)contentId
 +                  response:(NSData*)response;
++
++// The compositor's layer for a protected stream.
++//
++// A FairPlay-decrypted frame lives in memory the CPU may not read, so
++// the IOSurface path that carries clear video cannot carry this one -
++// copyPixelBuffer returns nothing and the plane addresses are offsets.
++// AVFoundation has to own the path to the screen, which means the
++// player is bound to a layer that is really in the view hierarchy.
++// NativeLayerCA builds that layer when the DRM mark arrives and hands
++// it over here.
++- (void)attachLayer:(AVPlayerLayer*)layer to:(NSUInteger)playerId;
++
++// The player the compositor should bind a protected layer to, or 0.
++//
++// The layer arrives from the compositor, which knows only that the
++// surface was marked DRM - one bit, no player id, and no way to carry
++// one: 58fd2b0 established that a global IOSurface id does not resolve
++// across processes on iOS at all. It does not need to. The compositor
++// and this host are in the SAME process, so the host answers which
++// player is protected and the id never crosses a boundary.
++- (NSUInteger)protectedPlayerId;
 +@end
 +
 +// The reverse direction, and the only one there is.
@@ -161,7 +183,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +197,44 @@
+@@ -55,8 +219,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -206,7 +228,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +243,83 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +265,83 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
