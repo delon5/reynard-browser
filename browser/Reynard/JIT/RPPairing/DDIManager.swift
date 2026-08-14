@@ -5,6 +5,7 @@
 //  Created by Minh Ton on 23/3/26.
 //
 
+import CryptoKit
 import Foundation
 
 final class DDIManager: NSObject {
@@ -12,6 +13,7 @@ final class DDIManager: NSObject {
         case alreadyInProgress
         case cancelled
         case invalidRemoteURL
+        case integrityCheckFailed(fileName: String)
         case sharedContainerUnavailable
         
         var errorDescription: String? {
@@ -22,6 +24,14 @@ final class DDIManager: NSObject {
                 return NSLocalizedString("Developer Disk Image download was cancelled.", comment: "")
             case .invalidRemoteURL:
                 return NSLocalizedString("Developer Disk Image source URL is invalid.", comment: "")
+            case let .integrityCheckFailed(fileName):
+                return String(
+                    format: NSLocalizedString(
+                        "Developer Disk Image integrity verification failed for %@.",
+                        comment: ""
+                    ),
+                    fileName
+                )
             case .sharedContainerUnavailable:
                 return NSLocalizedString("The shared App Group container is unavailable.", comment: "")
             }
@@ -33,10 +43,17 @@ final class DDIManager: NSObject {
     private struct DownloadItem {
         let remoteURL: URL
         let destinationURL: URL
+        let expectedSHA256: String
+    }
+
+    private struct DDIValidationReceipt: Codable, Equatable {
+        let sourceRevision: String
+        let hashes: [String: String]
     }
     
     private struct DownloadPlan {
         let rootDirectoryURL: URL
+        let receiptURL: URL
         let items: [DownloadItem]
     }
     
@@ -64,11 +81,19 @@ final class DDIManager: NSObject {
     }
     
     func hasRequiredDDIFiles() -> Bool {
-        guard let plan = try? makeDownloadPlan() else {
+        guard let plan = try? makeDownloadPlan(),
+              plan.items.allSatisfy({
+                  fileManager.fileExists(atPath: $0.destinationURL.path)
+              }),
+              let receiptData = try? Data(contentsOf: plan.receiptURL),
+              let receipt = try? JSONDecoder().decode(
+                  DDIValidationReceipt.self,
+                  from: receiptData
+              ) else {
             return false
         }
-        
-        return plan.items.allSatisfy { fileManager.fileExists(atPath: $0.destinationURL.path) }
+
+        return receipt == validationReceipt(for: plan)
     }
     
     /// TEMPORARY DIAGNOSTIC — checks the downloaded manifest's own
@@ -192,7 +217,14 @@ final class DDIManager: NSObject {
         }
         
         guard active.currentIndex < active.plan.items.count else {
-            finishActiveDownloadLocked(result: .success(()), shouldCleanup: false)
+            do {
+                let receipt = validationReceipt(for: active.plan)
+                let receiptData = try JSONEncoder().encode(receipt)
+                try receiptData.write(to: active.plan.receiptURL, options: .atomic)
+                finishActiveDownloadLocked(result: .success(()), shouldCleanup: false)
+            } catch {
+                finishActiveDownloadLocked(result: .failure(error), shouldCleanup: true)
+            }
             return
         }
         
@@ -203,10 +235,7 @@ final class DDIManager: NSObject {
                 at: item.destinationURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            
-            if fileManager.fileExists(atPath: item.destinationURL.path) {
-                try fileManager.removeItem(at: item.destinationURL)
-            }
+
         } catch {
             finishActiveDownloadLocked(result: .failure(error), shouldCleanup: true)
             return
@@ -233,11 +262,20 @@ final class DDIManager: NSObject {
                 withIntermediateDirectories: true
             )
             
-            if fileManager.fileExists(atPath: item.destinationURL.path) {
-                try fileManager.removeItem(at: item.destinationURL)
+            guard try Self.sha256(at: location) == item.expectedSHA256 else {
+                throw DDIError.integrityCheckFailed(
+                    fileName: item.destinationURL.lastPathComponent
+                )
             }
-            
-            try fileManager.moveItem(at: location, to: item.destinationURL)
+
+            if fileManager.fileExists(atPath: item.destinationURL.path) {
+                _ = try fileManager.replaceItemAt(
+                    item.destinationURL,
+                    withItemAt: location
+                )
+            } else {
+                try fileManager.moveItem(at: location, to: item.destinationURL)
+            }
         } catch {
             finishActiveDownloadLocked(result: .failure(error), shouldCleanup: true)
             return
@@ -341,22 +379,70 @@ final class DDIManager: NSObject {
         try fileManager.removeItem(at: rootDirectoryURL)
     }
     
+    private static let ddiSourceRevision = "5423e4e955fbb3a9eef3e1212acfbfc6e7a26236"
+
     private func makeDownloadPlan() throws -> DownloadPlan {
         let rootDirectoryURL = try ddiRootDirectoryURL()
-        let baseURLString = "https://github.com/doronz88/DeveloperDiskImage/raw/refs/heads/main/PersonalizedImages/Xcode_iOS_DDI_Personalized"
+        let baseURLString = "https://raw.githubusercontent.com/delon5/DeveloperDiskImage/5423e4e955fbb3a9eef3e1212acfbfc6e7a26236/PersonalizedImages/Xcode_iOS_DDI_Personalized"
         guard let baseURL = URL(string: baseURLString) else {
             throw DDIError.invalidRemoteURL
         }
-        
-        let fileNames = ["BuildManifest.plist", "Image.dmg", "Image.dmg.trustcache"]
-        let items = fileNames.map { fileName in
+
+        let artifacts: [(fileName: String, sha256: String)] = [
+            ("BuildManifest.plist", "8edd4a2f4f4ef1fbd7bfe49785d8badc673d1395d1d94d85b132ca8ab5ecaf54"),
+            ("Image.dmg", "05fd807da5e19f030fa4941f24800c965c6c77982ab572dd5d1ef778fb69f9ca"),
+            ("Image.dmg.trustcache", "36af60889ff5a737874a26daeb8e1a0139ebfebec6ec2e4d8f6a3c1bf1dce35c"),
+        ]
+        let items = artifacts.map { artifact in
             DownloadItem(
-                remoteURL: baseURL.appendingPathComponent(fileName),
-                destinationURL: rootDirectoryURL.appendingPathComponent(fileName, isDirectory: false)
+                remoteURL: baseURL.appendingPathComponent(artifact.fileName),
+                destinationURL: rootDirectoryURL.appendingPathComponent(
+                    artifact.fileName,
+                    isDirectory: false
+                ),
+                expectedSHA256: artifact.sha256
             )
         }
-        
-        return DownloadPlan(rootDirectoryURL: rootDirectoryURL, items: items)
+
+        return DownloadPlan(
+            rootDirectoryURL: rootDirectoryURL,
+            receiptURL: rootDirectoryURL.appendingPathComponent(
+                ".reynard-ddi-validation.json",
+                isDirectory: false
+            ),
+            items: items
+        )
+    }
+
+    private func validationReceipt(for plan: DownloadPlan) -> DDIValidationReceipt {
+        DDIValidationReceipt(
+            sourceRevision: Self.ddiSourceRevision,
+            hashes: Dictionary(
+                uniqueKeysWithValues: plan.items.map {
+                    ($0.destinationURL.lastPathComponent, $0.expectedSHA256)
+                }
+            )
+        )
+    }
+
+    private static func sha256(at fileURL: URL) throws -> String {
+        let fileHandle = try FileHandle(forReadingFrom: fileURL)
+        defer {
+            fileHandle.closeFile()
+        }
+
+        var hasher = SHA256()
+        while true {
+            let data = fileHandle.readData(ofLength: 1024 * 1024)
+            guard !data.isEmpty else {
+                break
+            }
+            hasher.update(data: data)
+        }
+
+        return hasher.finalize()
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
     
     private func ddiRootDirectoryURL() throws -> URL {
