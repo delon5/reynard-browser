@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,2268 @@
+@@ -0,0 +1,2302 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -406,6 +406,40 @@ index 000000000000..aec25c5a8025
 +        static_cast<const uint8_t*>(surface->GetBaseAddressOfPlane(0));
 +    const uint8_t* cbcr =
 +        static_cast<const uint8_t*>(surface->GetBaseAddressOfPlane(1));
++    // A null check is not enough, and a device crash proved it. On the
++    // first frame ever decoded here from PROTECTED content the base
++    // address came back as 0x200 - a plane offset where an address
++    // should be - and memcpy read from 512:
++    //
++    //   x1 = 0x200 (source)  x2 = 0x7e900 (518400 = 960 x 540)
++    //   far = 0x200  esr = byte READ translation fault
++    //
++    // A FairPlay-decrypted frame lives in memory the CPU may not read;
++    // that is what the protection IS. IOSurfaceLock still succeeds,
++    // there is simply no mapping, and the plane address is meaningless.
++    // Every clear frame this path has copied worked - including the
++    // same player at the same 960x540 before the stream was encrypted -
++    // so protection is the variable, not geometry.
++    //
++    // Nothing here can make such a frame copyable. AVFoundation has to
++    // own the whole path to the screen for protected content, which is
++    // what the AVPlayerLayer and its placeholder are for. This just
++    // declines to read memory that is not ours.
++    const uintptr_t kFirstPage = 0x1000;
++    const bool readable = reinterpret_cast<uintptr_t>(y) >= kFirstPage &&
++                          reinterpret_cast<uintptr_t>(cbcr) >= kFirstPage;
++    if (!readable) {
++      static bool sWarnedProtected = false;
++      if (!sWarnedProtected) {
++        sWarnedProtected = true;
++        printf_stderr(
++            "avPlayer: frame planes are not CPU-readable (y=%p cbcr=%p) - "
++            "protected content, leaving it to AVFoundation\n",
++            (void*)y, (void*)cbcr);
++      }
++      surface->Unlock(/* aReadOnly */ true);
++      return;
++    }
 +    if (y && cbcr) {
 +      ReynardAVPlayerSendFrameData(
 +          aKey, y, (uint32_t)surface->GetBytesPerRow(0), cbcr,

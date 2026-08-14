@@ -202,7 +202,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
-@@ -8006,6 +8142,218 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+@@ -8006,6 +8142,234 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
  }
  
  }  // namespace dom
@@ -381,6 +381,22 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +  MOZ_ASSERT(NS_IsMainThread());
 +  dom::ContentParent* cp = AVPlayerOwner(aKey);
 +  if (!cp || !aY || !aCbCr || aWidth <= 0 || aHeight <= 0) {
++    return;
++  }
++  // The caller checks this too. Repeated here because this is a public
++  // entry point that trusts its arguments, and the crash it is guarding
++  // against got past a null check: a protected frame reports a plane
++  // OFFSET, 0x200, where an address belongs. Nothing legitimate lives
++  // in the first page.
++  if (reinterpret_cast<uintptr_t>(aY) < 0x1000 ||
++      reinterpret_cast<uintptr_t>(aCbCr) < 0x1000) {
++    static bool sWarnedUnmapped = false;
++    if (!sWarnedUnmapped) {
++      sWarnedUnmapped = true;
++      printf_stderr(
++          "avPlayer: refusing to copy from unmapped planes (y=%p cbcr=%p)\n",
++          (const void*)aY, (const void*)aCbCr);
++    }
 +    return;
 +  }
 +
