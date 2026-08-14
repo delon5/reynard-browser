@@ -304,13 +304,13 @@ new file mode 100644
 +        AVPlayerPlaybackRegistry::Get(mPlayerId);
 +    printf_stderr(
 +        "avPlayer: track Seek to %.3f (registry duration=%.3f "
-+        "demuxer duration=%.3f position=%.3f)\n",
++        "track mInfo duration=%.3f position=%.3f)\n",
 +        aTime.ToSeconds(),
 +        seekSnapshot && seekSnapshot->mDuration.IsValid()
 +            ? seekSnapshot->mDuration.ToSeconds()
 +            : -1.0,
-+        mVideoInfo.mDuration.IsValid() ? mVideoInfo.mDuration.ToSeconds()
-+                                       : -1.0,
++        mInfo.mDuration.IsValid() ? mInfo.mDuration.ToSeconds()
++                                  : -1.0,
 +        seekSnapshot && seekSnapshot->mPosition.IsValid()
 +            ? seekSnapshot->mPosition.ToSeconds()
 +            : -1.0);
