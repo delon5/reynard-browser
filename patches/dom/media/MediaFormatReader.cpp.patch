@@ -1,0 +1,34 @@
+diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
+--- a/dom/media/MediaFormatReader.cpp
++++ b/dom/media/MediaFormatReader.cpp
+@@ -1313,7 +1313,30 @@
+   if (videoDuration.IsPositive() || audioDuration.IsPositive()) {
+     auto duration = std::max(videoDuration, audioDuration);
+     LOG("Determine mMetadataDuration=%" PRId64, duration.ToMicroseconds());
+     mInfo.mMetadataDuration = Some(duration);
+   }
++  // REYNARD DIAGNOSTIC - which VideoInfo does the reader actually use?
++  //
++  // MediaDecoderStateMachine takes its duration from
++  // MediaInfo::mMetadataDuration, computed right above from THIS mInfo -
++  // not from the VideoInfo the AVPlayer demuxer publishes and not from
++  // the copy AVPlayerTrackDemuxer holds. A capture showed those two
++  // reading invalid and infinite while MDSM completed against 38.855,
++  // so a third copy carries the stale value and this names it.
++  printf_stderr(
++      "avPlayer: reader metadata hasVideo=%d videoDur=%.3f hasAudio=%d "
++      "audioDur=%.3f -> mMetadataDuration=%.3f\n",
++      HasVideo() ? 1 : 0,
++      (HasVideo() && mInfo.mVideo.mDuration.IsValid())
++          ? mInfo.mVideo.mDuration.ToSeconds()
++          : -1.0,
++      HasAudio() ? 1 : 0,
++      (HasAudio() && mInfo.mAudio.mDuration.IsValid())
++          ? mInfo.mAudio.mDuration.ToSeconds()
++          : -1.0,
++      (mInfo.mMetadataDuration.isSome() &&
++       mInfo.mMetadataDuration->IsValid())
++          ? mInfo.mMetadataDuration->ToSeconds()
++          : -1.0);
+ 
+   mInfo.mMediaSeekable = mDemuxer->IsSeekable();
