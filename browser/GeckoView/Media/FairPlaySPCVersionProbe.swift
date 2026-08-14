@@ -26,6 +26,21 @@ public enum FairPlaySPCVersionProbe {
 
     /// Accept one explicit protocol version. Invalid input fails closed to
     /// the existing version-1 behaviour.
+    /// Whether the SPC's content identifier is the whole skd:// URI
+    /// rather than just its host.
+    ///
+    /// Apple's HLS Catalog With FPS sample takes the host, which for
+    /// skd://<uuid> is the bare uuid, and that is what this pipeline
+    /// has always sent. Amazon returns a bare HTTP 400 for an SPC that
+    /// is otherwise well-formed - correct certificate, correct key,
+    /// the only version AVFoundation will emit - so the identifier is
+    /// the one field left worth varying.
+    ///
+    /// This enum's name is now narrower than what it holds. Renaming it
+    /// would touch the verification script's invariants for no
+    /// behavioural gain, so it keeps the name and this says so.
+    public static var configuredUseFullKeyURI = false
+
     public static func selectedVersion(from rawValue: String?) -> Int {
         switch rawValue {
         case "1": return 1

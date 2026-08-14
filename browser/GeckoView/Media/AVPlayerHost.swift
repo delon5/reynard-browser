@@ -1220,9 +1220,19 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
         // 'encrypted' init data, which is what a KSM protocol wants as
         // its "uri" field.
         let contentIdData: Data?
+        var contentIdForm = "binary"
         if let identifier = request.identifier as? String {
-            let assetId = URL(string: identifier)?.host ?? identifier
-            contentIdData = Data(assetId.utf8)
+            if FairPlaySPCVersionProbe.configuredUseFullKeyURI {
+                // The whole skd:// URI - the string the playlist
+                // carries and the string the page sends alongside the
+                // challenge.
+                contentIdData = Data(identifier.utf8)
+                contentIdForm = "full-uri"
+            } else {
+                let assetId = URL(string: identifier)?.host ?? identifier
+                contentIdData = Data(assetId.utf8)
+                contentIdForm = "host"
+            }
         } else {
             contentIdData = request.identifier as? Data
         }
@@ -1256,7 +1266,8 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
                     FairPlaySPCVersionProbe.describeEncodedVersion(in: spc)
                 avLog("SPC ready for \(contentId), \(spc.count) bytes, "
                       + "requested protocol version \(protocolVersion), "
-                      + "encoded protocol version " + encodedDescription)
+                      + "encoded protocol version " + encodedDescription
+                      + ", content id " + contentIdForm)
                 spc.withUnsafeBytes { raw in
                     ReynardFairPlayNotifyKeyMessage(
                         self.playerId, contentId,

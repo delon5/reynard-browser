@@ -90,6 +90,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "fairPlayHLSOnlyInitData"): true,
             key("CompatibilitySettings", "useSafariUserAgentForStreaming"): true,
             key("CompatibilitySettings", "fairPlaySPCProtocolVersion"): 1,
+            key("CompatibilitySettings", "fairPlaySPCUseFullKeyURI"): false,
             
             // Browsing
             key("BrowsingSettings", "requestDesktopWebsite"): UIDevice.current.userInterfaceIdiom == .pad,
@@ -199,6 +200,13 @@ final class BrowserPreferences {
                             "fairPlaySPCProtocolVersion"
                         )
                     )
+                )
+            )
+        FairPlaySPCVersionProbe.configuredUseFullKeyURI =
+            UserDefaults.standard.bool(
+                forKey: key(
+                    "CompatibilitySettings",
+                    "fairPlaySPCUseFullKeyURI"
                 )
             )
         UserDefaults.standard.set(
@@ -975,6 +983,21 @@ final class BrowserPreferences {
                 prefs.set(validated, forSetting: "CompatibilitySettings",
                           key: "fairPlaySPCProtocolVersion")
                 FairPlaySPCVersionProbe.configuredVersion = validated
+            }
+        }
+
+        /// Whether the SPC carries the whole skd:// URI as its content
+        /// identifier instead of just the host. See
+        /// FairPlaySPCVersionProbe.configuredUseFullKeyURI.
+        static var fairPlaySPCUseFullKeyURI: Bool {
+            get {
+                prefs.bool(forSetting: "CompatibilitySettings",
+                           key: "fairPlaySPCUseFullKeyURI")
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings",
+                          key: "fairPlaySPCUseFullKeyURI")
+                FairPlaySPCVersionProbe.configuredUseFullKeyURI = newValue
             }
         }
 

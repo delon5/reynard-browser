@@ -52,6 +52,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         case hideMediaSource
         case fairPlayHLSOnly
         case fairPlaySPCVersion
+        case fairPlaySPCFullKeyURI
     }
     
     private let androidUserAgentSwitch = UISwitch()
@@ -59,6 +60,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
     private let enablePerSiteOverridesSwitch = UISwitch()
     private let hideMediaSourceSwitch = UISwitch()
     private let fairPlayHLSOnlySwitch = UISwitch()
+    private let fairPlaySPCFullKeyURISwitch = UISwitch()
     private let safariStreamingSwitch = UISwitch()
     
     private var displayedUserAgentRows: [UserAgentRow] {
@@ -220,6 +222,12 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
                 Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
             )
             return cell
+        case .fairPlaySPCFullKeyURI:
+            let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("FairPlay Full Key URI", comment: "")
+            cell.selectionStyle = .none
+            cell.accessoryView = fairPlaySPCFullKeyURISwitch
+            return cell
         }
     }
     
@@ -289,6 +297,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         // re-syncs it. registerDefaults does the same at launch.
         Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion =
             Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
+        fairPlaySPCFullKeyURISwitch.isOn =
+            Prefs.CompatibilitySettings.fairPlaySPCUseFullKeyURI
     }
     
     private func configureSwitches() {
@@ -297,11 +307,19 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         enablePerSiteOverridesSwitch.addTarget(self, action: #selector(applyPerSiteOverridesPreference), for: .valueChanged)
         hideMediaSourceSwitch.addTarget(self, action: #selector(applyHideMediaSourcePreference), for: .valueChanged)
         fairPlayHLSOnlySwitch.addTarget(self, action: #selector(applyFairPlayHLSOnlyPreference), for: .valueChanged)
+        fairPlaySPCFullKeyURISwitch.addTarget(self, action: #selector(applyFairPlaySPCFullKeyURIPreference), for: .valueChanged)
         safariStreamingSwitch.addTarget(self, action: #selector(applySafariStreamingPreference), for: .valueChanged)
     }
 
     // Takes effect on the next navigation, like every other user agent
     // setting here - there is nothing to push to the engine.
+    // Takes effect on the next key request - AVPlayerHost reads the
+    // probe per SPC - so there is nothing to reload and no relaunch.
+    @objc private func applyFairPlaySPCFullKeyURIPreference() {
+        Prefs.CompatibilitySettings.fairPlaySPCUseFullKeyURI =
+            fairPlaySPCFullKeyURISwitch.isOn
+    }
+
     @objc private func applySafariStreamingPreference() {
         Prefs.CompatibilitySettings.useSafariUserAgentForStreaming = safariStreamingSwitch.isOn
     }
