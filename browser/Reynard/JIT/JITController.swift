@@ -45,6 +45,16 @@ final class JITController {
     // together is worth being able to see.
     private static var orphanedAttachPIDs: Set<Int32> = []
     private static let orphanedAttachLock = NSLock()
+
+    // ADDED - fix_foreground_scoped_jit_transport.py. One of the three
+    // gates on closing the tunnel: an orphaned call is by definition one
+    // that timed out and may still be inside the FFI holding the
+    // adapter.
+    static var orphanedAttachCount: Int {
+        orphanedAttachLock.lock()
+        defer { orphanedAttachLock.unlock() }
+        return orphanedAttachPIDs.count
+    }
     private let watchdogQueue = DispatchQueue(label: "com.minh-ton.Reynard.JITController.WatchdogQueue", qos: .userInitiated)
 
     // The attach bookkeeping - attached, rejected and deferred pids
@@ -397,6 +407,43 @@ final class JITController {
             self.ledger.markApplicationInactive()
         }
     }
+
+    /// Closes the JIT transport on the way into a suspension, if and
+    /// only if nothing can still be using it.
+    ///
+    /// ADDED - see fix_foreground_scoped_jit_transport.py. Three gates,
+    /// because freeing an AdapterHandle another thread is inside an FFI
+    /// call with is a use-after-free, and that is exactly what
+    /// fix_provider_use_after_free.py was written to end:
+    ///
+    ///   attachInFlightCount   an attach this app started and is waiting on
+    ///   orphanedAttachCount   one that timed out and may still be running
+    ///   vAttachInFlightSince  a vAttach actually inside the FFI right now
+    ///
+    /// All three are read on attachQueue, which is also the queue every
+    /// attach marks itself in flight on - so no attach can start between
+    /// the check and the close.
+    ///
+    /// Skip rather than force: the next background gets another go, and a
+    /// missed close costs one cycle of JIT, where a wrong one costs a
+    /// crash.
+    func closeTunnelForSuspension() {
+        attachQueue.async {
+            let inFlight = self.ledger.attachInFlightCount()
+            let orphaned = Self.orphanedAttachCount
+            let vAttachRunning = JITEnabler.vAttachInFlightSince() != nil
+
+            guard inFlight == 0, orphaned == 0, !vAttachRunning else {
+                logger(String(
+                    format: "tunnelClose: SKIPPED - %d attach(es) in flight, %d orphaned, vAttach %@ - leaving the tunnel alone",
+                    inFlight, orphaned, vAttachRunning ? "RUNNING" : "idle"
+                ))
+                return
+            }
+
+            JITEnabler.shared.closeSharedTunnel()
+        }
+    }
     
     /// Runs the foreground re-attach steps in order, off the main
     /// thread. See fix_reattach_off_main_queue.py.
@@ -453,6 +500,17 @@ final class JITController {
             // re-arm while the teardown is standing, so the deferred
             // attaches below would start loops that immediately detach.
             JITEnabler.clearDebuggerTeardownRequest()
+
+            // ADDED - fix_foreground_scoped_jit_transport.py. The
+            // background teardown closed the tunnel, so rebuild it here
+            // rather than letting the first child discover it is gone by
+            // failing - which is the attach that becomes the "Failed to
+            // enable JIT / Error -9" screen on return from background.
+            //
+            // Cheap when it is not needed: getProviderForPID returns the
+            // cached provider and skips both createDeviceProvider and the
+            // DDI mount.
+            JITEnabler.shared.prewarmSharedTunnel()
 
             let deferred = self.ledger.drainDeferredPIDs()
 

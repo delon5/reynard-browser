@@ -110,6 +110,23 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 // still be using it).
 - (void)invalidateSharedProviderAfterTimeout NS_SWIFT_NAME(invalidateSharedProviderAfterTimeout());
 
+/// Closes the shared tunnel and FREES its adapter, which is what
+/// actually releases the socket to the pairing endpoint.
+///
+/// ADDED - see fix_foreground_scoped_jit_transport.py. The invalidate
+/// methods above deliberately never free, to avoid a use-after-free
+/// against an orphaned FFI call. That is correct on a failure path,
+/// where we cannot know what is still running - but it means the socket
+/// is never released, so no rebuild has ever succeeded in a running
+/// process. This is the deliberate counterpart, called only from the
+/// background teardown once the caller has established that nothing is
+/// in flight.
+- (void)closeSharedTunnel NS_SWIFT_NAME(closeSharedTunnel());
+
+/// Builds the shared tunnel if there is not one, so a child does not
+/// have to discover its absence by failing. See the same docstring.
+- (void)prewarmSharedTunnel NS_SWIFT_NAME(prewarmSharedTunnel());
+
 // Timestamp of when the most recent vAttach FFI call started, if it
 // might still genuinely be running - nil if none is currently thought
 // to be in flight. Set immediately before the call, cleared

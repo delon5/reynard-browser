@@ -814,6 +814,47 @@ static void jitHangBacktraceHandler(int signalNumber) {
     return provider;
 }
 
+// ADDED - see fix_foreground_scoped_jit_transport.py.
+//
+// The only caller is the background teardown, and only after it has
+// established that no attach is in flight, no orphaned call is
+// outstanding, and no vAttach is running - so nothing can still be
+// inside an FFI call holding this adapter. That is the whole difference
+// from invalidateSharedProviderAfterTimeout, which cannot know any of
+// those things and therefore must not free.
+//
+// dispatch_async rather than sync: providerQueue can be occupied by a
+// createDeviceProvider for many seconds, and the caller is a lifecycle
+// path that must not block on it.
+- (void)closeSharedTunnel {
+    dispatch_async(self.providerQueue, ^{
+        DeviceProvider *doomed = self.sharedProvider;
+        if (!doomed) {
+            logger(@"tunnelClose: nothing to close - no shared tunnel");
+            return;
+        }
+        self.sharedProvider = NULL;
+        self.didEnsureDDIMounted = NO;
+        freeDeviceProvider(doomed);
+        logger(@"tunnelClose: shared tunnel closed, adapter freed - the socket to the pairing endpoint is released");
+    });
+}
+
+// ADDED - fix_foreground_scoped_jit_transport.py. Deliberately routed
+// through getProviderForPID: rather than calling createDeviceProvider
+// directly, so the DDI mount and the caching behave exactly as they do
+// for a real attach. pid 0 is not a process, it is a label for this
+// call in the getProvider logs.
+- (void)prewarmSharedTunnel {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *prewarmError = nil;
+        DeviceProvider *provider = [self getProviderForPID:0 error:&prewarmError];
+        logger([NSString stringWithFormat:@"tunnelPrewarm: %@ at foreground%@",
+                provider ? @"tunnel ready" : @"FAILED",
+                provider ? @"" : [NSString stringWithFormat:@" - %@", prewarmError.localizedDescription ?: @"(no error set)"]]);
+    });
+}
+
 - (void)dealloc {
     resetJITEndpointMonitor();
     if (_sharedProvider) {

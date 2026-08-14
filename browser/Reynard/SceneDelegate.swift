@@ -495,24 +495,66 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // captures, so this is ample for a loop between iterations and
         // still well inside the background window.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            // Gated OFF by default - see fix_no_cancel_experiment.py.
+            // UNGATED - see fix_foreground_scoped_jit_transport.py.
             //
-            // Cancelling desyncs the connection permanently rather than
-            // briefly disturbing it: a retry 50ms later succeeded once
-            // in ten. The detach that follows then fails, leaving the
-            // process attached with a dead debugger connection - which
-            // is the state that hangs the app on the next transition.
+            // The three reasons this was turned off, and where each
+            // stands now:
             //
-            // Loops still parked here have RUNNING targets, and a
-            // running extension can answer XPC. Leaving them alone may
-            // simply be better.
-            if Prefs.ExperimentalSettings.cancelsDebugSessionsOnBackground {
-                JITEnabler.cancelAllDebugSessionCalls()
-            }
-            
-            if cancelTaskIdentifier != .invalid {
-                application.endBackgroundTask(cancelTaskIdentifier)
-                cancelTaskIdentifier = .invalid
+            //   "cancelling desyncs the connection permanently"
+            //       still true, now irrelevant - the adapter is closed
+            //       two steps below, so there is nothing left to desync.
+            //
+            //   "the detach that follows then fails, leaving the process
+            //    attached with a dead debugger connection"
+            //       that cost is already paid on EVERY background: 52
+            //       Detach failed and zero Detach response in the
+            //       2026-08-14 capture. Cancelling does not create the
+            //       state, it only decides when we enter it.
+            //
+            //   "loops still parked here have RUNNING targets ... leaving
+            //    them alone may simply be better"
+            //       that was the hypothesis, and it has been the shipped
+            //       behaviour for four builds. It produced the 07:02 and
+            //       11:53 watchdog kills. It does not hold.
+            //
+            // The structural reason to prefer this over the 0x03
+            // interrupt we spent four builds compensating for:
+            // debug_proxy_cancel aborts OUR OWN in-flight read,
+            // client-side. Nothing goes over the wire, so unlike the
+            // interrupt it cannot stop the target. It is the only way to
+            // get a loop out of a blocking continue without touching the
+            // process.
+            //
+            // dumpDebugLoopState above has just printed WAITING for every
+            // session, and WAITING means the target is running. So this
+            // runs at a moment we have verified is safe, rather than
+            // letting the connection die at an arbitrary point inside a
+            // three-minute suspension - possibly while a child is stopped
+            // at a fault with nobody left to service it.
+            JITEnabler.cancelAllDebugSessionCalls()
+
+            // Then the transport itself, once the loops it was feeding
+            // have had a second to notice and exit.
+            //
+            // This is the half that makes JIT recoverable without a force
+            // quit. freeDeviceProvider is the only thing in the app that
+            // calls adapter_free, and until now it ran only from dealloc
+            // - so a retired tunnel kept its socket to 10.7.0.1:49152
+            // open for the life of the process, and every rebuild was
+            // refused. Measured: 6 successful tunnel creates against 102
+            // failures, and all 6 were the first call of a fresh process.
+            //
+            // Closing here also sends the FIN before iOS can suspend us,
+            // so the peer does not keep a half-open connection that
+            // refuses the NEXT launch too - the 96-minute dead window on
+            // 2026-08-14 that only airplane mode cleared.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                JITController.shared.closeTunnelForSuspension()
+
+                if cancelTaskIdentifier != .invalid {
+                    application.endBackgroundTask(cancelTaskIdentifier)
+                    cancelTaskIdentifier = .invalid
+                }
             }
         }
         
