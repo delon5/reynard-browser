@@ -191,9 +191,19 @@ final class AttachLedger {
         childTypes[pid] = type
     }
 
-    /// Drops children that are no longer alive. childTypes is purely
-    /// diagnostic - unlike attachedPIDs and rejectedPIDs it feeds no
-    /// attach decision - and pids recycle anyway, so an evicted child
+    /// Drops children that are no longer alive.
+    ///
+    /// CHANGED - childTypes is no longer purely diagnostic. knownType
+    /// reads it, and since
+    /// fix_defer_helper_attach_until_type_known.py the Helper path uses
+    /// a nil answer to tell "this pid has not been rejected" apart from
+    /// "nobody has said what this pid is yet", and defers rather than
+    /// attaching in the second case. Pruning a LIVE
+    /// child would therefore make its request defer again - so the
+    /// liveness test below is what keeps this safe, and it must stay a
+    /// liveness test.
+    ///
+    /// Pids recycle anyway, so an evicted child
     /// that somehow returns is simply re-announced. Without this the
     /// map grew by one entry per child process for the life of the
     /// app: content processes churn on every tab sleep and recovery,

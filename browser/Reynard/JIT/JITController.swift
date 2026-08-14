@@ -82,6 +82,16 @@ final class JITController {
     // thread too once the queued work finishes, so this flag is only
     // ever touched from one thread - safe without needing a lock.
     private var isProcessingHelperAttachRequests = false
+
+    // ADDED - fix_defer_helper_attach_until_type_known.py. When each
+    // pid's Helper request was first seen with no announced type, so
+    // the deferral can be bounded rather than waiting forever on a
+    // child nobody ever announces.
+    //
+    // Touched only from inside processPendingHelperAttachRequests'
+    // attachQueue block, which is the same serial queue AttachLedger is
+    // confined to.
+    private var helperTypeWaitStart: [Int32: CFAbsoluteTime] = [:]
     // The 3-second helper-attach fallback, stored so the lifecycle
     // observers can stop it while the app is backgrounded. It used to be
     // created anonymously and never invalidated, so it woke the CPU
@@ -603,7 +613,24 @@ final class JITController {
         // Recorded for EVERY child, before any decision about
         // attaching - socket/gpu/rdd are rejected below and would
         // otherwise never appear in any diagnostic.
-        attachQueue.async { self.ledger.noteChild(pid, type: processType) }
+        attachQueue.async {
+            self.ledger.noteChild(pid, type: processType)
+
+            // ADDED - fix_defer_helper_attach_until_type_known.py. The
+            // fast retry for a Helper request this pid's own arrival
+            // deferred. Posted from INSIDE this block so it cannot run
+            // before noteChild has recorded the type, and onto main
+            // because processPendingHelperAttachRequests asserts it is
+            // called there.
+            //
+            // Best effort: that function is non-reentrant, so a post
+            // landing while a pass is still running is dropped. The
+            // polling timer is the backstop, and the 3.5s budget in the
+            // deferral falls through to today's behaviour if both miss.
+            DispatchQueue.main.async {
+                self.processPendingHelperAttachRequests(source: "TYPE ANNOUNCED")
+            }
+        }
 
         // ADDED - see fix_child_heartbeat_instrument.py. Recorded
         // synchronously and into the ObjC layer's own map, NOT the
@@ -1467,6 +1494,14 @@ extension JITController {
             // practice - rules out any pathological, runaway scenario
             // rather than looping genuinely unbounded.
             let maxPasses = 50
+
+            // ADDED - fix_defer_helper_attach_until_type_known.py. A
+            // deferred request is left on disk on purpose, so without
+            // this the very next pass of this same loop would see it
+            // again and spin against it until maxPasses ran out. Held
+            // across passes, cleared when this call returns.
+            var deferredForTypeThisCall: Set<Int32> = []
+
             for _ in 0..<maxPasses {
                 guard let contents = try? fileManager.contentsOfDirectory(atPath: containerURL.path) else {
                     return
@@ -1477,7 +1512,17 @@ extension JITController {
                 // Filename format: jit-attach-request-{pid}_{token} - PID
                 // kept in the name for easy debugging/readability, token
                 // is what actually makes each attempt unique.
-                let pendingRequests = contents.filter { $0.hasPrefix(Self.jitAttachRequestFilePrefix) }
+                let pendingRequests = contents
+                    .filter { $0.hasPrefix(Self.jitAttachRequestFilePrefix) }
+                    // Deferred this call - see deferredForTypeThisCall.
+                    .filter { name in
+                        let remainder = name.dropFirst(Self.jitAttachRequestFilePrefix.count)
+                        guard let underscoreIndex = remainder.firstIndex(of: "_"),
+                              let pid = Int32(remainder[remainder.startIndex..<underscoreIndex]) else {
+                            return true
+                        }
+                        return !deferredForTypeThisCall.contains(pid)
+                    }
                 
                 guard !pendingRequests.isEmpty else {
                     return
@@ -1505,6 +1550,50 @@ extension JITController {
                         continue
                     }
                     
+                    // ADDED - see
+                    // fix_defer_helper_attach_until_type_known.py.
+                    //
+                    // Deliberately ABOVE the removal below: leaving the
+                    // request on disk is what makes the next drain pass
+                    // pick it up, once childProcessDidStart has said
+                    // what this pid is.
+                    //
+                    // Without this the isRejected check further down is
+                    // asked about a pid nobody has announced yet and
+                    // answers "not rejected", so rdd and utility
+                    // processes are attached despite shouldAttach
+                    // refusing them - 80 of 80 attaches in the
+                    // 2026-08-14 capture began 8-77ms before the type
+                    // was known, and every rdd in every session with a
+                    // working tunnel was attached.
+                    //
+                    // Bounded: a child nobody ever announces must still
+                    // get an answer inside its 5s WaitForJITReadySignal
+                    // deadline, so after 3.5s this falls through and
+                    // attaches exactly as it did before.
+                    if self.ledger.knownType(pid) == nil,
+                       !self.ledger.isAttached(pid) {
+                        let now = CFAbsoluteTimeGetCurrent()
+                        let waitedSince = self.helperTypeWaitStart[pid] ?? now
+                        if self.helperTypeWaitStart[pid] == nil {
+                            self.helperTypeWaitStart[pid] = now
+                        }
+                        let waited = now - waitedSince
+                        if waited < 3.5 {
+                            deferredForTypeThisCall.insert(pid)
+                            logger(String(
+                                format: "helperAttach: pid %d deferred - type not announced yet (%.0fms so far)",
+                                pid, waited * 1000.0
+                            ))
+                            continue
+                        }
+                        logger(String(
+                            format: "helperAttach: pid %d type never announced after %.0fms - attaching anyway",
+                            pid, waited * 1000.0
+                        ))
+                    }
+                    self.helperTypeWaitStart.removeValue(forKey: pid)
+
                     // Removed first, before the attach attempt itself - if
                     // this process were to crash mid-attach, a stale
                     // request file would otherwise sit here forever,
