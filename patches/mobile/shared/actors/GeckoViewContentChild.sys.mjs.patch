@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,1130 @@
+@@ -17,6 +17,1168 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -1097,6 +1097,44 @@ index 9ca6e15..799455c 100644
 +    };
 +  }
 +
++  // ---- what the page sees when deciding to offer fullscreen ---------
++  //
++  // Protected video renders through an AVPlayerLayer, so Gecko's element
++  // receives one placeholder frame and then nothing. If the page gates
++  // its fullscreen control on the element - intrinsic size, readyState,
++  // webkitSupportsFullscreen - it would read state that no longer
++  // reflects what is on screen, and the control would vanish.
++  //
++  // That is a guess, which is exactly why it is being measured rather
++  // than fixed. Reports only when the string changes, so a stable player
++  // prints one line, not one per second.
++  var lastVideoState = "";
++  setInterval(function () {
++    try {
++      var v = document.querySelector("video");
++      if (!v) {
++        return;
++      }
++      var state =
++        "readyState=" + v.readyState +
++        " network=" + v.networkState +
++        " size=" + v.videoWidth + "x" + v.videoHeight +
++        " dur=" + (isFinite(v.duration) ? v.duration.toFixed(1) : String(v.duration)) +
++        " paused=" + (v.paused ? 1 : 0) +
++        " supportsFS=" +
++          (typeof v.webkitSupportsFullscreen === "boolean"
++            ? (v.webkitSupportsFullscreen ? 1 : 0)
++            : "absent") +
++        " inFS=" + (v.webkitDisplayingFullscreen ? 1 : 0) +
++        " reqFS=" + (typeof v.requestFullscreen === "function" ? 1 : 0) +
++        " docFSEnabled=" + (document.fullscreenEnabled ? 1 : 0);
++      if (state !== lastVideoState) {
++        lastVideoState = state;
++        debug("VIDEO", state);
++      }
++    } catch (e) {}
++  }, 1000);
++
 +  window.addEventListener("unhandledrejection", function (e) {
 +    debug("UNHANDLED REJECTION:", describe(e.reason));
 +  });
@@ -1133,7 +1171,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +1191,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +1229,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -1470,7 +1508,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1638,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1676,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1489,7 +1527,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1665,77 @@
+@@ -199,14 +1703,77 @@
      return false;
    }
 +

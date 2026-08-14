@@ -77,6 +77,13 @@ public final class AVPlayerHost: NSObject {
     /// A licence rather than a key session, deliberately: every player
     /// has a session, only a protected one is ever given a CKC.
     private var lastProtectedPlayerId: UInt = 0
+    /// Layers bound by attachLayer, so destroy() can unbind them.
+    ///
+    /// Without this a destroyed player leaves layer.player pointing at it.
+    /// Prime tears an element down and builds another mid-session - a
+    /// capture caught player=1 and player=2 in one run - so the compositor
+    /// can be left showing a layer bound to a player that no longer exists.
+    private var attachedLayers: [UInt: AVPlayerLayer] = [:]
     // Display link -> player id. Kept out of the Player so the link never
     // holds a strong reference back to the object whose lifetime it is
     // supposed to follow.
@@ -1009,6 +1016,20 @@ public final class AVPlayerHost: NSObject {
 
     @objc public func destroy(_ id: UInt) {
         avLog("HOST destroy(\(id))")
+        // Unbind first. layer.player holding a torn-down player is what
+        // leaves the compositor showing a dead layer, and nothing else
+        // clears it - the layer belongs to NativeLayerCA, which has no
+        // idea the player went away.
+        let staleLayer = withState { () -> AVPlayerLayer? in
+            if lastProtectedPlayerId == id {
+                lastProtectedPlayerId = 0
+            }
+            return attachedLayers.removeValue(forKey: id)
+        }
+        if let staleLayer {
+            staleLayer.player = nil
+            avLog("detached layer from \(id)")
+        }
         guard let entry = withState({ players.removeValue(forKey: id) }) else {
             return
         }
@@ -1049,6 +1070,7 @@ public final class AVPlayerHost: NSObject {
             return
         }
         layer.player = entry.player
+        withState { attachedLayers[id] = layer }
         avLog("attached layer to \(id)")
     }
 
