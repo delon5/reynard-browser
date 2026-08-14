@@ -51,6 +51,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         case useSafariForStreaming
         case hideMediaSource
         case fairPlayHLSOnly
+        case fairPlaySPCVersion
     }
     
     private let androidUserAgentSwitch = UISwitch()
@@ -210,6 +211,15 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             cell.selectionStyle = .none
             cell.accessoryView = fairPlayHLSOnlySwitch
             return cell
+        case .fairPlaySPCVersion:
+            // Three values, so a tap cycles rather than pushing a
+            // picker screen for one number.
+            let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("FairPlay SPC Version", comment: "")
+            cell.detailTextLabel?.text = String(
+                Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
+            )
+            return cell
         }
     }
     
@@ -233,7 +243,14 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             }
             navigationController?.pushViewController(PerSiteUserAgentOverridesViewController(), animated: true)
         case .media:
-            break
+            guard MediaRow.allCases.indices.contains(indexPath.row),
+                  MediaRow.allCases[indexPath.row] == .fairPlaySPCVersion else {
+                return
+            }
+            let current = Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
+            Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion =
+                current >= 3 ? 1 : current + 1
+            tableView.reloadRows(at: [indexPath], with: .none)
         }
     }
     
@@ -267,6 +284,11 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         hideMediaSourceSwitch.isOn = Prefs.CompatibilitySettings.hideMediaSourceForSafariUA
         fairPlayHLSOnlySwitch.isOn = Prefs.CompatibilitySettings.fairPlayHLSOnlyInitData
         safariStreamingSwitch.isOn = Prefs.CompatibilitySettings.useSafariUserAgentForStreaming
+        // Pushes the stored value into the GeckoView probe as a side
+        // effect of the getter/setter pair, so opening this screen also
+        // re-syncs it. registerDefaults does the same at launch.
+        Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion =
+            Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
     }
     
     private func configureSwitches() {

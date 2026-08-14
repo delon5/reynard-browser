@@ -14,6 +14,7 @@ NAVIGATION_HISTORY_TEST_BINARY="${TMPDIR:-/tmp}/reynard-navigation-history-tests
 TOOLBAR_LAYOUT_TEST_BINARY="${TMPDIR:-/tmp}/reynard-toolbar-layout-tests"
 PAGE_MENU_LAYOUT_TEST_BINARY="${TMPDIR:-/tmp}/reynard-page-menu-layout-tests"
 PAGE_ZOOM_VIEWPORT_TEST_BINARY="${TMPDIR:-/tmp}/reynard-page-zoom-viewport-tests"
+FAIRPLAY_SPC_VERSION_TEST_BINARY="${TMPDIR:-/tmp}/reynard-fairplay-spc-version-tests"
 PAGE_ZOOM_COMPATIBILITY_TEST_BINARY="${TMPDIR:-/tmp}/reynard-page-zoom-compatibility-tests"
 IMAGE_DECODE_TEST_BINARY="${TMPDIR:-/tmp}/reynard-image-decode-tests"
 BOOKMARK_ICON_IMAGE_POLICY_TEST_BINARY="${TMPDIR:-/tmp}/reynard-bookmark-icon-image-policy-tests"
@@ -325,6 +326,42 @@ if ! rg -q 'release-preflight\.sh" --clean' \
 	exit 1
 fi
 
+FAIRPLAY_AVPLAYER_HOST="$ROOT_DIR/browser/GeckoView/Media/AVPlayerHost.swift"
+FAIRPLAY_EME_PATCH="$ROOT_DIR/patches/mobile/shared/actors/GeckoViewContentChild.sys.mjs.patch"
+
+if rg -q 'spc\.prefix\(16\)|String\(format: "%02x"' \
+    "$FAIRPLAY_AVPLAYER_HOST"; then
+    echo "FairPlay still logs raw SPC bytes." >&2
+    exit 1
+fi
+if ! rg -q 'AVContentKeyRequestProtocolVersionsKey: \[protocolVersion\]' \
+    "$FAIRPLAY_AVPLAYER_HOST"; then
+    echo "FairPlay SPC generation is not using the validated singleton version." >&2
+    exit 1
+fi
+if [ "$(rg -c 'spcIssued\.remove\(contentId\)' \
+    "$FAIRPLAY_AVPLAYER_HOST" || true)" -ne 1 ]; then
+    echo "FairPlay one-SPC state is reset outside the fresh-request path." >&2
+    exit 1
+fi
+# The page-error diagnostics are allowed to exist, but only inside the
+# shim - which the actor installs solely when
+# media.reynard.eme.webkitmediakeys-shim.enabled is true AND the host is
+# one of WEBKIT_MEDIA_KEYS_SHIM_HOSTS. A page outside that list never
+# sees a line of them. What must never happen is them escaping that
+# gate, so this asserts the gate rather than their absence.
+if rg -q 'UNHANDLED REJECTION:' "$FAIRPLAY_EME_PATCH"; then
+    if ! rg -q 'media\.reynard\.eme\.webkitmediakeys-shim\.enabled' \
+        "$FAIRPLAY_EME_PATCH"; then
+        echo "FairPlay page diagnostics are present without the shim pref." >&2
+        exit 1
+    fi
+    if ! rg -q 'WEBKIT_MEDIA_KEYS_SHIM_HOSTS' "$FAIRPLAY_EME_PATCH"; then
+        echo "FairPlay page diagnostics are present without the host list." >&2
+        exit 1
+    fi
+fi
+
 xcrun --find swiftc >/dev/null
 mkdir -p "$MODULE_CACHE"
 swiftc \
@@ -523,6 +560,14 @@ swiftc \
 	-o "$PAGE_ZOOM_VIEWPORT_TEST_BINARY"
 "$PAGE_ZOOM_VIEWPORT_TEST_BINARY"
 rm -f "$PAGE_ZOOM_VIEWPORT_TEST_BINARY"
+
+MACOSX_DEPLOYMENT_TARGET=13.0 swiftc \
+	-module-cache-path "$MODULE_CACHE" \
+	"$ROOT_DIR/browser/GeckoView/Media/FairPlaySPCVersionProbe.swift" \
+	"$SCRIPT_DIR/FairPlaySPCVersionProbeTests.swift" \
+	-o "$FAIRPLAY_SPC_VERSION_TEST_BINARY"
+"$FAIRPLAY_SPC_VERSION_TEST_BINARY"
+rm -f "$FAIRPLAY_SPC_VERSION_TEST_BINARY"
 
 swiftc \
 	-module-cache-path "$MODULE_CACHE" \

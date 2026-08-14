@@ -1113,19 +1113,14 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
     /// Content ids whose request is waiting for a certificate.
     private var awaitingCertificate: [String] = []
 
-    /// Content ids whose AVContentKeyRequest has already produced an
-    /// SPC. A key request yields exactly ONE - a second
+    /// Content ids whose current AVContentKeyRequest has already attempted
+    /// SPC generation. A request gets exactly ONE attempt - a second
     /// makeStreamingContentKeyRequestData on a request already awaiting
-    /// its response fails with AVFoundationErrorDomain -11879 - and
-    /// there are two callers that each think they are the one to start
-    /// it: the certificate arriving flushes anything held, and the
-    /// page's generateRequest adopts the same held request. A capture
-    /// showed both firing microseconds apart, one SPC ready and one
-    /// SPC FAILED for the same id.
+    /// or holding its response fails with AVFoundationErrorDomain -11879.
     ///
-    /// Cleared when a CKC is applied and when AVFoundation raises a
-    /// fresh request for the same id, so key rotation and renewal are
-    /// unaffected.
+    /// Reset only when AVFoundation supplies a different request object
+    /// for the same content id. Applying a CKC completes the exchange but
+    /// does not make that answered request eligible for another SPC.
     private var spcIssued = Set<String>()
 
     init(playerId: UInt) {
@@ -1180,10 +1175,6 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
             avLog("CKC for \(contentId) with no pending request")
             return
         }
-        // The exchange for this id is over; a later request under the
-        // same id - key rotation, renewal, a fresh load - is entitled
-        // to its own SPC.
-        spcIssued.remove(contentId)
         request.processContentKeyResponse(
             AVContentKeyResponse(fairPlayStreamingKeyResponseData: ckc))
         avLog("CKC applied for \(contentId), \(ckc.count) bytes")
@@ -1235,38 +1226,37 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
         } else {
             contentIdData = request.identifier as? Data
         }
+        // Read per request, not once per process: the preference behind
+        // it is a switch in Compatibility, and waiting for a relaunch to
+        // observe a knob whose whole purpose is a single A/B against a
+        // key server is a needless build cycle.
+        let protocolVersion = FairPlaySPCVersionProbe.configuredVersion
         request.makeStreamingContentKeyRequestData(
             forApp: certificate,
             contentIdentifier: contentIdData,
-            // Version 1, explicitly, exactly as Apple's sample does.
-            // Left nil this negotiates a default that not every key
-            // server module accepts.
-            options: [AVContentKeyRequestProtocolVersionsKey: [1]]
+            options: [
+                AVContentKeyRequestProtocolVersionsKey: [protocolVersion],
+            ]
         ) { spc, error in
             // AVFoundation calls back on its own queue; the C entry
             // point wants Gecko's main thread, which here is this one.
             DispatchQueue.main.async {
                 guard let spc = spc, error == nil else {
-                    avLog("SPC FAILED for \(contentId): "
+                    avLog("SPC FAILED for \(contentId) at protocol version "
+                          + "\(protocolVersion): "
                           + "\(error?.localizedDescription ?? "no data")")
                     return
                 }
-                // An FPS SPC opens with a 4-byte big-endian version.
-                // Amazon refused a licence request built from one of
-                // these with "license.drm_service.invalid_request", and
-                // the version is the first thing worth ruling in or
-                // out: makeStreamingContentKeyRequestData is being told
-                // AVContentKeyRequestProtocolVersionsKey: [1], while
-                // Amazon advertises com.apple.fps.1_0, 2_0 AND 3_0.
-                //
-                // 00 00 00 01 here means v1. Sixteen bytes of header
-                // only - the rest is a licence request for a real
-                // account and does not belong in a log.
-                let head = spc.prefix(16)
-                    .map { String(format: "%02x", $0) }
-                    .joined(separator: " ")
+                // The byte count is the only thing tying this line to the
+                // content process's "webkitkeymessage, N bytes", and the
+                // content id is the only thing saying which key it is
+                // about once rotation is in play. Both have been
+                // load-bearing in every capture in this series.
+                let encodedDescription =
+                    FairPlaySPCVersionProbe.describeEncodedVersion(in: spc)
                 avLog("SPC ready for \(contentId), \(spc.count) bytes, "
-                      + "head \(head)")
+                      + "requested protocol version \(protocolVersion), "
+                      + "encoded protocol version " + encodedDescription)
                 spc.withUnsafeBytes { raw in
                     ReynardFairPlayNotifyKeyMessage(
                         self.playerId, contentId,
@@ -1282,10 +1272,13 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
             avLog("content key request with an identifier we cannot key by")
             return
         }
+        let isNewRequest = requests[contentId] !== keyRequest
         requests[contentId] = keyRequest
-        // A NEW request object for this id supersedes any earlier one,
-        // so whatever SPC that one produced no longer counts.
-        spcIssued.remove(contentId)
+        // Only a genuinely new request object is entitled to another SPC.
+        // A duplicate callback for the same object keeps the one-shot gate.
+        if isNewRequest {
+            spcIssued.remove(contentId)
+        }
         avLog("content key requested for \(contentId) on player \(playerId)")
 
         // The page has to hear about this as an 'encrypted' event.

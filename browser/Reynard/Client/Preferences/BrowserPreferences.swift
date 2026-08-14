@@ -88,6 +88,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "hideMediaSourceForSafariUA"): true,
             key("CompatibilitySettings", "fairPlayHLSOnlyInitData"): true,
             key("CompatibilitySettings", "useSafariUserAgentForStreaming"): true,
+            key("CompatibilitySettings", "fairPlaySPCProtocolVersion"): 1,
             
             // Browsing
             key("BrowsingSettings", "requestDesktopWebsite"): UIDevice.current.userInterfaceIdiom == .pad,
@@ -920,6 +921,38 @@ final class BrowserPreferences {
             }
         }
         
+        /// Which FairPlay protocol version SPC generation asks for.
+        ///
+        /// Amazon refused a licence request built from a v1 SPC with
+        /// license.drm_service.invalid_request while advertising
+        /// com.apple.fps.1_0, 2_0 AND 3_0, so which version its key
+        /// server actually wants is an open question worth being able
+        /// to answer without editing code. 1, 2 or 3; anything else
+        /// falls back to 1.
+        ///
+        /// Written straight through to the GeckoView probe, because
+        /// AVPlayerHost lives in the GeckoView module and cannot see
+        /// this one.
+        static var fairPlaySPCProtocolVersion: Int {
+            get {
+                let stored = prefs.integer(
+                    forSetting: "CompatibilitySettings",
+                    key: "fairPlaySPCProtocolVersion"
+                )
+                return FairPlaySPCVersionProbe.selectedVersion(
+                    from: String(stored)
+                )
+            }
+            set {
+                let validated = FairPlaySPCVersionProbe.selectedVersion(
+                    from: String(newValue)
+                )
+                prefs.set(validated, forSetting: "CompatibilitySettings",
+                          key: "fairPlaySPCProtocolVersion")
+                FairPlaySPCVersionProbe.configuredVersion = validated
+            }
+        }
+
         static var customUserAgent: String {
             get {
                 prefs.string(forSetting: "CompatibilitySettings", key: "customUserAgent") ?? ""
