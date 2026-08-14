@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import GeckoView
 import UIKit
 
 typealias Prefs = BrowserPreferences
