@@ -111,6 +111,20 @@ struct ReynardMigrationTransaction {
             try fileSystem.checkpoint(.duringPreferenceImport)
 
             try verifyAppliedBackup(staged, importedPreferences: importedPreferences)
+
+            // Removing the journal is the durable commit point. Recovery treats an
+            // operation without a journal as committed and only removes its debris.
+            //
+            // The import is applied and verified by this point, so a failed unlink
+            // must not reach the catch below with journalWritten still set - that
+            // would roll back committed data over an I/O error.
+            do {
+                try fileSystem.removeItem(at: journalURL)
+                journalWritten = false
+            } catch {
+                journalWritten = false
+            }
+
             try? fileSystem.removeItem(at: operationRoot)
             removeMigrationRootIfEmpty(migrationRoot)
         } catch {

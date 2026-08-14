@@ -34,6 +34,8 @@ final class FaviconStore {
     private static let imageFilePrefix = "img-"
     private static let maxHTMLBytes = 768 * 1024
     private static let maxImageBytes = 2 * 1024 * 1024
+    private static let maxImagePixelCount = 4 * 1024 * 1024
+    private static let maxImageDimension = 2_048
     private static let maxRedirectDepth = 3
     private static let minimumTouchIconSideLength = 57
     private static let safariSharedUIFramework = dlopen(
@@ -98,12 +100,13 @@ final class FaviconStore {
     private var database: OpaquePointer?
     private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     
-    private lazy var session: URLSession = {
+    private let networkConfiguration: URLSessionConfiguration = {
         let configuration = URLSessionConfiguration.default
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 10
-        return URLSession(configuration: configuration)
+        return configuration
     }()
     private lazy var metadataUserAgent: String = {
         let version = ProcessInfo.processInfo.operatingSystemVersion
@@ -272,22 +275,18 @@ final class FaviconStore {
         stateQueue.async {
             self.activeRequests.values.forEach { $0.cancel() }
             self.activeRequests.removeAll()
-            
-            let imageKeys = self.fetchImageKeysLocked()
-            _ = self.executeLocked(
+
+            guard self.executeLocked(
                 """
                 DELETE FROM favicon_associations;
                 DELETE FROM favicon_sources;
                 DELETE FROM favicon_images;
                 """
-            )
-            
-            for imageKey in imageKeys {
-                let imageURL = self.imageFileURL(for: imageKey)
-                if self.fileManager.fileExists(atPath: imageURL.path) {
-                    try? self.fileManager.removeItem(at: imageURL)
-                }
+            ) else {
+                return
             }
+
+            self.removeAllImageFilesLocked()
         }
     }
     
@@ -547,16 +546,29 @@ final class FaviconStore {
         let imageKey = Self.sha256(remoteImage.data)
         let imageURL = imageFileURL(for: imageKey)
         let transparencyAnalysisResult = Self.transparencyAnalysisResult(for: remoteImage.image)
-        
-        if !fileManager.fileExists(atPath: imageURL.path) {
-            try? remoteImage.data.write(to: imageURL, options: .atomic)
+
+        let didCreateImageFile: Bool
+        if fileManager.fileExists(atPath: imageURL.path) {
+            didCreateImageFile = false
+        } else {
+            do {
+                try remoteImage.data.write(to: imageURL, options: .atomic)
+                didCreateImageFile = true
+            } catch {
+                return
+            }
         }
-        
+
         let scopeKey = faviconScopeKey(for: pageURL, iconURL: remoteImage.url)
         guard executeLocked("BEGIN IMMEDIATE TRANSACTION;") else {
+            removeCreatedImageIfUntrackedLocked(
+                imageURL,
+                imageKey: imageKey,
+                didCreate: didCreateImageFile
+            )
             return
         }
-        
+
         guard upsertImageLocked(
             imageKey: imageKey,
             transparencyAnalysisResult: transparencyAnalysisResult,
@@ -565,11 +577,21 @@ final class FaviconStore {
               upsertSourceURLLocked(remoteImage.url.absoluteString, imageKey: imageKey),
               upsertAssociationLocked(scopeKey: scopeKey, imageKey: imageKey, iconURL: remoteImage.url.absoluteString, now: now) else {
             _ = executeLocked("ROLLBACK TRANSACTION;")
+            removeCreatedImageIfUntrackedLocked(
+                imageURL,
+                imageKey: imageKey,
+                didCreate: didCreateImageFile
+            )
             return
         }
-        
+
         guard executeLocked("COMMIT TRANSACTION;") else {
             _ = executeLocked("ROLLBACK TRANSACTION;")
+            removeCreatedImageIfUntrackedLocked(
+                imageURL,
+                imageKey: imageKey,
+                didCreate: didCreateImageFile
+            )
             return
         }
     }
@@ -607,6 +629,7 @@ final class FaviconStore {
                 try? fileManager.removeItem(at: imageURL)
             }
         }
+        removeOrphanedImageFilesLocked()
     }
     
     private func lookupAssociationLocked(for pageURL: URL) -> SiteAssociation? {
@@ -824,21 +847,31 @@ final class FaviconStore {
     }
     
     private func fetchImageKeysLocked() -> [String] {
+        Array(trackedImageKeysLocked() ?? []).sorted()
+    }
+
+    private func trackedImageKeysLocked() -> Set<String>? {
         guard let statement = prepareStatementLocked(
             "SELECT image_key FROM favicon_images;"
         ) else {
-            return []
+            return nil
         }
-        
+
         defer {
             sqlite3_finalize(statement)
         }
-        
-        var imageKeys: [String] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            imageKeys.append(string(from: statement, at: 0))
+
+        var imageKeys = Set<String>()
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_ROW {
+                imageKeys.insert(string(from: statement, at: 0))
+            } else if result == SQLITE_DONE {
+                return imageKeys
+            } else {
+                return nil
+            }
         }
-        return imageKeys
     }
     
     private func deleteExpiredAssociationsLocked(cutoff: TimeInterval) -> Bool {
@@ -875,6 +908,66 @@ final class FaviconStore {
     
     private func imageFileURL(for imageKey: String) -> URL {
         storage.directoryURL.appendingPathComponent(Self.imageFilePrefix + imageKey, isDirectory: false)
+    }
+
+    private func removeCreatedImageIfUntrackedLocked(
+        _ imageURL: URL,
+        imageKey: String,
+        didCreate: Bool
+    ) {
+        guard didCreate,
+              let trackedImageKeys = trackedImageKeysLocked(),
+              !trackedImageKeys.contains(imageKey) else {
+            return
+        }
+        try? fileManager.removeItem(at: imageURL)
+    }
+
+    private func removeOrphanedImageFilesLocked() {
+        guard let trackedImageKeys = trackedImageKeysLocked(),
+              let imageURLs = try? fileManager.contentsOfDirectory(
+                  at: storage.directoryURL,
+                  includingPropertiesForKeys: [.isRegularFileKey],
+                  options: []
+              ) else {
+            return
+        }
+
+        for imageURL in imageURLs {
+            let fileName = imageURL.lastPathComponent
+            guard fileName.hasPrefix(Self.imageFilePrefix),
+                  let values = try? imageURL.resourceValues(
+                      forKeys: [.isRegularFileKey]
+                  ),
+                  values.isRegularFile == true else {
+                continue
+            }
+            let imageKey = String(fileName.dropFirst(Self.imageFilePrefix.count))
+            if !trackedImageKeys.contains(imageKey) {
+                try? fileManager.removeItem(at: imageURL)
+            }
+        }
+    }
+
+    private func removeAllImageFilesLocked() {
+        guard let imageURLs = try? fileManager.contentsOfDirectory(
+            at: storage.directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else {
+            return
+        }
+
+        for imageURL in imageURLs {
+            guard imageURL.lastPathComponent.hasPrefix(Self.imageFilePrefix),
+                  let values = try? imageURL.resourceValues(
+                      forKeys: [.isRegularFileKey]
+                  ),
+                  values.isRegularFile == true else {
+                continue
+            }
+            try? fileManager.removeItem(at: imageURL)
+        }
     }
     
     private func requestScopeKey(for pageURL: URL) -> String {
@@ -968,7 +1061,10 @@ final class FaviconStore {
         request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
         request.setValue(metadataUserAgent, forHTTPHeaderField: "User-Agent")
         
-        guard let (data, response) = await data(for: request),
+        guard let (data, response) = await data(
+            for: request,
+            maximumBytes: Self.maxHTMLBytes
+        ),
               data.count <= Self.maxHTMLBytes else {
             return nil
         }
@@ -998,9 +1094,16 @@ final class FaviconStore {
         request.httpMethod = "GET"
         request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
         
-        guard let (data, response) = await data(for: request),
+        guard let (data, response) = await data(
+            for: request,
+            maximumBytes: Self.maxImageBytes
+        ),
               data.count <= Self.maxImageBytes,
-              let image = UIImage(data: data) else {
+              let image = BoundedImageDecoder.image(
+                  from: data,
+                  maximumPixelCount: Self.maxImagePixelCount,
+                  maximumDimension: Self.maxImageDimension
+              ) else {
             return nil
         }
         
@@ -1012,7 +1115,10 @@ final class FaviconStore {
         request.httpMethod = "GET"
         request.setValue("application/manifest+json,application/json", forHTTPHeaderField: "Accept")
         
-        guard let (data, response) = await data(for: request),
+        guard let (data, response) = await data(
+            for: request,
+            maximumBytes: Self.maxHTMLBytes
+        ),
               data.count <= Self.maxHTMLBytes,
               let manifest = try? JSONSerialization.jsonObject(with: data) else {
             return []
@@ -1073,26 +1179,18 @@ final class FaviconStore {
         return min(pixelWidth, pixelHeight) >= Self.minimumTouchIconSideLength
     }
     
-    private func data(for request: URLRequest) async -> (Data, URLResponse)? {
-        await withCheckedContinuation { continuation in
-            let task = session.dataTask(with: request) { data, response, error in
-                guard error == nil,
-                      let data,
-                      let response else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                if let httpResponse = response as? HTTPURLResponse,
-                   !(200...299).contains(httpResponse.statusCode) {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                continuation.resume(returning: (data, response))
-            }
-            task.resume()
+    private func data(
+        for request: URLRequest,
+        maximumBytes: Int
+    ) async -> (Data, URLResponse)? {
+        guard let output = await BoundedURLDataLoader.data(
+            for: request,
+            configuration: networkConfiguration,
+            maximumBytes: maximumBytes
+        ) else {
+            return nil
         }
+        return (output.data, output.response)
     }
     
     // MARK: - HTML Parsing

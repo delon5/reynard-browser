@@ -33,6 +33,8 @@ final class SiteMetadataStore {
     private static let imageFilePrefix = "img-"
     private static let maxHTMLBytes = 768 * 1024
     private static let maxImageBytes = 4 * 1024 * 1024
+    private static let maxImagePixelCount = 16 * 1024 * 1024
+    private static let maxImageDimension = 4_096
     private static let maxRedirectDepth = 3
     
     private struct StorageURLs {
@@ -57,12 +59,13 @@ final class SiteMetadataStore {
     private var records: [String: SiteMetadataRecord] = [:]
     private var activeRequests: [String: Task<SiteMetadataSnapshot?, Never>] = [:]
     
-    private lazy var session: URLSession = {
+    private let networkConfiguration: URLSessionConfiguration = {
         let configuration = URLSessionConfiguration.default
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 8
         configuration.timeoutIntervalForResource = 15
-        return URLSession(configuration: configuration)
+        return configuration
     }()
     
     private lazy var metaTagExpression = try! NSRegularExpression(
@@ -91,7 +94,9 @@ final class SiteMetadataStore {
         
         stateQueue.sync {
             prepareStorageLocked()
-            loadRecordsLocked()
+            if loadRecordsLocked() {
+                removeOrphanedImageFilesLocked()
+            }
         }
     }
     
@@ -163,17 +168,23 @@ final class SiteMetadataStore {
             let removedRecords = self.records.filter { key, _ in
                 !retainedKeys.contains(key)
             }
-            
+
             guard !removedRecords.isEmpty else {
                 return
             }
-            
+
+            var candidateRecords = self.records
             for key in removedRecords.keys {
-                self.records[key] = nil
+                candidateRecords[key] = nil
             }
-            
-            self.removeUnreferencedImagesLocked(removedImageKeys: removedRecords.values.compactMap(\.ogImageKey))
-            self.saveRecordsLocked()
+            guard self.saveRecordsLocked(candidateRecords) else {
+                return
+            }
+
+            self.records = candidateRecords
+            self.removeUnreferencedImagesLocked(
+                removedImageKeys: removedRecords.values.compactMap(\.ogImageKey)
+            )
         }
     }
     
@@ -183,21 +194,34 @@ final class SiteMetadataStore {
         try? fileManager.createDirectory(at: storage.directoryURL, withIntermediateDirectories: true)
     }
     
-    private func loadRecordsLocked() {
-        guard let data = try? Data(contentsOf: storage.indexURL) else {
+    private func loadRecordsLocked() -> Bool {
+        guard fileManager.fileExists(atPath: storage.indexURL.path) else {
             records = [:]
-            return
+            return true
         }
-        
-        records = (try? JSONDecoder().decode([String: SiteMetadataRecord].self, from: data)) ?? [:]
+        guard let data = try? Data(contentsOf: storage.indexURL),
+              let decodedRecords = try? JSONDecoder().decode(
+                  [String: SiteMetadataRecord].self,
+                  from: data
+              ) else {
+            records = [:]
+            return false
+        }
+
+        records = decodedRecords
+        return true
     }
-    
-    private func saveRecordsLocked() {
-        guard let data = try? JSONEncoder().encode(records) else {
-            return
+
+    private func saveRecordsLocked(
+        _ candidateRecords: [String: SiteMetadataRecord]
+    ) -> Bool {
+        do {
+            let data = try JSONEncoder().encode(candidateRecords)
+            try data.write(to: storage.indexURL, options: .atomic)
+            return true
+        } catch {
+            return false
         }
-        
-        try? data.write(to: storage.indexURL, options: .atomic)
     }
     
     private func snapshotLocked(for sanitizedURL: URL) -> SiteMetadataSnapshot? {
@@ -217,18 +241,24 @@ final class SiteMetadataStore {
     }
     
     private func storeLocked(sanitizedURL: URL, finalURL: URL, metadata: [String: String], remoteImage: RemoteImage?) -> SiteMetadataSnapshot {
-        let imageKey: String?
+        var imageKey: String?
+        var newlyCreatedImageURL: URL?
         if let remoteImage {
             let key = Self.sha256(remoteImage.data)
             let imageURL = imageFileURL(for: key)
-            if !fileManager.fileExists(atPath: imageURL.path) {
-                try? remoteImage.data.write(to: imageURL, options: .atomic)
+            if fileManager.fileExists(atPath: imageURL.path) {
+                imageKey = key
+            } else {
+                do {
+                    try remoteImage.data.write(to: imageURL, options: .atomic)
+                    imageKey = key
+                    newlyCreatedImageURL = imageURL
+                } catch {
+                    imageKey = nil
+                }
             }
-            imageKey = key
-        } else {
-            imageKey = nil
         }
-        
+
         let record = SiteMetadataRecord(
             url: sanitizedURL.absoluteString,
             finalURL: finalURL.absoluteString,
@@ -236,14 +266,32 @@ final class SiteMetadataStore {
             ogImageKey: imageKey,
             updatedAt: Date()
         )
-        records[sanitizedURL.absoluteString] = record
-        saveRecordsLocked()
-        
+        var candidateRecords = records
+        let previousRecord = candidateRecords.updateValue(
+            record,
+            forKey: sanitizedURL.absoluteString
+        )
+        let didPersist = saveRecordsLocked(candidateRecords)
+
+        if didPersist {
+            records = candidateRecords
+            if let previousImageKey = previousRecord?.ogImageKey,
+               previousImageKey != imageKey {
+                removeUnreferencedImagesLocked(
+                    removedImageKeys: [previousImageKey]
+                )
+            }
+        } else if let imageURL = newlyCreatedImageURL,
+                  let imageKey,
+                  !records.values.compactMap(\.ogImageKey).contains(imageKey) {
+            try? fileManager.removeItem(at: imageURL)
+        }
+
         return SiteMetadataSnapshot(
             url: sanitizedURL,
             finalURL: finalURL,
             metadata: metadata,
-            ogImageKey: imageKey,
+            ogImageKey: didPersist ? imageKey : nil,
             ogImage: remoteImage?.image
         )
     }
@@ -269,6 +317,32 @@ final class SiteMetadataStore {
     
     private func imageFileURL(for imageKey: String) -> URL {
         storage.directoryURL.appendingPathComponent(Self.imageFilePrefix + imageKey, isDirectory: false)
+    }
+
+    private func removeOrphanedImageFilesLocked() {
+        let retainedImageKeys = Set(records.values.compactMap(\.ogImageKey))
+        guard let imageURLs = try? fileManager.contentsOfDirectory(
+            at: storage.directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else {
+            return
+        }
+
+        for imageURL in imageURLs {
+            let fileName = imageURL.lastPathComponent
+            guard fileName.hasPrefix(Self.imageFilePrefix),
+                  let values = try? imageURL.resourceValues(
+                      forKeys: [.isRegularFileKey]
+                  ),
+                  values.isRegularFile == true else {
+                continue
+            }
+            let imageKey = String(fileName.dropFirst(Self.imageFilePrefix.count))
+            if !retainedImageKeys.contains(imageKey) {
+                try? fileManager.removeItem(at: imageURL)
+            }
+        }
     }
     
     // MARK: - Fetching
@@ -302,7 +376,10 @@ final class SiteMetadataStore {
         request.httpMethod = "GET"
         request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
         
-        guard let (data, response) = await data(for: request),
+        guard let (data, response) = await data(
+            for: request,
+            maximumBytes: Self.maxHTMLBytes
+        ),
               data.count <= Self.maxHTMLBytes else {
             return nil
         }
@@ -332,35 +409,34 @@ final class SiteMetadataStore {
         request.httpMethod = "GET"
         request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
         
-        guard let (data, response) = await data(for: request),
+        guard let (data, response) = await data(
+            for: request,
+            maximumBytes: Self.maxImageBytes
+        ),
               data.count <= Self.maxImageBytes,
-              let image = UIImage(data: data) else {
+              let image = BoundedImageDecoder.image(
+                  from: data,
+                  maximumPixelCount: Self.maxImagePixelCount,
+                  maximumDimension: Self.maxImageDimension
+              ) else {
             return nil
         }
         
         return RemoteImage(image: image, data: data, url: response.url ?? url)
     }
     
-    private func data(for request: URLRequest) async -> (Data, URLResponse)? {
-        await withCheckedContinuation { continuation in
-            let task = session.dataTask(with: request) { data, response, error in
-                guard error == nil,
-                      let data,
-                      let response else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                if let httpResponse = response as? HTTPURLResponse,
-                   !(200...299).contains(httpResponse.statusCode) {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                
-                continuation.resume(returning: (data, response))
-            }
-            task.resume()
+    private func data(
+        for request: URLRequest,
+        maximumBytes: Int
+    ) async -> (Data, URLResponse)? {
+        guard let output = await BoundedURLDataLoader.data(
+            for: request,
+            configuration: networkConfiguration,
+            maximumBytes: maximumBytes
+        ) else {
+            return nil
         }
+        return (output.data, output.response)
     }
     
     // MARK: - HTML Parsing

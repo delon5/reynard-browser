@@ -16,6 +16,18 @@ protocol SystemMediaSessionObserver: AnyObject {
 }
 
 final class SystemMediaSession: MediaSessionDelegate {
+    private static let maxArtworkBytes = 8 * 1024 * 1024
+    private static let maxArtworkPixelCount = 4 * 1024 * 1024
+    private static let maxArtworkDimension = 2_048
+    private static let artworkNetworkConfiguration: URLSessionConfiguration = {
+        let configuration = URLSessionConfiguration.default
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 20
+        return configuration
+    }()
+
     /// The one instance. See fix_carplay_media_session.py.
     ///
     /// Shared rather than owned by TabManagerImpl because the CarPlay
@@ -38,7 +50,8 @@ final class SystemMediaSession: MediaSessionDelegate {
         weak var session: GeckoSession?
         var nowPlayingInfo: [String: Any] = [:]
         var features: MediaSessionFeatures = [.seekForward, .seekBackward, .seekTo]
-        var artworkTask: URLSessionDataTask?
+        var artworkTask: BoundedURLDataLoader?
+        var artworkGeneration: UInt64 = 0
         var playbackState = PlaybackState.none
         var positionState: MediaSessionPositionState?
         
@@ -131,10 +144,17 @@ final class SystemMediaSession: MediaSessionDelegate {
     
     func onMetadata(session: GeckoSession, metadata: MediaSessionMetadata) {
         let state = state(for: session)
+
+        state.artworkTask?.cancel()
+        state.artworkTask = nil
+        state.artworkGeneration &+= 1
+        let artworkGeneration = state.artworkGeneration
+        state.nowPlayingInfo.removeValue(forKey: MPMediaItemPropertyArtwork)
+
         state.nowPlayingInfo[MPMediaItemPropertyTitle] = metadata.title ?? ""
         state.nowPlayingInfo[MPMediaItemPropertyArtist] = metadata.artist ?? ""
         state.nowPlayingInfo[MPMediaItemPropertyAlbumTitle] = metadata.album ?? ""
-        
+
         if activeSession === session {
             nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
         } else if state.playbackState == .playing {
@@ -143,26 +163,49 @@ final class SystemMediaSession: MediaSessionDelegate {
             // of metadata. See fix_no_lockscreen_without_metadata.py.
             activate(session, state: state)
         }
-        
-        state.artworkTask?.cancel()
-        state.artworkTask = nil
-        
-        if let artworkURLString = metadata.artworkUrl,
-           let artworkURL = URL(string: artworkURLString) {
-            let task = URLSession.shared.dataTask(with: artworkURL) { [weak self, weak state] data, _, _ in
-                guard let data, let image = UIImage(data: data) else { return }
+
+        guard let artworkURLString = metadata.artworkUrl,
+              let artworkURL = URL(string: artworkURLString) else {
+            return
+        }
+
+        var request = URLRequest(url: artworkURL)
+        request.httpMethod = "GET"
+        request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        let loader = BoundedURLDataLoader(
+            request: request,
+            configuration: Self.artworkNetworkConfiguration,
+            maximumBytes: Self.maxArtworkBytes
+        )
+        state.artworkTask = loader
+
+        loader.start { [weak self, weak state, weak loader] output in
+            let image = output.flatMap {
+                BoundedImageDecoder.image(
+                    from: $0.data,
+                    maximumPixelCount: Self.maxArtworkPixelCount,
+                    maximumDimension: Self.maxArtworkDimension
+                )
+            }
+
+            DispatchQueue.main.async {
+                guard let state,
+                      let loader,
+                      state.artworkGeneration == artworkGeneration,
+                      state.artworkTask === loader else {
+                    return
+                }
+                state.artworkTask = nil
+                guard let self, let image else {
+                    return
+                }
+
                 let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-                DispatchQueue.main.async {
-                    guard let self, let state else { return }
-                    state.artworkTask = nil
-                    state.nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
-                    if self.activeSession === state.session {
-                        self.nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
-                    }
+                state.nowPlayingInfo[MPMediaItemPropertyArtwork] = artwork
+                if self.activeSession === state.session {
+                    self.nowPlayingCenter.nowPlayingInfo = state.nowPlayingInfo
                 }
             }
-            task.resume()
-            state.artworkTask = task
         }
     }
     

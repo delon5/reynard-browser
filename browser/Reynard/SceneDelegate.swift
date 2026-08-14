@@ -59,12 +59,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         browserViewController.sessionManager.applicationDidBecomeActive()
         browserViewController.privateBrowsingLockCoordinator.presentLockIfNeeded(animated: true)
-        guard let browserViewController = window?.rootViewController as? BrowserViewController else {
-            return
-        }
-        
         browserViewController.startScreenOrientationHandling()
-        browserViewController.sessionManager.applicationDidBecomeActive()
         browserViewController.tabManager.applicationDidBecomeActive()
     }
     
