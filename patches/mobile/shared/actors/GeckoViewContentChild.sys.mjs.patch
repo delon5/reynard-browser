@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,1033 @@
+@@ -17,6 +17,1130 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -885,6 +885,76 @@ index 9ca6e15..799455c 100644
 +    }
 +  }
 +
++  // The request body's STRUCTURE, never its contents.
++  //
++  // Amazon returns 400 with "code": null and the bare word "Invalid",
++  // which reads like field validation rather than a DRM refusal - a
++  // service names an unknown key or a dead entitlement in its code
++  // field. Whether the envelope Prime built is complete is therefore
++  // the question, and top-level keys with types and lengths answer it
++  // without a value ever being printed.
++  //
++  // Nested objects are reported as object(N keys) rather than
++  // recursed: one level deeper is where credentials would start
++  // showing up as key names, and the answer does not need it.
++  function describeBody(body) {
++    if (body === undefined || body === null) {
++      return "none";
++    }
++    if (typeof body !== "string") {
++      // FormData, Blob, ArrayBuffer, URLSearchParams. Type and size
++      // only; there is nothing here worth unpacking.
++      var kind = "object";
++      try {
++        kind = Object.prototype.toString.call(body).slice(8, -1);
++      } catch (e) {}
++      var size = "";
++      try {
++        if (typeof body.size === "number") size = "(" + body.size + ")";
++        else if (typeof body.byteLength === "number")
++          size = "(" + body.byteLength + ")";
++      } catch (e) {}
++      return kind + size;
++    }
++    var parsed = null;
++    try {
++      parsed = JSON.parse(body);
++    } catch (e) {
++      return "text(" + body.length + ")";
++    }
++    if (parsed === null || typeof parsed !== "object") {
++      return "json-scalar(" + body.length + ")";
++    }
++    var bits = [];
++    try {
++      var keys = Object.keys(parsed);
++      for (var i = 0; i < keys.length && i < 24; i++) {
++        var k = keys[i];
++        var v = parsed[k];
++        if (v === null) {
++          bits.push(k + ":null");
++        } else if (typeof v === "string") {
++          bits.push(k + ":string(" + v.length + ")");
++        } else if (typeof v === "number" || typeof v === "boolean") {
++          // A length is meaningless here and the value is not ours to
++          // print, so the type stands alone.
++          bits.push(k + ":" + typeof v);
++        } else if (Object.prototype.toString.call(v) === "[object Array]") {
++          bits.push(k + ":array(" + v.length + ")");
++        } else {
++          var n = 0;
++          try {
++            n = Object.keys(v).length;
++          } catch (e) {}
++          bits.push(k + ":object(" + n + " keys)");
++        }
++      }
++    } catch (e) {
++      return "json(unreadable)";
++    }
++    return "json{" + bits.join(" ") + "}";
++  }
++
 +  function logResponse(method, url, status, body) {
 +    debug(
 +      "NET",
@@ -912,6 +982,26 @@ index 9ca6e15..799455c 100644
 +      try {
 +        interesting = DRM_URL.test(url);
 +      } catch (e) {}
++      if (interesting) {
++        try {
++          var shape;
++          if (init && init.body !== undefined && init.body !== null) {
++            shape = describeBody(init.body);
++          } else if (input && typeof input === "object" && input.url) {
++            // fetch(new Request(url, {body})): the body lives on the
++            // Request, not on init, and the call above has already
++            // consumed it - so it cannot be read here. Say that, rather
++            // than report "none", which would read as "Prime sent no
++            // body" and point at the wrong half of the question this
++            // line exists to answer. If this ever prints, move the
++            // capture above the nativeFetch call and clone the Request.
++            shape = "on-Request(not readable after dispatch)";
++          } else {
++            shape = describeBody(null);
++          }
++          debug("NET", method, safeUrl(url), "request", shape);
++        } catch (e) {}
++      }
 +      if (!interesting || !result || typeof result.then !== "function") {
 +        return result;
 +      }
@@ -977,6 +1067,13 @@ index 9ca6e15..799455c 100644
 +      var self = this;
 +      try {
 +        if (DRM_URL.test(String(self.__reynardUrl || ""))) {
++          debug(
++            "NET",
++            self.__reynardMethod || "GET",
++            safeUrl(self.__reynardUrl || ""),
++            "request",
++            describeBody(arguments.length ? arguments[0] : null)
++          );
 +          self.addEventListener("loadend", function () {
 +            var body = "";
 +            try {
@@ -1036,7 +1133,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +1094,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +1191,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -1373,7 +1470,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1541,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1638,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1392,7 +1489,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1568,77 @@
+@@ -199,14 +1665,77 @@
      return false;
    }
 +
