@@ -439,8 +439,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // makes at every background. Only the interrupt and the detach
         // are skipped. The loops stay alive, parked in their continue,
         // and the next background after media stops tears down normally.
-        if browserViewController.sessionManager.hasSystemMediaSession {
-            logger("backgroundTeardown: skipping the debug-session detach - PiP or system media is live and its content process must keep running")
+        let preservesSystemMedia = browserViewController.sessionManager.hasSystemMediaSession
+        if preservesSystemMedia {
+            logger("backgroundTeardown: preserving the whole JIT teardown - PiP, CarPlay or system media is live and its content process must keep running")
         } else {
             JITEnabler.requestDetachForAllDebugSessions()
         }
@@ -457,7 +458,35 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // target to resume. See
         // fix_hold_background_for_inflight_attach.py.
         waitForInFlightAttachesBeforeSuspending()
-        
+
+        // The guard above only ever covered the detach. Cancellation was
+        // ungated later (8bd362e), and it is NOT conditional on live
+        // media - so a PiP, CarPlay or backgrounded-audio teardown still
+        // cancelled every loop and freed the adapter, contradicting the
+        // comment above that says the loops stay alive.
+        //
+        // 2026-08-14 20:06:59 is what that costs. PiP was live, the
+        // detach was skipped as designed, and then cancelAllDebugSession-
+        // Calls cancelled 5 loops and the tunnel closed 150ms later.
+        // Three of those five tabs - 27245, 27249, 27278 - were left
+        // halted, and hangHeartbeat printed them stalled 4.5s with
+        // "cannot answer XPC". On the way back in, iOS sent each of them
+        // a synchronous XPC from _sendWillEnterForegroundCallbacks, got
+        // no reply, and took the app at ten seconds: 0x8BADF00D,
+        // scene-update watchdog, 0.093s of application CPU across the
+        // whole allowance - blocked, not busy.
+        //
+        // A child stopped at a brk cannot be rescued once its loop is
+        // gone, so the fix is to not abandon it. Live media keeps its
+        // loops and its transport; every other background still cancels
+        // and still closes the tunnel, so the rebuild property 8bd362e
+        // exists for is unchanged. History flushing stays - it is safe
+        // and it is the reason this path runs at all.
+        if preservesSystemMedia {
+            flushNavigationHistoryInBackground()
+            return
+        }
+
         // CHANGED - cancellation is delayed rather than immediate. See
         // fix_delay_cancel_after_detach.py.
         //
