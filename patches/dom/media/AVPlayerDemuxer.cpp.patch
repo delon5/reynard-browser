@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.cpp
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,526 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -491,6 +491,30 @@ new file mode 100644
 +        media::TimeInterval(media::TimeUnit::Zero(), snapshot->mDuration));
 +  }
 +  if (!snapshot->mPosition.IsValid()) {
++    return media::TimeIntervals();
++  }
++  // Report NOTHING while the duration is unknown, rather than a window
++  // invented from the position.
++  //
++  // MediaDecoderStateMachine::BufferedRangeUpdated replaces an infinite
++  // duration with the END of whatever is reported here - IsInfinite() is
++  // the first condition in that test - so any positive window becomes
++  // the duration. And the registry position is deliberately snapped to
++  // the seek target a few lines above, so that duration comes out equal
++  // to the seek target, MDSM reads the seek as seekingToEnd, and
++  // CompletedState ends a stream that never played.
++  //
++  // Three captures show the loop closing exactly: duration 40.855,
++  // 38.855 and 36.855, each identical to that run's own position. A
++  // value retained from a previous item would have been the same number
++  // all three times; this one is manufactured fresh from the seek.
++  //
++  // Before the licence lands there genuinely is no decodable data, so
++  // an empty range is the honest answer as well as the safe one. Once
++  // the registry carries a real duration the clamp below applies, the
++  // reported end can never exceed it, and neither branch of
++  // BufferedRangeUpdated can fire.
++  if (!snapshot->mDuration.IsValid()) {
 +    return media::TimeIntervals();
 +  }
 +  media::TimeUnit end = snapshot->mPosition + MaxLead();
