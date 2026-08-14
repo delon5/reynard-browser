@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,853 @@
+@@ -17,6 +17,890 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -796,6 +796,16 @@ index 9ca6e15..799455c 100644
 +    var names = [
 +      "name", "message", "code", "status", "statusCode", "errorCode",
 +      "errorType", "reason", "detail", "description", "type", "url",
++      // Amazon's player carries its real complaint in these two.
++      // The first capture that reached its key server printed
++      // keys=[code,internalName,message,isFatal,cause,stack] and then
++      // showed neither internalName nor cause, because one was not in
++      // this list and the other is an object.
++      "internalName", "instrumentationCode", "isFatal",
++      // Whatever the transport put on the wrapped failure. json=
++      // carries these anyway; naming them just makes the line
++      // readable at a glance instead of needing to be unpicked.
++      "httpStatus", "httpStatusCode", "responseCode", "title",
 +    ];
 +    for (var i = 0; i < names.length; i++) {
 +      if (v[names[i]] !== undefined && typeof v[names[i]] !== "object") {
@@ -809,6 +819,33 @@ index 9ca6e15..799455c 100644
 +      bits.push("json=" + JSON.stringify(v).slice(0, 500));
 +    } catch (e) {
 +      bits.push("json=<not serialisable>");
++    }
++    // One level into cause. A service wraps the underlying failure -
++    // an HTTP status, a server message - and collapsing it to the
++    // word "Object" is the exact blindness this function exists to
++    // escape, just one level down. ONE level only: deeper is a log
++    // that nobody reads.
++    if (v.cause !== undefined && v.cause !== null) {
++      var c = v.cause;
++      if (typeof c !== "object") {
++        bits.push("cause=" + String(c));
++      } else {
++        var causeBits = [];
++        for (var k = 0; k < names.length; k++) {
++          if (c[names[k]] !== undefined && typeof c[names[k]] !== "object") {
++            causeBits.push(names[k] + "=" + String(c[names[k]]));
++          }
++        }
++        try {
++          causeBits.push("keys=[" + Object.keys(c).slice(0, 16).join(",") + "]");
++        } catch (e) {}
++        try {
++          causeBits.push("json=" + JSON.stringify(c).slice(0, 400));
++        } catch (e) {
++          causeBits.push("json=<not serialisable>");
++        }
++        bits.push("cause{" + causeBits.join(" ") + "}");
++      }
 +    }
 +    if (v.stack) {
 +      // No escape sequences in here: this source is embedded in a
@@ -856,7 +893,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +914,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +951,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -1193,7 +1230,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1361,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1398,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1212,7 +1249,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1388,77 @@
+@@ -199,14 +1425,77 @@
      return false;
    }
 +

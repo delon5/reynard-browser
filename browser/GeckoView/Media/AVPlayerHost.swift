@@ -1251,7 +1251,22 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
                           + "\(error?.localizedDescription ?? "no data")")
                     return
                 }
-                avLog("SPC ready for \(contentId), \(spc.count) bytes")
+                // An FPS SPC opens with a 4-byte big-endian version.
+                // Amazon refused a licence request built from one of
+                // these with "license.drm_service.invalid_request", and
+                // the version is the first thing worth ruling in or
+                // out: makeStreamingContentKeyRequestData is being told
+                // AVContentKeyRequestProtocolVersionsKey: [1], while
+                // Amazon advertises com.apple.fps.1_0, 2_0 AND 3_0.
+                //
+                // 00 00 00 01 here means v1. Sixteen bytes of header
+                // only - the rest is a licence request for a real
+                // account and does not belong in a log.
+                let head = spc.prefix(16)
+                    .map { String(format: "%02x", $0) }
+                    .joined(separator: " ")
+                avLog("SPC ready for \(contentId), \(spc.count) bytes, "
+                      + "head \(head)")
                 spc.withUnsafeBytes { raw in
                     ReynardFairPlayNotifyKeyMessage(
                         self.playerId, contentId,
