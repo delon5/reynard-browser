@@ -234,6 +234,9 @@ final class AttachLedger {
 
         let before = attachedPIDs.count
         attachedPIDs = attachedPIDs.filter { isAlive($0) }
+        rejectedPIDs = rejectedPIDs.filter { isAlive($0) }
+        pendingAttachPIDs = pendingAttachPIDs.filter { isAlive($0) }
+        attachInFlightPIDs = attachInFlightPIDs.filter { isAlive($0) }
         return before - attachedPIDs.count
     }
 
@@ -251,6 +254,9 @@ final class AttachLedger {
         dispatchPrecondition(condition: .onQueue(queue))
         childTypes.removeValue(forKey: pid)
         attachedPIDs.remove(pid)
+        rejectedPIDs.remove(pid)
+        pendingAttachPIDs.remove(pid)
+        attachInFlightPIDs.remove(pid)
     }
 
     /// Every child ever announced this launch, including pruned ones.

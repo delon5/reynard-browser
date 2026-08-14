@@ -1833,6 +1833,12 @@ void runDebugService(int32_t pid, DebugSession *session) {
     // same reason: unconditional logging would flood, silence already
     // cost a session.
     NSInteger nonBreakpointStops = 0;
+
+    // The generated 0xf00d breakpoint normally has one PC.  Keeping this
+    // cache on the loop stack gives it the same lifetime as the DebugSession
+    // and avoids a process-global PID/PC dictionary that was never evicted.
+    NSMutableDictionary<NSNumber *, NSNumber *> *instructionCacheByPC =
+        [NSMutableDictionary dictionary];
     
     while (YES) {
         @autoreleasepool {
@@ -1985,23 +1991,9 @@ void runDebugService(int32_t pid, DebugSession *session) {
             // subsequent traps at the same pc skip the round trip
             // entirely. Falls back to reading on a miss, so a
             // different pc simply produces a new entry.
-            static NSMutableDictionary<NSString *, NSNumber *> *cachedInstructionByPC = nil;
-            static dispatch_once_t instructionCacheOnce;
-            dispatch_once(&instructionCacheOnce, ^{
-                cachedInstructionByPC = [NSMutableDictionary dictionary];
-            });
-            
             uint32_t instruction = 0;
-            // Keyed by pid as well as pc. This dictionary is a file-scope
-            // static shared by every runDebugService loop for every pid and
-            // never evicted, and on a hit the loop advances PC and writes x0
-            // WITHOUT reading target memory - so a pc-only key lets one
-            // process's classification drive register writes into another.
-            NSString *instructionCacheKey = [NSString stringWithFormat:@"%d:%llx", pid, pc];
-            NSNumber *cachedInstruction = nil;
-            @synchronized (cachedInstructionByPC) {
-                cachedInstruction = cachedInstructionByPC[instructionCacheKey];
-            }
+            NSNumber *instructionCacheKey = @(pc);
+            NSNumber *cachedInstruction = instructionCacheByPC[instructionCacheKey];
             
             if (cachedInstruction) {
                 instruction = cachedInstruction.unsignedIntValue;
@@ -2013,9 +2005,7 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 instruction = (uint32_t)parseLittleEndianHex64(instructionResponse ?: @"");
                 
                 if (instructionResponse.length > 0) {
-                    @synchronized (cachedInstructionByPC) {
-                        cachedInstructionByPC[instructionCacheKey] = @(instruction);
-                    }
+                    instructionCacheByPC[instructionCacheKey] = @(instruction);
                 }
             }
             if (instructionResponse.length == 0 || !instructionIsBreakpoint(instruction)) {

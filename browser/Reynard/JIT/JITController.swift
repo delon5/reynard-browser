@@ -1389,6 +1389,7 @@ final class JITController {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.ledger.forgetChild(pid)
+            self.helperTypeWaitStart.removeValue(forKey: pid)
             logger(String(format: "childExit: pid %d exited - dropped from the attach ledger", pid))
         }
     }
@@ -1426,6 +1427,9 @@ extension JITController {
     fileprivate static let jitAttachRequestPostedNotification = "com.minh-ton.Reynard.JITAttachRequestPosted" as CFString
     fileprivate static let jitAttachRequestFilePrefix = "jit-attach-request-"
     fileprivate static let jitAttachResultFilePrefix = "jit-attach-result-"
+    // The Helper stops waiting after 20 seconds.  Five seconds of grace
+    // covers a final directory scan without retaining a request forever.
+    fileprivate static let jitAttachRequestStaleAgeSeconds: TimeInterval = 25
     // Comfortably past the Helper's own 20s client-side timeout - any
     // result file older than this can only be an abandoned one nobody
     // is ever coming back to read.
@@ -1565,13 +1569,20 @@ extension JITController {
                     return
                 }
                 
-                self.pruneStaleResultFiles(contents: contents, containerURL: containerURL, fileManager: fileManager)
+                self.pruneStaleHelperFiles(contents: contents, containerURL: containerURL, fileManager: fileManager)
                 
                 // Filename format: jit-attach-request-{pid}_{token} - PID
                 // kept in the name for easy debugging/readability, token
                 // is what actually makes each attempt unique.
                 let pendingRequests = contents
                     .filter { $0.hasPrefix(Self.jitAttachRequestFilePrefix) }
+                    // pruneStaleHelperFiles works from the same directory
+                    // snapshot, so exclude anything it just removed.
+                    .filter {
+                        fileManager.fileExists(
+                            atPath: containerURL.appendingPathComponent($0).path
+                        )
+                    }
                     // Deferred this call - see deferredForTypeThisCall.
                     .filter { name in
                         let remainder = name.dropFirst(Self.jitAttachRequestFilePrefix.count)
@@ -1817,22 +1828,51 @@ extension JITController {
         }
     }
     
-    fileprivate func pruneStaleResultFiles(contents: [String], containerURL: URL, fileManager: FileManager) {
-        let staleResultFiles = contents.filter { $0.hasPrefix(Self.jitAttachResultFilePrefix) }
-        guard !staleResultFiles.isEmpty else {
+    fileprivate func pruneStaleHelperFiles(contents: [String], containerURL: URL, fileManager: FileManager) {
+        let helperFiles = contents.filter {
+            $0.hasPrefix(Self.jitAttachRequestFilePrefix) ||
+                $0.hasPrefix(Self.jitAttachResultFilePrefix)
+        }
+        guard !helperFiles.isEmpty else {
             return
         }
-        
+
         let now = Date()
-        for resultFileName in staleResultFiles {
-            let resultFileURL = containerURL.appendingPathComponent(resultFileName)
-            guard let attributes = try? fileManager.attributesOfItem(atPath: resultFileURL.path),
+        for fileName in helperFiles {
+            let isRequest = fileName.hasPrefix(Self.jitAttachRequestFilePrefix)
+            let fileURL = containerURL.appendingPathComponent(fileName)
+            var requestPID: Int32?
+
+            if isRequest {
+                let remainder = fileName.dropFirst(Self.jitAttachRequestFilePrefix.count)
+                guard let underscoreIndex = remainder.firstIndex(of: "_") else {
+                    try? fileManager.removeItem(at: fileURL)
+                    continue
+                }
+
+                let pidText = remainder[remainder.startIndex..<underscoreIndex]
+                let token = String(remainder[remainder.index(after: underscoreIndex)...])
+                guard let pid = Int32(pidText), pid > 0, UUID(uuidString: token) != nil else {
+                    try? fileManager.removeItem(at: fileURL)
+                    continue
+                }
+                requestPID = pid
+            }
+
+            guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
                   let modificationDate = attributes[.modificationDate] as? Date
             else {
                 continue
             }
-            if now.timeIntervalSince(modificationDate) > Self.jitAttachResultStaleAgeSeconds {
-                try? fileManager.removeItem(at: resultFileURL)
+
+            let staleAge = isRequest
+                ? Self.jitAttachRequestStaleAgeSeconds
+                : Self.jitAttachResultStaleAgeSeconds
+            if now.timeIntervalSince(modificationDate) > staleAge {
+                try? fileManager.removeItem(at: fileURL)
+                if let requestPID {
+                    helperTypeWaitStart.removeValue(forKey: requestPID)
+                }
             }
         }
     }

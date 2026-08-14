@@ -283,7 +283,15 @@ static BOOL requestJITAttachFromMainApp(int32_t pid, NSString **errorDescription
     );
     sJITAttachReplySemaphore = NULL;
     
+    // The main app normally consumes the request first.  Removing it
+    // here closes the client side of the protocol when the request was never
+    // observed, so an abandoned Helper cannot leave work queued forever.
+    [[NSFileManager defaultManager] removeItemAtURL:requestFileURL error:nil];
+
     if (!resultReady) {
+        // A result may have raced the final poll without its notification.
+        // It no longer has a reader after this function returns.
+        [[NSFileManager defaultManager] removeItemAtURL:resultFileURL error:nil];
         if (errorDescriptionOut) *errorDescriptionOut = @"Timed out waiting for main app to process JIT attach request";
         return NO;
     }
