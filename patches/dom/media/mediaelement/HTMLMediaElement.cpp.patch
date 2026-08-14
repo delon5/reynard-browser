@@ -75,7 +75,37 @@ index dbf941c..6357b9b 100644
      return nullptr;
 +    }
    }
-@@ -8701,6 +8755,28 @@
+@@ -8160,8 +8214,28 @@
+     return;
+   }
+
++  // Reynard: hand the page FairPlay's key URI even when the media is
++  // cross-origin, because the page cannot ask for a licence without it.
++  //
++  // Apple's FPS sample - identical in SDK 4.4.5 and 26.0.4 - reads the
++  // URI straight off this event and puts it in the licence POST:
++  //
++  //   let keyURI = uInt8ArrayToString(new Uint8Array(event.initData));
++  //   ... "streaming-keys": [{ "uri": keyURI, "spc": ... }]
++  //
++  // A key server must be told which key is wanted; the SPC does not say,
++  // since its payload is encrypted to the FPS private key. And every
++  // streaming service serves its HLS from a CDN origin, so this check
++  // always fails for exactly the content that needs to pass it.
++  //
++  // Narrow deliberately: "skd" only, which nothing but the AVPlayer
++  // FairPlay path produces, carrying a URI the page already has because
++  // it set video.src to the playlist that contains it. IsCORSSameOrigin
++  // and GetCurrentPrincipal are untouched, so canvas tainting and every
++  // other same-origin decision are unchanged. Real Safari delivers this.
++  const bool isFairPlayKeyURI = aInitDataType.EqualsLiteral("skd");
+   RefPtr<MediaEncryptedEvent> event;
+-  if (IsCORSSameOrigin()) {
++  if (IsCORSSameOrigin() || isFairPlayKeyURI) {
+     event = MediaEncryptedEvent::Constructor(this, aInitDataType, aInitData);
+   } else {
+     event = MediaEncryptedEvent::Constructor(this);
+@@ -8701,6 +8775,28 @@
  };
  #endif
  
