@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,890 @@
+@@ -17,6 +17,1033 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -857,6 +857,149 @@ index 9ca6e15..799455c 100644
 +    return bits.join(" ");
 +  }
 +
++  // ---- licence-exchange network log --------------------------------
++  //
++  // Amazon returns license.drm_service.invalid_request and its error
++  // object carries nothing else: internalName and cause are listed by
++  // Object.keys and are both undefined. The HTTP response is where the
++  // reason is, and nothing has ever looked at it.
++  //
++  // Logged: method, origin + pathname, status, and 400 characters of
++  // the RESPONSE body. Not logged: the query string, which carries
++  // Amazon's session and device tokens, and the request body, which
++  // carries the SPC - a licence request for a real account has no
++  // business in a log file.
++
++  var DRM_URL = /drm|licence|license|cdp|fairplay|widevine|playready|getplayback/i;
++
++  function safeUrl(raw) {
++    try {
++      var u = new URL(String(raw), location.href);
++      return u.origin + u.pathname;
++    } catch (e) {
++      // Not parseable: strip anything after the first "?" by hand
++      // rather than print a token by accident.
++      var s = String(raw);
++      var q = s.indexOf("?");
++      return q < 0 ? s : s.slice(0, q);
++    }
++  }
++
++  function logResponse(method, url, status, body) {
++    debug(
++      "NET",
++      method,
++      safeUrl(url),
++      "->",
++      status,
++      "body:",
++      String(body === undefined || body === null ? "" : body).slice(0, 400)
++    );
++  }
++
++  var nativeFetch = window.fetch;
++  if (typeof nativeFetch === "function") {
++    window.fetch = function (input, init) {
++      var url = "";
++      var method = "GET";
++      try {
++        url = typeof input === "string" ? input : (input && input.url) || "";
++        method =
++          (init && init.method) || (input && input.method) || "GET";
++      } catch (e) {}
++      var result = nativeFetch.apply(this, arguments);
++      var interesting = false;
++      try {
++        interesting = DRM_URL.test(url);
++      } catch (e) {}
++      if (!interesting || !result || typeof result.then !== "function") {
++        return result;
++      }
++      return result.then(
++        function (res) {
++          // clone() so the page still gets an unconsumed body. If the
++          // response cannot be cloned, report without one rather than
++          // touching the stream the page is about to read.
++          // Only read a TEXTUAL body. On a successful exchange the body
++          // is the CKC - real content key material - and it has no
++          // business in a log that gets pasted into other tools. Both
++          // diagnostic cases this exists for (a 4xx body, and a 200
++          // carrying an error envelope) are JSON or text, so nothing is
++          // lost by declining to decode anything else.
++          var contentType = "";
++          try {
++            contentType = res.headers.get("content-type") || "";
++          } catch (e) {}
++          if (!/json|text|xml|html|javascript/i.test(contentType)) {
++            logResponse(
++              method,
++              url,
++              res.status,
++              "<" + (contentType || "no content-type") + ", body not logged>"
++            );
++            return res;
++          }
++          try {
++            res.clone().text().then(
++              function (body) {
++                logResponse(method, url, res.status, body);
++              },
++              function () {
++                logResponse(method, url, res.status, "<unreadable>");
++              }
++            );
++          } catch (e) {
++            logResponse(method, url, res.status, "<not cloneable>");
++          }
++          return res;
++        },
++        function (err) {
++          debug("NET", method, safeUrl(url), "FAILED:", describe(err));
++          throw err;
++        }
++      );
++    };
++  }
++
++  // Same again for XHR: which of the two a player uses is its own
++  // business, and Prime's bundle is minified past guessing.
++  var nativeOpen = XMLHttpRequest.prototype.open;
++  var nativeSend = XMLHttpRequest.prototype.send;
++  if (typeof nativeOpen === "function" && typeof nativeSend === "function") {
++    XMLHttpRequest.prototype.open = function (method, url) {
++      try {
++        this.__reynardMethod = method;
++        this.__reynardUrl = url;
++      } catch (e) {}
++      return nativeOpen.apply(this, arguments);
++    };
++    XMLHttpRequest.prototype.send = function () {
++      var self = this;
++      try {
++        if (DRM_URL.test(String(self.__reynardUrl || ""))) {
++          self.addEventListener("loadend", function () {
++            var body = "";
++            try {
++              body =
++                self.responseType === "" || self.responseType === "text"
++                  ? self.responseText
++                  : "<" + self.responseType + ">";
++            } catch (e) {
++              body = "<unreadable>";
++            }
++            logResponse(
++              self.__reynardMethod || "GET",
++              self.__reynardUrl || "",
++              self.status,
++              body
++            );
++          });
++        }
++      } catch (e) {}
++      return nativeSend.apply(this, arguments);
++    };
++  }
++
 +  window.addEventListener("unhandledrejection", function (e) {
 +    debug("UNHANDLED REJECTION:", describe(e.reason));
 +  });
@@ -893,7 +1036,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +951,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +1094,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -1230,7 +1373,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1398,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1541,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1249,7 +1392,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1425,77 @@
+@@ -199,14 +1568,77 @@
      return false;
    }
 +
