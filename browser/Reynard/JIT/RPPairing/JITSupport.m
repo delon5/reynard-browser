@@ -1889,12 +1889,35 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // still CS_DEBUGGED with no loop servicing them, and
                 // the app was killed two seconds later.
                 //
-                // Cancellation and detach always happen together, in
-                // sceneDidEnterBackground. So a failure on a pid whose
-                // detach was requested is ours, the connection is fine,
-                // and the detach should still run. A genuine transport
-                // failure has no detach pending and still skips it.
-                connectionFailed = !shouldDetachDebugSessionPID(pid);
+                // CHANGED - see fix_close_before_suspension.py. Was:
+                //
+                //   connectionFailed = !shouldDetachDebugSessionPID(pid);
+                //
+                // whose premise was "a failure on a pid whose detach was
+                // requested is ours, the connection is fine, and the
+                // detach should still run". That held while cancellation
+                // was gated OFF, when the only way to arrive here with a
+                // detach pending was a spurious error.
+                //
+                // With cancellation ungated the premise inverts. The
+                // failure is ours AND the connection is not fine: we
+                // desynced it deliberately a moment ago and are about to
+                // free the adapter behind it.
+                //
+                // The comment further down already predicted the result -
+                // "if the abort desynced the stream, it will fail
+                // identically ... which would mean cancellation and clean
+                // detach cannot coexist". 2026-08-14 19:23 says exactly
+                // that: three detaches, three 50ms retries, all failed,
+                // and they took EIGHT MINUTES to return because they sat
+                // in flight across the suspension - with closeSharedTunnel
+                // freeing the adapter out from under them at 19:23:15.146,
+                // inside that window.
+                //
+                // So: skip it. This routes to the existing "skipping
+                // detach - transport already dead" branch below, which is
+                // now the truth on both paths.
+                connectionFailed = YES;
                 
                 // The transport died, and since every session shares one
                 // tunnel they all have. Stop content processes trapping

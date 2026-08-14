@@ -486,10 +486,18 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
         
-        // One second: continue iterations were taking 30-60ms in the
-        // captures, so this is ample for a loop between iterations and
-        // still well inside the background window.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        // CHANGED from 1.0s - see fix_close_before_suspension.py.
+        // closeBeforeSuspension.
+        //
+        // The second was there to let a loop between iterations see the
+        // detach flag and exit cleanly on its own. Measurement says no
+        // such loop exists: every session has printed WAITING - parked
+        // in a blocking read - at background in every capture, and
+        // "Detach response" has never once appeared at background.
+        //
+        // What the second actually bought was a teardown that finished
+        // at +3.70s when iOS suspended the coalition at +3.59s.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             // UNGATED - see fix_foreground_scoped_jit_transport.py.
             //
             // The three reasons this was turned off, and where each
@@ -543,7 +551,14 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             // so the peer does not keep a half-open connection that
             // refuses the NEXT launch too - the 96-minute dead window on
             // 2026-08-14 that only airplane mode cleared.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // CHANGED from 1.0s - see fix_close_before_suspension.py.
+            //
+            // A second to let the loops notice the cancel and exit. They
+            // exit in ONE millisecond: cancelled at 19:23:14.098584, all
+            // three "Debug loop ended" by 19:23:14.099063. The other 999
+            // were spent arriving 0.11s after the suspension that this
+            // close exists to beat.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 JITController.shared.closeTunnelForSuspension()
 
                 if cancelTaskIdentifier != .invalid {

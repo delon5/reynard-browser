@@ -683,7 +683,7 @@ final class JITController {
             //
             // Best effort: that function is non-reentrant, so a post
             // landing while a pass is still running is dropped. The
-            // polling timer is the backstop, and the 3.5s budget in the
+            // polling timer is the backstop, and the 0.5s budget in the
             // deferral falls through to today's behaviour if both miss.
             DispatchQueue.main.async {
                 self.processPendingHelperAttachRequests(source: "TYPE ANNOUNCED")
@@ -1627,8 +1627,21 @@ extension JITController {
                     //
                     // Bounded: a child nobody ever announces must still
                     // get an answer inside its 5s WaitForJITReadySignal
-                    // deadline, so after 3.5s this falls through and
-                    // attaches exactly as it did before.
+                    // deadline, so after the budget below this falls
+                    // through and attaches exactly as it did before.
+                    //
+                    // CHANGED from 3.5s - see fix_close_before_suspension.py.
+                    // In the 2026-08-14 19:31 capture 90 pids were
+                    // deferred, 77 hit the budget, and 76 of those 77 were
+                    // never announced by Gecko at all. For those the wait
+                    // is pure latency against the child's 5s deadline, and
+                    // 3.5s plus a 1.0-1.6s attach lands on it - so a child
+                    // that should have got JIT falls back to the
+                    // interpreter instead.
+                    //
+                    // The largest inversion ever measured is 77ms. Half a
+                    // second is six times that and leaves 4.5s of the
+                    // child's budget intact.
                     if self.ledger.knownType(pid) == nil,
                        !self.ledger.isAttached(pid) {
                         let now = CFAbsoluteTimeGetCurrent()
@@ -1637,7 +1650,7 @@ extension JITController {
                             self.helperTypeWaitStart[pid] = now
                         }
                         let waited = now - waitedSince
-                        if waited < 3.5 {
+                        if waited < 0.5 {
                             deferredForTypeThisCall.insert(pid)
                             logger(String(
                                 format: "helperAttach: pid %d deferred - type not announced yet (%.0fms so far)",
