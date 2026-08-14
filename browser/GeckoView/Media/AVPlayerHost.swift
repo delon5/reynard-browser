@@ -1113,6 +1113,21 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
     /// Content ids whose request is waiting for a certificate.
     private var awaitingCertificate: [String] = []
 
+    /// Content ids whose AVContentKeyRequest has already produced an
+    /// SPC. A key request yields exactly ONE - a second
+    /// makeStreamingContentKeyRequestData on a request already awaiting
+    /// its response fails with AVFoundationErrorDomain -11879 - and
+    /// there are two callers that each think they are the one to start
+    /// it: the certificate arriving flushes anything held, and the
+    /// page's generateRequest adopts the same held request. A capture
+    /// showed both firing microseconds apart, one SPC ready and one
+    /// SPC FAILED for the same id.
+    ///
+    /// Cleared when a CKC is applied and when AVFoundation raises a
+    /// fresh request for the same id, so key rotation and renewal are
+    /// unaffected.
+    private var spcIssued = Set<String>()
+
     init(playerId: UInt) {
         self.playerId = playerId
     }
@@ -1165,6 +1180,10 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
             avLog("CKC for \(contentId) with no pending request")
             return
         }
+        // The exchange for this id is over; a later request under the
+        // same id - key rotation, renewal, a fresh load - is entitled
+        // to its own SPC.
+        spcIssued.remove(contentId)
         request.processContentKeyResponse(
             AVContentKeyResponse(fairPlayStreamingKeyResponseData: ckc))
         avLog("CKC applied for \(contentId), \(ckc.count) bytes")
@@ -1184,6 +1203,14 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
             avLog("no app certificate yet - holding \(contentId)")
             return
         }
+        // Exactly one SPC per key request. Both the certificate flush
+        // and the page's generateRequest reach here for the same held
+        // request; whichever arrives second would fail with -11879.
+        if spcIssued.contains(contentId) {
+            avLog("SPC already issued for \(contentId) - not asking twice")
+            return
+        }
+        spcIssued.insert(contentId)
         // The ASSET ID, not the whole URI. Apple's HLS Catalog With FPS
         // sample (FairPlay Streaming Server SDK,
         // Shared/Managers/ContentKeyDelegate.swift) does exactly this:
@@ -1241,6 +1268,9 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
             return
         }
         requests[contentId] = keyRequest
+        // A NEW request object for this id supersedes any earlier one,
+        // so whatever SPC that one produced no longer counts.
+        spcIssued.remove(contentId)
         avLog("content key requested for \(contentId) on player \(playerId)")
 
         // The page has to hear about this as an 'encrypted' event.
