@@ -1,0 +1,29 @@
+diff --git a/dom/media/MediaDecoderStateMachine.cpp b/dom/media/MediaDecoderStateMachine.cpp
+--- a/dom/media/MediaDecoderStateMachine.cpp
++++ b/dom/media/MediaDecoderStateMachine.cpp
+@@ -2728,4 +2728,25 @@ class MediaDecoderStateMachine::CompletedState
+   void Enter() {
++    // REYNARD DIAGNOSTIC - why did this stream finish?
++    //
++    // CompletedState is the only door to the state that dispatches
++    // PlaybackEnded, and on a FairPlay stream it opens roughly fourteen
++    // log lines after the player is created - before the licence lands
++    // and before the duration is known - so the element pauses and the
++    // AVPlayer is never told to play. Broker traffic for such a stream
++    // is PAUSE, SEEK and DESTROY with no PLAY at all.
++    //
++    // The two instrumented sources are both silent: the video demuxer
++    // never rejects with END_OF_STREAM and AVFoundation never reports
++    // the item ending. These flags are the condition that decides it,
++    // which is what a stack trace would not have told us.
++    printf_stderr(
++        "mdsm: CompletedState hasAudio=%d audioCompleted=%d hasVideo=%d "
++        "videoCompleted=%d duration=%.3f position=%.3f looping=%d\n",
++        mMaster->HasAudio(), (int)mMaster->mAudioCompleted,
++        mMaster->HasVideo(), (int)mMaster->mVideoCompleted,
++        mMaster->Duration().IsValid() ? mMaster->Duration().ToSeconds() : -1.0,
++        mMaster->GetMediaTime().ToSeconds(), (int)mMaster->mLooping);
++
+     // On Android, the life cycle of graphic buffer is equal to Android's codec,
+     // we couldn't release it if we still need to render the frame.
+ #ifndef MOZ_WIDGET_ANDROID
