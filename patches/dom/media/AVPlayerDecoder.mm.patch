@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2365 @@
+@@ -0,0 +0,2398 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1687,6 +1687,36 @@ index 000000000000..aec25c5a8025
 +    return;
 +  }
 +
++  // Protected content never sets mHasPublishedRealFrame, because the
++  // frames cannot be copied - so that latch above never fires here and
++  // every metadata callback republished, rebuilding the layer each time.
++  //
++  // Each publish carries the DRM mark, and NativeLayerCA rebuilds the
++  // content layer whenever that mark changes. A capture showed the cost:
++  // five layer constructions across one session, each tearing down the
++  // AVPlayerLayer and rebinding the player, which is visible as the
++  // picture dropping back to loading.
++  //
++  // Two guards. Once this decoder has published a protected placeholder
++  // it must never publish an unprotected one again - that direction is
++  // always a regression, and it is what turns a settled AVPlayerLayer
++  // back into an AVSampleBufferDisplayLayer. And a republish at the same
++  // geometry and the same mark changes nothing the compositor needs, so
++  // it only costs a rebuild.
++  const bool isProtectedNow = !!mCDMProxy;
++  if (mHasPublishedProtectedPlaceholder && !isProtectedNow) {
++    printf_stderr(
++        "avPlayer: placeholder SKIPPED - would unmark a protected layer\n");
++    return;
++  }
++  if (mLastPlaceholderSize == aDisplay &&
++      mLastPlaceholderWasProtected == isProtectedNow) {
++    printf_stderr(
++        "avPlayer: placeholder SKIPPED - same %dx%d and same DRM=%d\n",
++        aDisplay.width, aDisplay.height, isProtectedNow ? 1 : 0);
++    return;
++  }
++
 +  VideoFrameContainer* container = GetVideoFrameContainer();
 +  if (!container) {
 +    printf_stderr(
@@ -1774,6 +1804,9 @@ index 000000000000..aec25c5a8025
 +  // video would be a large change disguised as a diagnostic.
 +  const bool isProtected = !!mCDMProxy;
 +  image->SetIsDRM(isProtected);
++  mHasPublishedProtectedPlaceholder |= isProtected;
++  mLastPlaceholderSize = aDisplay;
++  mLastPlaceholderWasProtected = isProtected;
 +  printf_stderr("avPlayer: placeholder image DRM=%d (cdmProxy=%d)\n",
 +                isProtected ? 1 : 0, mCDMProxy ? 1 : 0);
 +  // Five arguments: the trailing processing duration and media time
