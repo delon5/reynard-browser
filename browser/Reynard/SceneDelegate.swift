@@ -439,9 +439,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // makes at every background. Only the interrupt and the detach
         // are skipped. The loops stay alive, parked in their continue,
         // and the next background after media stops tears down normally.
-        let preservesSystemMedia = browserViewController.sessionManager.hasSystemMediaSession
-        if preservesSystemMedia {
-            logger("backgroundTeardown: preserving the whole JIT teardown - PiP, CarPlay or system media is live and its content process must keep running")
+        if browserViewController.sessionManager.hasSystemMediaSession {
+            logger("backgroundTeardown: skipping the debug-session detach - PiP or system media is live and its content process must keep running")
         } else {
             JITEnabler.requestDetachForAllDebugSessions()
         }
@@ -458,35 +457,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // target to resume. See
         // fix_hold_background_for_inflight_attach.py.
         waitForInFlightAttachesBeforeSuspending()
-
-        // The guard above only ever covered the detach. Cancellation was
-        // ungated later (8bd362e), and it is NOT conditional on live
-        // media - so a PiP, CarPlay or backgrounded-audio teardown still
-        // cancelled every loop and freed the adapter, contradicting the
-        // comment above that says the loops stay alive.
-        //
-        // 2026-08-14 20:06:59 is what that costs. PiP was live, the
-        // detach was skipped as designed, and then cancelAllDebugSession-
-        // Calls cancelled 5 loops and the tunnel closed 150ms later.
-        // Three of those five tabs - 27245, 27249, 27278 - were left
-        // halted, and hangHeartbeat printed them stalled 4.5s with
-        // "cannot answer XPC". On the way back in, iOS sent each of them
-        // a synchronous XPC from _sendWillEnterForegroundCallbacks, got
-        // no reply, and took the app at ten seconds: 0x8BADF00D,
-        // scene-update watchdog, 0.093s of application CPU across the
-        // whole allowance - blocked, not busy.
-        //
-        // A child stopped at a brk cannot be rescued once its loop is
-        // gone, so the fix is to not abandon it. Live media keeps its
-        // loops and its transport; every other background still cancels
-        // and still closes the tunnel, so the rebuild property 8bd362e
-        // exists for is unchanged. History flushing stays - it is safe
-        // and it is the reason this path runs at all.
-        if preservesSystemMedia {
-            flushNavigationHistoryInBackground()
-            return
-        }
-
+        
         // CHANGED - cancellation is delayed rather than immediate. See
         // fix_delay_cancel_after_detach.py.
         //
@@ -527,6 +498,38 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // What the second actually bought was a teardown that finished
         // at +3.70s when iOS suspended the coalition at +3.59s.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            // ADDED - see fix_media_keeps_its_tunnel.py.
+            //
+            // The media guard further up wraps ONLY
+            // requestDetachForAllDebugSessions, so without this the
+            // cancel below and the tunnel close after it run while PiP
+            // or CarPlay audio is live - killing the debug loop that
+            // services the content process drawing the PiP window, and
+            // then freeing the adapter underneath it. That is the exact
+            // opposite of what that guard exists for, and its own
+            // comment says so: "the loops stay alive, parked in their
+            // continue".
+            //
+            // Re-read here rather than beside the other test because
+            // this fires 0.15s later: if media stopped in between the
+            // teardown should proceed, and if it started it should be
+            // skipped. Both are the right answer, and only a fresh read
+            // gives them.
+            //
+            // Nothing is lost by skipping. The close exists because a
+            // suspension kills every socket; an app holding a background
+            // audio assertion is not suspended, which is why its tunnel
+            // survives in the first place. The next background after
+            // media stops tears down normally.
+            guard !browserViewController.sessionManager.hasSystemMediaSession else {
+                logger("backgroundTeardown: skipping the cancel and the tunnel close - PiP or system media is still live")
+                if cancelTaskIdentifier != .invalid {
+                    application.endBackgroundTask(cancelTaskIdentifier)
+                    cancelTaskIdentifier = .invalid
+                }
+                return
+            }
+
             // UNGATED - see fix_foreground_scoped_jit_transport.py.
             //
             // The three reasons this was turned off, and where each
