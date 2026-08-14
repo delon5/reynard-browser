@@ -1713,6 +1713,27 @@ index 000000000000..aec25c5a8025
 +  }
 +
 +  RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(macSurface);
++
++  // STEP 1 of the AVPlayerLayer plan - prove the content->compositor
++  // channel before any layer code exists.
++  //
++  // For protected content the parent declines the pixel copy (the
++  // planes are not CPU-readable), so no AVPlayerFrameData is sent and
++  // THIS placeholder is the layer on screen. Marking it DRM travels a
++  // route that already exists end to end and needs no protocol change:
++  //
++  //   Image::SetIsDRM          ImageContainer.h
++  //   -> TextureFlags::DRM_SOURCE   MacIOSurfaceImage.cpp
++  //   -> NativeLayerCA::mIsDRM      NativeLayerCA.mm
++  //   -> forwarded remotely         NativeLayerRootRemoteMacParent.mm
++  //
++  // Gated on the CDM proxy so clear video keeps today's path entirely -
++  // mIsDRM forces a specialized video layer, and forcing that for every
++  // video would be a large change disguised as a diagnostic.
++  const bool isProtected = !!mCDMProxy;
++  image->SetIsDRM(isProtected);
++  printf_stderr("avPlayer: placeholder image DRM=%d (cdmProxy=%d)\n",
++                isProtected ? 1 : 0, mCDMProxy ? 1 : 0);
 +  // Five arguments: the trailing processing duration and media time
 +  // are required by this signature. Zero for both - nothing was
 +  // decoded to measure, and the AVPlayer owns the timeline.
