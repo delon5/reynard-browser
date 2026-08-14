@@ -177,6 +177,30 @@ final class BrowserPreferences {
             key("TrackingProtection", "globalPrivacyControlEnabled"): false,
         ]
         UserDefaults.standard.register(defaults: registeredDefaults)
+        // The FairPlay SPC version has to reach the GeckoView probe at
+        // startup, not only when the Compatibility screen is opened.
+        // Without this the setting reads 2 or 3 on screen while every
+        // key request after a relaunch still asks for 1 - which is
+        // exactly what a device capture showed, five SPCs at version 1
+        // across four pids with the row already changed.
+        //
+        // Read straight from UserDefaults through this instance's own
+        // key() rather than via Prefs.CompatibilitySettings: this runs
+        // while preferences are still being constructed and must not
+        // depend on that static's storage being wired up yet. Same
+        // validation either way, so an absent or corrupted value still
+        // lands on 1.
+        FairPlaySPCVersionProbe.configuredVersion =
+            FairPlaySPCVersionProbe.selectedVersion(
+                from: String(
+                    UserDefaults.standard.integer(
+                        forKey: key(
+                            "CompatibilitySettings",
+                            "fairPlaySPCProtocolVersion"
+                        )
+                    )
+                )
+            )
         UserDefaults.standard.set(
             UserDefaults.standard.bool(
                 forKey: key("BrowsingSettings", "openLinksInApps")
