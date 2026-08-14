@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.cpp
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,472 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -289,7 +289,32 @@ new file mode 100644
 +
 +RefPtr<AVPlayerTrackDemuxer::SeekPromise> AVPlayerTrackDemuxer::Seek(
 +    const media::TimeUnit& aTime) {
-+  printf_stderr("avPlayer: track Seek to %.3f\n", aTime.ToSeconds());
++  // Where does the duration MDSM completes against come from?
++  //
++  // A seek whose target equals the duration is seekingToEnd in
++  // MediaDecoderStateMachine, which goes straight to CompletedState -
++  // and on a FairPlay stream that fires here, at 40.855, which was the
++  // PREVIOUS item's length. The registry starts clean (Register
++  // assigns a fresh RegistryEntry) and no SetMetadata arrives before
++  // the completion, so the number is not coming from either. Printing
++  // all three together says whether it comes through this pipeline at
++  // all, or belongs to the reused HTMLMediaElement.
++  {
++    Maybe<AVPlayerPlaybackRegistry::Snapshot> seekSnapshot =
++        AVPlayerPlaybackRegistry::Get(mPlayerId);
++    printf_stderr(
++        "avPlayer: track Seek to %.3f (registry duration=%.3f "
++        "demuxer duration=%.3f position=%.3f)\n",
++        aTime.ToSeconds(),
++        seekSnapshot && seekSnapshot->mDuration.IsValid()
++            ? seekSnapshot->mDuration.ToSeconds()
++            : -1.0,
++        mVideoInfo.mDuration.IsValid() ? mVideoInfo.mDuration.ToSeconds()
++                                       : -1.0,
++        seekSnapshot && seekSnapshot->mPosition.IsValid()
++            ? seekSnapshot->mPosition.ToSeconds()
++            : -1.0);
++  }
 +  // The reader's clock jumps immediately and the AVPlayer follows. The
 +  // registry is snapped to the target so the first post-seek
 +  // GetSamples does not park waiting for a round-trip; the real player
