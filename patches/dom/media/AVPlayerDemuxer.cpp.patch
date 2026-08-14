@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.cpp
-@@ -0,0 +1,526 @@
+@@ -0,0 +0,542 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -517,15 +517,31 @@ new file mode 100644
 +  if (!snapshot->mDuration.IsValid()) {
 +    return media::TimeIntervals();
 +  }
-+  media::TimeUnit end = snapshot->mPosition + MaxLead();
-+  if (snapshot->mDuration.IsValid() && snapshot->mDuration < end) {
-+    end = snapshot->mDuration;
-+  }
-+  if (!(media::TimeUnit::Zero() < end)) {
-+    return media::TimeIntervals();
-+  }
++  // Once the duration IS known, report the whole span rather than a
++  // window that trails the position.
++  //
++  // Returning empty above was half the fix and the capture showed the
++  // other half missing. BufferedRangeUpdated replaces an infinite
++  // duration with the end of whatever is reported here, and MDSM's
++  // duration stays infinite for the life of the stream: mMetadataDuration
++  // is computed from the track's VideoInfo, which AVPlayerTrackDemuxer
++  // captured as a const copy at GetTrackDemuxer time - before the
++  // registry had a duration. So the clamp below never protected
++  // anything; IsInfinite() fires whatever the reported end is, and a
++  // trailing window makes the duration equal the position again.
++  //
++  // Reporting [0, duration] uses that branch as intended: it is exactly
++  // the "estimated duration from buffer ranges" path, and the estimate
++  // we can give it is the real value the registry now holds. MDSM then
++  // has 1964.481 rather than 39.655, a seek to 39.655 is no longer a
++  // seek to the end, and nothing completes early.
++  //
++  // The cost is that buffered reads as fully buffered. This pipeline's
++  // buffered range was always synthetic - AVFoundation owns real
++  // buffering and the element never sees it - so the honest window was
++  // buying accuracy nobody consumes at the price of ending playback.
 +  return media::TimeIntervals(
-+      media::TimeInterval(media::TimeUnit::Zero(), end));
++      media::TimeInterval(media::TimeUnit::Zero(), snapshot->mDuration));
 +}
 +
 +}  // namespace mozilla
