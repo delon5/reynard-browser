@@ -2,7 +2,7 @@ diff --git a/dom/media/AVPlayerDemuxer.cpp b/dom/media/AVPlayerDemuxer.cpp
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/AVPlayerDemuxer.cpp
-@@ -0,0 +1,472 @@
+@@ -0,0 +1,502 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -255,6 +255,36 @@ new file mode 100644
 +    if (snapshot->mDuration.IsValid()) {
 +      mVideoInfo.mDuration = snapshot->mDuration;
 +    }
++  }
++  // UNKNOWN, never zero.
++  //
++  // Before the licence lands the snapshot has no duration, so nothing
++  // above runs and this field keeps its default of zero - and a
++  // duration of zero makes EVERY seek a seek to the end. A device
++  // capture caught the consequence exactly:
++  //
++  //   track Seek to 40.855 (registry duration=-1.000
++  //                         track mInfo duration=0.000)
++  //   mdsm: CompletedState ... duration=40.855 position=40.855
++  //
++  // 40.855 was the PREVIOUS item's length, retained by the
++  // MediaDecoder because Prime reuses the element and nothing here
++  // ever replaced it. The element restored that position, the seek
++  // target met the duration, MediaDecoderStateMachine read it as
++  // seekingToEnd, and a 32-minute episode ended before it played -
++  // PAUSE, SEEK and DESTROY reached the broker, PLAY never did.
++  //
++  // Infinite is the honest answer here: the length genuinely is not
++  // known until the key unlocks the stream. It is also the answer the
++  // rest of the machinery already handles - an unknown-length stream
++  // cannot be seeked to its end, and the track demuxer parks in
++  // WAITING_FOR_DATA rather than completing, which is what a licence
++  // round trip needs. The real value corrects through the registry
++  // and GetBuffered once metadata arrives, exactly as the comment
++  // above already describes for the display size.
++  if (!mVideoInfo.mDuration.IsValid() ||
++      mVideoInfo.mDuration == media::TimeUnit::Zero()) {
++    mVideoInfo.mDuration = media::TimeUnit::FromInfinity();
 +  }
 +  printf_stderr("avPlayer: track info %dx%d duration=%.3f\n",
 +                mVideoInfo.mDisplay.width, mVideoInfo.mDisplay.height,
