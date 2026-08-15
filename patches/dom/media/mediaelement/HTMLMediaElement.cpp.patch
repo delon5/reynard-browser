@@ -50,7 +50,7 @@ index dbf941c..6357b9b 100644
    RefPtr<ChannelMediaDecoder> decoder =
        ChannelMediaDecoder::Create(decoderInit, &diagnostics);
    if (!decoder) {
-@@ -7875,4 +7909,24 @@
+@@ -7875,4 +7909,39 @@
    if (MozAudioCaptured()) {
 +#ifdef MOZ_WIDGET_UIKIT
 +    // Reynard: FairPlay decrypts inside AVFoundation and Gecko never
@@ -64,7 +64,22 @@ index dbf941c..6357b9b 100644
 +    if (aMediaKeys) {
 +      aMediaKeys->GetKeySystem(keySystem);
 +    }
-+    const bool fairPlayExempt = IsFairPlayKeySystem(keySystem);
++    // Null is exempt too. Clearing keys is a DETACH, not an attach -
++    // there is nothing left to leak into a capture stream, and it is
++    // the operation that makes an element less capable, not more.
++    //
++    // Without this the null case takes the empty keySystem into
++    // IsFairPlayKeySystem(""), which is false, and clearing throws
++    // NotSupportedError. A device capture counted 223 refused calls,
++    // every one of them a null, against 60 genuine FairPlay ones that
++    // were allowed. A page that cannot clear its MediaKeys strands EME
++    // state on an element it is trying to reuse.
++    //
++    // Nothing else widens: a Widevine or ClearKey MediaKeys on a
++    // captured element is still refused, which is the case this guard
++    // exists for.
++    const bool fairPlayExempt =
++        !aMediaKeys || IsFairPlayKeySystem(keySystem);
 +    printf_stderr(
 +        "emeKeys: SetMediaKeys with audio captured, keySystem=%s exempt=%d\n",
 +        NS_ConvertUTF16toUTF8(keySystem).get(), fairPlayExempt ? 1 : 0);
@@ -75,7 +90,7 @@ index dbf941c..6357b9b 100644
      return nullptr;
 +    }
    }
-@@ -8160,8 +8214,28 @@
+@@ -8160,8 +8229,28 @@
      return;
    }
 
@@ -105,7 +120,7 @@ index dbf941c..6357b9b 100644
      event = MediaEncryptedEvent::Constructor(this, aInitDataType, aInitData);
    } else {
      event = MediaEncryptedEvent::Constructor(this);
-@@ -8701,6 +8775,28 @@
+@@ -8701,6 +8790,28 @@
  };
  #endif
  
