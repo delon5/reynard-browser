@@ -1,9 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
-index 000000000000..aec25c5a8025
+index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2537 @@
+@@ -0,0 +0,2566 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -976,6 +976,35 @@ index 000000000000..aec25c5a8025
 +  auto& players = BrokeredPlayers();
 +  auto entry = players.find(aKey);
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
++
++  // Player id 0 means "no player", and only MSE arrives that way:
++  // FairPlayCDMProxy sends sinf and cenc with the id still zero rather
++  // than parking them, because an MSE element never reaches
++  // AVPlayerDecoder and so nothing would ever flush the park.
++  //
++  // The child half of the composite key survives - AVPlayerBrokerKey is
++  // (childID << 32) | playerId - and that is the scope the parser
++  // session uses, matching how the app certificate is already delivered
++  // per child. No players.find here: there is deliberately no entry.
++  if ((aKey & 0xffffffff) == 0) {
++    SEL parserAppend = @selector(parserAppendInitData:contentId:initData:);
++    if (!host || ![host respondsToSelector:parserAppend]) {
++      printf_stderr(
++          "avPlayer: FairPlay parser route unavailable for child %llu\n",
++          (unsigned long long)(aKey >> 32));
++      return;
++    }
++    printf_stderr(
++        "avPlayer: FairPlay parser route child=%llu id=%s type=%s %zu bytes\n",
++        (unsigned long long)(aKey >> 32), aContentId.get(), aInitDataType.get(),
++        (size_t)aInitData.Length());
++    [host parserAppendInitData:static_cast<NSUInteger>(aKey >> 32)
++                     contentId:[NSString stringWithUTF8String:aContentId.get()]
++                      initData:[NSData dataWithBytes:aInitData.Elements()
++                                              length:aInitData.Length()]];
++    return;
++  }
++
 +  if (entry == players.end() || !host ||
 +      ![host respondsToSelector:@selector(generateKeyRequest:contentId:initDataType:initData:)]) {
 +    return;

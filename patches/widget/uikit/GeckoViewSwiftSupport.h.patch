@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,181 @@
+@@ -18,16 +18,194 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -122,6 +122,19 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +// every player the sending content process owns.
 +- (void)setAppCertificate:(NSData*)certificate
 +                forPlayer:(NSUInteger)playerId;
++// MSE, which has no player at all. Keyed by CHILD id, because the
++// composite broker key arrives with its player half zeroed and its child
++// half intact - and because the certificate above is already fanned out
++// per child, so one parser session per content process is the coarsest
++// scope that path can still serve.
++//
++// The host routes these to AVStreamDataParser, the one API that
++// originates a FairPlay key request from init-segment bytes rather than
++// from an AVURLAsset. Optional like the rest: a host without it simply
++// leaves MSE where it was.
++- (void)parserAppendInitData:(NSUInteger)childId
++                   contentId:(NSString*)contentId
++                    initData:(NSData*)initData;
 +// generateRequest(): produce an SPC for this identifier. If the asset
 +// already raised a request for it - the usual case, since the page is
 +// replying to an 'encrypted' event that came from exactly that
@@ -184,7 +197,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +220,44 @@
+@@ -55,8 +233,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -229,7 +242,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +266,91 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +279,91 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
