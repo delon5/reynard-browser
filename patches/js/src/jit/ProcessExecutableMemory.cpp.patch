@@ -18,7 +18,7 @@ index cea7d764..4e912f86 100644
  #include "jsfriendapi.h"
  
  #include "gc/Memory.h"
-@@ -26,6 +34,7 @@
+@@ -26,6 +35,7 @@
  #include "util/RandomSeed.h"
  #include "util/WindowsWrapper.h"
  #include "vm/MutexIDs.h"
@@ -26,10 +26,11 @@ index cea7d764..4e912f86 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +56,362 @@
+@@ -46,7 +56,414 @@
+ 
  using namespace js;
  using namespace js::jit;
- 
++
 +#ifdef XP_IOS
 +static uint8_t* sExecutableMemoryBase = nullptr;
 +static uint8_t* sWritableExecutableMemoryBase = nullptr;
@@ -118,6 +119,46 @@ index cea7d764..4e912f86 100644
 +// How many times a SIGBUS inside the JIT region was skipped. Non-zero
 +// means generated code may have a hole in it - see the handler.
 +static mozilla::Atomic<uint64_t, mozilla::Relaxed> sSkippedBusFaults(0);
++
++// Evidence for a decision that is not being taken yet.
++//
++// A proposed change makes PrepareExecutableRegionForWriting return bool
++// and fails the executable allocation when preparation did not happen.
++// Today an unprepared region simply runs interpreted, which is the
++// normal exercised path; after that change it becomes a failed
++// executable allocation, which SpiderMonkey surfaces as OOM. The same
++// change removes the SIGBUS skip below, so both survival paths would go
++// at once - and nothing currently measures how often either is used.
++//
++// These count what that trade would actually cost. Each reason is
++// separate because they mean different things: no debugger is expected
++// and harmless, a debugger that stopped listening is a tunnel problem,
++// and chunk overflow is a sizing problem.
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPrepareCalls(0);
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPrepareNoTXM(0);
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPrepareNoDebugger(0);
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPrepareNotListening(0);
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPrepareCachedChunk(0);
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPrepareRequested(0);
++
++// Reported on a schedule rather than per call: this is a hot path and a
++// line per region would be its own outage. Powers of two keep early
++// behaviour visible without ever becoming noise.
++static void ReportPrepareCountersIfDue() {
++  const uint64_t calls = ++sPrepareCalls;
++  if (calls & (calls - 1)) {
++    return;
++  }
++  printf_stderr(
++      "jitPrepare: calls=%llu requested=%llu cached=%llu "
++      "skipped(noTXM=%llu noDebugger=%llu notListening=%llu) busSkips=%llu\n",
++      (unsigned long long)calls, (unsigned long long)sPrepareRequested,
++      (unsigned long long)sPrepareCachedChunk,
++      (unsigned long long)sPrepareNoTXM,
++      (unsigned long long)sPrepareNoDebugger,
++      (unsigned long long)sPrepareNotListening,
++      (unsigned long long)sSkippedBusFaults);
++}
 +
 +// ADDED - see fix_guard_brk_without_debugger.py's docstring.
 +//
@@ -288,14 +329,18 @@ index cea7d764..4e912f86 100644
 +    return;
 +  }
 +
++  ReportPrepareCountersIfDue();
++
 +  if (!sHasTXMSupport) {
++    sPrepareNoTXM++;
 +    return;
 +  }
-+
+ 
 +  // Never trap without something to catch it. Deliberately uncached -
 +  // the point is noticing when the debugger goes away, and this runs
 +  // once per region rather than per write.
 +  if (!ProcessHasDebuggerAttached()) {
++    sPrepareNoDebugger++;
 +    return;
 +  }
 +
@@ -303,16 +348,19 @@ index cea7d764..4e912f86 100644
 +  // debugger attached at some point rather than that one is listening
 +  // now. This closes that gap - see fix_debugger_listening_guard.py.
 +  if (!DebuggerIsListening()) {
++    sPrepareNotListening++;
 +    return;
 +  }
 +
 +  if (!sExecutableMemoryBase) {
++    sPrepareRequested++;
 +    RequestDebuggerToPrepareRegion(aAddress, aSize);
 +    return;
 +  }
 +
 +  auto* address = static_cast<uint8_t*>(aAddress);
 +  if (address < sExecutableMemoryBase) {
++    sPrepareRequested++;
 +    RequestDebuggerToPrepareRegion(aAddress, aSize);
 +    return;
 +  }
@@ -324,6 +372,7 @@ index cea7d764..4e912f86 100644
 +  size_t lastChunk = (endOffset - 1) / kPrepareChunkBytes;
 +
 +  if (lastChunk >= kMaxPrepareChunks) {
++    sPrepareRequested++;
 +    RequestDebuggerToPrepareRegion(aAddress, aSize);
 +    return;
 +  }
@@ -331,6 +380,7 @@ index cea7d764..4e912f86 100644
 +  for (size_t chunk = firstChunk; chunk <= lastChunk; chunk++) {
 +    uint64_t bit = uint64_t(1) << chunk;
 +    if (sPreparedChunkMask & bit) {
++      sPrepareCachedChunk++;
 +      continue;
 +    }
 +
@@ -340,10 +390,12 @@ index cea7d764..4e912f86 100644
 +    // nothing. notify_get_state is cheap. See
 +    // fix_sigbus_and_chunk_mask.py.
 +    if (!DebuggerIsListening()) {
++      sPrepareNotListening++;
 +      return;
 +    }
 +
 +    uint8_t* chunkStart = sExecutableMemoryBase + (chunk * kPrepareChunkBytes);
++    sPrepareRequested++;
 +    RequestDebuggerToPrepareRegion(chunkStart, kPrepareChunkBytes);
 +    // |= rather than a load, OR and store. mozilla::Atomic makes the
 +    // compound form atomic; spelling it out defeats that, and two
@@ -389,7 +441,7 @@ index cea7d764..4e912f86 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +819,246 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +880,246 @@
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -636,7 +688,7 @@ index cea7d764..4e912f86 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +1023,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +1164,22 @@
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -664,7 +716,7 @@ index cea7d764..4e912f86 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -561,8 +1078,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -561,8 +1219,30 @@
  
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
@@ -696,7 +748,7 @@ index cea7d764..4e912f86 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +1109,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +1250,14 @@
    if (ret != 0) {
      return false;
    }
@@ -714,7 +766,7 @@ index cea7d764..4e912f86 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +1126,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +1267,51 @@
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -770,7 +822,7 @@ index cea7d764..4e912f86 100644
  #  endif
  }
  #endif
-@@ -722,8 +1284,42 @@ class ProcessExecutableMemory {
+@@ -722,8 +1425,42 @@
        return false;
      }
  
@@ -813,7 +865,7 @@ index cea7d764..4e912f86 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -743,6 +1339,20 @@ class ProcessExecutableMemory {
+@@ -743,6 +1480,20 @@
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -834,7 +886,7 @@ index cea7d764..4e912f86 100644
      DeallocateProcessExecutableMemory(base_, MaxCodeBytesPerProcess);
      base_ = nullptr;
      rng_.reset();
-@@ -901,6 +1511,17 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,6 +1652,17 @@
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -852,7 +904,7 @@ index cea7d764..4e912f86 100644
  size_t js::jit::LikelyAvailableExecutableMemory() {
    // Round down available memory to the closest MB.
    return MaxCodeBytesPerProcess -
-@@ -920,6 +1541,19 @@ bool js::jit::AddressIsInExecutableMemory(const void* p) {
+@@ -920,6 +1682,19 @@
    return execMemory.containsAddress(p);
  }
  
@@ -872,7 +924,7 @@ index cea7d764..4e912f86 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1603,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1744,30 @@
      return true;
    }
  
