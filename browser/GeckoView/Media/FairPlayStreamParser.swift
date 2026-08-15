@@ -187,35 +187,51 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("SPC for session \(sessionId) before any key request - nothing to cover")
             return nil
         }
+        return Self.requestSPC(parser: entry.parser, trackID: trackID,
+                               certificate: certificate,
+                               contentIdentifier: contentIdentifier,
+                               label: "session \(sessionId)")
+    }
 
-        // Typed invocation, not perform(): the selector takes an int32
-        // track id and an NSError**, and perform() can carry neither.
-        // Getting this wrong is what crashed the probe - it typed the
-        // track id as an object and sent it isKindOfClass:.
+    /// The raw SPC call, with the track id supplied rather than looked up.
+    ///
+    /// Split out for the deadlock probe: the ordinary path can only name
+    /// a track a key request already reported, and the open question is
+    /// whether the call needs one at all.
+    ///
+    /// Typed invocation, not perform(): the selector takes an int32 track
+    /// id and an NSError**, and perform() can carry neither. Getting that
+    /// wrong is what crashed the first probe - it typed a track id as an
+    /// object and sent it isKindOfClass:, for EXC_BAD_ACCESS at 0x2.
+    private static func requestSPC(parser: NSObject,
+                                   trackID: Int32,
+                                   certificate: Data,
+                                   contentIdentifier: Data,
+                                   label: String) -> Data? {
         let selector = NSSelectorFromString(
             "streamingContentKeyRequestDataForApp:contentIdentifier:trackID:options:error:")
-        guard entry.parser.responds(to: selector),
-              let signature = entry.parser.method(for: selector) else {
-            Self.log("no streamingContentKeyRequestDataForApp: on the parser")
+        guard parser.responds(to: selector),
+              let implementation = parser.method(for: selector) else {
+            log("no streamingContentKeyRequestDataForApp: on the parser")
             return nil
         }
         typealias SPCFunction = @convention(c) (
             AnyObject, Selector, NSData, NSData, Int32, NSDictionary?,
             UnsafeMutablePointer<NSError?>?
         ) -> NSData?
-        let call = unsafeBitCast(signature, to: SPCFunction.self)
+        let call = unsafeBitCast(implementation, to: SPCFunction.self)
 
         var error: NSError?
         let spc = withUnsafeMutablePointer(to: &error) { errorPointer -> NSData? in
-            call(entry.parser, selector, certificate as NSData,
+            call(parser, selector, certificate as NSData,
                  contentIdentifier as NSData, trackID, nil, errorPointer)
         }
         guard let spc else {
-            Self.log("SPC refused for session \(sessionId) track \(trackID): "
-                     + (error.map { String(describing: $0) } ?? "no error given"))
+            log("SPC refused, \(label) track \(trackID): "
+                + (error.map { String(describing: $0) } ?? "no error given"))
             return nil
         }
-        Self.log("SPC for session \(sessionId) track \(trackID): \(spc.length) bytes")
+        log("SPC produced, \(label) track \(trackID): \(spc.length) bytes")
         return spc as Data
     }
 
@@ -283,10 +299,53 @@ public final class FairPlayStreamParser: NSObject {
         Self.log("display layer built: status=\(layer.status.rawValue) "
                  + "error=\(layer.error.map { String(describing: $0) } ?? "nil")")
 
-        // 2. Feed it. The asset callback below reports the tracks.
+        // 2. THE DEADLOCK QUESTION, asked before anything is appended.
+        //
+        // A capture of tv.apple.com and netflix.com with MSE enabled
+        // carried 396 emeConfig negotiations and not one appendBuffer:
+        // the page raises generateRequest from the manifest's PSSH, waits
+        // for a 'message' event we never send, and never commits to the
+        // source. So the init segment a tap would forward does not exist
+        // yet - it arrives only after the licence exchange the page is
+        // stuck in.
+        //
+        // Which leaves one question. The ordinary SPC path names a track
+        // a key request already reported, and no key request can happen
+        // without an append. If the call needs that track, MSE FairPlay
+        // deadlocks here and Apple TV+ is unreachable. If it will make an
+        // SPC from a content id and a guessed track, the cycle breaks and
+        // the whole route opens.
+        //
+        // A dummy certificate is enough to tell them apart: what matters
+        // is WHICH refusal comes back. The same error before and after an
+        // append means the track was never the obstacle - a certificate
+        // complaint in both cases is the answer we want. Different errors
+        // mean the track is required and the deadlock is real.
+        let dummyCertificate = Data(repeating: 0, count: 16)
+        let contentIdentifier = Data("probe-content-id".utf8)
+        Self.log("--- SPC before any append (track guessed) ---")
+        for trackID in Int32(1)...Int32(2) {
+            _ = Self.requestSPC(parser: entry.parser, trackID: trackID,
+                                certificate: dummyCertificate,
+                                contentIdentifier: contentIdentifier,
+                                label: "NO-APPEND")
+        }
+
+        // 3. Feed it. The asset callback below reports the tracks.
         append(sessionId, initSegment: initSegment)
 
-        // 3. Ask for media data on every track the parser raised a key
+        // 4. The same call again, now that a key request has named a real
+        // track. Compare the two refusals - that comparison IS the
+        // result.
+        Self.log("--- SPC after append (real track) ---")
+        for trackID in withState({ entry.trackIDs }) {
+            _ = Self.requestSPC(parser: entry.parser, trackID: trackID,
+                                certificate: dummyCertificate,
+                                contentIdentifier: contentIdentifier,
+                                label: "AFTER-APPEND")
+        }
+
+        // 5. Ask for media data on every track the parser raised a key
         // request for. Without a CKC nothing should decrypt - the point
         // is whether the CALL is accepted and what it says, not whether
         // pixels arrive.
