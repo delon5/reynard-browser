@@ -53,6 +53,15 @@ index 4714b8a15791..03bce06ba608 100644
    bool EnqueueSurface(IOSurfaceRef aSurfaceRef);
  
    // Applies buffered changes to the native CALayers. The contract with the
+@@ -312,7 +326,7 @@
+                     gfx::SamplingFilter aSamplingFilter, bool aSpecializeVideo,
+                     const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
+                     const Maybe<gfx::DeviceColor>& aColor, bool aIsDRM,
+-                    bool aIsVideo);
++                    bool aIsVideo, bool aIsOnscreen);
+ 
+   // Return whether any aspects of this layer representation have been mutated
+   // since the last call to ApplyChanges, i.e. whether ApplyChanges needs to
 @@ -330,6 +344,7 @@ struct NativeLayerCARepresentation {
    CALayer* mRoundedClipCALayer = nullptr;   // strong
    CALayer* mContentCALayer = nullptr;       // strong
