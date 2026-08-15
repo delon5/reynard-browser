@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2482 @@
+@@ -0,0 +0,2493 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1684,7 +1684,18 @@ index 000000000000..aec25c5a8025
 +    mStallCheckPosition = position;
 +    return;
 +  }
-+  static const double kProtectedStallSeconds = 3.0;
++  // One second, not three. Three was chosen for margin and was simply
++  // too long for the interaction: a capture caught Apple TV+ in exactly
++  // this state - one frame, then blocked with the position climbing -
++  // and the title was paused after roughly two seconds, because nobody
++  // watches a black rectangle for longer than that before giving up.
++  //
++  // The margin was never what made this safe. Measuring in stream
++  // position is: a paused player does not advance it, and neither does
++  // a rebuffering one, so shortening the window cannot turn either into
++  // a false positive. It only decides how quickly a genuinely protected
++  // stream is recognised.
++  static const double kProtectedStallSeconds = 1.0;
 +  if (position - mStallCheckPosition < kProtectedStallSeconds) {
 +    return;
 +  }
