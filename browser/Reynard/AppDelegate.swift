@@ -13,24 +13,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         guard !ReynardStartupMode.current.usesUIKitOnlyStartup else {
             return true
         }
-        // One-shot, and only when asked for. AVStreamDataParser is the
-        // only thing that could originate a FairPlay key request for MSE
-        // content - public AVFoundation cannot, because AVURLAsset is
-        // the sole AVContentKeyRecipient - so whether it instantiates
-        // and accepts addContentKeyRecipient: decides whether Apple TV+,
-        // Netflix and HBO Max are reachable at all. It writes to stderr,
-        // so the answer arrives in the ordinary device capture.
-        //
-        // Unconditional, deliberately. An environment variable would
-        // never fire here - SpringBoard launches this app, and only
-        // Xcode or a shell sets one - so gating on that would have
-        // produced a probe that silently never ran and a capture that
-        // looked like a negative answer.
-        //
-        // The cost is about a hundred lines once per process, in a log
-        // where 90% of every capture is already one repeated extension
-        // error. Remove this call once the question is answered.
-        ReynardRunAVStreamDataParserProbe()
         Task {
             do {
                 try await AddonPackageStagingService.shared.removeStaleFiles()
