@@ -31,6 +31,7 @@
 
 import AVFoundation
 import Foundation
+import ObjectiveC
 
 @objc(ReynardFairPlayStreamParser)
 public final class FairPlayStreamParser: NSObject {
@@ -373,7 +374,48 @@ public final class FairPlayStreamParser: NSObject {
                                 label: "AFTER-APPEND")
         }
 
-        // 5. Ask for media data on every track the parser raised a key
+        // 5. The specifier itself - what the parser actually handed us,
+        // and the receiver the SPC probably belongs to.
+        //
+        // Everything above asks the PARSER for an SPC and gets nil with
+        // no NSError, under conditions that should have worked. That is
+        // the signature of a wrong receiver or a wrong signature rather
+        // than a refusal, so stop guessing and read the object: its class
+        // and its methods say which selector makes an SPC and what it
+        // takes.
+        Self.log("--- the content key specifier ---")
+        if let specifier = entry.delegate.lastSpecifier {
+            Self.log("specifier is \(type(of: specifier)) - \(specifier)")
+            var count: UInt32 = 0
+            if let methods = class_copyMethodList(object_getClass(specifier), &count) {
+                var names: [String] = []
+                for i in 0..<Int(count) {
+                    names.append(NSStringFromSelector(method_getName(methods[i])))
+                }
+                free(methods)
+                for name in names.sorted(by: { $0.lowercased() < $1.lowercased() }) {
+                    Self.log("    \(name)")
+                }
+            }
+            // The standard AVContentKeyRequest spelling, tried directly.
+            // Async with a completion handler rather than returning bytes,
+            // which is itself why the synchronous parser call may never
+            // have been the right one.
+            let make = NSSelectorFromString(
+                "makeStreamingContentKeyRequestDataForApp:contentIdentifier:options:completionHandler:")
+            if specifier.responds(to: make) {
+                Self.log("specifier RESPONDS to makeStreamingContentKeyRequestDataForApp: - "
+                         + "this is the route")
+            } else {
+                Self.log("specifier does not respond to "
+                         + "makeStreamingContentKeyRequestDataForApp: - see the dump above "
+                         + "for what it does offer")
+            }
+        } else {
+            Self.log("no specifier was retained - the callback did not fire")
+        }
+
+        // 6. Ask for media data on every track the parser raised a key
         // request for. Without a CKC nothing should decrypt - the point
         // is whether the CALL is accepted and what it says, not whether
         // pixels arrive.
@@ -437,11 +479,27 @@ private final class ParserDelegate: NSObject {
 
     /// The key request. This is the callback the probe proved fires from
     /// a plain MSE init segment with no asset in the process.
+    /// The specifier the parser hands over, kept rather than discarded.
+    ///
+    /// Discarding it is why the SPC question is still open. Three probe
+    /// runs called
+    /// streamingContentKeyRequestDataForApp:contentIdentifier:trackID:options:error:
+    /// on the PARSER - with a real Apple certificate and a real track id
+    /// from a real key request - and every one returned nil with no
+    /// NSError at all. A method that reached real logic and disliked its
+    /// inputs would populate that error; nil with none is what a wrong
+    /// signature or a wrong receiver looks like.
+    ///
+    /// In AVFoundation's ordinary flow the SPC comes from the REQUEST
+    /// object, not from whatever produced it. This is that object.
+    private(set) var lastSpecifier: AnyObject?
+
     @objc(streamDataParser:didProvideContentKeySpecifier:forTrackID:)
     func streamDataParser(_ parser: Any,
                           didProvideContentKeySpecifier specifier: Any,
                           forTrackID trackID: Int32) {
         fputs("fpsParser: session \(sessionId) key request on track \(trackID)\n", stderr)
+        lastSpecifier = specifier as AnyObject
         FairPlayStreamParser.shared.noteKeyRequest(sessionId: sessionId, trackID: trackID)
     }
 
