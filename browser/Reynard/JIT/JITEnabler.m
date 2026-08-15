@@ -550,16 +550,37 @@ static void jitHangBacktraceHandler(int signalNumber) {
         // SIGTRAP is deliberately absent. That is brk #0xf00d, and the
         // W^X mediation needs it to keep stopping the target.
         //
-        // Unsupported is safe: debugserver answers an unknown Q packet
-        // with an empty response and nothing changes.
+        // Unsupported is safe AND expected. QPassSignals is a gdbserver
+        // packet; Apple's debugserver does not implement it and answers
+        // an unknown Q packet with an empty response. This is still
+        // asked because a stub that DOES support it would save a round
+        // trip per fault, and the answer costs one packet at attach.
+        //
+        // The empty answer is not a missing capability, and the line
+        // this used to print - "faults will still stop this process" -
+        // read like one. It cost real time: that line was taken as the
+        // root cause of both a Reddit tab that would not paint and a
+        // 0x8BADF00D watchdog kill, and it is neither.
+        //
+        // Faults ARE delivered, by the other mechanism. A stop that is
+        // not our brk #0xf00d is resumed with vCont;S<sig> in
+        // runDebugService, which continues the target AND delivers the
+        // signal, so the process's own handler runs. QPassSignals would
+        // only avoid the stop-and-resume round trip, not enable the
+        // delivery.
+        //
+        // What does leave a process stopped for good is a transport that
+        // dies while it is stopped - there is then nothing to resume it
+        // over. That is a different fault with a different fix; see
+        // killStoppedChildren.
         {
             NSString *passSignalsResponse = nil;
             NSError *passSignalsError = nil;
             if (sendDebugCommand(session.debugProxy, @"QPassSignals:0a;0b;", &passSignalsResponse, &passSignalsError)) {
                 if ([passSignalsResponse isEqualToString:@"OK"]) {
-                    logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals accepted - SIGBUS/SIGSEGV will not stop this process", pid]);
+                    logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals accepted - faults pass through without a stop", pid]);
                 } else {
-                    logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals NOT SUPPORTED (response %@) - faults will still stop this process", pid, passSignalsResponse.length > 0 ? passSignalsResponse : @"<empty>"]);
+                    logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals not implemented by debugserver (response %@) - expected; faults are delivered by vCont;S instead, one round trip each", pid, passSignalsResponse.length > 0 ? passSignalsResponse : @"<empty>"]);
                 }
             } else {
                 logger([NSString stringWithFormat:@"jitPassSignals: (pid %d) QPassSignals send FAILED: %@", pid, passSignalsError.localizedDescription ?: @"(no error set)"]);
