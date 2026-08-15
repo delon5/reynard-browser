@@ -429,6 +429,41 @@ final class BrowserChrome: UIView {
     /// `ScrollChromeCoordinator` generally, this is driven by gesture
     /// direction rather than true scroll position, since GeckoView
     /// exposes no real scroll-offset API.
+    /// What the three chrome views actually are when a condense settles.
+    ///
+    /// Every dynToolbar line reports what the app SENDS. None reports
+    /// whether UIKit drew the chrome at all, and that is the one thing
+    /// no geometry value can stand in for: a screen recording caught the
+    /// bottom 168pt painting neither the pill nor the toolbar nor the
+    /// page, with the frames either side of a condense-to-expand
+    /// transition pixel-identical, while every sent value was correct
+    /// (contentBottom 874 condensed, 732 expanded, engine max 0 then
+    /// 426, all within one millisecond).
+    ///
+    /// Two states are indistinguishable in the logs that exist and need
+    /// opposite fixes: the views being wrong - hidden, transparent, out
+    /// of the window, or framed outside it - versus the views being
+    /// right and that region never being presented. alpha, isHidden,
+    /// window and the window-space frame separate them in one capture.
+    ///
+    /// Window-space, not local: a correct alpha on a view whose frame
+    /// has left the window looks identical from inside the view.
+    private func logChromeState(_ phase: String) {
+        func describe(_ label: String, _ view: UIView) -> String {
+            let frame = view.convert(view.bounds, to: window)
+            return String(format: "%@ a=%.2f hid=%d win=%d f=%.0f,%.0f %.0fx%.0f",
+                          label, view.alpha, view.isHidden ? 1 : 0,
+                          view.window == nil ? 0 : 1,
+                          frame.origin.x, frame.origin.y,
+                          frame.size.width, frame.size.height)
+        }
+        NSLog("chromeState: %@ condensed=%d | %@ | %@ | %@",
+              phase, isScrollCondensed ? 1 : 0,
+              describe("top", topToolbar),
+              describe("bottom", bottomToolbar),
+              describe("pill", condensedPill))
+    }
+
     func setScrollCondensed(_ condensed: Bool, animated: Bool) {
         guard condensed != isScrollCondensed else {
             return
@@ -450,10 +485,19 @@ final class BrowserChrome: UIView {
                 ? CGAffineTransform(scaleX: 0.92, y: 0.92)
                 : .identity
             self.condensedPill.alpha = condensed ? 1 : 0
+            self.logChromeState("applied")
         }
-        
+
         let completion: (Bool) -> Void = { [weak self] _ in
-            guard let self, !self.isScrollCondensed else {
+            guard let self else {
+                return
+            }
+            // Before the condensed guard below, not after: that guard
+            // returns while condensed, which is exactly half the
+            // transitions and the half the pill is meant to be visible
+            // for.
+            self.logChromeState("settled")
+            guard !self.isScrollCondensed else {
                 return
             }
             self.condensedPill.isHidden = true
