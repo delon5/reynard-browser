@@ -1085,7 +1085,43 @@ public final class AVPlayerHost: NSObject {
             avLog("unbound the previous layer for \(id)")
         }
         layer.player = entry.player
-        avLog("attached layer to \(id)")
+        avLog("attached layer to \(id) \(layerOrigin(of: layer))")
+    }
+
+    /// Which layer tree this AVPlayerLayer sits in, for the log only.
+    ///
+    /// Nothing in the attach path carries a window: the compositor calls
+    /// ReynardAVPlayerAttachLayer with a bare layer, and the host answers
+    /// with whichever player last asked for a key. With one window that
+    /// ambiguity never showed. With two - a tab on the phone and a tab on
+    /// the CarPlay display, each its own content process - "the picture is
+    /// black but the subtitles are there" has two explanations that need
+    /// different fixes, and no line in the log separates them.
+    ///
+    /// The root layer's size does: a car display and a phone are not the
+    /// same shape, and an orphaned layer has no root at all. Reported
+    /// rather than interpreted here, because the sizes are whatever the
+    /// hardware says they are.
+    private func layerOrigin(of layer: AVPlayerLayer) -> String {
+        var root: CALayer = layer
+        var depth = 0
+        while let parent = root.superlayer {
+            root = parent
+            depth += 1
+            // A cycle is impossible in a well-formed tree, but this runs
+            // on the main thread during composition and must not hang.
+            if depth > 64 { break }
+        }
+        let rootSize = root.bounds.size
+        let ownSize = layer.bounds.size
+        return String(
+            format: "[depth=%d own=%.0fx%.0f root=%.0fx%.0f scale=%.1f%@]",
+            depth,
+            ownSize.width, ownSize.height,
+            rootSize.width, rootSize.height,
+            layer.contentsScale,
+            depth == 0 ? " ORPHAN-not-in-any-tree" : ""
+        )
     }
 
     /// Seconds, or -1 when not yet known.

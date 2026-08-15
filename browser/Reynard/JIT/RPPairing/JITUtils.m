@@ -9,6 +9,7 @@
 #import <os/log.h>
 
 // ADDED - see fix_logger_writes_to_documents_file_v2.py's docstring.
+#include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
@@ -192,6 +193,22 @@ static void ReynardRotateLogIfNeeded(void) {
 
 void logger(NSString *message) {
     os_log(OS_LOG_DEFAULT, "[Reynard] %{public}@", message);
+
+    // And to stderr, because the device captures this project actually
+    // reads are stdout/stderr captures - reynard_stdout.txt - and
+    // os_log goes to the unified log instead, where none of it appears.
+    //
+    // Everything routed through logger() was therefore invisible in
+    // every capture taken so far: the CarPlay scene lifecycle, the
+    // scripts it runs, and the user agent resolved per navigation. That
+    // last one cost real time - a macOS user agent was set for HBO and
+    // there was no way to confirm from a log whether the page ever
+    // received it, so a UA experiment could not be told apart from a UA
+    // that was never applied.
+    //
+    // printf_stderr is Gecko's and not linked here; fprintf is enough
+    // and matches how the engine's own raw lines already appear.
+    fprintf(stderr, "[Reynard] %s\n", [message UTF8String]);
 
     // The os_log call above is deliberately NOT gated - system logging
     // keeps working and idevicesyslog captures are unaffected. Only
