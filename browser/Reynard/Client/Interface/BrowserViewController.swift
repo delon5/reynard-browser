@@ -1023,6 +1023,38 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             animationOptions: animation.curve
         )
         browserChrome.dockAddressBar(offset: 0)
+
+        // Swiping the keyboard away ends the search session, exactly as
+        // Cancel does.
+        //
+        // Without this the app is left in a state with no way out.
+        // Search focus is only released where
+        // isSearchAddressBarEditing is false, and dismissing the
+        // keyboard does not clear the address bar's editing state - so
+        // isFocused stayed true, the toolbar stayed suppressed for
+        // search, and the layout went on reserving its full height for
+        // it. A capture shows the state held for five seconds:
+        //
+        //   focusedInput: keyboard inset=0.0 searchFocused=YES
+        //   dynToolbar: max=142.0 contentBottom=732.0 viewH=874.0
+        //
+        // 874 - 732 is the toolbar's 142pt, empty, with no control left
+        // on screen to leave the page by. The only way off was tapping a
+        // favourite or a recent site. Cancel already recovered it, which
+        // is what says the two gestures should agree.
+        //
+        // Guarded on the hardware keyboard: there the inset is
+        // legitimately zero while the user is still typing, and ending
+        // the session under them would be its own bug. Same condition
+        // the relocation path above already trusts.
+        let isInHardwareKeyboardMode =
+            tabManager.selectedTab?.session.isInHardwareKeyboardMode() == true
+        if searchOverlayCoordinator.isFocused
+            && !tabOverview.isPresented
+            && !isInHardwareKeyboardMode {
+            searchOverlayCoordinator.endSearchSession()
+        }
+
         animateLayout(animation)
     }
     
