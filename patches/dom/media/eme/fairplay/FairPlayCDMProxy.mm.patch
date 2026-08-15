@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.mm b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
 new file mode 100644
-index 000000000000..a36dca25629f
+index 000000000000..5fd25a830ab7
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1167 @@
+@@ -0,0 +1,1188 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -612,12 +612,33 @@ index 000000000000..a36dca25629f
 +    request.mInitDataType = initDataType;
 +    request.mInitData = aInitData.Clone();
 +    if (!mBoundPlayerId) {
-+      // SetCDMProxy has not named the player yet. Parked rather than
-+      // sent to nobody; BindToPlayer flushes.
-+      printf_stderr("avPlayer: FairPlay parking generateRequest for %s\n",
-+                    contentId.get());
-+      mRemoteParkedRequests.AppendElement(std::move(request));
-+      return;
++      // Only skd waits for a player. skd is native HLS, where
++      // SetCDMProxy names the player moments later and BindToPlayer
++      // flushes whatever parked here.
++      //
++      // sinf and cenc are MSE, and an MSE element never reaches
++      // HTMLMediaElement's AVPlayerDecoder branch at all - so
++      // SetCDMProxy never runs, BindToPlayer never runs, and parking is
++      // parking forever. A device capture counted four parked against
++      // zero replayed, across three services.
++      //
++      // Sent with the player id still zero, deliberately: the broker
++      // reserves 0 for "no player" and routes it to the stream parser,
++      // which originates a key request from init-segment bytes with no
++      // AVURLAsset anywhere. Measured on device before this was
++      // written - addContentKeyRecipient: accepted the parser, and
++      // Apple's own encrypted init segment raised
++      // streamDataParser:didProvideContentKeySpecifier:forTrackID:.
++      if (initDataType.EqualsLiteral("skd")) {
++        printf_stderr("avPlayer: FairPlay parking generateRequest for %s\n",
++                      contentId.get());
++        mRemoteParkedRequests.AppendElement(std::move(request));
++        return;
++      }
++      printf_stderr(
++          "avPlayer: FairPlay routing %s generateRequest for %s to the "
++          "parser\n",
++          initDataType.get(), contentId.get());
 +    }
 +    SendRemoteKeyRequest(request);
 +    return;
