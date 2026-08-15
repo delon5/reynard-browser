@@ -21,7 +21,7 @@ index 000000000000..ea7fc34baab8
 +namespace mozilla::widget {
 +
 +void InstallPictureInPictureSourceObserver(nsWindow* aWindow);
-+AVSampleBufferDisplayLayer* GetPictureInPictureDisplayLayer(nsWindow* aWindow);
++CALayer* GetPictureInPictureDisplayLayer(nsWindow* aWindow);
 +
 +}  // namespace mozilla::widget
 +

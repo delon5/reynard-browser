@@ -195,7 +195,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +- (void)setInteractionDelegate:(id<GeckoViewInteractionDelegate>)delegate;
 +
 +// PiP
-+- (AVSampleBufferDisplayLayer*)pictureInPictureDisplayLayer;
++- (CALayer*)pictureInPictureDisplayLayer;
 +
 +// Layout
 +- (void)setDynamicToolbarMaxHeight:(CGFloat)height;

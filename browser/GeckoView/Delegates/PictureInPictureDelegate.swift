@@ -26,7 +26,7 @@ final class PictureInPictureHandler: GeckoSessionHandlerCommon {
     private weak var session: GeckoSession?
     weak var delegate: PictureInPictureDelegate?
     
-    var displayLayer: AVSampleBufferDisplayLayer? {
+    var displayLayer: CALayer? {
         return autoreleasepool {
             session?.window?.pictureInPictureDisplayLayer()
         }

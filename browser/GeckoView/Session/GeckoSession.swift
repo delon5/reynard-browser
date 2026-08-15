@@ -124,7 +124,7 @@ public class GeckoSession {
         get { pictureInPictureHandler.delegate }
         set { pictureInPictureHandler.delegate = newValue }
     }
-    public var pictureInPictureDisplayLayer: AVSampleBufferDisplayLayer? {
+    public var pictureInPictureDisplayLayer: CALayer? {
         return pictureInPictureHandler.displayLayer
     }
     

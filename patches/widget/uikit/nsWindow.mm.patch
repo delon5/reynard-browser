@@ -1709,7 +1709,7 @@ index ffb8da937efa..9dd0f5694d61 100644
    }
  }
 +
-+- (AVSampleBufferDisplayLayer*)pictureInPictureDisplayLayer {
++- (CALayer*)pictureInPictureDisplayLayer {
 +  return GetPictureInPictureDisplayLayer(mWindow);
 +}
 +

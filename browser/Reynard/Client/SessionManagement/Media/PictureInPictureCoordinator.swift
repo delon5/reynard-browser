@@ -31,21 +31,21 @@ protocol PictureInPictureCoordinatorDelegate: AnyObject {
 final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating {
     private struct EligibleSession {
         let session: GeckoSession
-        let displayLayer: AVSampleBufferDisplayLayer
+        let displayLayer: CALayer
         let positionState: MediaSessionPositionState
         let supportsSeeking: Bool
     }
     
     private final class Presentation {
         let session: GeckoSession
-        var displayLayer: AVSampleBufferDisplayLayer
+        var displayLayer: CALayer
         let controller: AVPictureInPictureController
         var wasStopRequested = false
         var pauseGeneration = 0
         
         init(
             session: GeckoSession,
-            displayLayer: AVSampleBufferDisplayLayer,
+            displayLayer: CALayer,
             controller: AVPictureInPictureController
         ) {
             self.session = session
@@ -166,17 +166,34 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
             }
             if displayLayer !== presentation.displayLayer {
                 guard let positionState = snapshot.positionState,
-                      isValid(positionState),
-                      synchronizeTimebase(of: displayLayer, with: positionState) else {
+                      isValid(positionState) else {
                     stopPresentation()
                     return
                 }
-                presentation.displayLayer = displayLayer
-                presentation.controller.contentSource =
-                AVPictureInPictureController.ContentSource(
-                    sampleBufferDisplayLayer: displayLayer,
-                    playbackDelegate: self
-                )
+                if let playerLayer = displayLayer as? AVPlayerLayer {
+                    presentation.displayLayer = displayLayer
+                    presentation.controller.contentSource =
+                    AVPictureInPictureController.ContentSource(
+                        playerLayer: playerLayer
+                    )
+                } else if let sampleLayer =
+                            displayLayer as? AVSampleBufferDisplayLayer {
+                    guard synchronizeTimebase(
+                        of: sampleLayer, with: positionState
+                    ) else {
+                        stopPresentation()
+                        return
+                    }
+                    presentation.displayLayer = displayLayer
+                    presentation.controller.contentSource =
+                    AVPictureInPictureController.ContentSource(
+                        sampleBufferDisplayLayer: sampleLayer,
+                        playbackDelegate: self
+                    )
+                } else {
+                    stopPresentation()
+                    return
+                }
             }
             updatePlayback(of: presentation, with: snapshot)
         case let .starting(presentation), let .active(presentation):
@@ -223,19 +240,13 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     }
     
     private func prepare(_ eligibleSession: EligibleSession) {
-        guard synchronizeTimebase(
-            of: eligibleSession.displayLayer,
-            with: eligibleSession.positionState
-        ),
-              eligibleSession.session.pictureInPictureDisplayLayer ===
+        guard eligibleSession.session.pictureInPictureDisplayLayer ===
                 eligibleSession.displayLayer else {
             return
         }
-        let contentSource = AVPictureInPictureController.ContentSource(
-            sampleBufferDisplayLayer: eligibleSession.displayLayer,
-            playbackDelegate: self
-        )
-        let controller = AVPictureInPictureController(contentSource: contentSource)
+        guard let controller = makeController(for: eligibleSession) else {
+            return
+        }
         controller.delegate = self
         controller.requiresLinearPlayback = !eligibleSession.supportsSeeking
         controller.canStartPictureInPictureAutomaticallyFromInline = true
@@ -246,13 +257,50 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
         ))
     }
     
+    /// Protected video reaches us as an AVPlayerLayer, because a FairPlay
+    /// frame cannot be read by the CPU and AVFoundation has to draw it
+    /// itself. AVKit has a dedicated entry point for that layer class: the
+    /// controller talks to the AVPlayer directly, so it needs neither a
+    /// playback delegate nor a control timebase to drive - both of which
+    /// are AVSampleBufferDisplayLayer concepts. Sending controlTimebase to
+    /// an AVPlayerLayer is an unrecognised selector, and it threw right as
+    /// the page entered fullscreen.
+    private func makeController(
+        for eligibleSession: EligibleSession
+    ) -> AVPictureInPictureController? {
+        if let playerLayer = eligibleSession.displayLayer as? AVPlayerLayer {
+            return AVPictureInPictureController(
+                contentSource: AVPictureInPictureController.ContentSource(
+                    playerLayer: playerLayer
+                )
+            )
+        }
+        guard let displayLayer =
+                eligibleSession.displayLayer as? AVSampleBufferDisplayLayer,
+              synchronizeTimebase(
+                of: displayLayer,
+                with: eligibleSession.positionState
+              ) else {
+            return nil
+        }
+        let contentSource = AVPictureInPictureController.ContentSource(
+            sampleBufferDisplayLayer: displayLayer,
+            playbackDelegate: self
+        )
+        return AVPictureInPictureController(contentSource: contentSource)
+    }
+
     private func updatePlayback(
         of presentation: Presentation,
         with snapshot: SystemMediaSession.Snapshot
     ) {
-        if let positionState = snapshot.positionState, isValid(positionState) {
+        if let positionState = snapshot.positionState, isValid(positionState),
+           let sampleLayer =
+            presentation.displayLayer as? AVSampleBufferDisplayLayer {
+            // An AVPlayerLayer has no control timebase; its player already
+            // carries the timing AVKit reads.
             _ = synchronizeTimebase(
-                of: presentation.displayLayer,
+                of: sampleLayer,
                 with: positionState,
                 isPaused: snapshot.playbackState == .paused
             )
@@ -513,7 +561,9 @@ extension PictureInPictureCoordinator:
               let positionState = snapshot.positionState,
               positionState.duration.isFinite,
               positionState.duration > 0,
-              let timebase = presentation.displayLayer.controlTimebase else {
+              let sampleLayer =
+                presentation.displayLayer as? AVSampleBufferDisplayLayer,
+              let timebase = sampleLayer.controlTimebase else {
             completionHandler()
             return
         }

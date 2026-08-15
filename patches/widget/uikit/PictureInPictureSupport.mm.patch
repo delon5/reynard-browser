@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..90968c5f3a1e
 --- /dev/null
 +++ b/widget/uikit/PictureInPictureSupport.mm
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,58 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -43,7 +43,7 @@ index 000000000000..90968c5f3a1e
 +      });
 +}
 +
-+AVSampleBufferDisplayLayer* GetPictureInPictureDisplayLayer(nsWindow* aWindow) {
++CALayer* GetPictureInPictureDisplayLayer(nsWindow* aWindow) {
 +  if (!aWindow) {
 +    return nil;
 +  }
@@ -53,8 +53,12 @@ index 000000000000..90968c5f3a1e
 +  if (!root) {
 +    return nil;
 +  }
-+  return [(AVSampleBufferDisplayLayer*)root->CopyPictureInPictureSource()
-+      autorelease];
++  // Typed as the base class deliberately. Protected video is an
++  // AVPlayerLayer, and handing that across as an
++  // AVSampleBufferDisplayLayer made Swift send it controlTimebase -
++  // an unrecognised selector, thrown right as the page entered
++  // fullscreen. The caller checks the class.
++  return [root->CopyPictureInPictureSource() autorelease];
 +}
 +
 +}  // namespace mozilla::widget
