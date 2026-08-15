@@ -77,6 +77,12 @@ public final class AVPlayerHost: NSObject {
     /// A licence rather than a key session, deliberately: every player
     /// has a session, only a protected one is ever given a CKC.
     private var lastProtectedPlayerId: UInt = 0
+    /// Parser sessions already created, by session id. One per content
+    /// process; see parserAppendInitData. Held here rather than asking
+    /// FairPlayStreamParser, so the create is decided under this host's
+    /// own lock and two init segments arriving together cannot both
+    /// think they are first.
+    private var parserSessions: Set<String> = []
     /// Layers bound by attachLayer, so destroy() can unbind them.
     ///
     /// Without this a destroyed player leaves layer.player pointing at it.
@@ -232,6 +238,57 @@ public final class AVPlayerHost: NSObject {
     /// The player a protected layer should bind to, or 0 if none.
     @objc public func protectedPlayerId() -> UInt {
         withState { lastProtectedPlayerId }
+    }
+
+    // MARK: - MSE FairPlay, via the stream parser
+
+    /// MSE init data, on its way to a key request that has no player.
+    ///
+    /// Everything else here is keyed by player id, because a player is
+    /// what AVFoundation owns a URL for. MSE has no URL and so no player,
+    /// which is the entire problem: FairPlayCDMProxy parked every
+    /// generateRequest because BindToPlayer never ran, and a device
+    /// capture counted four parked against zero replayed. This routes
+    /// those bytes to FairPlayStreamParser, which originates key requests
+    /// from an init segment with no asset anywhere - measured on device,
+    /// not assumed.
+    ///
+    /// Keyed by CHILD id, not player id, for two reasons. The broker
+    /// reserves player id 0 for "no player" already, so an MSE request
+    /// arrives with the player half of its composite key zeroed and the
+    /// child half intact. And the application certificate is delivered
+    /// per child, so one parser session per content process is the
+    /// coarsest scope the certificate path can still serve.
+    ///
+    /// The SPC return leg is deliberately not here yet. It needs a
+    /// per-child certificate store this host does not have - certificates
+    /// currently live on a player's delegate - and an owner actor that
+    /// ContentParent only records at AVPlayerCreate, which never runs for
+    /// MSE. Both are real work; this slice proves the bytes arrive first.
+    @objc public func parserAppendInitData(_ childId: UInt,
+                                           contentId: String,
+                                           initData: Data) {
+        let sessionId = "child-\(childId)"
+        let parser = FairPlayStreamParser.shared
+        if withState({ parserSessions.insert(sessionId).inserted }) {
+            guard parser.createSession(sessionId) else {
+                withState { _ = parserSessions.remove(sessionId) }
+                return
+            }
+        }
+        avLog("parser init data for child \(childId), id \(contentId), "
+              + "\(initData.count) bytes")
+        // The PSSH the page appended IS what the parser wants - no
+        // repackaging, which is what makes this route cheap.
+        parser.append(sessionId, initSegment: initData)
+    }
+
+    @objc public func parserDestroySession(_ childId: UInt) {
+        let sessionId = "child-\(childId)"
+        guard withState({ parserSessions.remove(sessionId) != nil }) else {
+            return
+        }
+        FairPlayStreamParser.shared.destroySession(sessionId)
     }
 
     /// DIAGNOSTIC + likely fix for "play() ignored": the AVPlayer runs
