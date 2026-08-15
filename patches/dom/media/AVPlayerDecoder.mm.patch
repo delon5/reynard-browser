@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2398 @@
+@@ -0,0 +0,2482 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1631,6 +1631,69 @@ index 000000000000..aec25c5a8025
 +  // gains data. The demuxer is what was waiting; the reader owns the
 +  // machinery for asking it again.
 +  NotifyReaderDataArrived();
++  MaybeMarkProtectedOutputStall();
++}
++
++// Native HLS FairPlay never touches EME. Apple TV+ hands the whole key
++// exchange to AVFoundation through its AVContentKeySession, so a capture
++// shows "emeAccess: GRANTED" and then no setMediaKeys, no key request
++// and no SPC at all - mCDMProxy stays null, and the one signal this
++// pipeline used to decide a stream was protected never fires.
++//
++// The stream is protected all the same, and AVPlayerItemVideoOutput
++// will not vend pixel buffers for it. The observable state is exactly
++// that: the player is playing and its position keeps advancing, while
++// no frame arrives. Prime announces itself through EME and never gets
++// here; a site that decrypts inside AVFoundation only ever says so by
++// going quiet.
++//
++// Measured in stream position rather than wall clock deliberately. A
++// paused or rebuffering player does not advance its position, so
++// neither can produce this, and no timer is needed to tell them apart.
++void AVPlayerDecoder::MaybeMarkProtectedOutputStall() {
++  MOZ_ASSERT(NS_IsMainThread());
++  // EME already answered, or this already fired. Either way there is
++  // nothing left to infer.
++  if (mOutputStallProtected || mCDMProxy) {
++    return;
++  }
++  // Nothing to draw into - a placeholder has to have been published for
++  // its geometry to be republished with the mark.
++  if (mLastPlaceholderSize.IsEmpty()) {
++    return;
++  }
++  Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
++      AVPlayerPlaybackRegistry::Get(mPlayerId);
++  if (!snapshot || !snapshot->mPosition.IsValid()) {
++    return;
++  }
++  const double position = snapshot->mPosition.ToSeconds();
++  if (position < 0.0) {
++    return;
++  }
++  // A frame since the last check, or the first check ever: rebase and
++  // wait. Playback that is delivering pixels can never accumulate the
++  // gap below.
++  if (mSawRealFrameSincePoke || mStallCheckPosition < 0.0) {
++    mSawRealFrameSincePoke = false;
++    mStallCheckPosition = position;
++    return;
++  }
++  // Seeking backwards would otherwise look like a stall forever.
++  if (position < mStallCheckPosition) {
++    mStallCheckPosition = position;
++    return;
++  }
++  static const double kProtectedStallSeconds = 3.0;
++  if (position - mStallCheckPosition < kProtectedStallSeconds) {
++    return;
++  }
++  mOutputStallProtected = true;
++  printf_stderr(
++      "avPlayer: output stalled %.3fs of playback with no frame - treating "
++      "player %llu as protected\n",
++      position - mStallCheckPosition, (unsigned long long)mPlayerId);
++  PublishPlaceholderFrame(mLastPlaceholderSize);
 +}
 +
 +void AVPlayerDecoder::DispatchEncryptedFromKeySession(
@@ -1681,10 +1744,28 @@ index 000000000000..aec25c5a8025
 +  // placeholder once the asset's true size is known, and on a stream
 +  // whose metadata resolves after playback has begun that landed on top
 +  // of frames already being decoded - a flash of picture, then magenta.
-+  if (mHasPublishedRealFrame) {
++  //
++  // Unless the output has since stalled in the way only protected
++  // content stalls. Apple TV+ delivers ONE copyable frame from a clear
++  // lead-in segment and then nothing, which set this latch and
++  // suppressed the very republish that carries the DRM mark - so the
++  // compositor kept an AVSampleBufferDisplayLayer waiting for frames
++  // that can never arrive. Audio played over a black picture.
++  //
++  // Allowed through once, and only towards protected: clear video never
++  // sets mOutputStallProtected, so the flash-then-magenta case this
++  // guard exists for cannot come back, and
++  // mHasPublishedProtectedPlaceholder caps it at one republish.
++  const bool republishForProtection =
++      mOutputStallProtected && !mHasPublishedProtectedPlaceholder;
++  if (mHasPublishedRealFrame && !republishForProtection) {
 +    printf_stderr(
 +        "avPlayer: placeholder SKIPPED - real frames are already flowing\n");
 +    return;
++  }
++  if (republishForProtection) {
++    printf_stderr(
++        "avPlayer: placeholder republished to mark a stalled output DRM\n");
 +  }
 +
 +  // Protected content never sets mHasPublishedRealFrame, because the
@@ -1703,7 +1784,7 @@ index 000000000000..aec25c5a8025
 +  // back into an AVSampleBufferDisplayLayer. And a republish at the same
 +  // geometry and the same mark changes nothing the compositor needs, so
 +  // it only costs a rebuild.
-+  const bool isProtectedNow = !!mCDMProxy;
++  const bool isProtectedNow = !!mCDMProxy || mOutputStallProtected;
 +  if (mHasPublishedProtectedPlaceholder && !isProtectedNow) {
 +    printf_stderr(
 +        "avPlayer: placeholder SKIPPED - would unmark a protected layer\n");
@@ -1802,13 +1883,14 @@ index 000000000000..aec25c5a8025
 +  // Gated on the CDM proxy so clear video keeps today's path entirely -
 +  // mIsDRM forces a specialized video layer, and forcing that for every
 +  // video would be a large change disguised as a diagnostic.
-+  const bool isProtected = !!mCDMProxy;
++  const bool isProtected = !!mCDMProxy || mOutputStallProtected;
 +  image->SetIsDRM(isProtected);
 +  mHasPublishedProtectedPlaceholder |= isProtected;
 +  mLastPlaceholderSize = aDisplay;
 +  mLastPlaceholderWasProtected = isProtected;
-+  printf_stderr("avPlayer: placeholder image DRM=%d (cdmProxy=%d)\n",
-+                isProtected ? 1 : 0, mCDMProxy ? 1 : 0);
++  printf_stderr("avPlayer: placeholder image DRM=%d (cdmProxy=%d stall=%d)\n",
++                isProtected ? 1 : 0, mCDMProxy ? 1 : 0,
++                mOutputStallProtected ? 1 : 0);
 +  // Five arguments: the trailing processing duration and media time
 +  // are required by this signature. Zero for both - nothing was
 +  // decoded to measure, and the AVPlayer owns the timeline.
@@ -2075,6 +2157,7 @@ index 000000000000..aec25c5a8025
 +        // Latched before publishing, so a metadata callback that runs
 +        // between this and the next frame cannot slip a placeholder in.
 +        entry->second->mHasPublishedRealFrame = true;
++        entry->second->mSawRealFrameSincePoke = true;
 +
 +        RefPtr<mozilla::layers::Image> image =
 +            new mozilla::layers::MacIOSurfaceImage(macSurface);
@@ -2394,6 +2477,7 @@ index 000000000000..aec25c5a8025
 +  // Latched before publishing, so a metadata callback cannot slip a
 +  // placeholder in over live video.
 +  entry->second->mHasPublishedRealFrame = true;
++  entry->second->mSawRealFrameSincePoke = true;
 +
 +  RefPtr<mozilla::layers::Image> image =
 +      new mozilla::layers::MacIOSurfaceImage(surface);

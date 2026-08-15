@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..72f80c12573a
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +0,218 @@
+@@ -0,0 +0,236 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -124,6 +124,13 @@ index 000000000000..72f80c12573a
 +  // surface. Main thread only.
 +  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay);
 +
++  // Decides a stream is protected from the only evidence a native-HLS
++  // FairPlay site ever gives: the position keeps advancing and no frame
++  // arrives. Apple TV+ hands its key exchange to AVFoundation and never
++  // touches EME, so mCDMProxy stays null while the content is
++  // protected. Main thread only.
++  void MaybeMarkProtectedOutputStall();
++
 +  // Latched by ReynardAVPlayerNotifyFrame the first time a real
 +  // decoded frame reaches the container. Once true the placeholder
 +  // must never publish again: NotifyMetadata republishes it at the
@@ -138,6 +145,17 @@ index 000000000000..72f80c12573a
 +  bool mHasPublishedProtectedPlaceholder = false;
 +  bool mLastPlaceholderWasProtected = false;
 +  gfx::IntSize mLastPlaceholderSize;
++
++  // Protection inferred from a stalled output rather than announced
++  // through EME - see MaybeMarkProtectedOutputStall. Once set it is
++  // never cleared: a stream does not stop being protected, and letting
++  // it flip back would unmark a settled AVPlayerLayer.
++  bool mOutputStallProtected = false;
++  // Set by the frame callbacks, consumed by the check. The window is
++  // measured in stream position, so a pause or a rebuffer - neither of
++  // which advances position - cannot be mistaken for a stall.
++  bool mSawRealFrameSincePoke = false;
++  double mStallCheckPosition = -1.0;
 +
 +  // Hooked purely to report that the pipeline got this far.
 +  //
