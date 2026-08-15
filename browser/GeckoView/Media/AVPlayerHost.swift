@@ -1163,26 +1163,63 @@ public final class AVPlayerHost: NSObject {
     /// same shape, and an orphaned layer has no root at all. Reported
     /// rather than interpreted here, because the sizes are whatever the
     /// hardware says they are.
+    ///
+    /// Root size alone turned out not to be enough. A capture showed the
+    /// final attach landing in the car's tree (root=425x255) with the
+    /// picture still black, which rules out "the phone stole the
+    /// binding" and leaves the harder question: the layer is in the
+    /// right tree, so why does it paint nothing? Three things can do
+    /// that to a correctly-bound layer, and none of them were reported -
+    /// it sits outside the root's bounds, something above it is hidden,
+    /// or the accumulated opacity is zero. Note own= was already larger
+    /// than root= on every car attach, which is the first of those.
+    ///
+    /// No UIKit here on purpose. This file is in the GeckoView
+    /// framework and its header documents what does and does not link;
+    /// root size already separates the two screens, so the window and
+    /// its UIScreen are not worth a new dependency to reach.
     private func layerOrigin(of layer: AVPlayerLayer) -> String {
         var root: CALayer = layer
         var depth = 0
+        var hiddenAncestorDepth = -1
+        var effectiveOpacity = layer.opacity
         while let parent = root.superlayer {
-            root = parent
             depth += 1
+            if parent.isHidden, hiddenAncestorDepth < 0 {
+                hiddenAncestorDepth = depth
+            }
+            effectiveOpacity *= parent.opacity
+            root = parent
             // A cycle is impossible in a well-formed tree, but this runs
             // on the main thread during composition and must not hang.
             if depth > 64 { break }
         }
         let rootSize = root.bounds.size
         let ownSize = layer.bounds.size
-        return String(
-            format: "[depth=%d own=%.0fx%.0f root=%.0fx%.0f scale=%.1f%@]",
-            depth,
-            ownSize.width, ownSize.height,
-            rootSize.width, rootSize.height,
-            layer.contentsScale,
-            depth == 0 ? " ORPHAN-not-in-any-tree" : ""
-        )
+        // Where the layer actually lands in the root's coordinate space.
+        // Bound, unhidden and in the right tree still paints nothing if
+        // this rect is empty or falls outside what the root covers.
+        let inRoot = layer.convert(layer.bounds, to: root)
+        let clipped = inRoot.isEmpty || !root.bounds.intersects(inRoot)
+
+        func n(_ value: CGFloat) -> String { String(format: "%.0f", value) }
+
+        var out = "[depth=\(depth)"
+        out += " own=\(n(ownSize.width))x\(n(ownSize.height))"
+        out += " root=\(n(rootSize.width))x\(n(rootSize.height))"
+        out += " scale=\(String(format: "%.1f", layer.contentsScale))"
+        out += " at=\(n(inRoot.origin.x)),\(n(inRoot.origin.y))"
+        out += " \(n(inRoot.size.width))x\(n(inRoot.size.height))"
+        out += clipped ? " OUTSIDE-ROOT-BOUNDS" : " within-root"
+        if layer.isHidden { out += " SELF-HIDDEN" }
+        if hiddenAncestorDepth >= 0 {
+            out += " HIDDEN-ANCESTOR-at-\(hiddenAncestorDepth)"
+        }
+        out += " alpha=\(String(format: "%.2f", effectiveOpacity))"
+        out += root.delegate == nil ? " root-has-NO-delegate" : " root-delegate=yes"
+        if depth == 0 { out += " ORPHAN-not-in-any-tree" }
+        out += "]"
+        return out
     }
 
     /// Seconds, or -1 when not yet known.
