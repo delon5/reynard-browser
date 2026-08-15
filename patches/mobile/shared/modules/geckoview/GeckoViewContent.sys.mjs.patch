@@ -10,7 +10,7 @@ index c850b03..a85c1de 100644
  
  export class GeckoViewContent extends GeckoViewModule {
    onInit() {
-@@ -14,6 +15,11 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -14,6 +15,12 @@
        "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
        "GeckoView:RestoreState",
        "GeckoView:ContainsFormData",
@@ -19,13 +19,15 @@ index c850b03..a85c1de 100644
 +      "GeckoView:GetSafeAreaInsetUsage",
 +      "GeckoView:GetVisualViewportMetrics",
 +      "GeckoView:RunUserScript",
++      "GeckoView:MarkUserActivated",
        "GeckoView:ProcessBackPressed",
        "GeckoView:ScrollBy",
        "GeckoView:ScrollTo",
-@@ -279,6 +285,21 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -278,7 +285,25 @@
+         break;
        case "GeckoView:ContainsFormData":
          this._containsFormData(aCallback);
-         break;
++        break;
 +      case "GeckoView:Autofill:FillOneTimeCode":
 +        this._fillOneTimeCode(aData, aCallback);
 +        break;
@@ -37,17 +39,22 @@ index c850b03..a85c1de 100644
 +        break;
 +      case "GeckoView:GetVisualViewportMetrics":
 +        this._getVisualViewportMetrics(aCallback);
-+        break;
+         break;
 +      case "GeckoView:RunUserScript":
 +        this._runUserScript(aData, aCallback);
++        break;
++      case "GeckoView:MarkUserActivated":
++        this._markUserActivated(aCallback);
 +        break;
        case "GeckoView:GetWebCompatInfo":
          this._getWebCompatInfo(aCallback);
          break;
-@@ -455,6 +476,94 @@ export class GeckoViewContent extends GeckoViewModule {
-     aCallback.onSuccess(await this.actor.containsFormData());
-   }
+@@ -453,8 +478,112 @@
  
+   async _containsFormData(aCallback) {
+     aCallback.onSuccess(await this.actor.containsFormData());
++  }
++
 +  async _fillOneTimeCode(aData, aCallback) {
 +    try {
 +      const result = await gAutofillManager.fillOneTimeCode(
@@ -59,8 +66,8 @@ index c850b03..a85c1de 100644
 +    } catch (error) {
 +      aCallback.onError(`Cannot fill one-time code, error: ${error}`);
 +    }
-+  }
-+
+   }
+ 
 +  async _getFocusedInputMetrics(aCallback) {
 +    try {
 +      if (this.window.windowUtils.isMozAfterPaintPending) {
@@ -121,6 +128,22 @@ index c850b03..a85c1de 100644
 +      );
 +    } catch (error) {
 +      aCallback.onError(`Cannot run user script, error: ${error}`);
++    }
++  }
++
++  // Grants the document sticky user activation, for the CarPlay
++  // display, which receives no touch events and so never gets one.
++  //
++  // Registering here is not optional and was missed once: a message
++  // absent from the list above is dropped before it reaches the actor,
++  // with no error anywhere - the capture showed "CarPlay: user
++  // activation FAILED" five times while the actor's own catch never
++  // ran, because nothing ever arrived for it to catch.
++  async _markUserActivated(aCallback) {
++    try {
++      aCallback.onSuccess(await this.actor.sendQuery("MarkUserActivated"));
++    } catch (error) {
++      aCallback.onError(`Cannot mark user activated, error: ${error}`);
 +    }
 +  }
 +

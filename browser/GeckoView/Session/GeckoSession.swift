@@ -613,9 +613,10 @@ public class GeckoSession {
     /// session calls it.
     @discardableResult
     public func markUserActivated() async -> Bool {
+        // No payload, matching GetVisualViewportMetrics - the query
+        // carries nothing but its name.
         let response = try? await dispatcher.query(
-            type: "GeckoView:MarkUserActivated",
-            message: [:]
+            type: "GeckoView:MarkUserActivated"
         )
         guard let values = response as? [AnyHashable: Any] else {
             return false
