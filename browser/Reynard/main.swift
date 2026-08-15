@@ -168,5 +168,29 @@ if startupMode.usesUIKitOnlyStartup {
     // launch at exactly that callback, because its synthesised method
     // signature types forTrackID: - a CMPersistentTrackID - as an object
     // and then sends it isKindOfClass:. Fix that before re-enabling.
+    //
+    // The rendering half is still open, and FairPlayStreamParser's probe
+    // asks what can be asked without a key server. Gated on a MARKER file
+    // rather than on the segment, and that is the whole point: the last
+    // probe ran unconditionally, crashed before the first frame, and the
+    // only way out was another build. Deleting fps-render-probe.on in
+    // Files recovers this one, so a bad result costs a file rather than a
+    // cycle. The segment is Apple's, from the FPS Server SDK.
+    // directories, not ReynardDirectories.shared: on iOS 13 unsandboxed
+    // builds configureUnsandboxedAppDataDirectories above has already
+    // repointed these, and the probe must read the same Documents the
+    // user dropped the segment into.
+    let documents = directories.documents
+    let renderProbeMarker = documents.appendingPathComponent("fps-render-probe.on")
+    if FileManager.default.fileExists(atPath: renderProbeMarker.path) {
+        let segment = documents
+            .appendingPathComponent("elementary-stream-video-header-keyid-1.m4v")
+        if let initSegment = try? Data(contentsOf: segment) {
+            FairPlayStreamParser.shared.runRenderProbe(initSegment: initSegment)
+        } else {
+            FileHandle.standardError.write(Data(
+                "fpsParser: render probe marker present but no init segment beside it\n".utf8))
+        }
+    }
     GeckoRuntime.main(argc: CommandLine.argc, argv: CommandLine.unsafeArgv)
 }

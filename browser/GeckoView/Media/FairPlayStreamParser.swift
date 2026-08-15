@@ -243,6 +243,79 @@ public final class FairPlayStreamParser: NSObject {
         return true
     }
 
+    // MARK: - Rendering probe
+
+    /// Can the parser's output reach a layer at all?
+    ///
+    /// Key origination is settled: a parser fed Apple's encrypted init
+    /// segment raises a key request with no AVURLAsset anywhere. What is
+    /// not settled is the other half - protected samples cannot be copied
+    /// into Gecko (a FairPlay plane base address comes back as 0x200, and
+    /// AVSampleBufferAttachContentKey on a self-decoded buffer answers
+    /// "this app is not authorized to play this file"), so the only way to
+    /// the screen is an AVSampleBufferDisplayLayer that AVFoundation fills
+    /// itself. Whether that path exists is worth knowing BEFORE spending a
+    /// wide rebuild on IPC that assumes it does.
+    ///
+    /// What this can answer without a licence server: whether the parser
+    /// understands the segment and reports its tracks, whether it accepts
+    /// being asked for media data, and whether the sink constructs in this
+    /// process. What it cannot: whether a DECRYPTED sample renders, which
+    /// needs a CKC and therefore a key server. Said plainly here so the
+    /// result is not over-read.
+    @objc public func runRenderProbe(initSegment: Data) {
+        let sessionId = "renderProbe"
+        Self.log("=== rendering probe ===")
+        guard createSession(sessionId) else {
+            return
+        }
+        defer { destroySession(sessionId) }
+
+        guard let entry = withState({ entries[sessionId] }) else {
+            return
+        }
+
+        // 1. Does the sink even exist in this process? A content
+        // extension is refused a playback audio session; if display
+        // layers were refused too the whole approach is dead, and this
+        // is one line rather than an architecture.
+        let layer = AVSampleBufferDisplayLayer()
+        Self.log("display layer built: status=\(layer.status.rawValue) "
+                 + "error=\(layer.error.map { String(describing: $0) } ?? "nil")")
+
+        // 2. Feed it. The asset callback below reports the tracks.
+        append(sessionId, initSegment: initSegment)
+
+        // 3. Ask for media data on every track the parser raised a key
+        // request for. Without a CKC nothing should decrypt - the point
+        // is whether the CALL is accepted and what it says, not whether
+        // pixels arrive.
+        let shouldProvide = NSSelectorFromString("setShouldProvideMediaData:forTrackID:")
+        let provide = NSSelectorFromString("providePendingMediaData")
+        let tracks = withState { entry.trackIDs }
+        guard !tracks.isEmpty else {
+            Self.log("no track raised a key request - nothing to ask for")
+            return
+        }
+        for trackID in tracks {
+            guard entry.parser.responds(to: shouldProvide),
+                  let implementation = entry.parser.method(for: shouldProvide) else {
+                Self.log("no setShouldProvideMediaData:forTrackID: on the parser")
+                break
+            }
+            typealias ProvideFunction = @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
+            let call = unsafeBitCast(implementation, to: ProvideFunction.self)
+            call(entry.parser, shouldProvide, true, trackID)
+            Self.log("asked for media data on track \(trackID)")
+        }
+        if entry.parser.responds(to: provide) {
+            entry.parser.perform(provide)
+            Self.log("providePendingMediaData sent - any samples are logged above as they land")
+        } else {
+            Self.log("no providePendingMediaData on the parser")
+        }
+    }
+
     fileprivate func noteKeyRequest(sessionId: String, trackID: Int32) {
         withState {
             guard let entry = entries[sessionId], !entry.trackIDs.contains(trackID) else {
@@ -300,5 +373,35 @@ private final class ParserDelegate: NSObject {
     @objc(streamDataParser:didFailToParseStreamDataWithError:)
     func streamDataParser(_ parser: Any, didFailToParseStreamDataWithError error: Error) {
         fputs("fpsParser: session \(sessionId) parse FAILED: \(error)\n", stderr)
+    }
+
+    /// The parser understood the segment and built an asset for it.
+    ///
+    /// This is what says the init segment parsed at all, and its tracks
+    /// are what the media-data calls address. AVAsset here is a parsed
+    /// description, NOT an AVURLAsset - nothing about it makes the
+    /// AVContentKeyRecipient refusal go away, and it must not be read as
+    /// a way back onto the player path.
+    @objc(streamDataParser:didParseStreamDataAsAsset:)
+    func streamDataParser(_ parser: Any, didParseStreamDataAsAsset asset: AVAsset) {
+        fputs("fpsParser: session \(sessionId) parsed asset \(asset)\n", stderr)
+        for track in asset.tracks {
+            fputs("fpsParser:   track id=\(track.trackID) type=\(track.mediaType.rawValue) "
+                  + "enabled=\(track.isEnabled) formats=\(track.formatDescriptions.count)\n",
+                  stderr)
+        }
+    }
+
+    /// Only the arity-2 spelling is declared, and only because its types
+    /// are certain. Everything else the parser might send is deliberately
+    /// left unanswered: AVFoundation checks respondsToSelector: before an
+    /// optional delegate call, so declining is free, whereas declaring a
+    /// selector whose signature nobody has verified is how the last probe
+    /// crashed the app on every launch.
+    @objc(streamDataParser:didReachEndOfTrackWithTrackID:mediaType:)
+    func streamDataParser(_ parser: Any,
+                          didReachEndOfTrackWithTrackID trackID: Int32,
+                          mediaType: String) {
+        fputs("fpsParser: session \(sessionId) end of track \(trackID) (\(mediaType))\n", stderr)
     }
 }
