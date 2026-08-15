@@ -473,10 +473,17 @@ final class BrowserChrome: UIView {
                           frame.origin.x, frame.origin.y,
                           frame.size.width, frame.size.height)
         }
-        let line = String(format: "condensed=%d | %@ | %@ | %@",
+        // ca= is the content alpha, and it is the whole reason this bug
+        // survived four captures. A toolbar whose own alpha is 1, is
+        // unhidden, is in the window and is at the right y still renders
+        // as an EMPTY bar if its contentView alpha is 0 - painted black
+        // by the OLED overlay, translucent without it, and in both cases
+        // exactly the band that was being reported while every value
+        // logged here said the chrome was fine.
+        let line = String(format: "condensed=%d | %@ ca=%.2f | %@ ca=%.2f | %@",
                           isScrollCondensed ? 1 : 0,
-                          describe("top", topToolbar),
-                          describe("bottom", bottomToolbar),
+                          describe("top", topToolbar), topToolbar.contentAlpha,
+                          describe("bottom", bottomToolbar), bottomToolbar.contentAlpha,
                           describe("pill", condensedPill))
         guard line != lastChromeState else {
             return
@@ -506,6 +513,23 @@ final class BrowserChrome: UIView {
                 ? CGAffineTransform(scaleX: 0.92, y: 0.92)
                 : .identity
             self.condensedPill.alpha = condensed ? 1 : 0
+            // Assert the CONTENT alpha too, not just the view's.
+            //
+            // Two systems drive this toolbar and neither knew about the
+            // other's alpha. setToolbarTransition, from the scroll path,
+            // fades contentView as the bar slides; this method resets
+            // alpha and transform but never touched contentView, so a
+            // condense-then-expand after a scroll fade put the toolbar
+            // back in place with no buttons in it. The background still
+            // paints - black under the OLED overlay, translucent without
+            // it - which is the band, and is why tapping the pill never
+            // recovered: expanding restored everything except the one
+            // value that was wrong.
+            //
+            // Expanding means fully shown, so 1 is not a guess about what
+            // the scroll left behind; it is what expanded means.
+            self.topToolbar.setContentAlpha(condensed ? 0 : 1)
+            self.bottomToolbar.setContentAlpha(condensed ? 0 : 1)
             self.logChromeState("applied")
         }
 

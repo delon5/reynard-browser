@@ -244,6 +244,11 @@ final class TopToolbar: UIView {
     func setContentAlpha(_ alpha: CGFloat) {
         contentView.alpha = alpha
     }
+
+    /// See BottomToolbar.contentAlpha - the same invisibility applies.
+    var contentAlpha: CGFloat {
+        contentView.alpha
+    }
     
     // MARK: - Updates
     

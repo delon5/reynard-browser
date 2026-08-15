@@ -250,6 +250,14 @@ final class BottomToolbar: UIView {
     func setContentAlpha(_ alpha: CGFloat) {
         contentView.alpha = alpha
     }
+
+    /// Readable because it is invisible from outside otherwise, and that
+    /// is what hid the black band for four captures: the toolbar's own
+    /// alpha reads 1 while its CONTENT alpha is 0, so every diagnostic
+    /// reported healthy chrome while the bar rendered empty.
+    var contentAlpha: CGFloat {
+        contentView.alpha
+    }
     
     func updateDownload(_ summary: DownloadStoreSummary) {
         downloadButton.applyDownloadSummary(summary)
