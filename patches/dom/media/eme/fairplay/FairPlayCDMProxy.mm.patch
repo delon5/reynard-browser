@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.mm b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
 new file mode 100644
-index 000000000000..c20df0f7f09f
+index 000000000000..a36dca25629f
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1133 @@
+@@ -0,0 +1,1167 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +14,9 @@ index 000000000000..c20df0f7f09f
 +#include "mozilla/dom/MediaKeyMessageEventBinding.h"
 +#include "mozilla/dom/MediaKeySession.h"
 +#include "nsThreadUtils.h"
++// media_reynard_fairplay_hls_only_initdata - CreateSession refuses what
++// CreateFairPlayKeySystemConfigs declined to advertise.
++#include "mozilla/StaticPrefs_media.h"
 +// SendAVPlayerSetAppCertificate and friends - the AVContentKeySession
 +// lives in the app process, because the asset does.
 +#include "mozilla/dom/ContentChild.h"
@@ -479,6 +482,37 @@ index 000000000000..c20df0f7f09f
 +  if (!mRemote && (!mKeySession || !mDelegate)) {
 +    RejectPromiseWithStateError(aPromiseId,
 +                                "FairPlay session is not initialised"_ns);
++    return;
++  }
++
++  // Refuse an init data type we declined to advertise, instead of
++  // accepting it and parking the request where nothing will ever
++  // collect it.
++  //
++  // Only skd can raise an AVContentKeyRequest, because only an
++  // AVURLAsset AVFoundation owns end to end conforms to
++  // AVContentKeyRecipient. cenc and sinf belong to an MSE element,
++  // which never reaches HTMLMediaElement's AVPlayerDecoder branch - so
++  // SetCDMProxy never runs, BindToPlayer never runs, and the request
++  // sits in mRemoteParkedRequests until teardown with the page hearing
++  // nothing at all. A device capture showed four parked
++  // generateRequests against zero replays, on three different services.
++  //
++  // The set mirrors CreateFairPlayKeySystemConfigs exactly, so the
++  // engine refuses precisely what it declined to offer, and flipping
++  // hls-only-initdata off still opens the MSE path for diagnosis. A
++  // rejection is also what lets a well-written player fall through to
++  // its HLS choice - the fallthrough the pref was added for, which
++  // silence defeats.
++  if (StaticPrefs::media_reynard_fairplay_hls_only_initdata() &&
++      !aInitDataType.EqualsLiteral("skd")) {
++    nsCString reason("FairPlay serves skd init data only"_ns);
++    printf_stderr("avPlayer: FairPlay refusing generateRequest, initDataType "
++                  "%s is not served\n",
++                  NS_ConvertUTF16toUTF8(aInitDataType).get());
++    ErrorResult rv;
++    rv.ThrowNotSupportedError(reason);
++    RejectPromise(aPromiseId, std::move(rv), reason);
 +    return;
 +  }
 +

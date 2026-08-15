@@ -114,14 +114,16 @@ public final class AVPlayerHost: NSObject {
     /// - and its delegate, which retains the proxy - alive for the
     /// process lifetime.
     ///
-    /// LIMITATION, deliberately not hidden: this is the most RECENT
-    /// session, not one bound per decoder, because
-    /// MediaDecoder::SetCDMProxy is not virtual and AVPlayerDecoder has
-    /// no hook to reach its own proxy through. With a single protected
-    /// element playing - all this pipeline supports today - that is the
-    /// same pairing. Two protected elements at once would attach the
-    /// second one's asset to the first one's session; fixing that
-    /// properly needs SetCDMProxy made virtual.
+    /// Holds whatever publish landed last, so on the unpaired path this
+    /// is the most RECENT session rather than one bound per decoder.
+    /// That is a fallback now, not the limitation it once was:
+    /// MediaDecoder::SetCDMProxy is virtual, AVPlayerDecoder overrides
+    /// it to name the player it owns, and
+    /// FairPlayCDMProxy::PublishKeySessionIfBound hands that player to
+    /// useContentKeySession(_:forPlayer:) below for an exact pairing.
+    /// The unpaired value therefore only decides anything when nothing
+    /// ever binds - and with a single protected element playing it is
+    /// the same pairing regardless.
     private weak var emeContentKeySession: AVContentKeySession?
 
     // MARK: - Called from FairPlayCDMProxy
