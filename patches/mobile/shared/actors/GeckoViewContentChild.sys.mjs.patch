@@ -430,7 +430,7 @@ index 9ca6e15..799455c 100644
 +          return;
 +        }
 +        self._session = session;
- 
++
 +        session.addEventListener("message", function (e) {
 +          self.sessionId = session.sessionId || "";
 +          debug("message ->  webkitkeymessage,", e.message.byteLength, "bytes");
@@ -1096,7 +1096,7 @@ index 9ca6e15..799455c 100644
 +      return nativeSend.apply(this, arguments);
 +    };
 +  }
-+
+ 
 +  // ---- Safari's prefixed fullscreen on the video element ------------
 +  //
 +  // The probe below answered this outright. Every field healthy -
@@ -1264,12 +1264,10 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1319,338 @@
-       return windowUtils.SCROLL_MODE_INSTANT;
-     }
+@@ -67,6 +1321,336 @@
      return windowUtils.SCROLL_MODE_SMOOTH;
-+  }
-+
+   }
+ 
 +  isFocusedEditableElement(element) {
 +    if (!element) {
 +      return false;
@@ -1544,8 +1542,8 @@ index 9ca6e15..799455c 100644
 +      viewportHeight: String(Math.round(viewportHeight)),
 +      boundsBottom: String(Math.round(bounds.bottom)),
 +    };
-   }
- 
++  }
++
 +  // The visual viewport's geometry, in CSS pixels. The embedder
 +  // divides its content view's point width by `width` to get the
 +  // page's effective points-per-CSS-px, which is what converts
@@ -1622,10 +1620,12 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +1795,100 @@
+@@ -197,6 +1793,113 @@
+       return true;
+     }
      return false;
-   }
- 
++  }
++
 +  // Reynard: install Apple's legacy prefixed EME before page script.
 +  //
 +  // DOMWindowCreated, not pageshow or DOMContentLoaded: a player
@@ -1677,8 +1677,31 @@ index 9ca6e15..799455c 100644
 +      const wanted = WEBKIT_MEDIA_KEYS_SHIM_HOSTS.concat(extraHosts).some(
 +        domain => host === domain || host.endsWith("." + domain)
 +      );
-+      if (wanted && extraHosts.length) {
-+        debug("host", host, "allowed; extra hosts:", extraHosts.join(" "));
++      if (extraHosts.length) {
++        // dump(), not debug``. Two reasons, one of which was a bug.
++        //
++        // debug here is GeckoViewUtils' tagged-template logger, and
++        // _log throws outright on a plain call: "Expecting template
++        // literal". That throw landed inside this try, before the
++        // sandbox is built - so putting anything in the setting stopped
++        // the shim installing on every host, including the four
++        // built-in ones. The feature disabled itself the moment it was
++        // used.
++        //
++        // And its output would not have been visible anyway: the
++        // GeckoView logger is silent unless geckoview.logging is set,
++        // while this line exists to be read in a device capture beside
++        // the other webkitEME lines. Reporting the rejections too,
++        // since "the host did not match" is the answer worth having
++        // when a site does nothing.
++        dump(
++          "webkitEME: host " +
++            host +
++            (wanted ? " allowed" : " NOT matched") +
++            "; extra hosts: " +
++            extraHosts.join(" ") +
++            "\n"
++        );
 +      }
 +      if (!wanted) {
 +        return;
@@ -1708,10 +1731,10 @@ index 9ca6e15..799455c 100644
 +      // the shim must not notice it failed to install.
 +      warn`webkitmediakeys shim failed: ${e}`;
 +    }
-+  }
-+
+   }
+ 
    // eslint-disable-next-line complexity
-   handleEvent(aEvent) {
+@@ -204,6 +1907,11 @@
      debug`handleEvent: ${aEvent.type}`;
  
      switch (aEvent.type) {
