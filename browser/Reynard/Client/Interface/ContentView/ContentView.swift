@@ -973,6 +973,45 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         return nil
     }
     
+    /// The content layer's own black-capable views, which chromeState
+    /// cannot see.
+    ///
+    /// chromeState reports BrowserChrome - toolbars and pill - and three
+    /// captures of the black band showed all of those correct. But
+    /// historyTransitionOverlayView is `backgroundColor = .black` and
+    /// lives HERE, above webContentView during a back/forward swipe, and
+    /// nothing clears it except resetHistoryNavigation(). A swipe
+    /// interrupted before that reset - by a rotation, for instance -
+    /// leaves a black view over the page that no chrome log would ever
+    /// mention.
+    ///
+    /// historyPreviewImageView is included because it is the sibling that
+    /// paints .appBackground rather than black, so the two together say
+    /// whether a stranded overlay is the black or merely near it.
+    ///
+    /// Deduplicated like chromeState: this runs on every layout pass.
+    private var lastContentState = ""
+
+    func logContentState(_ phase: String) {
+        func describe(_ label: String, _ view: UIView) -> String {
+            let frame = view.convert(view.bounds, to: window)
+            return String(format: "%@ a=%.2f hid=%d f=%.0f,%.0f %.0fx%.0f ty=%.0f",
+                          label, view.alpha, view.isHidden ? 1 : 0,
+                          frame.origin.x, frame.origin.y,
+                          frame.size.width, frame.size.height,
+                          view.transform.ty)
+        }
+        let line = String(format: "%@ | %@ | %@",
+                          describe("web", webContentView),
+                          describe("overlay", historyTransitionOverlayView),
+                          describe("preview", historyPreviewImageView))
+        guard line != lastContentState else {
+            return
+        }
+        lastContentState = line
+        NSLog("contentState: %@ %@", phase, line)
+    }
+
     private func updateHistoryTransitionOverlay(
         direction: HistorySwipeDirection,
         progress: CGFloat

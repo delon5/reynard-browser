@@ -163,6 +163,12 @@ final class ToolbarController {
         // condense transitions, which are fine. Deduplicated inside, so
         // this costs one line per genuine change.
         browserChrome.logChromeState("layout")
+        // And the content layer, which chromeState does not cover.
+        // historyTransitionOverlayView is explicitly black and sits above
+        // the page during a history swipe; only resetHistoryNavigation()
+        // clears it, so an interrupted swipe leaves black over the page
+        // that no chrome log would mention.
+        contentView.logContentState("layout")
 
         // Both together - see setCondensedChrome. Setting them in two
         // calls meant whichever ran first sent with the other's stale
