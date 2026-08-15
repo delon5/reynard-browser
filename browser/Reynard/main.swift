@@ -155,26 +155,18 @@ if startupMode.usesUIKitOnlyStartup {
        getEntitlementValue("com.apple.private.security.no-sandbox") {
         configureUnsandboxedAppDataDirectories(directories)
     }
-    // One-shot. AVStreamDataParser is the only thing that could
-    // originate a FairPlay key request for MSE content - public
-    // AVFoundation cannot, because AVURLAsset is the sole
-    // AVContentKeyRecipient - so whether it instantiates and accepts
-    // addContentKeyRecipient: decides whether Apple TV+, Netflix and
-    // HBO Max are reachable at all. It writes to stderr, redirected
-    // above, so the answer arrives in the ordinary device capture.
+    // ReynardRunAVStreamDataParserProbe() ran here and is done. It
+    // answered the question it was written for, on device:
+    // AVStreamDataParser exists, declares AVContentKeyRecipient, accepts
+    // addContentKeyRecipient:, and - fed Apple's encrypted MSE init
+    // segment - raised a key request through
+    // streamDataParser:didProvideContentKeySpecifier:forTrackID: with no
+    // AVURLAsset anywhere. MSE+FairPlay has a route.
     //
-    // Here and not in AppDelegate, which is where it started: a normal
-    // launch takes this branch into GeckoRuntime.main below, and Gecko
-    // installs its own AppShellDelegate as the UIApplicationDelegate.
-    // The Swift AppDelegate is only ever the delegate in the UIKit-only
-    // startup modes, and its didFinishLaunching returns early in exactly
-    // those modes - so the call was unreachable on every launch. A
-    // capture stamped 116f179 carried no probe output at all for that
-    // reason, which reads identically to a negative answer.
-    //
-    // Before GeckoRuntime.main because that does not return.
-    //
-    // Remove this call once the question is answered.
-    ReynardRunAVStreamDataParserProbe()
+    // AVStreamDataParserProbe.m stays for whoever builds that route, but
+    // do not call it again as it stands: it crashed the app on every
+    // launch at exactly that callback, because its synthesised method
+    // signature types forTrackID: - a CMPersistentTrackID - as an object
+    // and then sends it isKindOfClass:. Fix that before re-enabling.
     GeckoRuntime.main(argc: CommandLine.argc, argv: CommandLine.unsafeArgv)
 }
