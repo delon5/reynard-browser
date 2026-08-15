@@ -156,6 +156,13 @@ final class ToolbarController {
         // engine was told.
         let contentBottom = contentView.convert(contentView.bounds, to: rootView).maxY
         NSLog("dynToolbar: condensed=\(condensed) floats=\(floats) max=\(maxHeight) env=\(env) pillTop=\(pillTop) contentBottom=\(contentBottom) viewH=\(rootView.bounds.height)")
+        // Every layout pass, not just the condense animation. This runs on
+        // rotation and setScrollCondensed does not, and rotation is where
+        // the black band was actually being entered - three captures read
+        // as healthy because the only chromeState lines in them came from
+        // condense transitions, which are fine. Deduplicated inside, so
+        // this costs one line per genuine change.
+        browserChrome.logChromeState("layout")
 
         // Both together - see setCondensedChrome. Setting them in two
         // calls meant whichever ran first sent with the other's stale

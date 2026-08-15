@@ -448,7 +448,23 @@ final class BrowserChrome: UIView {
     ///
     /// Window-space, not local: a correct alpha on a view whose frame
     /// has left the window looks identical from inside the view.
-    private func logChromeState(_ phase: String) {
+    ///
+    /// Called from ToolbarController.updateLayout as well as from the
+    /// condense animation, and that is the whole point. The first version
+    /// logged only from setScrollCondensed, which opens with
+    /// `guard condensed != isScrollCondensed` - so a state entered by
+    /// ROTATING produced no line at all. A capture with the bug twice
+    /// reproduced and twice rotated therefore showed nothing but healthy
+    /// condense transitions, and the black band went unseen through three
+    /// captures because of it.
+    ///
+    /// Deduplicated on the formatted line: a layout pass runs on every
+    /// scroll tick, and 700 identical lines is how a real one gets
+    /// missed. Only changes print, so the bad state is the line that
+    /// stands out.
+    private var lastChromeState = ""
+
+    func logChromeState(_ phase: String) {
         func describe(_ label: String, _ view: UIView) -> String {
             let frame = view.convert(view.bounds, to: window)
             return String(format: "%@ a=%.2f hid=%d win=%d f=%.0f,%.0f %.0fx%.0f",
@@ -457,11 +473,16 @@ final class BrowserChrome: UIView {
                           frame.origin.x, frame.origin.y,
                           frame.size.width, frame.size.height)
         }
-        NSLog("chromeState: %@ condensed=%d | %@ | %@ | %@",
-              phase, isScrollCondensed ? 1 : 0,
-              describe("top", topToolbar),
-              describe("bottom", bottomToolbar),
-              describe("pill", condensedPill))
+        let line = String(format: "condensed=%d | %@ | %@ | %@",
+                          isScrollCondensed ? 1 : 0,
+                          describe("top", topToolbar),
+                          describe("bottom", bottomToolbar),
+                          describe("pill", condensedPill))
+        guard line != lastChromeState else {
+            return
+        }
+        lastChromeState = line
+        NSLog("chromeState: %@ %@", phase, line)
     }
 
     func setScrollCondensed(_ condensed: Bool, animated: Bool) {
