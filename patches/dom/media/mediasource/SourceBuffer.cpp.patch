@@ -1,0 +1,43 @@
+diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/SourceBuffer.cpp
+index d79526afbbfa..cb10fad683d0 100644
+--- a/dom/media/mediasource/SourceBuffer.cpp
++++ b/dom/media/mediasource/SourceBuffer.cpp
+@@ -568,6 +568,38 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+   MOZ_ASSERT(NS_IsMainThread());
+   MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
+ 
++  // Reynard: what the page actually appends, for the FairPlay MSE route.
++  //
++  // AVStreamDataParser originates a key request from an INIT SEGMENT -
++  // fragmented MP4, ftyp/moov carrying sinf - proven on device with
++  // Apple's 19996-byte FPS sample. What FairPlayCDMProxy can forward
++  // today is EME init data, which for cenc is a ~104-byte PSSH box, and
++  // the parser produces nothing from it: no key request, no error.
++  //
++  // Before building a tap that forwards these buffers, this says whether
++  // the bytes are the right shape at all - whether tv.apple.com's append
++  // looks like Apple's sample or like something the parser declines. The
++  // top-level box type is the answer, and in an MP4 it is the four bytes
++  // after a big-endian length.
++  //
++  // Every append, not only the first: which one carries the init segment
++  // is exactly what is not known yet, and arrival order is an assumption
++  // rather than a guarantee. One line per append, and appends are per
++  // segment rather than per frame, so the cost is nil.
++  {
++    const size_t mseLength = aData->Length();
++    char mseBox[5] = {'?', '?', '?', '?', '\0'};
++    if (mseLength >= 8) {
++      memcpy(mseBox, aData->Elements() + 4, 4);
++      for (size_t i = 0; i < 4; i++) {
++        if (mseBox[i] < 0x20 || mseBox[i] > 0x7e) {
++          mseBox[i] = '.';
++        }
++      }
++    }
++    printf_stderr("mseAppend: %zu bytes box=%s\n", mseLength, mseBox);
++  }
++
+   StartUpdating();
+ 
+   mTrackBuffersManager->AppendData(aData.forget(), mCurrentAttributes)
