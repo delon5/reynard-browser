@@ -481,6 +481,24 @@ final class TabManagerImplementation: NSObject, TabManager {
         // extension the main thread is blocked on, because it runs from
         // this background queue while that thread is stuck.
         JITEnabler.dumpChildHeartbeats(labelled: "hangHeartbeat")
+
+        // And act on what that just printed.
+        //
+        // The dump has been able to name the wedged child for a while -
+        // one capture reads "pid 35088 type=tab main=512619ms
+        // bg=512618ms  <<< STOPPED - cannot answer XPC" - and then did
+        // nothing with it, while interruptLiveDebugSessions found no
+        // live session to interrupt because the loop had long since
+        // exited. Ten seconds later iOS killed the app.
+        //
+        // A child stopped that long cannot be resumed from here; its
+        // debugger transport is gone. Killing it is the whole move, and
+        // it is the right one - Gecko rebuilds a dead content process,
+        // whereas the watchdog kill takes the session with it.
+        let killed = JITEnabler.killStoppedChildren()
+        if killed > 0 {
+            logger(String(format: "tabFlush: HangWatchdog killed %d stopped child(ren)", killed))
+        }
         
         store.emergencyPersistTabs(
             regularTabs: snapshot.regularTabs,

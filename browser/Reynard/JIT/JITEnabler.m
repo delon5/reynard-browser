@@ -699,6 +699,10 @@ static void jitHangBacktraceHandler(int signalNumber) {
     dumpChildHeartbeats(label.UTF8String);
 }
 
++ (int)killStoppedChildren {
+    return killStoppedChildren();
+}
+
 + (void)setDebuggerListening:(BOOL)listening {
     setDebuggerListeningState(listening ? 1 : 0);
 }

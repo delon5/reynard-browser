@@ -76,6 +76,12 @@ void recordChildForHeartbeat(int32_t pid, NSString *processType);
 /// disagree. Safe from any thread - takes only its own lock.
 void dumpChildHeartbeats(const char *label);
 
+/// Kills children a supervision session has left stopped, which cannot
+/// answer the synchronous XPC iOS sends when the app foregrounds. Called
+/// only from the hang escalation - see the implementation for the
+/// watchdog kill it exists to prevent. Returns how many were killed.
+int killStoppedChildren(void);
+
 /// Records whether a loop is blocked in its continue - the state that
 /// tells a healthy loop from one whose target is stopped. See
 /// fix_track_loop_waiting_state.py.

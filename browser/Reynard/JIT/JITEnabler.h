@@ -80,6 +80,11 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// may be the thing that is blocked.
 + (void)dumpChildHeartbeatsLabelled:(NSString *)label NS_SWIFT_NAME(dumpChildHeartbeats(labelled:));
 
+/// Kills any child a supervision session has left stopped. Only for the
+/// hang escalation: a stopped child cannot answer the synchronous XPC
+/// the foreground handshake sends, and the app is killed for the wait.
++ (int)killStoppedChildren NS_SWIFT_NAME(killStoppedChildren());
+
 /// Tells content processes whether trapping into the debugger is safe.
 ///
 /// Cleared before a suspension rather than after one has gone wrong: a

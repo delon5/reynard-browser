@@ -622,6 +622,80 @@ static NSString *heartbeatDescription(int32_t pid) {
     return [NSString stringWithFormat:@"%@ %@%@", mainDesc, bgDesc, verdict];
 }
 
+// A child both of whose heartbeats have been stale for this long, while
+// the process is still alive, is stopped rather than busy. The number is
+// deliberately far above kHeartbeatStaleMs: staleness of a second or two
+// is an overloaded child, and killing one of those would be a bug. The
+// capture that motivated this read main=512619ms.
+static const double kHeartbeatUnrecoverableMs = 15000.0;
+
+// Kills children that a supervision session has left stopped.
+//
+// This is the crash it exists for, from one capture:
+//
+//   14:06:27  hangHeartbeat: pid 35088 type=tab main=512619ms bg=512618ms
+//   14:06:27  interruptLiveDebugSessions: 0 live session(s), interrupted 0
+//   14:06:37  0x8BADF00D scene-update watchdog: 10.00 seconds
+//
+// The tab had been stopped for eight and a half minutes with no live
+// debug session left to interrupt, so the one existing escalation lever
+// moved nothing. Foregrounding then sent it a SYNCHRONOUS XPC through
+// ExtensionFoundation, which cannot time out, and iOS killed the whole
+// app for the ten seconds that took.
+//
+// A stopped child cannot be resumed from here - its debugger transport
+// is gone, which is how it got into this state. Killing it is the only
+// move, and it is a good one: Gecko rebuilds a dead content process,
+// while a watchdog kill loses every tab and the session with them.
+//
+// Called only from the hang escalation, never speculatively. A
+// backgrounded extension is legitimately quiet, and this must not be
+// the thing that decides otherwise.
+int killStoppedChildren(void) {
+    NSLock *lock = heartbeatChildLock();
+    [lock lock];
+    NSDictionary<NSNumber *, NSString *> *snapshot = [heartbeatChildTypes() copy];
+    [lock unlock];
+
+    int killed = 0;
+    for (NSNumber *key in snapshot) {
+        int32_t pid = key.intValue;
+        if (!pidIsAlive((pid_t)pid)) {
+            continue;
+        }
+        double mainAge = -1.0, bgAge = -1.0;
+        if (!readHeartbeatAge(pid, YES, &mainAge) ||
+            !readHeartbeatAge(pid, NO, &bgAge)) {
+            // Could not read the instrument. Never kill on that.
+            continue;
+        }
+        // "never" is an instrument problem, not a process problem - the
+        // same distinction heartbeatDescription refuses to blur.
+        if (mainAge < 0 || bgAge < 0) {
+            continue;
+        }
+        if (mainAge <= kHeartbeatUnrecoverableMs ||
+            bgAge <= kHeartbeatUnrecoverableMs) {
+            continue;
+        }
+        logger([NSString stringWithFormat:
+                @"killStoppedChildren: killing pid %d type=%@ - stopped for "
+                @"%.0fms/%.0fms, cannot answer the foreground XPC",
+                pid, snapshot[key], mainAge, bgAge]);
+        if (kill((pid_t)pid, SIGKILL) != 0) {
+            logger([NSString stringWithFormat:
+                    @"killStoppedChildren: kill(%d) failed, errno=%d",
+                    pid, errno]);
+            continue;
+        }
+        killed++;
+    }
+    if (killed == 0) {
+        logger(@"killStoppedChildren: nothing stopped long enough to kill");
+    }
+    return killed;
+}
+
 void dumpChildHeartbeats(const char *label) {
     NSString *tag = [NSString stringWithUTF8String:label ?: "heartbeat"];
 
@@ -2278,7 +2352,27 @@ void runDebugService(int32_t pid, DebugSession *session) {
             logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach retry after 50ms %@", pid, detachedByCommand ? @"SUCCEEDED" : @"failed again"]);
         }
     } else if (connectionFailed) {
-        logger([NSString stringWithFormat:@"runDebugService: (pid %d) skipping detach - transport already dead", pid]);
+        // The D packet cannot go anywhere: the transport this session
+        // would have sent it on is what died. But saying only "skipping
+        // detach" understates what is being left behind, and that
+        // understatement cost an app kill.
+        //
+        // If this process trapped before the transport died, it is
+        // stopped now and nothing will ever resume it - the debugger
+        // that could is gone. It stays alive, registered, and unable to
+        // answer the synchronous XPC iOS sends on the next foreground
+        // transition, which is a 0x8BADF00D scene-update kill for the
+        // whole app. One capture shows exactly that sequence, eight
+        // minutes apart.
+        //
+        // The heartbeat is the thing that can tell stopped from merely
+        // busy, and it needs a moment to notice, so the verdict is not
+        // made here. What is recorded here is the fact that matters to
+        // it: this pid has no debugger left, so if it does look stopped
+        // later, it is not going to recover.
+        logger([NSString stringWithFormat:
+                @"runDebugService: (pid %d) skipping detach - transport already "
+                @"dead; process left with no debugger and may be stopped", pid]);
     }
     
     // Before freeDebugSession below, so a concurrent cancellation can
