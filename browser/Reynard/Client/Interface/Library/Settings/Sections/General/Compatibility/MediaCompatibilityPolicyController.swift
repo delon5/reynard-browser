@@ -20,6 +20,18 @@ enum MediaCompatibilityPolicyController {
         ])
     }
 
+    /// Extra hosts the WebKit media-keys shim should install on.
+    ///
+    /// The shim's host list is hard-coded in the actor because those four
+    /// are the ones this pipeline has been exercised against. This adds to
+    /// it at runtime so trying another site costs a reload, not a build.
+    static func applyWebKitShimExtraHosts() {
+        GeckoRuntime.setDefaultPrefs([
+            "media.reynard.eme.webkitmediakeys-shim.extra-hosts":
+                Prefs.CompatibilitySettings.webKitShimExtraHosts,
+        ])
+    }
+
     /// The other half of the same decision. Hiding MSE steers a player
     /// away from MSE+FairPlay; this stops the engine advertising the
     /// init data types that mean MSE+FairPlay in the first place, so

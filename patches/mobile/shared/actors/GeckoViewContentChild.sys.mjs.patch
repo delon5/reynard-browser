@@ -1580,7 +1580,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1756,77 @@
+@@ -199,14 +1756,103 @@
      return false;
    }
 +
@@ -1609,9 +1609,35 @@ index 9ca6e15..799455c 100644
 +        return;
 +      }
 +      const host = contentWindow.location?.hostname ?? "";
-+      const wanted = WEBKIT_MEDIA_KEYS_SHIM_HOSTS.some(
++      // Extra hosts, comma separated, from
++      // media.reynard.eme.webkitmediakeys-shim.extra-hosts.
++      //
++      // The built-in four are the ones this pipeline has actually been
++      // exercised against. Anything else is an experiment, and an
++      // experiment should not need a build - Safari-targeting players
++      // are common enough that the interesting question is which OTHER
++      // sites this already works for.
++      //
++      // Matched exactly like the built-ins: the host itself or any
++      // subdomain of it. Empty entries and stray whitespace are dropped
++      // so a trailing comma cannot turn into a match-everything rule.
++      let extraHosts = [];
++      try {
++        extraHosts = Services.prefs
++          .getCharPref(
++            "media.reynard.eme.webkitmediakeys-shim.extra-hosts",
++            ""
++          )
++          .split(",")
++          .map(entry => entry.trim().toLowerCase())
++          .filter(entry => entry.length > 0);
++      } catch (e) {}
++      const wanted = WEBKIT_MEDIA_KEYS_SHIM_HOSTS.concat(extraHosts).some(
 +        domain => host === domain || host.endsWith("." + domain)
 +      );
++      if (wanted && extraHosts.length) {
++        debug("host", host, "allowed; extra hosts:", extraHosts.join(" "));
++      }
 +      if (!wanted) {
 +        return;
 +      }

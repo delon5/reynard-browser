@@ -365,6 +365,9 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         // toggled, so turning it OFF would silently revert to on at the
         // next launch - the StaticPrefList default is true.
         MediaCompatibilityPolicyController.applyFairPlayInitDataPolicy()
+        // Same reason again: a pref the engine only learns about when the
+        // field is edited is one that silently empties on every launch.
+        MediaCompatibilityPolicyController.applyWebKitShimExtraHosts()
         
         // HLS/FairPlay through AVFoundation
         AVPlayerPolicyController.applyAVPlayerHLS()

@@ -91,6 +91,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "useSafariUserAgentForStreaming"): true,
             key("CompatibilitySettings", "fairPlaySPCProtocolVersion"): 1,
             key("CompatibilitySettings", "fairPlaySPCUseFullKeyURI"): false,
+            key("CompatibilitySettings", "webKitShimExtraHosts"): "",
             
             // Browsing
             key("BrowsingSettings", "requestDesktopWebsite"): UIDevice.current.userInterfaceIdiom == .pad,
@@ -998,6 +999,24 @@ final class BrowserPreferences {
                 prefs.set(newValue, forSetting: "CompatibilitySettings",
                           key: "fairPlaySPCUseFullKeyURI")
                 FairPlaySPCVersionProbe.configuredUseFullKeyURI = newValue
+            }
+        }
+
+        /// Extra hosts for the WebKit media-keys shim, comma separated.
+        ///
+        /// The built-in four are the ones this pipeline has been exercised
+        /// against; this exists so trying a fifth does not need a build.
+        /// Pushed to the engine as
+        /// media.reynard.eme.webkitmediakeys-shim.extra-hosts.
+        static var webKitShimExtraHosts: String {
+            get {
+                prefs.string(forSetting: "CompatibilitySettings",
+                             key: "webKitShimExtraHosts") ?? ""
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings",
+                          key: "webKitShimExtraHosts")
+                MediaCompatibilityPolicyController.applyWebKitShimExtraHosts()
             }
         }
 

@@ -53,6 +53,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         case fairPlayHLSOnly
         case fairPlaySPCVersion
         case fairPlaySPCFullKeyURI
+        case webKitShimHosts
     }
     
     private let androidUserAgentSwitch = UISwitch()
@@ -228,6 +229,15 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             cell.selectionStyle = .none
             cell.accessoryView = fairPlaySPCFullKeyURISwitch
             return cell
+        case .webKitShimHosts:
+            let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Extra Shim Hosts", comment: "")
+            cell.accessoryType = .disclosureIndicator
+            let hosts = Prefs.CompatibilitySettings.webKitShimExtraHosts
+            cell.detailTextLabel?.text = hosts.isEmpty
+                ? NSLocalizedString("None", comment: "")
+                : hosts
+            return cell
         }
     }
     
@@ -251,14 +261,21 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             }
             navigationController?.pushViewController(PerSiteUserAgentOverridesViewController(), animated: true)
         case .media:
-            guard MediaRow.allCases.indices.contains(indexPath.row),
-                  MediaRow.allCases[indexPath.row] == .fairPlaySPCVersion else {
+            guard MediaRow.allCases.indices.contains(indexPath.row) else {
                 return
             }
-            let current = Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
-            Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion =
-                current >= 3 ? 1 : current + 1
-            tableView.reloadRows(at: [indexPath], with: .none)
+            switch MediaRow.allCases[indexPath.row] {
+            case .fairPlaySPCVersion:
+                let current = Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
+                Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion =
+                    current >= 3 ? 1 : current + 1
+                tableView.reloadRows(at: [indexPath], with: .none)
+            case .webKitShimHosts:
+                navigationController?.pushViewController(
+                    WebKitShimHostsPreferencesViewController(), animated: true)
+            default:
+                return
+            }
         }
     }
     
