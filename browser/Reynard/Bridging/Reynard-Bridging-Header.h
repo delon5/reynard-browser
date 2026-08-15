@@ -8,6 +8,7 @@
 #ifndef Reynard_Bridging_Header_h
 #define Reynard_Bridging_Header_h
 
+#import "AVStreamDataParserProbe.h"
 #import "ExtensionBridge.h"
 #import "GeckoRuntimeBridge.h"
 #import "JITEnabler.h"
