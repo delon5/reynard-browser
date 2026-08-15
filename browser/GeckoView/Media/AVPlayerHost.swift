@@ -1069,8 +1069,22 @@ public final class AVPlayerHost: NSObject {
         guard let entry = withState({ players[id] }) else {
             return
         }
+        // Unbind whatever was bound before. A rotation or any other
+        // rebuild constructs a fresh AVPlayerLayer for the same player,
+        // and two layers holding one player is not a state AVFoundation
+        // renders sensibly - the picture disappears. Nothing else clears
+        // the old one: the compositor discarded its pointer, and destroy()
+        // only runs when the PLAYER goes away, which it has not.
+        let previous = withState { () -> AVPlayerLayer? in
+            let old = attachedLayers[id]
+            attachedLayers[id] = layer
+            return old
+        }
+        if let previous, previous !== layer {
+            previous.player = nil
+            avLog("unbound the previous layer for \(id)")
+        }
         layer.player = entry.player
-        withState { attachedLayers[id] = layer }
         avLog("attached layer to \(id)")
     }
 

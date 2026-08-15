@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,6 +17,1168 @@
+@@ -17,6 +17,1221 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -1097,6 +1097,59 @@ index 9ca6e15..799455c 100644
 +    };
 +  }
 +
++  // ---- Safari's prefixed fullscreen on the video element ------------
++  //
++  // The probe below answered this outright. Every field healthy -
++  // readyState=4, size=1280x720, dur=1964.5, playing - and
++  // supportsFS=absent. Not false: the property does not exist at all.
++  //
++  // Prime targets Safari, where video.webkitSupportsFullscreen is true
++  // once a source is loaded, so it tests for something this engine has
++  // never had and never offers its fullscreen control. Same reason the
++  // EME shim above exists: the page speaks Safari.
++  //
++  // Mapped onto the standard API rather than reimplemented, so fullscreen
++  // behaves exactly as it does for any other element. Both spellings of
++  // enter/exit are provided - Safari shipped webkitEnterFullscreen and
++  // webkitEnterFullScreen, and pages use either.
++  try {
++    var videoProto =
++      window.HTMLVideoElement && window.HTMLVideoElement.prototype;
++    if (videoProto && !("webkitSupportsFullscreen" in videoProto)) {
++      Object.defineProperty(videoProto, "webkitSupportsFullscreen", {
++        get: function () {
++          // Safari reports true once metadata is in and there is a
++          // picture to show. HAVE_METADATA is 1.
++          return this.readyState >= 1 && this.videoWidth > 0;
++        },
++        configurable: true,
++      });
++      Object.defineProperty(videoProto, "webkitDisplayingFullscreen", {
++        get: function () {
++          try {
++            return document.fullscreenElement === this;
++          } catch (e) {
++            return false;
++          }
++        },
++        configurable: true,
++      });
++      videoProto.webkitEnterFullscreen = function () {
++        return typeof this.requestFullscreen === "function"
++          ? this.requestFullscreen()
++          : undefined;
++      };
++      videoProto.webkitExitFullscreen = function () {
++        return typeof document.exitFullscreen === "function"
++          ? document.exitFullscreen()
++          : undefined;
++      };
++      videoProto.webkitEnterFullScreen = videoProto.webkitEnterFullscreen;
++      videoProto.webkitExitFullScreen = videoProto.webkitExitFullscreen;
++      debug("installed webkit fullscreen shim on HTMLVideoElement");
++    }
++  } catch (e) {}
++
 +  // ---- what the page sees when deciding to offer fullscreen ---------
 +  //
 +  // Protected video renders through an AVPlayerLayer, so Gecko's element
@@ -1171,7 +1224,7 @@ index 9ca6e15..799455c 100644
  
  const lazy = {};
  
-@@ -67,6 +1229,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +1282,336 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -1508,7 +1561,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1676,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +1729,18 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1527,7 +1580,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,14 +1703,77 @@
+@@ -199,14 +1756,77 @@
      return false;
    }
 +

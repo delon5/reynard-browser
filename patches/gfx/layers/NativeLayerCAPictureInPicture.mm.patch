@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..a29cd27a2cc3
 --- /dev/null
 +++ b/gfx/layers/NativeLayerCAPictureInPicture.mm
-@@ -0,0 +0,128 @@
+@@ -0,0 +0,143 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -124,8 +124,23 @@ index 000000000000..a29cd27a2cc3
 +}
 +
 +CALayer* NativeLayerCARepresentation::PictureInPictureSourceLayer() {
-+  if (!mWrappingCALayerHasExtent || mPictureInPictureFailureLatched ||
-+      ![mContentCALayer isKindOfClass:[AVSampleBufferDisplayLayer class]]) {
++  if (!mWrappingCALayerHasExtent || mPictureInPictureFailureLatched) {
++    return nil;
++  }
++  // Two layer classes can be the source now. Clear video still arrives as
++  // an AVSampleBufferDisplayLayer with surfaces enqueued into it, and
++  // protected video is an AVPlayerLayer bound to the AVPlayer that owns
++  // its decode - because a FairPlay frame cannot be read by the CPU, so
++  // nothing can be enqueued and AVFoundation has to draw it.
++  //
++  // Checking only for the display layer silently dropped PiP for every
++  // protected stream the moment the AVPlayerLayer path landed. That is a
++  // regression to a working feature rather than a gap in a missing one,
++  // which is why it is fixed here rather than left for later.
++  const bool isEligibleLayer =
++      [mContentCALayer isKindOfClass:[AVSampleBufferDisplayLayer class]] ||
++      [mContentCALayer isKindOfClass:[AVPlayerLayer class]];
++  if (!isEligibleLayer) {
 +    return nil;
 +  }
 +  return mContentCALayer;
