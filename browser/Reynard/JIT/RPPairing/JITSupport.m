@@ -658,6 +658,7 @@ int killStoppedChildren(void) {
     [lock unlock];
 
     int killed = 0;
+    int refused = 0;
     for (NSNumber *key in snapshot) {
         int32_t pid = key.intValue;
         if (!pidIsAlive((pid_t)pid)) {
@@ -683,6 +684,7 @@ int killStoppedChildren(void) {
                 @"%.0fms/%.0fms, cannot answer the foreground XPC",
                 pid, snapshot[key], mainAge, bgAge]);
         if (kill((pid_t)pid, SIGKILL) != 0) {
+            refused++;
             logger([NSString stringWithFormat:
                     @"killStoppedChildren: kill(%d) failed, errno=%d",
                     pid, errno]);
@@ -690,7 +692,27 @@ int killStoppedChildren(void) {
         }
         killed++;
     }
-    if (killed == 0) {
+    // "Nothing stopped long enough" and "found them and was refused" are
+    // opposite diagnoses and used to print the same line, because only
+    // successful kills were counted. A device capture (0x8BADF00D at
+    // 19:46:37) found both stopped children correctly, took EPERM on
+    // both kills, and then reported that it had found nothing - which
+    // reads as a broken heartbeat and sent the next reader looking in
+    // the wrong place entirely.
+    //
+    // EPERM is the expected answer, not an anomaly: RunningBoard spawns
+    // these extensions, so this process is not their parent and has no
+    // privilege to signal them. The same errno already turns up on
+    // csops. Which means this function cannot do its job at all, and
+    // the log has to say so rather than imply the search failed.
+    if (refused > 0) {
+        logger([NSString stringWithFormat:
+                @"killStoppedChildren: found %d stopped child(ren) and was "
+                @"REFUSED on every kill - this process cannot signal them "
+                @"(errno 1 = EPERM, they are RunningBoard's, not ours). "
+                @"The app is now waiting on a foreground XPC they cannot "
+                @"answer.", refused]);
+    } else if (killed == 0) {
         logger(@"killStoppedChildren: nothing stopped long enough to kill");
     }
     return killed;
