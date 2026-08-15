@@ -104,12 +104,24 @@ public final class FairPlayStreamParser: NSObject {
         guard let entry = withState({ entries[sessionId] }) else {
             return
         }
-        guard let identifier = specifier.value(forKey: "identifier") else {
-            Self.log("specifier has no identifier")
+        // A nil identifier is normal here, and requiring one was a bug
+        // that cost a build. The specifier's own initialisers say so:
+        // alongside initForKeySystem:identifier:... there is
+        // initForKeySystem:initializationData: with no identifier at all.
+        // Native HLS names a key with an skd:// URI; MSE names it with
+        // the init data itself - the sinf or PSSH - so for this path the
+        // initialisation data IS the identity.
+        //
+        // Refuse only when BOTH are absent, because then there is nothing
+        // to address a key request with.
+        let identifier = specifier.value(forKey: "identifier")
+        let initializationData = specifier.value(forKey: "initializationData") as? Data
+        guard identifier != nil || initializationData != nil else {
+            Self.log("specifier carries neither identifier nor initialisation data")
             return
         }
-        let initializationData = specifier.value(forKey: "initializationData") as? Data
-        Self.log("handing the specifier to the key session - id \(identifier), "
+        Self.log("handing the specifier to the key session - id "
+                 + "\(identifier.map { String(describing: $0) } ?? "nil"), "
                  + "\(initializationData?.count ?? 0) bytes of init data")
         entry.keySession.processContentKeyRequest(withIdentifier: identifier,
                                                   initializationData: initializationData,
