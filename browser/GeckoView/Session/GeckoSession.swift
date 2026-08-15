@@ -594,7 +594,35 @@ public class GeckoSession {
         
         return (values["error"] as? String) ?? "unknown error"
     }
-    
+
+    /// Gives the loaded document sticky user activation, as though it had
+    /// been tapped.
+    ///
+    /// For the CarPlay display, which receives no touch events at all:
+    /// without a gesture an autoplaying video is muted at best, and a
+    /// site blocked in Site Settings is refused outright.
+    ///
+    /// Activation rather than a permission, deliberately. Autoplay
+    /// policy ORs the blocking model in ahead of the site permission, so
+    /// an activated window plays even against BLOCKED_ALL - and nothing
+    /// is written to the shared permission store, which is what
+    /// answering .allow to the permission request used to do, silently
+    /// and forever, for every site ever played in the car.
+    ///
+    /// Like runUserScript, generic by design but only the CarPlay
+    /// session calls it.
+    @discardableResult
+    public func markUserActivated() async -> Bool {
+        let response = try? await dispatcher.query(
+            type: "GeckoView:MarkUserActivated",
+            message: [:]
+        )
+        guard let values = response as? [AnyHashable: Any] else {
+            return false
+        }
+        return (values["ok"] as? Bool) ?? false
+    }
+
     @discardableResult
     public func focusForHardwareKeyboard() -> Bool {
         return window?.focusForHardwareKeyboard() ?? false

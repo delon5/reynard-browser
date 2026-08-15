@@ -1096,7 +1096,7 @@ index 9ca6e15..799455c 100644
 +      return nativeSend.apply(this, arguments);
 +    };
 +  }
- 
++
 +  // ---- Safari's prefixed fullscreen on the video element ------------
 +  //
 +  // The probe below answered this outright. Every field healthy -
@@ -1149,7 +1149,7 @@ index 9ca6e15..799455c 100644
 +      debug("installed webkit fullscreen shim on HTMLVideoElement");
 +    }
 +  } catch (e) {}
-+
+ 
 +  // ---- controls for a video that went fullscreen on its own ---------
 +  //
 +  // On iOS, webkitEnterFullscreen hands the video to the system player,
@@ -1264,10 +1264,12 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +1321,336 @@
+@@ -65,8 +1319,338 @@
+       return windowUtils.SCROLL_MODE_INSTANT;
+     }
      return windowUtils.SCROLL_MODE_SMOOTH;
-   }
- 
++  }
++
 +  isFocusedEditableElement(element) {
 +    if (!element) {
 +      return false;
@@ -1353,8 +1355,8 @@ index 9ca6e15..799455c 100644
 +      // indistinguishable from a script that ran and did nothing.
 +      return { ok: false, error: String(e) };
 +    }
-+  }
-+
+   }
+ 
 +  getSafeAreaInsetUsage() {
 +    const { contentWindow } = this;
 +    const document = contentWindow?.document;
@@ -1601,7 +1603,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1768,18 @@
+@@ -184,6 +1768,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1614,16 +1616,52 @@ index 9ca6e15..799455c 100644
 +      case "RunUserScript": {
 +        return this.runUserScript(message.data?.script);
 +      }
++      case "MarkUserActivated": {
++        return this.markUserActivated();
++      }
 +      case "GetVisualViewportMetrics": {
 +        return this.getVisualViewportMetrics();
 +      }
      }
  
      return null;
-@@ -197,6 +1793,113 @@
-       return true;
-     }
+@@ -199,11 +1798,158 @@
      return false;
+   }
+ 
++  // Reynard: give this document sticky user activation.
++  //
++  // For the CarPlay display, which cannot be tapped: without a gesture
++  // an autoplaying video is held at Allowed_muted at best, and a site
++  // the user has blocked in Site Settings is refused outright.
++  //
++  // Activation is the right lever rather than a permission, because
++  // AutoplayPolicy::GetAutoplayPolicy ORs the blocking model in ahead of
++  // everything else - an activated window is Allowed even against a
++  // BLOCKED_ALL site permission. So the car display always plays, and
++  // the per-site setting keeps meaning exactly what it says everywhere
++  // else.
++  //
++  // The alternative was what CarPlay did before: answer .allow to the
++  // autoplay permission request. GeckoViewPermission persists that with
++  // addFromPrincipal(..., EXPIRE_NEVER), so every site played in the car
++  // silently acquired a permanent autoplay grant for normal browsing
++  // too. Activation is per document and stores nothing.
++  //
++  // notifyUserGestureActivation is ChromeOnly, which is why this has to
++  // happen here rather than in one of the injected scripts.
++  markUserActivated() {
++    const { contentWindow } = this;
++    if (!contentWindow) {
++      return { ok: false };
++    }
++    try {
++      contentWindow.document.notifyUserGestureActivation();
++      return { ok: true };
++    } catch (e) {
++      warn`markUserActivated failed: ${e}`;
++      return { ok: false };
++    }
 +  }
 +
 +  // Reynard: install Apple's legacy prefixed EME before page script.
@@ -1731,10 +1769,10 @@ index 9ca6e15..799455c 100644
 +      // the shim must not notice it failed to install.
 +      warn`webkitmediakeys shim failed: ${e}`;
 +    }
-   }
- 
++  }
++
    // eslint-disable-next-line complexity
-@@ -204,6 +1907,11 @@
+   handleEvent(aEvent) {
      debug`handleEvent: ${aEvent.type}`;
  
      switch (aEvent.type) {

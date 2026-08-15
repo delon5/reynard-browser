@@ -488,8 +488,26 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
             return .deny
         }
         
-        logger("CarPlay: allowing autoplay for the car display")
-        return .allow
+        // Autoplay is NOT granted here any more, and that is the point.
+        //
+        // GeckoViewPermission persists whatever this returns with
+        // addFromPrincipal(..., EXPIRE_NEVER), into the same store Site
+        // Settings reads. So every site ever played on the car display
+        // was quietly acquiring a permanent autoplay grant for normal
+        // browsing too - and, in the other direction, a site the user
+        // blocked in Site Settings could not be played in the car.
+        //
+        // markUserActivated does the job instead: sticky activation is
+        // ORed in ahead of the site permission, so the car display plays
+        // regardless, and nothing is written down. See onPageStart.
+        // .prompt, which is PROMPT_ACTION - the neutral value. .allow
+        // and .deny are BOTH persisted, so either one would decide
+        // autoplay for this site in normal browsing as well. With
+        // activation granted the request should not be raised at all;
+        // if it ever is, this leaves the user's own Site Settings choice
+        // as the only thing that decides.
+        logger("CarPlay: leaving autoplay to activation, not a stored permission")
+        return .prompt
     }
 
     /// Camera and microphone, denied outright. Nothing on the car
@@ -504,7 +522,17 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
 
     // MARK: - ProgressDelegate
     
-    func onPageStart(session: GeckoSession, url: String) {}
+    /// The car display receives no touch events - Apple's guide says so
+    /// and a tap probe on device confirmed it - so no document here ever
+    /// gets a real gesture. Activation is granted on its behalf, at page
+    /// start so a player feature-detecting during boot already sees it.
+    func onPageStart(session: GeckoSession, url: String) {
+        Task { @MainActor in
+            let activated = await session.markUserActivated()
+            logger(String(format: "CarPlay: user activation %@ for %@",
+                          activated ? "granted" : "FAILED", url))
+        }
+    }
     
     func onProgressChange(session: GeckoSession, progress: Int) {}
     
@@ -517,6 +545,17 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
     /// their DOM far better than Swift-side polling could. See
     /// fix_carplay_scripts_ui.py.
     func onPageStop(session: GeckoSession, success: Bool) {
+        // Before the scripts guard: activation is not a scripting
+        // feature, and a car display with the scripts toggle off still
+        // must not be left unable to play. Again here because a
+        // same-document navigation swaps out the document that was
+        // activated at page start.
+        if success {
+            Task { @MainActor in
+                await session.markUserActivated()
+            }
+        }
+
         guard success, Prefs.ExperimentalSettings.isCarPlayScriptsEnabled else {
             return
         }
