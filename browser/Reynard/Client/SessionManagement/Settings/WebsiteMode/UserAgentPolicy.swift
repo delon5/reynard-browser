@@ -18,9 +18,31 @@ struct UserAgentConfiguration {
 struct UserAgentPolicy {
     // MARK: - FairPlay Streaming
 
-    /// Safari on iPhone, tracking the device's real OS version so the
-    /// string does not go stale. Same construction FaviconStore uses
-    /// for its metadata fetches.
+    /// Safari on iPhone, copied verbatim from a device capture rather
+    /// than synthesised from the running OS.
+    ///
+    /// Apple freezes the OS token. Real Safari reports `iPhone OS 18_6`
+    /// while `Version/` advances independently - a Charles capture of
+    /// this phone playing Apple TV+ in Safari sends exactly:
+    ///
+    ///   Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X)
+    ///   AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0
+    ///   Mobile/15E148 Safari/604.1
+    ///
+    /// Deriving both tokens from operatingSystemVersion produced
+    /// "iPhone OS 27_0", which no iPhone has ever sent. Apple TV+
+    /// branches on client identity - its playlist request carries
+    /// webbrowser=true - and an unrecognised OS token drops us onto the
+    /// generic-browser path: MSE + cenc, which ends at
+    /// FairPlayCDMProxy::Decrypt and cannot be served. Safari is handed
+    /// HLS with KEYFORMAT="com.apple.streamingkeydelivery" and skd://
+    /// key URIs, which is the path AVPlayerDecoder owns and the Apple TV
+    /// trailer already plays through. That playlist also offers plain
+    /// avc1.64001f + mp4a.40.2 ladders, so the HEVC and Dolby rungs we
+    /// do not advertise are not required.
+    ///
+    /// A stale-but-real string beats a live-but-impossible one. Re-capture
+    /// from the device rather than computing it when this needs advancing.
     ///
     /// The iPhone form even on iPad, deliberately. It is what makes
     /// MediaSource::VisibleForCurrentGlobal hide window.MediaSource for
@@ -29,14 +51,10 @@ struct UserAgentPolicy {
     /// MSE+FairPlay, which this engine cannot serve. An iPad UA would
     /// leave MSE visible and walk the player into the path that does
     /// not work.
-    static let safariMobileUserAgent: String = {
-        let version = ProcessInfo.processInfo.operatingSystemVersion
-        let osVersion = "\(version.majorVersion)_\(version.minorVersion)"
-        let safariVersion = "\(version.majorVersion).\(version.minorVersion)"
-        return "Mozilla/5.0 (iPhone; CPU iPhone OS \(osVersion) like Mac OS X) "
-            + "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-            + "Version/\(safariVersion) Mobile/15E148 Safari/604.1"
-    }()
+    static let safariMobileUserAgent: String =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        + "Version/27.0 Mobile/15E148 Safari/604.1"
 
     /// Services that hand FairPlay over native HLS to Safari on iOS,
     /// and Widevine to anything that looks like Firefox.
