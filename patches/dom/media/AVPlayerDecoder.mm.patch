@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..aec25c5a8025
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2493 @@
+@@ -0,0 +0,2537 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -106,6 +106,7 @@ index 000000000000..aec25c5a8025
 +  kAVPlayerResume = 3,
 +  kAVPlayerDestroy = 4,
 +  kAVPlayerSeek = 5,
++  kAVPlayerVolume = 6,
 +};
 +
 +// PARENT PROCESS ONLY: the real players, keyed by the composite id
@@ -1042,6 +1043,9 @@ index 000000000000..aec25c5a8025
 +    case kAVPlayerSeek:
 +      [host seek:playerId to:aArg];
 +      break;
++    case kAVPlayerVolume:
++      [host setVolume:playerId to:aArg];
++      break;
 +    case kAVPlayerDestroy:
 +      [host destroy:playerId];
 +      players.erase(entry);
@@ -1092,6 +1096,9 @@ index 000000000000..aec25c5a8025
 +      break;
 +    case kAVPlayerSeek:
 +      [host seek:playerId to:aArg];
++      break;
++    case kAVPlayerVolume:
++      [host setVolume:playerId to:aArg];
 +      break;
 +    case kAVPlayerDestroy:
 +      [host destroy:playerId];
@@ -1391,6 +1398,43 @@ index 000000000000..aec25c5a8025
 +                (unsigned long long)mPlayerId);
 +  ControlPlayer(mPlayerId, kAVPlayerPlay);
 +  MediaDecoder::Play();
++}
++
++// The element's volume, forwarded to the player actually making the
++// sound.
++//
++// Nothing did this, and two separate faults came out of it. The page's
++// mute button set the element's volume to zero while the AVPlayer
++// carried on at full, so the button visibly did nothing. And the
++// autoplay setting "Block Audio Only" is Gecko's DENY_ACTION, which
++// resolves to Allowed_muted - the play is permitted PRECISELY because
++// Gecko believes the element is inaudible. With the volume never
++// reaching AVFoundation that belief was false, so a site blocked from
++// autoplaying with sound autoplayed with sound. Reported on IGN, whose
++// feed does exactly this.
++//
++// MediaDecoder::SetVolume is virtual for this; the base class still
++// records mVolume, which the rest of Gecko reads.
++void AVPlayerDecoder::SetVolume(double aVolume) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Clamped rather than trusted: AVPlayer takes 0...1 and anything
++  // outside that is undefined, while an element's volume is only
++  // guaranteed finite.
++  double volume = aVolume;
++  if (!std::isfinite(volume)) {
++    volume = 1.0;
++  }
++  volume = std::max(0.0, std::min(1.0, volume));
++  // Volume changes arrive per animation frame from a fading UI; only a
++  // real change is worth an IPC hop.
++  if (mLastVolumeSent >= 0.0 && std::fabs(mLastVolumeSent - volume) < 0.001) {
++    return;
++  }
++  mLastVolumeSent = volume;
++  printf_stderr("avPlayer: decoder volume player=%llu -> %.3f\n",
++                (unsigned long long)mPlayerId, volume);
++  ControlPlayer(mPlayerId, kAVPlayerVolume, volume);
++  MediaDecoder::SetVolume(aVolume);
 +}
 +
 +void AVPlayerDecoder::Pause() {

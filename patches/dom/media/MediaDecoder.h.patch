@@ -2,7 +2,23 @@ diff --git a/dom/media/MediaDecoder.h b/dom/media/MediaDecoder.h
 index 98d4e9bffca6..edc305b6883e 100644
 --- a/dom/media/MediaDecoder.h
 +++ b/dom/media/MediaDecoder.h
-@@ -442,7 +442,13 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
+@@ -174,7 +174,14 @@
+   // Pause video playback.
+   virtual void Pause();
+   // Adjust the speed of the playback, optionally with pitch correction,
+-  void SetVolume(double aVolume);
++  // Virtual for AVPlayerDecoder, which forwards the element's volume to
++  // the AVPlayer actually producing the sound. Without that the page's
++  // mute button changed mVolume and nothing else, and the "Block Audio
++  // Only" autoplay setting - which Gecko implements as Allowed_muted,
++  // permitting the play only because it believes the element is
++  // inaudible - was defeated by a player that never heard about the
++  // volume at all.
++  virtual void SetVolume(double aVolume);
+ 
+   void SetPlaybackRate(double aPlaybackRate);
+   void SetPreservesPitch(bool aPreservesPitch);
+@@ -442,7 +449,13 @@
  
    AbstractThread* AbstractMainThread() const { return mAbstractMainThread; }
  

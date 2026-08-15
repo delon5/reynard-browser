@@ -1202,6 +1202,28 @@ public final class AVPlayerHost: NSObject {
         return duration.isValid && !duration.isIndefinite ? duration.seconds : -1
     }
 
+    /// The element's volume, applied to the player that is actually
+    /// producing the sound.
+    ///
+    /// Nothing carried this before, and two faults came out of it: the
+    /// page's mute button changed the element and nothing else, and the
+    /// "Block Audio Only" autoplay setting was defeated, because Gecko
+    /// permits that play only on the belief that the element is
+    /// inaudible - a belief AVFoundation never heard about.
+    ///
+    /// isMuted as well as volume: AVPlayer treats them independently,
+    /// and a player left muted by the diagnostic retry in pullFrames
+    /// would otherwise stay silent no matter what the page asked for.
+    @objc public func setVolume(_ id: UInt, to volume: Double) {
+        guard let entry = withState({ players[id] }) else {
+            return
+        }
+        let clamped = max(0.0, min(1.0, volume))
+        entry.player.volume = Float(clamped)
+        entry.player.isMuted = clamped <= 0.0
+        avLog("setVolume(\(id)) -> \(clamped)")
+    }
+
     @objc public func seek(_ id: UInt, to seconds: Double) {
         guard let entry = withState({ players[id] }) else {
             return

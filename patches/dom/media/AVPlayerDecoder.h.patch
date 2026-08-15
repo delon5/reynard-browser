@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..72f80c12573a
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +0,236 @@
+@@ -0,0 +0,245 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -131,6 +131,11 @@ index 000000000000..72f80c12573a
 +  // Republishes the placeholder carrying the DRM mark. Main thread only.
 +  void MarkProtectedByOutputStall();
 +
++  // Forwards the element's volume to the AVPlayer. See the definition
++  // for the mute button and the "Block Audio Only" setting that both
++  // depended on it. Main thread only.
++  void SetVolume(double aVolume) override;
++
 +  // Latched by ReynardAVPlayerNotifyFrame the first time a real
 +  // decoded frame reaches the container. Once true the placeholder
 +  // must never publish again: NotifyMetadata republishes it at the
@@ -156,6 +161,10 @@ index 000000000000..72f80c12573a
 +  // which advances position - cannot be mistaken for a stall.
 +  bool mSawRealFrameSincePoke = false;
 +  double mStallCheckPosition = -1.0;
++
++  // Last volume actually sent, so a fading UI's per-frame changes do
++  // not each cost an IPC hop. Negative until the first send.
++  double mLastVolumeSent = -1.0;
 +
 +  // Hooked purely to report that the pipeline got this far.
 +  //
