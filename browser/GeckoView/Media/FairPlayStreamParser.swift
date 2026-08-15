@@ -53,6 +53,8 @@ public final class FairPlayStreamParser: NSObject {
         let recipient: AVContentKeyRecipient
         let keySession: AVContentKeySession
         let delegate: ParserDelegate
+        /// Retained because setDelegate(_:queue:) does not.
+        let keyDelegate: KeySessionDelegate
         /// Track ids the parser has raised a key request for, in arrival
         /// order. The SPC call needs one and the CKC is addressed to one,
         /// and neither EME message carries it - the page has never heard
@@ -62,11 +64,13 @@ public final class FairPlayStreamParser: NSObject {
         init(parser: NSObject,
              recipient: AVContentKeyRecipient,
              keySession: AVContentKeySession,
-             delegate: ParserDelegate) {
+             delegate: ParserDelegate,
+             keyDelegate: KeySessionDelegate) {
             self.parser = parser
             self.recipient = recipient
             self.keySession = keySession
             self.delegate = delegate
+            self.keyDelegate = keyDelegate
         }
     }
 
@@ -79,8 +83,37 @@ public final class FairPlayStreamParser: NSObject {
         return body()
     }
 
-    private static func log(_ message: String) {
+    fileprivate static func log(_ message: String) {
         fputs("fpsParser: \(message)\n", stderr)
+    }
+
+    /// Hands a specifier to the key session so a REAL request comes back.
+    ///
+    /// The parser reports `AVContentKeySpecifier`, which a method dump
+    /// showed is a value object - identifier, initializationData,
+    /// keySystem, options, and nothing that makes an SPC. It is the input
+    /// to processContentKeyRequest, and the AVContentKeyRequest that
+    /// answers it is the object carrying
+    /// makeStreamingContentKeyRequestDataForApp:.
+    ///
+    /// Four builds went into asking the parser directly for an SPC, on
+    /// the strength of a selector its own method dump listed. Every one
+    /// returned nil with no NSError, because that is not the supported
+    /// path. This is.
+    fileprivate func processSpecifier(sessionId: String, specifier: AnyObject) {
+        guard let entry = withState({ entries[sessionId] }) else {
+            return
+        }
+        guard let identifier = specifier.value(forKey: "identifier") else {
+            Self.log("specifier has no identifier")
+            return
+        }
+        let initializationData = specifier.value(forKey: "initializationData") as? Data
+        Self.log("handing the specifier to the key session - id \(identifier), "
+                 + "\(initializationData?.count ?? 0) bytes of init data")
+        entry.keySession.processContentKeyRequest(withIdentifier: identifier,
+                                                  initializationData: initializationData,
+                                                  options: nil)
     }
 
     /// A file in the app's Documents, for probe inputs the user drops in.
@@ -128,17 +161,28 @@ public final class FairPlayStreamParser: NSObject {
             return false
         }
 
-        // A session with no delegate of its own on purpose. The parser is
-        // the recipient and the parser's delegate is what reports the key
-        // request; AVContentKeySession's own delegate is the AVURLAsset
-        // path's mechanism and would be a second, conflicting source of
-        // the same event.
+        // The session gets a delegate, and that correction is the whole
+        // point of this revision.
+        //
+        // This code used to say the session needed no delegate - that the
+        // parser's delegate reported the key request and the session's
+        // was "the AVURLAsset path's mechanism", a second conflicting
+        // source of the same event. That was reasoned, not tested, and it
+        // was wrong. The parser's delegate reports an
+        // AVContentKeySpecifier, which is a description of what needs a
+        // key; the session's delegate is where the AVContentKeyRequest
+        // arrives, and only that object can make an SPC. Without a
+        // delegate here the request had nowhere to be delivered, which is
+        // why four builds of asking the parser directly returned nil.
         let keySession = AVContentKeySession(keySystem: .fairPlayStreaming)
+        let keyDelegate = KeySessionDelegate(sessionId: sessionId)
+        keySession.setDelegate(keyDelegate, queue: DispatchQueue.main)
         keySession.addContentKeyRecipient(recipient)
 
         withState {
             entries[sessionId] = Entry(parser: parser, recipient: recipient,
-                                       keySession: keySession, delegate: delegate)
+                                       keySession: keySession, delegate: delegate,
+                                       keyDelegate: keyDelegate)
         }
         Self.log("session \(sessionId) ready - parser \(parser), "
                  + "recipients \(keySession.contentKeyRecipients.count)")
@@ -352,6 +396,9 @@ public final class FairPlayStreamParser: NSObject {
                  ?? "no fps-certificate.der - falling back to a dummy, so a "
                  + "refusal below says nothing about the cause")
         let contentIdentifier = Data("probe-content-id".utf8)
+        // The key-session delegate needs it too - that is where the real
+        // AVContentKeyRequest lands and where the SPC is actually made.
+        entry.keyDelegate.certificate = certificate
         Self.log("--- SPC before any append (track guessed) ---")
         for trackID in Int32(1)...Int32(2) {
             _ = Self.requestSPC(parser: entry.parser, trackID: trackID,
@@ -457,6 +504,65 @@ public final class FairPlayStreamParser: NSObject {
 
 // MARK: - Delegate
 
+/// Where the real AVContentKeyRequest arrives.
+///
+/// The piece that was missing. The parser's delegate reports an
+/// AVContentKeySpecifier - a description of what needs a key, with no
+/// ability to make an SPC. Feeding that to
+/// processContentKeyRequest(withIdentifier:initializationData:options:)
+/// makes the session raise a genuine AVContentKeyRequest, and THAT is the
+/// object with makeStreamingContentKeyRequestData(forApp:...).
+///
+/// The certificate is set by whoever drives the session, because it comes
+/// from the page's setServerCertificate and cannot be invented here.
+final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
+    let sessionId: String
+    var certificate: Data?
+
+    init(sessionId: String) {
+        self.sessionId = sessionId
+        super.init()
+    }
+
+    func contentKeySession(_ session: AVContentKeySession,
+                           didProvide keyRequest: AVContentKeyRequest) {
+        FairPlayStreamParser.log(
+            "session \(sessionId) REAL AVContentKeyRequest arrived - "
+            + "identifier \(String(describing: keyRequest.identifier))")
+        guard let certificate else {
+            FairPlayStreamParser.log("no application certificate yet - cannot make an SPC")
+            return
+        }
+        // The content identifier the SPC covers. Apple's HLS Catalog
+        // sample takes the ASSET ID rather than the whole skd:// URI, and
+        // AVPlayerHost does the same on the native path - but MSE's
+        // identifier is raw key-id bytes rather than a URI, so it is used
+        // as-is when it is already Data.
+        let contentId: Data
+        if let data = keyRequest.identifier as? Data {
+            contentId = data
+        } else if let string = keyRequest.identifier as? String {
+            contentId = Data(string.utf8)
+        } else {
+            FairPlayStreamParser.log("identifier is neither Data nor String - cannot address an SPC")
+            return
+        }
+        keyRequest.makeStreamingContentKeyRequestData(
+            forApp: certificate, contentIdentifier: contentId, options: nil
+        ) { spc, error in
+            if let spc {
+                FairPlayStreamParser.log(
+                    "SPC PRODUCED for session \(self.sessionId): \(spc.count) bytes - "
+                    + "the MSE FairPlay route is open")
+            } else {
+                FairPlayStreamParser.log(
+                    "SPC failed for session \(self.sessionId): "
+                    + (error.map { String(describing: $0) } ?? "no error given"))
+            }
+        }
+    }
+}
+
 /// The parser's output delegate.
 ///
 /// Only the callbacks that matter are declared, and they are declared with
@@ -501,6 +607,8 @@ private final class ParserDelegate: NSObject {
         fputs("fpsParser: session \(sessionId) key request on track \(trackID)\n", stderr)
         lastSpecifier = specifier as AnyObject
         FairPlayStreamParser.shared.noteKeyRequest(sessionId: sessionId, trackID: trackID)
+        FairPlayStreamParser.shared.processSpecifier(sessionId: sessionId,
+                                                     specifier: specifier as AnyObject)
     }
 
     /// The older spelling, kept because the SDK samples and WebKit both
