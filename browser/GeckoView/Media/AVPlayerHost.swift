@@ -404,6 +404,11 @@ public final class AVPlayerHost: NSObject {
         /// nothing would unpark the link when the stall clears.
         /// Guarded by stateLock, like wantsPlayback.
         var idlePullTicks: Int = 0
+        /// Item time when the output last handed over a pixel buffer, and
+        /// whether we have already told Gecko this stream is protected.
+        /// See noteProtectedStall.
+        var lastBufferItemTime: Double = -1
+        var reportedProtected = false
         /// Desired park state for the pull link. Guarded by stateLock -
         /// written from Gecko's main thread (pause, suspend) and from
         /// the GCD main queue (the idle backstop, the readiness replay).
@@ -683,6 +688,58 @@ public final class AVPlayerHost: NSObject {
         // audio played on. Every case the backstop exists for still
         // parks: created-but-never-played, pause() and suspend() all
         // sit in .paused.
+        // A protected stream is the only thing that plays with the clock
+        // running and the output permanently empty. AVPlayerItemVideoOutput
+        // will not vend pixel buffers for content it is decrypting, so
+        // "playing, ready, and nothing coming out" is the signature.
+        //
+        // Gecko cannot see any of this. Apple TV+ hands the whole key
+        // exchange to AVFoundation through the AVContentKeySession and
+        // never touches EME, so the content process has no CDM proxy and
+        // no reason to think the stream is protected - it keeps waiting
+        // for frames that can never arrive, which is a black picture with
+        // audio playing over it.
+        //
+        // The window is measured in ITEM TIME, not wall clock, and that is
+        // what makes it safe: a paused player does not advance item time,
+        // and neither does a rebuffering one, so neither can be mistaken
+        // for this. .playing with no waiting reason excludes them anyway;
+        // the item-time test is the belt to that pair of braces.
+        func noteProtectedStall(at itemSeconds: Double) {
+            guard itemSeconds.isFinite, itemSeconds >= 0 else { return }
+            let player = entry.player
+            guard player.timeControlStatus == .playing,
+                  player.reasonForWaitingToPlay == nil,
+                  entry.item.status == .readyToPlay else {
+                return
+            }
+            let shouldReport = withState { () -> Bool in
+                guard !entry.reportedProtected else { return false }
+                // First observation with no buffer yet: start the window
+                // here rather than at zero, so a player that began mid
+                // stream is measured from where it actually is.
+                if entry.lastBufferItemTime < 0 {
+                    entry.lastBufferItemTime = itemSeconds
+                    return false
+                }
+                // A backwards seek rebases instead of accumulating.
+                if itemSeconds < entry.lastBufferItemTime {
+                    entry.lastBufferItemTime = itemSeconds
+                    return false
+                }
+                guard itemSeconds - entry.lastBufferItemTime >= 1.0 else {
+                    return false
+                }
+                entry.reportedProtected = true
+                return true
+            }
+            guard shouldReport else { return }
+            avLog("framePull[\(id)] output stalled "
+                  + "\(itemSeconds - entry.lastBufferItemTime)s of item time "
+                  + "with no buffer - reporting protected")
+            ReynardAVPlayerNotifyProtected(id)
+        }
+
         func noteIdleTick() {
             let shouldPark = withState { () -> Bool in
                 guard entry.player.timeControlStatus == .paused else {
@@ -745,6 +802,7 @@ public final class AVPlayerHost: NSObject {
 
         guard output.hasNewPixelBuffer(forItemTime: itemTime) else {
             report("no new pixel buffer at t=\(CMTimeGetSeconds(itemTime))")
+            noteProtectedStall(at: CMTimeGetSeconds(itemTime))
             noteIdleTick()
             return
         }
@@ -756,7 +814,10 @@ public final class AVPlayerHost: NSObject {
             return
         }
 
-        withState { entry.idlePullTicks = 0 }
+        withState {
+            entry.idlePullTicks = 0
+            entry.lastBufferItemTime = CMTimeGetSeconds(itemTime)
+        }
         if !entry.reportedFirstPull {
             entry.reportedFirstPull = true
             avLog("framePull[\(id)] FIRST BUFFER after \(tick) ticks - handing to Gecko")

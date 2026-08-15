@@ -202,7 +202,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
-@@ -8006,6 +8142,234 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+@@ -8006,6 +8142,242 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
  }
  
  }  // namespace dom
@@ -307,6 +307,14 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +                  static_cast<unsigned long long>(aKey), cp ? 1 : 0,
 +                  sent ? 1 : 0);
 +  }
++}
++
++void ReynardAVPlayerSendProtected(uint64_t aKey) {
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerProtected(aKey & 0xffffffff);
++  printf_stderr("avPlayer: send protected key=%llu owner=%d sent=%d\n",
++                static_cast<unsigned long long>(aKey), cp ? 1 : 0,
++                sent ? 1 : 0);
 +}
 +
 +void ReynardAVPlayerSendEnded(uint64_t aKey) {

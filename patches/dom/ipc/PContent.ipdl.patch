@@ -2,7 +2,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
 index 23fb64851635..6afd9d5f25df 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,9 +571,105 @@ parent:
+@@ -571,9 +571,110 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -70,6 +70,11 @@ index 23fb64851635..6afd9d5f25df 100644
 +                           int32_t aWidth, int32_t aHeight);
 +    async AVPlayerTime(uint64_t aPlayerId, double aSeconds);
 +    async AVPlayerEnded(uint64_t aPlayerId);
++    // The app process worked out this stream is protected by watching
++    // its own video output go quiet while the clock kept running. Only
++    // it can see that, so only it can say so. See
++    // AVPlayerDecoder::MaybeMarkProtectedOutputStall.
++    async AVPlayerProtected(uint64_t aPlayerId);
 +
 +    // Reynard FairPlay, the other direction.
 +    //
@@ -108,7 +113,7 @@ index 23fb64851635..6afd9d5f25df 100644
      async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
                             ManagedEndpoint<PWindowGlobalChild> windowEp,
                             TabId tabId,
-@@ -604,7 +700,8 @@ child:
+@@ -604,7 +705,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -118,7 +123,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +711,8 @@ child:
+@@ -614,7 +716,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

@@ -130,6 +130,7 @@ index 000000000000..aec25c5a8025
 +                                 int32_t aWidth, int32_t aHeight);
 +void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds);
 +void ReynardAVPlayerSendEnded(uint64_t aKey);
++void ReynardAVPlayerSendProtected(uint64_t aKey);
 +// FairPlay, the same direction: app process -> the content process
 +// that asked for this player.
 +void ReynardFairPlaySendEncrypted(uint64_t aKey,
@@ -215,6 +216,18 @@ index 000000000000..aec25c5a8025
 +      NS_NewRunnableFunction("ReynardAVPlayerSendTime", [aKey, aSeconds]() {
 +        ReynardAVPlayerSendTime(aKey, aSeconds);
 +      }));
++}
++
++static void ForwardProtectedToOwner(uint64_t aKey) {
++  printf_stderr("avPlayer: forwarding protected mark for key %llu\n",
++                (unsigned long long)aKey);
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendProtected(aKey);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerSendProtected",
++      [aKey]() { ReynardAVPlayerSendProtected(aKey); }));
 +}
 +
 +static void ForwardEndedToOwner(uint64_t aKey) {
@@ -1631,7 +1644,6 @@ index 000000000000..aec25c5a8025
 +  // gains data. The demuxer is what was waiting; the reader owns the
 +  // machinery for asking it again.
 +  NotifyReaderDataArrived();
-+  MaybeMarkProtectedOutputStall();
 +}
 +
 +// Native HLS FairPlay never touches EME. Apple TV+ hands the whole key
@@ -1650,61 +1662,19 @@ index 000000000000..aec25c5a8025
 +// Measured in stream position rather than wall clock deliberately. A
 +// paused or rebuffering player does not advance its position, so
 +// neither can produce this, and no timer is needed to tell them apart.
-+void AVPlayerDecoder::MaybeMarkProtectedOutputStall() {
++void AVPlayerDecoder::MarkProtectedByOutputStall() {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  // EME already answered, or this already fired. Either way there is
-+  // nothing left to infer.
-+  if (mOutputStallProtected || mCDMProxy) {
-+    return;
-+  }
-+  // Nothing to draw into - a placeholder has to have been published for
-+  // its geometry to be republished with the mark.
-+  if (mLastPlaceholderSize.IsEmpty()) {
-+    return;
-+  }
-+  Maybe<AVPlayerPlaybackRegistry::Snapshot> snapshot =
-+      AVPlayerPlaybackRegistry::Get(mPlayerId);
-+  if (!snapshot || !snapshot->mPosition.IsValid()) {
-+    return;
-+  }
-+  const double position = snapshot->mPosition.ToSeconds();
-+  if (position < 0.0) {
-+    return;
-+  }
-+  // A frame since the last check, or the first check ever: rebase and
-+  // wait. Playback that is delivering pixels can never accumulate the
-+  // gap below.
-+  if (mSawRealFrameSincePoke || mStallCheckPosition < 0.0) {
-+    mSawRealFrameSincePoke = false;
-+    mStallCheckPosition = position;
-+    return;
-+  }
-+  // Seeking backwards would otherwise look like a stall forever.
-+  if (position < mStallCheckPosition) {
-+    mStallCheckPosition = position;
-+    return;
-+  }
-+  // One second, not three. Three was chosen for margin and was simply
-+  // too long for the interaction: a capture caught Apple TV+ in exactly
-+  // this state - one frame, then blocked with the position climbing -
-+  // and the title was paused after roughly two seconds, because nobody
-+  // watches a black rectangle for longer than that before giving up.
-+  //
-+  // The margin was never what made this safe. Measuring in stream
-+  // position is: a paused player does not advance it, and neither does
-+  // a rebuffering one, so shortening the window cannot turn either into
-+  // a false positive. It only decides how quickly a genuinely protected
-+  // stream is recognised.
-+  static const double kProtectedStallSeconds = 1.0;
-+  if (position - mStallCheckPosition < kProtectedStallSeconds) {
++  if (mOutputStallProtected || IsShutdown()) {
 +    return;
 +  }
 +  mOutputStallProtected = true;
-+  printf_stderr(
-+      "avPlayer: output stalled %.3fs of playback with no frame - treating "
-+      "player %llu as protected\n",
-+      position - mStallCheckPosition, (unsigned long long)mPlayerId);
-+  PublishPlaceholderFrame(mLastPlaceholderSize);
++  printf_stderr("avPlayer: marking player %llu protected - output stalled\n",
++                (unsigned long long)mPlayerId);
++  // Nothing to republish if no placeholder was ever built; the next
++  // publish carries the mark instead.
++  if (!mLastPlaceholderSize.IsEmpty()) {
++    PublishPlaceholderFrame(mLastPlaceholderSize);
++  }
 +}
 +
 +void AVPlayerDecoder::DispatchEncryptedFromKeySession(
@@ -2220,6 +2190,36 @@ index 000000000000..aec25c5a8025
 +// next sample request answers END_OF_STREAM - which is how the state
 +// machine completes and the element fires "ended" at the stream's real
 +// end, rather than at t=0 the way the end-of-stream stub did.
++// The app process watched its own video output go quiet while the clock
++// kept running, which is the only thing a native-HLS FairPlay stream
++// ever does to announce itself - Apple TV+ hands its key exchange to
++// AVFoundation and never touches EME, so mCDMProxy stays null while the
++// content is protected.
++//
++// The observation can only be made where the AVPlayer is, and the
++// decoder that has to act on it lives in the content process, so this
++// crosses exactly as the other player callbacks do.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyProtected(
++    uintptr_t aPlayerId) {
++  printf_stderr("avPlayer: protected callback player=%llu\n",
++                (unsigned long long)aPlayerId);
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ForwardProtectedToOwner(key);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyProtected", [aPlayerId]() {
++        MOZ_ASSERT(NS_IsMainThread());
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          // Teardown race, same as the other callbacks: dropped.
++          return;
++        }
++        entry->second->MarkProtectedByOutputStall();
++      }));
++}
++
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId) {
 +  printf_stderr("avPlayer: ended callback player=%llu\n",
 +                (unsigned long long)aPlayerId);
