@@ -1,0 +1,17 @@
+diff --git a/gfx/layers/NativeLayerRemoteMac.mm b/gfx/layers/NativeLayerRemoteMac.mm
+--- a/gfx/layers/NativeLayerRemoteMac.mm
++++ b/gfx/layers/NativeLayerRemoteMac.mm
+@@ -273,7 +273,12 @@
+       NativeLayerCAUpdateType::All, rect.Size(), mIsOpaque, rect.TopLeft(),
+       mTransform, displayRect, mClipRect, mRoundedClipRect, mBackingScale,
+       mSurfaceIsFlipped, mSamplingFilter, specializeVideo, surface, mColor,
+-      mIsDRM, isVideo);
++      mIsDRM, isVideo,
++      // The snapshot layer is by definition not the onscreen one, so it
++      // never takes the AVPlayer: a player draws into a single layer,
++      // and binding this one would take it from the layer the user is
++      // looking at.
++      /* aIsOnscreen */ false);
+ }
+ 
+ CALayer* NativeLayerRemoteMac::CALayerForSnapshot() {
