@@ -82,6 +82,16 @@ public final class FairPlayStreamParser: NSObject {
         fputs("fpsParser: \(message)\n", stderr)
     }
 
+    /// A file in the app's Documents, for probe inputs the user drops in.
+    ///
+    /// NSSearchPath rather than ReynardDirectories: this file is in the
+    /// GeckoView framework, which does not link the app's own types.
+    private func documentsPath(_ name: String) -> String {
+        let documents = NSSearchPathForDirectoriesInDomains(
+            .documentDirectory, .userDomainMask, true)
+        return (documents.first ?? "") + "/" + name
+    }
+
     // MARK: - Lifecycle
 
     /// Build a parser bound to its own key session, or report why not.
@@ -321,12 +331,30 @@ public final class FairPlayStreamParser: NSObject {
         // append means the track was never the obstacle - a certificate
         // complaint in both cases is the answer we want. Different errors
         // mean the track is required and the deadlock is real.
-        let dummyCertificate = Data(repeating: 0, count: 16)
+        // A REAL certificate if one was dropped beside the segment.
+        //
+        // The first run of this probe refused identically before and
+        // after an append, which ruled the track out as the obstacle but
+        // proved nothing about the cause: both calls returned nil with no
+        // NSError at all. 16 zero bytes is not a certificate, and a real
+        // FPS application certificate is ~2598 bytes - the size the
+        // broker logs on every Apple TV+ load.
+        //
+        // So the question needs a real one. Apple ships a test
+        // certificate in the same FPS Server SDK as the segment; drop it
+        // in Documents as fps-certificate.der. Falling back to the dummy
+        // keeps the track comparison working when it is absent.
+        let certificatePath = documentsPath("fps-certificate.der")
+        let realCertificate = FileManager.default.contents(atPath: certificatePath)
+        let certificate = realCertificate ?? Data(repeating: 0, count: 16)
+        Self.log(realCertificate.map { "using real certificate, \($0.count) bytes" }
+                 ?? "no fps-certificate.der - falling back to a dummy, so a "
+                 + "refusal below says nothing about the cause")
         let contentIdentifier = Data("probe-content-id".utf8)
         Self.log("--- SPC before any append (track guessed) ---")
         for trackID in Int32(1)...Int32(2) {
             _ = Self.requestSPC(parser: entry.parser, trackID: trackID,
-                                certificate: dummyCertificate,
+                                certificate: certificate,
                                 contentIdentifier: contentIdentifier,
                                 label: "NO-APPEND")
         }
@@ -340,7 +368,7 @@ public final class FairPlayStreamParser: NSObject {
         Self.log("--- SPC after append (real track) ---")
         for trackID in withState({ entry.trackIDs }) {
             _ = Self.requestSPC(parser: entry.parser, trackID: trackID,
-                                certificate: dummyCertificate,
+                                certificate: certificate,
                                 contentIdentifier: contentIdentifier,
                                 label: "AFTER-APPEND")
         }
