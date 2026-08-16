@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1263 @@
+@@ -0,0 +1,1268 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1125,13 +1125,18 @@ index 000000000000..e859b69f6239
 +//
 +// Free function, not a method: SourceBuffer has no proxy to call
 +// through, and on this path there may be no proxy at all yet.
-+// In mozilla::dom deliberately, and with ordinary C++ linkage. The only
++// mozilla::dom deliberately, and with ordinary C++ linkage. The only
 +// caller is SourceBuffer::AppendData, which is itself in mozilla::dom and
 +// declares this at block scope - and a block-scope declaration always
 +// names the enclosing namespace, so this has to be the namespace it
 +// names. extern "C" would remove the question but is not permitted at
 +// block scope, which is what the caller has.
-+namespace mozilla::dom {
++//
++// `namespace dom`, not `namespace mozilla::dom`: this point in the file
++// is already inside the `namespace mozilla` opened above, so the fully
++// spelled form would nest to mozilla::mozilla::dom and the caller's
++// symbol would go on being undefined.
++namespace dom {
 +void ReynardMSEForwardInitSegment(const uint8_t* aData, size_t aLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (!aData || !aLength) {
@@ -1149,7 +1154,7 @@ index 000000000000..e859b69f6239
 +  cc->SendAVPlayerKeyGenerateRequest(0, nsCString(""),
 +                                     nsCString("initseg"), segment);
 +}
-+}  // namespace mozilla::dom
++}  // namespace dom
 +
 +void FairPlayCDMProxy::SendRemoteKeyRequest(
 +    const RemoteKeyRequest& aRequest) {
