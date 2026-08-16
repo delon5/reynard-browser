@@ -2,7 +2,7 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,91 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +568,112 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -65,18 +65,39 @@ index d79526afbbfa..cb10fad683d0 100644
 +    // One, per process, then never again: this is a measurement, not a
 +    // pipeline. If samples come back the pipeline is worth building and
 +    // this goes away; if they do not, nothing more gets built.
-+    static bool sForwardedOneFragment = false;
++    // A bounded RUN, not a single fragment. One answered whether a
++    // sample can exist at all; nothing can be built on one - a decoder
++    // needs a sequence, and the next question either way is whether they
++    // keep coming, in order, with sane timestamps.
++    //
++    // Still a measurement, so it still stops on its own: eight
++    // fragments or 32 MB, whichever comes first, and it says so when it
++    // does rather than going quiet and looking like a bug.
++    static unsigned sForwardedFragments = 0;
++    static size_t sForwardedBytes = 0;
++    constexpr unsigned kMaxFragments = 8;
++    constexpr size_t kMaxTotalBytes = 32 * 1024 * 1024;
++    const bool sForwardedOneFragment =
++        sForwardedFragments >= kMaxFragments ||
++        sForwardedBytes >= kMaxTotalBytes;
 +    const bool mseIsInit = memcmp(mseBox, "ftyp", 4) == 0 ||
 +                           memcmp(mseBox, "moov", 4) == 0;
 +    const bool mseIsMedia = memcmp(mseBox, "moof", 4) == 0;
 +    const bool mseForwardMedia = mseIsMedia && !sForwardedOneFragment &&
 +                                 mseLength <= (16 * 1024 * 1024);
 +    if (mseForwardMedia) {
-+      sForwardedOneFragment = true;
++      sForwardedFragments++;
++      sForwardedBytes += mseLength;
 +      printf_stderr(
-+          "mseAppend: forwarding ONE media fragment, %zu bytes - asking "
-+          "whether the parser vends a decrypted sample\n",
-+          mseLength);
++          "mseAppend: forwarding media fragment %u/%u, %zu bytes (%zu "
++          "total) - building a sequence to decode\n",
++          sForwardedFragments, kMaxFragments, mseLength, sForwardedBytes);
++      if (sForwardedFragments >= kMaxFragments ||
++          sForwardedBytes >= kMaxTotalBytes) {
++        printf_stderr(
++            "mseAppend: fragment budget spent - no more will be "
++            "forwarded this process\n");
++      }
 +    }
 +    if (mseLength >= 8 &&
 +        ((mseIsInit && mseLength <= (256 * 1024)) || mseForwardMedia)) {

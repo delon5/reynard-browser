@@ -637,6 +637,58 @@ public final class FairPlayStreamParser: NSObject {
         return nil
     }
 
+    /// The first bytes of a sample's payload, and its total length.
+    ///
+    /// Contiguity is not assumed: a block buffer may be scattered, and
+    /// CMBlockBufferGetDataPointer only speaks for the contiguous run it
+    /// finds. Copying the prefix out is both simpler and correct for
+    /// either layout.
+    static func samplePrefix(_ sampleBuffer: CMSampleBuffer,
+                             count: Int) -> ([UInt8], Int) {
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return ([], 0)
+        }
+        let total = CMBlockBufferGetDataLength(block)
+        let wanted = min(count, total)
+        guard wanted > 0 else {
+            return ([], total)
+        }
+        var bytes = [UInt8](repeating: 0, count: wanted)
+        let status = bytes.withUnsafeMutableBytes { raw -> OSStatus in
+            guard let base = raw.baseAddress else { return -1 }
+            return CMBlockBufferCopyDataBytes(block, atOffset: 0,
+                                              dataLength: wanted,
+                                              destination: base)
+        }
+        guard status == noErr else {
+            return ([], total)
+        }
+        return (bytes, total)
+    }
+
+    /// Whether a payload prefix reads as length-prefixed H.264.
+    ///
+    /// Four big-endian length bytes, then a NAL header: forbidden_zero
+    /// clear, type in 1...23, and a length that fits what is actually
+    /// there. Deliberately strict - the point is a test ciphertext fails.
+    static func looksLikeLengthPrefixedH264(_ head: [UInt8],
+                                            total: Int) -> Bool {
+        guard head.count >= 5 else {
+            return false
+        }
+        let length = (Int(head[0]) << 24) | (Int(head[1]) << 16)
+                   | (Int(head[2]) << 8) | Int(head[3])
+        guard length > 0, length <= total - 4 else {
+            return false
+        }
+        let header = head[4]
+        guard header & 0x80 == 0 else {
+            return false
+        }
+        let nalType = header & 0x1f
+        return nalType >= 1 && nalType <= 23
+    }
+
     /// Ask the parser for media data on every track it knows about.
     ///
     /// Called once a licence is applied. Both track lists are tried: the
@@ -1681,6 +1733,45 @@ private final class ParserDelegate: NSObject {
         } ?? "none"
         let stillEncrypted = subtypeFourCC == "encv"
             || subtypeFourCC == "enca"
+
+        // THE PAYLOAD, because the description and the bytes are
+        // separate things and only one of them has been looked at.
+        //
+        // A parser could report a track's ORIGINAL format while handing
+        // back data it has not decrypted, and subtype=avc1 would look
+        // exactly the same. That distinction decides the architecture:
+        // genuinely clear samples belong in Gecko's own decode path and
+        // the whole protected-surface problem disappears, while
+        // ciphertext leaves an AVFoundation-filled display layer as the
+        // only sink.
+        //
+        // Decrypted H.264 in an MP4 sample is length-prefixed NAL units:
+        // four big-endian length bytes, then a header whose top bit is
+        // zero and whose low five bits are a type in 1...23, with the
+        // length fitting the buffer. Ciphertext passes that by accident
+        // essentially never.
+        let (head, totalBytes) = Self.samplePrefix(sampleBuffer, count: 16)
+        let looksLikeH264 = Self.looksLikeLengthPrefixedH264(head,
+                                                            total: totalBytes)
+        // And the extension a protected track carries to name the codec
+        // underneath its encryption. Absent beside subtype=avc1 is what
+        // a real decryption looks like; present would mean the
+        // description was unwrapped while the bytes were not.
+        var protectedOriginal = "absent"
+        if let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+           CMFormatDescriptionGetExtension(
+               formatDescription,
+               extensionKey: kCMFormatDescriptionExtension_ProtectedContentOriginalFormat)
+               != nil {
+            protectedOriginal = "PRESENT"
+        }
+        fputs("fpsParser: session \(sessionId)   payload \(totalBytes) bytes, "
+              + "head \(head.map { String(format: "%02x", $0) }.joined()) "
+              + "-> \(looksLikeH264 ? "length-prefixed H.264" : "NOT H.264") "
+              + "| ProtectedContentOriginalFormat \(protectedOriginal) "
+              + "| pts \(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))) "
+              + "dts \(CMTimeGetSeconds(CMSampleBufferGetDecodeTimeStamp(sampleBuffer)))\n",
+              stderr)
         fputs("fpsParser: session \(sessionId) MEDIA DATA track \(trackID) "
               + "(\(mediaType)) samples=\(samples) ready=\(ready) "
               + "dataBuffer=\(hasData) attachments=\(attachmentCount) "
