@@ -1750,15 +1750,24 @@ private final class ParserDelegate: NSObject {
         // zero and whose low five bits are a type in 1...23, with the
         // length fitting the buffer. Ciphertext passes that by accident
         // essentially never.
-        let (head, totalBytes) = Self.samplePrefix(sampleBuffer, count: 16)
-        let looksLikeH264 = Self.looksLikeLengthPrefixedH264(head,
-                                                            total: totalBytes)
+        // FairPlayStreamParser, not Self: these helpers live on the parser
+        // and this callback is on KeySessionDelegate, so Self resolves to
+        // the wrong type. swiftc -parse cannot see that - it checks syntax
+        // and does not resolve names.
+        let (head, totalBytes) = FairPlayStreamParser.samplePrefix(
+            sampleBuffer, count: 16)
+        let looksLikeH264 = FairPlayStreamParser.looksLikeLengthPrefixedH264(
+            head, total: totalBytes)
         // And the extension a protected track carries to name the codec
         // underneath its encryption. Absent beside subtype=avc1 is what
         // a real decryption looks like; present would mean the
         // description was unwrapped while the bytes were not.
+        // Availability-guarded: the deployment target here is iOS 13.0 and
+        // this key is 14.0+. Unguarded it does not compile at all, which is
+        // a build error swiftc -parse cannot see either.
         var protectedOriginal = "absent"
-        if let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+        if #available(iOS 14.0, *),
+           let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
            CMFormatDescriptionGetExtension(
                formatDescription,
                extensionKey: kCMFormatDescriptionExtension_ProtectedContentOriginalFormat)
