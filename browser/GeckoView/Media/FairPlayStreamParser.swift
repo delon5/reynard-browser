@@ -1001,6 +1001,15 @@ public final class FairPlayStreamParser: NSObject {
         /// video parser's track id throws exactly as arming an invented
         /// one does.
         var trackIDs: [Int32] = []
+        /// The sink under test. Built on the first video sample, never
+        /// added to a view hierarchy - this measures whether the layer
+        /// ACCEPTS these samples, and showing it would add a second
+        /// thing that could be wrong.
+        var displayLayer: AVSampleBufferDisplayLayer?
+        /// So 422 identical status lines do not bury the one that
+        /// changes.
+        var lastReport = ""
+        var enqueued = 0
 
         init(parser: NSObject, recipient: AVContentKeyRecipient,
              delegate: ParserDelegate) {
@@ -1155,6 +1164,84 @@ public final class FairPlayStreamParser: NSObject {
             for (key, slot) in streamParsers where key.hasPrefix(sessionId + "|") {
                 slot.failed = true
             }
+        }
+    }
+
+    /// Enqueue a decrypted video sample and report what the layer makes
+    /// of it.
+    ///
+    /// THE LAST PLATFORM QUESTION on this route. Decrypt is settled - the
+    /// parser hands back clear length-prefixed H.264 - and the only step
+    /// still capable of refusing on authorization grounds is the sink.
+    /// If a display layer takes these samples, the remaining work is
+    /// compositor wiring and nothing more; if it refuses, its error says
+    /// so in as many words and no amount of wiring would have helped.
+    fileprivate func enqueueForDisplay(streamKey: String,
+                                       sampleBuffer: CMSampleBuffer,
+                                       mediaType: String) {
+        // Video only. Audio has no display layer to go to, and the
+        // question is about pixels.
+        guard mediaType == "vide" else {
+            return
+        }
+        guard let slot = withState({ streamParsers[streamKey] }) else {
+            return
+        }
+
+        if slot.displayLayer == nil {
+            let layer = AVSampleBufferDisplayLayer()
+            // A control timebase, because a layer with no clock has
+            // nothing to schedule against and can report itself ready
+            // while showing nothing - which would read as acceptance and
+            // mean nothing. Started at this sample's presentation time so
+            // the first frame is due immediately rather than in the past.
+            var timebase: CMTimebase?
+            let start = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            if CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault,
+                                               sourceClock: CMClockGetHostTimeClock(),
+                                               timebaseOut: &timebase) == noErr,
+               let timebase {
+                CMTimebaseSetTime(timebase, time: start)
+                CMTimebaseSetRate(timebase, rate: 1.0)
+                layer.controlTimebase = timebase
+            }
+            layer.videoGravity = .resizeAspect
+            withState { slot.displayLayer = layer }
+            Self.log("stream \(streamKey) built a display layer - "
+                     + "status \(layer.status.rawValue) "
+                     + "timebase \(timebase != nil)")
+        }
+        guard let layer = withState({ slot.displayLayer }) else {
+            return
+        }
+
+        // Guarded: enqueue RAISES on a sample it dislikes rather than
+        // returning an error, and this route has already had one
+        // AVFoundation SPI take the process down.
+        if let failure = GeckoRuntimeBridge.catchException(from: {
+            layer.enqueue(sampleBuffer)
+        }) {
+            Self.log("stream \(streamKey) layer REFUSED the sample: "
+                     + failure)
+            return
+        }
+        let count = withState { () -> Int in
+            slot.enqueued += 1
+            return slot.enqueued
+        }
+
+        // Reported on change, plus the first one. status 2 is .failed and
+        // is where an authorization refusal would appear.
+        let report = "status=\(layer.status.rawValue) "
+            + "ready=\(layer.isReadyForMoreMediaData) "
+            + "error=\(layer.error.map { String(describing: $0) } ?? "nil")"
+        let changed = withState { () -> Bool in
+            guard slot.lastReport != report else { return false }
+            slot.lastReport = report
+            return true
+        }
+        if changed || count == 1 {
+            Self.log("stream \(streamKey) enqueued \(count) - " + report)
         }
     }
 
@@ -2005,6 +2092,14 @@ private final class ParserDelegate: NSObject {
               + "| pts \(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))) "
               + "dts \(CMTimeGetSeconds(CMSampleBufferGetDecodeTimeStamp(sampleBuffer)))\n",
               stderr)
+        // Into the sink, before the log line below, so a layer that
+        // takes the process down does it with the sample's own details
+        // already on the record.
+        if let streamKey {
+            FairPlayStreamParser.shared.enqueueForDisplay(
+                streamKey: streamKey, sampleBuffer: sampleBuffer,
+                mediaType: mediaType)
+        }
         fputs("fpsParser: session \(sessionId) MEDIA DATA track \(trackID) "
               + "(\(mediaType)) samples=\(samples) ready=\(ready) "
               + "dataBuffer=\(hasData) attachments=\(attachmentCount) "
