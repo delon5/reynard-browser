@@ -587,6 +587,14 @@ public final class AVPlayerHost: NSObject {
         /// See noteProtectedStall.
         var lastBufferItemTime: Double = -1
         var reportedProtected = false
+        /// The last reason noteProtectedStall declined to report, so
+        /// the log can be edge-triggered rather than per-tick.
+        ///
+        /// ADDED - see fix_stall_detector_says_why.py's docstring.
+        /// The detector runs at display-link rate; a line per call
+        /// would bury the answer it exists to surface. A line per
+        /// CHANGE is one per state transition.
+        var lastStallReason: String = ""
         /// Desired park state for the pull link. Guarded by stateLock -
         /// written from Gecko's main thread (pause, suspend) and from
         /// the GCD main queue (the idle backstop, the readiness replay).
@@ -883,29 +891,72 @@ public final class AVPlayerHost: NSObject {
         // and neither does a rebuffering one, so neither can be mistaken
         // for this. .playing with no waiting reason excludes them anyway;
         // the item-time test is the belt to that pair of braces.
+        /// Logs why the detector turned back, but only when the answer
+        /// CHANGES. ADDED - see fix_stall_detector_says_why.py.
+        func noteStallReason(_ reason: String) {
+            let changed = withState { () -> Bool in
+                guard entry.lastStallReason != reason else { return false }
+                entry.lastStallReason = reason
+                return true
+            }
+            guard changed else { return }
+            avLog("framePull[\(id)] not reporting protected: \(reason)")
+        }
+
         func noteProtectedStall(at itemSeconds: Double) {
-            guard itemSeconds.isFinite, itemSeconds >= 0 else { return }
-            let player = entry.player
-            guard player.timeControlStatus == .playing,
-                  player.reasonForWaitingToPlay == nil,
-                  entry.item.status == .readyToPlay else {
+            // CHANGED - every early return below now says which one it
+            // was. See fix_stall_detector_says_why.py's docstring: this
+            // detector is the ONLY producer of "protected" for a stream
+            // that never delivers a second buffer, it did not fire for
+            // Apple TV+, and its silence could not be told apart from
+            // its not being called.
+            guard itemSeconds.isFinite, itemSeconds >= 0 else {
+                noteStallReason("item time \(itemSeconds) is not usable")
                 return
             }
+            let player = entry.player
+            if player.timeControlStatus != .playing {
+                noteStallReason("player is not playing (timeControl="
+                                + "\(player.timeControlStatus.rawValue))")
+                return
+            }
+            if let waiting = player.reasonForWaitingToPlay {
+                noteStallReason("waiting - \(waiting.rawValue)")
+                return
+            }
+            if entry.item.status != .readyToPlay {
+                noteStallReason("item not ready (status="
+                                + "\(entry.item.status.rawValue))")
+                return
+            }
+            // Built inside the lock with the values it names, and
+            // carried out as a value: two of these branches WRITE
+            // lastBufferItemTime, so a reason composed afterwards
+            // would describe state the next tick may have moved.
+            var reason: String?
             let shouldReport = withState { () -> Bool in
-                guard !entry.reportedProtected else { return false }
+                guard !entry.reportedProtected else {
+                    reason = "already reported"
+                    return false
+                }
                 // First observation with no buffer yet: start the window
                 // here rather than at zero, so a player that began mid
                 // stream is measured from where it actually is.
                 if entry.lastBufferItemTime < 0 {
                     entry.lastBufferItemTime = itemSeconds
+                    reason = "window opened at \(itemSeconds)"
                     return false
                 }
                 // A backwards seek rebases instead of accumulating.
                 if itemSeconds < entry.lastBufferItemTime {
                     entry.lastBufferItemTime = itemSeconds
+                    reason = "rebased to \(itemSeconds)"
                     return false
                 }
                 guard itemSeconds - entry.lastBufferItemTime >= 1.0 else {
+                    reason = "only "
+                        + "\(itemSeconds - entry.lastBufferItemTime)s of "
+                        + "item time elapsed, need 1.0"
                     return false
                 }
                 entry.reportedProtected = true
@@ -921,7 +972,12 @@ public final class AVPlayerHost: NSObject {
                 lastProtectedPlayerId = id
                 return true
             }
-            guard shouldReport else { return }
+            guard shouldReport else {
+                if let reason {
+                    noteStallReason(reason)
+                }
+                return
+            }
             avLog("framePull[\(id)] output stalled "
                   + "\(itemSeconds - entry.lastBufferItemTime)s of item time "
                   + "with no buffer - reporting protected")
