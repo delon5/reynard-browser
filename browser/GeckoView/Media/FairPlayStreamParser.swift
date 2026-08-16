@@ -83,6 +83,11 @@ public final class FairPlayStreamParser: NSObject {
         return body()
     }
 
+    /// Delivers key-session callbacks off the main thread - see
+    /// createSession for why that matters.
+    private static let keyDelegateQueue =
+        DispatchQueue(label: "com.reynard.fairplay.keysession")
+
     fileprivate static func log(_ message: String) {
         fputs("fpsParser: \(message)\n", stderr)
     }
@@ -188,7 +193,13 @@ public final class FairPlayStreamParser: NSObject {
         // why four builds of asking the parser directly returned nil.
         let keySession = AVContentKeySession(keySystem: .fairPlayStreaming)
         let keyDelegate = KeySessionDelegate(sessionId: sessionId)
-        keySession.setDelegate(keyDelegate, queue: DispatchQueue.main)
+        // A dedicated serial queue, NOT main. The probe that drives this
+        // runs on the main thread during launch, before GeckoRuntime.main
+        // starts the runloop - so a callback queued to main sits behind a
+        // runloop that has not begun, and the first attempt saw
+        // processContentKeyRequest accepted with no request ever
+        // delivered. Off-main it arrives regardless of who is blocking.
+        keySession.setDelegate(keyDelegate, queue: Self.keyDelegateQueue)
         keySession.addContentKeyRecipient(recipient)
 
         withState {
@@ -352,7 +363,11 @@ public final class FairPlayStreamParser: NSObject {
         guard createSession(sessionId) else {
             return
         }
-        defer { destroySession(sessionId) }
+        // Deliberately NOT destroyed. The content key request arrives
+        // asynchronously, and tearing the session down at the end of this
+        // function is what swallowed it the first time. One leaked probe
+        // session per launch is the right trade for an answer that can
+        // actually arrive.
 
         guard let entry = withState({ entries[sessionId] }) else {
             return
