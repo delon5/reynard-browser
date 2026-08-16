@@ -709,37 +709,28 @@ public final class FairPlayStreamParser: NSObject {
     /// samples exist and whether they are decrypted, and a display layer
     /// would only add a second thing that could be wrong.
     func requestMediaData(_ sessionId: String) {
-        guard let entry = withState({ entries[sessionId] }) else {
+        // Every STREAM parser for this session, each with its OWN tracks.
+        //
+        // This used to pool assetTrackIDs across the session and arm the
+        // session's parser with them. Once each SourceBuffer got its own
+        // parser that became the same defect that aborted the app: the
+        // pooled list holds the video parser's tracks as well as the
+        // audio parser's, and arming either with the other's throws.
+        //
+        // The session's own parser is deliberately not armed here. It is
+        // fed EME init data and the render probe's segment, never media,
+        // so it has no tracks to drain and nothing to say.
+        let streams = withState { () -> [(String, StreamParser)] in
+            streamParsers.filter { $0.key.hasPrefix(sessionId + "|") }
+                         .map { ($0.key, $0.value) }
+        }
+        guard !streams.isEmpty else {
+            Self.log("session \(sessionId) has a licence but no stream "
+                     + "parsers yet - nothing has been appended")
             return
         }
-        var tracks = withState { entry.assetTrackIDs }
-        for extra in withState({ entry.trackIDs }) where !tracks.contains(extra) {
-            tracks.append(extra)
-        }
-        guard !tracks.isEmpty else {
-            Self.log("session \(sessionId) has a licence but no tracks to ask "
-                     + "for media on - nothing has been parsed yet")
-            return
-        }
-        let shouldProvide = NSSelectorFromString("setShouldProvideMediaData:forTrackID:")
-        let provide = NSSelectorFromString("providePendingMediaData")
-        guard entry.parser.responds(to: shouldProvide),
-              let implementation = entry.parser.method(for: shouldProvide) else {
-            Self.log("no setShouldProvideMediaData:forTrackID: on the parser")
-            return
-        }
-        typealias ProvideFunction = @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
-        let call = unsafeBitCast(implementation, to: ProvideFunction.self)
-        for trackID in tracks {
-            call(entry.parser, shouldProvide, true, trackID)
-        }
-        Self.log("session \(sessionId) asked for media data on tracks "
-                 + "\(tracks) - the licence is in, so anything vended now "
-                 + "should be decrypted")
-        if entry.parser.responds(to: provide) {
-            entry.parser.perform(provide)
-        } else {
-            Self.log("no providePendingMediaData on the parser")
+        for (key, slot) in streams {
+            Self.drainMediaData(slot.parser, tracks: slot.trackIDs, label: key)
         }
     }
 
@@ -1001,6 +992,15 @@ public final class FairPlayStreamParser: NSObject {
         /// new AVStreamDataParser to try again" - so this marks one for
         /// replacement rather than pretending it still works.
         var failed = false
+        /// Tracks THIS parser reported, from its own
+        /// didParseStreamDataAsAsset. Nothing is ever armed for a track
+        /// that is not in here.
+        ///
+        /// Per stream rather than per session, because fix 19 gave each
+        /// SourceBuffer its own parser: arming the audio parser with the
+        /// video parser's track id throws exactly as arming an invented
+        /// one does.
+        var trackIDs: [Int32] = []
 
         init(parser: NSObject, recipient: AVContentKeyRecipient,
              delegate: ParserDelegate) {
@@ -1053,7 +1053,7 @@ public final class FairPlayStreamParser: NSObject {
         // providePendingMediaData drains what is pending NOW - fragments
         // that arrive later were simply never asked for, which is why
         // eight forwarded fragments produced one sample.
-        Self.drainMediaData(slot.parser, label: stream)
+        Self.drainMediaData(slot.parser, tracks: slot.trackIDs, label: stream)
         return true
     }
 
@@ -1065,7 +1065,12 @@ public final class FairPlayStreamParser: NSObject {
             return nil
         }
         let parser = parserClass.init()
-        let delegate = ParserDelegate(sessionId: sessionId)
+        // The delegate carries the stream key, so the tracks it reports
+        // are recorded against the parser that reported them rather than
+        // pooled per session. Pooling would arm the audio parser with
+        // the video parser's track id, which throws.
+        let delegate = ParserDelegate(sessionId: sessionId,
+                                      streamKey: sessionId + "|" + stream)
         let setDelegate = NSSelectorFromString("setDelegate:")
         guard parser.responds(to: setDelegate) else {
             log("no setDelegate: on the stream parser")
@@ -1081,7 +1086,20 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     /// Arm every track and drain whatever is pending.
-    private static func drainMediaData(_ parser: NSObject, label: String) {
+    private static func drainMediaData(_ parser: NSObject, tracks: [Int32],
+                                       label: String) {
+        // Nothing is armed without a track the parser itself reported.
+        //
+        // The previous version walked 1...2 on the assumption that arming
+        // an absent track was a no-op. It is not:
+        // setShouldProvideMediaData:forTrackID: raises an Objective-C
+        // exception, Swift cannot catch one, and the first 802-byte init
+        // segment - appended before any asset had parsed, so before any
+        // track existed - aborted the app on the main thread.
+        guard !tracks.isEmpty else {
+            log("stream \(label) has no parsed tracks yet - nothing to arm")
+            return
+        }
         let shouldProvide = NSSelectorFromString("setShouldProvideMediaData:forTrackID:")
         let provide = NSSelectorFromString("providePendingMediaData")
         if parser.responds(to: shouldProvide),
@@ -1089,16 +1107,47 @@ public final class FairPlayStreamParser: NSObject {
             typealias ProvideFunction =
                 @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
             let call = unsafeBitCast(implementation, to: ProvideFunction.self)
-            // Tracks 1 and 2 cover a single-presentation stream, which is
-            // what each of these parsers now holds. Cheap and idempotent:
-            // arming a track that does not exist is a no-op.
-            for trackID in Int32(1)...Int32(2) {
-                call(parser, shouldProvide, true, trackID)
+            for trackID in tracks {
+                // Guarded even so. This is undocumented SPI whose
+                // behaviour is being established by experiment, and it
+                // has already proved it throws.
+                if let failure = GeckoRuntimeBridge.catchException(from: {
+                    call(parser, shouldProvide, true, trackID)
+                }) {
+                    log("stream \(label) refused arming track \(trackID): "
+                        + failure)
+                }
             }
         }
         if parser.responds(to: provide) {
-            parser.perform(provide)
+            if let failure = GeckoRuntimeBridge.catchException(from: {
+                parser.perform(provide)
+            }) {
+                log("stream \(label) refused providePendingMediaData: "
+                    + failure)
+            }
         }
+        log("stream \(label) armed tracks \(tracks) and drained")
+    }
+
+    /// Tracks a stream's parser reported, recorded and then acted on.
+    ///
+    /// Driven from the asset callback because that is the moment they
+    /// become known - an append cannot arm anything before the parse it
+    /// triggers has finished.
+    fileprivate func noteStreamTracks(streamKey: String, tracks: [Int32]) {
+        let slot = withState { () -> StreamParser? in
+            guard let slot = streamParsers[streamKey] else { return nil }
+            for track in tracks where !slot.trackIDs.contains(track) {
+                slot.trackIDs.append(track)
+            }
+            return slot
+        }
+        guard let slot else {
+            return
+        }
+        Self.drainMediaData(slot.parser, tracks: slot.trackIDs,
+                            label: streamKey)
     }
 
     fileprivate func noteStreamParseFailure(sessionId: String) {
@@ -1401,11 +1450,26 @@ public final class FairPlayStreamParser: NSObject {
             }
             typealias ProvideFunction = @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
             let call = unsafeBitCast(implementation, to: ProvideFunction.self)
-            call(entry.parser, shouldProvide, true, trackID)
+            // Guarded like the live path. The probe names tracks a key
+            // request actually reported, so it has never thrown - but
+            // this is the same SPI that aborted the app from the live
+            // path, and a diagnostic tool taking the process down is the
+            // worst possible failure for one.
+            if let failure = GeckoRuntimeBridge.catchException(from: {
+                call(entry.parser, shouldProvide, true, trackID)
+            }) {
+                Self.log("probe refused arming track \(trackID): " + failure)
+                continue
+            }
             Self.log("asked for media data on track \(trackID)")
         }
         if entry.parser.responds(to: provide) {
-            entry.parser.perform(provide)
+            if let failure = GeckoRuntimeBridge.catchException(from: {
+                entry.parser.perform(provide)
+            }) {
+                Self.log("probe refused providePendingMediaData: " + failure)
+                return
+            }
             Self.log("providePendingMediaData sent - any samples are logged above as they land")
         } else {
             Self.log("no providePendingMediaData on the parser")
@@ -1744,9 +1808,13 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
 /// answering a signature nobody has verified.
 private final class ParserDelegate: NSObject {
     let sessionId: String
+    /// "<sessionId>|<stream>" for a per-stream parser, nil for the render
+    /// probe's, which has no SourceBuffer behind it.
+    let streamKey: String?
 
-    init(sessionId: String) {
+    init(sessionId: String, streamKey: String? = nil) {
         self.sessionId = sessionId
+        self.streamKey = streamKey
         super.init()
     }
 
@@ -1820,8 +1888,16 @@ private final class ParserDelegate: NSObject {
         // the tracks that carry it. trackIDs holds only tracks a KEY
         // REQUEST named, and on this route the request arrives through
         // the session rather than the parser, so it is usually empty.
+        let reported = asset.tracks.map { $0.trackID }
         FairPlayStreamParser.shared.noteAssetTracks(
-            sessionId: sessionId, tracks: asset.tracks.map { $0.trackID })
+            sessionId: sessionId, tracks: reported)
+        // And against THIS parser, which is what the drain arms from.
+        // This is the moment the tracks become known, so it is also the
+        // moment anything can safely be asked for.
+        if let streamKey {
+            FairPlayStreamParser.shared.noteStreamTracks(streamKey: streamKey,
+                                                         tracks: reported)
+        }
     }
 
     /// A sample the parser vended - the answer to the render question.

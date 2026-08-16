@@ -14,6 +14,17 @@
 
 + (NSString *)version;
 
+/// Run a block, returning nil, or the description of the Objective-C
+/// exception it raised.
+///
+/// Swift has no catch for NSException, so an AVFoundation SPI that
+/// throws takes the process with it - which is what
+/// setShouldProvideMediaData:forTrackID: did when it was handed a track
+/// id the parser did not have. The MSE FairPlay route is establishing
+/// this interface's behaviour by experiment, and a wrong guess should
+/// cost a log line rather than the app.
++ (nullable NSString *)catchExceptionFrom:(NS_NOESCAPE void (^)(void))block;
+
 @end
 
 #endif /* GeckoRuntimeBridge_h */
