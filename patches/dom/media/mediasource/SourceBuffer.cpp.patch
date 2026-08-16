@@ -2,7 +2,7 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,127 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +568,138 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -124,6 +124,17 @@ index d79526afbbfa..cb10fad683d0 100644
 +                                               size_t aLength);
 +      ReynardMSEForwardInitSegment(reinterpret_cast<uintptr_t>(this),
 +                                   aData->Elements(), mseLength);
++      // And the same bytes, locally, once: can this route run HERE?
++      //
++      // If it can, the placement problem stops existing rather than
++      // getting solved - clear samples go into Gecko's own decode path
++      // and the element is an ordinary video again. Init segments only;
++      // a media fragment answers nothing the first segment has not.
++      if (mseIsInit) {
++        extern void ReynardMSEContentProcessProbe(const uint8_t* aData,
++                                                  size_t aLength);
++        ReynardMSEContentProcessProbe(aData->Elements(), mseLength);
++      }
 +    }
 +  }
 +

@@ -1322,6 +1322,50 @@ public final class FairPlayStreamParser: NSObject {
 #endif
     }
 
+    /// Does this whole route work in a CONTENT process?
+    ///
+    /// Everything works today with the parser in the app process, and
+    /// what is left is placement: the compositor learns where a video
+    /// rectangle belongs from a surface Gecko publishes, and an MSE
+    /// element publishes none.
+    ///
+    /// If the parser can run where the media element lives, that problem
+    /// stops existing rather than getting solved. The samples are clear -
+    /// their bytes have been read from the CPU - so they can go into
+    /// Gecko's ordinary decode path, and placement, sizing, fullscreen,
+    /// currentTime and audio all come free because none of it is special
+    /// any more.
+    ///
+    /// The tree does not already answer this. FairPlayCDMProxy goes
+    /// remote in a content process because "a proxy in a content process
+    /// can never reach the asset" - which is about the AVURLAsset of the
+    /// native HLS route. MSE has no asset; its content key recipient is
+    /// this parser, an object rather than a URL. So the reason does not
+    /// apply and the question is open.
+    ///
+    /// A class entry point rather than something on the host protocol:
+    /// this framework is already linked by content processes - see the
+    /// file header - so the class is present and can be reached by name,
+    /// with no protocol or IPDL change to ask one question.
+    @objc public static func runContentProcessProbe(_ initSegment: Data) {
+        let sessionId = "contentProbe"
+        log("=== content-process parser probe, \(initSegment.count) bytes ===")
+        guard NSClassFromString("AVStreamDataParser") != nil else {
+            log("AVStreamDataParser is ABSENT in this process - the route "
+                + "cannot move here")
+            return
+        }
+        guard shared.createSession(sessionId) else {
+            log("createSession FAILED in this process - the parser loads but "
+                + "the key session or the recipient registration is refused")
+            return
+        }
+        _ = shared.append(sessionId, initSegment: initSegment)
+        log("=== probe fed. A 'session contentProbe key request on track N' "
+            + "line means the parser and key session both work here, and "
+            + "the Gecko-native path is open ===")
+    }
+
     /// The page's FPS application certificate, for one session.
     ///
     /// Reaches here from setServerCertificate by way of the broker,
