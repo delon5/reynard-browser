@@ -101,6 +101,14 @@ public final class FairPlayStreamParser: NSObject {
         /// A flag, not a count: a session with three exchanges queued
         /// still wants three requests. This says which route makes them.
         var directRouteOwnsSession = false
+        /// A sinf box lifted from an init segment the page appended.
+        ///
+        /// Used as the TEMPLATE for the JSON handed to
+        /// processContentKeyRequest: it carries the true frma and the
+        /// true constant IV, and a PSSH carries neither. Only its key id
+        /// is swapped for the one being asked about, so one template
+        /// serves every key in the presentation.
+        var templateSinf: Data?
 
         init(parser: NSObject,
              recipient: AVContentKeyRecipient,
@@ -314,6 +322,21 @@ public final class FairPlayStreamParser: NSObject {
             return false
         }
         entry.parser.perform(append, with: initSegment)
+        // Keep any sinf this segment carries. The page appends real init
+        // segments now, and a real sinf is a better template for the key
+        // request JSON than anything reconstructible from a PSSH - it
+        // has the actual sample format and constant IV.
+        if let sinf = Self.sinfBox(in: initSegment) {
+            let isNew = withState { () -> Bool in
+                guard entry.templateSinf == nil else { return false }
+                entry.templateSinf = sinf
+                return true
+            }
+            if isNew {
+                Self.log("session \(sessionId) kept a \(sinf.count)-byte sinf "
+                         + "from this segment as the key request template")
+            }
+        }
         Self.log("session \(sessionId) appended \(initSegment.count) bytes")
         return true
     }
@@ -366,14 +389,22 @@ public final class FairPlayStreamParser: NSObject {
         // keyed by - FairPlayCDMProxy files the session under base64 of
         // exactly them - so entry.initData above is left alone. Only
         // what AVFoundation is handed changes.
+        // What goes to the session is a JSON sinf document, because that
+        // is what this API takes. Decoded from the probe's own specifier:
+        //
+        //   {"sinf":["<base64 of an 89-byte sinf box>"]}
+        //
+        // Both MP4 shapes - the whole pssh box and its payload - have
+        // been refused twice each now, once with a nil identifier and
+        // once with a correct key id, so the container was always the
+        // difference. psshPayload stays only for the log line below.
         let payload = Self.psshPayload(in: initData)
-        let forSession = payload ?? initData
-        Self.log("session \(sessionId) raising a key request directly from "
-                 + "\(forSession.count) bytes of "
-                 + (payload == nil ? "init data as it arrived"
-                                   : "PSSH payload (unwrapped from "
-                                     + "\(initData.count))")
-                 + " - key id "
+        let template = withState { entry.templateSinf }
+        let forSession = Self.sinfInitialisationJSON(
+            keyId: keyId, template: template, sessionId: sessionId)
+            ?? (payload ?? initData)
+        Self.log("session \(sessionId) raising a key request from "
+                 + "\(forSession.count) bytes - key id "
                  + (keyId.map { "\($0.count) bytes" } ?? "not found"))
         // The key id, PASSED this time.
         //
@@ -460,6 +491,142 @@ public final class FairPlayStreamParser: NSObject {
     /// teardown reports nothing instead of resurrecting an entry.
     fileprivate func liveSession(_ sessionId: String) -> AVContentKeySession? {
         return withState { entries[sessionId]?.keySession }
+    }
+
+    /// The initialisation data processContentKeyRequest actually takes.
+    ///
+    /// A JSON document, not an MP4 box - decoded from the specifier the
+    /// probe's parser produced, which this API accepts every time:
+    ///
+    ///     {"sinf":["<base64 sinf box>"]}
+    ///
+    /// Nil when there is no key id to name, since a sinf without a KID
+    /// describes nothing.
+    static func sinfInitialisationJSON(keyId: Data?, template: Data?,
+                                       sessionId: String) -> Data? {
+        guard let keyId, keyId.count == 16 else {
+            log("session \(sessionId) has no key id - cannot build a sinf")
+            return nil
+        }
+        let sinf: Data
+        if let template, let rekeyed = replacingKeyId(in: template, with: keyId) {
+            sinf = rekeyed
+            log("session \(sessionId) using the page's own sinf as the "
+                + "template, \(sinf.count) bytes")
+        } else {
+            sinf = canonicalSinf(keyId: keyId)
+            log("session \(sessionId) no sinf template yet - synthesising "
+                + "\(sinf.count) bytes with a zero constant IV")
+        }
+        let base64 = sinf.base64EncodedString()
+        // Serialised the way Foundation serialises it, because that
+        // is the exact byte sequence AVFoundation produced and
+        // accepted. The probe's specifier is 147 bytes; the compact
+        // form of the same object is 133, and prettyPrinted - spaces
+        // around the colon included - is 147 with nothing left over.
+        //
+        // A parser should not care about whitespace, and if this API
+        // merely parses then either form works. It is matched anyway
+        // because this call refuses in SILENCE: a refusal and a
+        // non-call are indistinguishable from outside, which has
+        // already cost device cycles. The known-good bytes are known,
+        // so there is no reason to send different ones.
+        let document: Data
+        if let serialised = try? JSONSerialization.data(
+            withJSONObject: ["sinf": [base64]],
+            options: [.prettyPrinted]) {
+            document = serialised
+        } else {
+            // Cannot happen for a dictionary of strings, but a silent
+            // nil here would be another invisible failure on a path
+            // that has had too many.
+            log("session \(sessionId) could not serialise the sinf "
+                + "JSON - falling back to the compact form")
+            document = Data(("{\"sinf\":[\"" + base64 + "\"]}").utf8)
+        }
+        log("session \(sessionId) init data JSON, \(document.count) "
+            + "bytes (the probe's specifier is 147): "
+            + (String(data: document, encoding: .utf8) ?? "<unreadable>"))
+        return document
+    }
+
+    /// A sinf box built to the probe's exact structure.
+    ///
+    /// Every field is the one AVFoundation's own parser emitted, with
+    /// the key id substituted and a zero constant IV. The IV plays no
+    /// part in NAMING a key - the request comes back identified by the
+    /// KID, which is what the probe showed - so a placeholder is honest
+    /// here in a way it would not be for decryption.
+    static func canonicalSinf(keyId: Data) -> Data {
+        func box(_ type: String, _ body: [UInt8]) -> [UInt8] {
+            let total = 8 + body.count
+            var out: [UInt8] = []
+            for shift in [24, 16, 8, 0] {
+                out.append(UInt8((total >> shift) & 0xff))
+            }
+            out.append(contentsOf: Array(type.utf8))
+            out.append(contentsOf: body)
+            return out
+        }
+        let frma = box("frma", Array("avc1".utf8))
+        // version+flags 0, scheme 'cbcs', scheme version 0x00010000
+        let schm = box("schm", [0, 0, 0, 0] + Array("cbcs".utf8)
+                               + [0x00, 0x01, 0x00, 0x00])
+        var tencBody: [UInt8] = [0x01, 0x00, 0x00, 0x00]  // version 1
+        tencBody.append(0x00)        // reserved
+        tencBody.append(0x19)        // crypt 1, skip 9 - cbcs
+        tencBody.append(0x01)        // default_isProtected
+        tencBody.append(0x00)        // per-sample IV size: none
+        tencBody.append(contentsOf: [UInt8](keyId))
+        tencBody.append(0x10)        // constant IV size
+        tencBody.append(contentsOf: [UInt8](repeating: 0, count: 16))
+        let schi = box("schi", box("tenc", tencBody))
+        return Data(frma + schm + schi)
+    }
+
+    /// The first complete sinf box in a buffer, or nil.
+    static func sinfBox(in data: Data) -> Data? {
+        let bytes = [UInt8](data)
+        let marker: [UInt8] = [0x73, 0x69, 0x6e, 0x66]  // "sinf"
+        var typeAt = 4
+        while typeAt + 4 <= bytes.count {
+            if Array(bytes[typeAt..<(typeAt + 4)]) == marker {
+                let boxAt = typeAt - 4
+                let size = (Int(bytes[boxAt]) << 24) | (Int(bytes[boxAt + 1]) << 16)
+                         | (Int(bytes[boxAt + 2]) << 8) | Int(bytes[boxAt + 3])
+                guard size >= 8, boxAt + size <= bytes.count else {
+                    return nil
+                }
+                // The BODY, without the sinf header: the probe's base64
+                // decodes to frma/schm/schi with no enclosing box.
+                return Data(bytes[(boxAt + 8)..<(boxAt + size)])
+            }
+            typeAt += 1
+        }
+        return nil
+    }
+
+    /// The same sinf, naming a different key.
+    ///
+    /// One template serves every key in a presentation; only the tenc's
+    /// default_KID changes between them.
+    static func replacingKeyId(in sinf: Data, with keyId: Data) -> Data? {
+        var bytes = [UInt8](sinf)
+        let marker: [UInt8] = [0x74, 0x65, 0x6e, 0x63]  // "tenc"
+        var typeAt = 0
+        while typeAt + 4 <= bytes.count {
+            if Array(bytes[typeAt..<(typeAt + 4)]) == marker {
+                let kidAt = typeAt + 12   // past type, version/flags, 4 fields
+                guard kidAt + 16 <= bytes.count else {
+                    return nil
+                }
+                bytes.replaceSubrange(kidAt..<(kidAt + 16),
+                                      with: [UInt8](keyId))
+                return Data(bytes)
+            }
+            typeAt += 1
+        }
+        return nil
     }
 
     /// Take the oldest origination this session has not yet matched to a
