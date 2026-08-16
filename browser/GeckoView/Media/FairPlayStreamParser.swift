@@ -319,6 +319,31 @@ public final class FairPlayStreamParser: NSObject {
         entry.keySession.processContentKeyRequest(withIdentifier: nil,
                                                   initializationData: forSession,
                                                   options: nil)
+
+        // ADDED - see fix_key_request_watchdog.py's docstring. The
+        // call above returns void and says nothing when it declines,
+        // which is how this path has failed silently twice and how
+        // the parser failed silently before it. Five seconds is far
+        // longer than the callback has ever taken - the probe's
+        // arrives immediately once its delegate queue is off main -
+        // so this only ever fires on a real refusal.
+        //
+        // The delegate is captured rather than looked up again: by
+        // the time this runs the session may be gone, and a
+        // torn-down one should not be resurrected just to report on.
+        let delegate = entry.keyDelegate
+        let sentCount = forSession.count
+        let sentShape = payload == nil ? "init data as it arrived"
+                                       : "the PSSH payload"
+        Self.keyDelegateQueue.asyncAfter(deadline: .now() + 5) {
+            guard !delegate.sawRequest else {
+                return
+            }
+            Self.log("session \(sessionId) raised NO key request from "
+                     + "\(sentCount) bytes sent as \(sentShape) - "
+                     + "AVFoundation did not recognise the shape, and "
+                     + "said nothing about it")
+        }
         return true
     }
 
@@ -779,6 +804,18 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     /// The licence is addressed to the REQUEST on this path, not to a
     /// track: nothing was ever parsed, so there is no track to name.
     private var awaitingResponse: AVContentKeyRequest?
+    /// Whether any key request has ever arrived for this session.
+    ///
+    /// ADDED - see fix_key_request_watchdog.py's docstring.
+    /// processContentKeyRequest returns void and reports nothing when
+    /// it declines, so "no request came back" is a fact nothing in
+    /// this file could previously state. This is what lets the
+    /// watchdog state it.
+    private var requestArrived = false
+
+    /// Read from the watchdog block, through the same lock as the
+    /// rest of this class's state.
+    var sawRequest: Bool { withLock { requestArrived } }
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -853,6 +890,10 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             "session \(sessionId) REAL AVContentKeyRequest arrived - "
             + "identifier \(String(describing: keyRequest.identifier))")
         let ready = withLock { () -> Bool in
+            // Before the certificate test, deliberately: a request
+            // that arrives and is HELD has still arrived, and the
+            // watchdog is asking about AVFoundation, not about us.
+            requestArrived = true
             if storedCertificate == nil {
                 heldRequests.append(keyRequest)
                 return false
