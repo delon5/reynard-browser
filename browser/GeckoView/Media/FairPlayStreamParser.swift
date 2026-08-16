@@ -185,6 +185,23 @@ public final class FairPlayStreamParser: NSObject {
         Self.log("handing the specifier to the key session - id "
                  + "\(identifier.map { String(describing: $0) } ?? "nil"), "
                  + "\(initializationData?.count ?? 0) bytes of init data")
+        // THE SHAPE THAT WORKS, in full.
+        //
+        // These are the bytes AVFoundation's own parser produced from a
+        // real init segment, and the ones processContentKeyRequest
+        // accepts every time - it raises a genuine AVContentKeyRequest
+        // from them, and that made an 8816-byte SPC. The page's PSSH is
+        // refused in both its shapes. So this is the difference, and in
+        // this whole series it has never once been printed.
+        //
+        // The whole thing, not a prefix: the point is to reconstruct it
+        // from a PSSH, and a truncated dump would hide precisely the
+        // tail a reconstruction gets wrong.
+        if let initializationData {
+            Self.log("  specifier init data: "
+                     + initializationData.map { String(format: "%02x", $0) }
+                                         .joined())
+        }
         entry.keySession.processContentKeyRequest(withIdentifier: identifier,
                                                   initializationData: initializationData,
                                                   options: nil)
@@ -358,7 +375,19 @@ public final class FairPlayStreamParser: NSObject {
                                      + "\(initData.count))")
                  + " - key id "
                  + (keyId.map { "\($0.count) bytes" } ?? "not found"))
-        entry.keySession.processContentKeyRequest(withIdentifier: nil,
+        // The key id, PASSED this time.
+        //
+        // It has been extracted and printed since the fkri reader landed
+        // and then dropped at the call: every capture reads "key id 16
+        // bytes" and then hands AVFoundation withIdentifier: nil. So the
+        // runs that refused the whole box (six of them) and the payload
+        // were ALL nil-identifier runs, and the identifier hypothesis
+        // has never been tested. "Shape is the only remaining variable"
+        // could not have been concluded from them.
+        //
+        // One variable: what is sent stays the payload, exactly as
+        // today. Only the identity changes.
+        entry.keySession.processContentKeyRequest(withIdentifier: keyId,
                                                   initializationData: forSession,
                                                   options: nil)
 
@@ -377,16 +406,60 @@ public final class FairPlayStreamParser: NSObject {
         let sentCount = forSession.count
         let sentShape = payload == nil ? "init data as it arrived"
                                        : "the PSSH payload"
+        let namedKey = keyId != nil
         Self.keyDelegateQueue.asyncAfter(deadline: .now() + 5) {
             guard !delegate.sawRequest else {
                 return
             }
             Self.log("session \(sessionId) raised NO key request from "
-                     + "\(sentCount) bytes sent as \(sentShape) - "
-                     + "AVFoundation did not recognise the shape, and "
-                     + "said nothing about it")
+                     + "\(sentCount) bytes sent as \(sentShape) with "
+                     + (namedKey ? "a named key id" : "no identifier")
+                     + " - AVFoundation did not recognise it, and said "
+                     + "nothing about it")
+
+            // The second experiment, sequential and labelled: the same
+            // key id with the shape that was not sent. Two shapes and
+            // two identities is four combinations, and device cycles are
+            // the expensive part - running the pair that share this key
+            // id in one pass halves them without ever having two
+            // variables in flight at once.
+            //
+            // Nothing invented: the alternate is the bytes as they
+            // arrived, which is the whole box when a payload was sent.
+            guard payload != nil else {
+                Self.log("session \(sessionId) sent the bytes as they "
+                         + "arrived - there is no alternate shape to try")
+                return
+            }
+            guard let live = FairPlayStreamParser.shared.liveSession(sessionId) else {
+                return
+            }
+            Self.log("session \(sessionId) retrying with the WHOLE PSSH box, "
+                     + "\(initData.count) bytes, same key id")
+            live.processContentKeyRequest(withIdentifier: keyId,
+                                          initializationData: initData,
+                                          options: nil)
+            Self.keyDelegateQueue.asyncAfter(deadline: .now() + 5) {
+                guard !delegate.sawRequest else {
+                    return
+                }
+                Self.log("session \(sessionId) BOTH shapes refused WITH a "
+                         + "named key id - the identifier is not the "
+                         + "obstacle either, and what is left is the "
+                         + "internal shape the parser produces; compare "
+                         + "against the specifier init data the render "
+                         + "probe now dumps")
+            }
         }
         return true
+    }
+
+    /// This session's AVContentKeySession, or nil once it is gone.
+    ///
+    /// Looked up late rather than captured, so a retry that fires after
+    /// teardown reports nothing instead of resurrecting an entry.
+    fileprivate func liveSession(_ sessionId: String) -> AVContentKeySession? {
+        return withState { entries[sessionId]?.keySession }
     }
 
     /// Take the oldest origination this session has not yet matched to a
@@ -1038,11 +1111,29 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                + "for by this process")
             + ", \(FairPlayStreamParser.shared.pendingOriginationCount(for: sessionId))"
             + " still queued")
-        guard let claimed else {
-            return
+        // No origination is not an error - it is the render probe.
+        //
+        // The probe's requests come from the parser's specifier callback
+        // and it never calls requestKey, so it queues nothing and this
+        // guard turned it away. That disabled the one path proven to
+        // work end to end: the last capture has no "SPC PRODUCED" line
+        // at all, where the run before it had 8816 bytes. Every
+        // comparison this route is measured against depends on that path
+        // still running.
+        //
+        // The request carries its own identifier, which is all makeSPC
+        // needs. An empty origination simply contributes no fallback
+        // bytes, and report(spc:) still declines to route a session that
+        // has no content process behind it.
+        let origination = claimed
+            ?? FairPlayOrigination(contentId: "", initData: Data())
+        if claimed == nil {
+            FairPlayStreamParser.log(
+                "session \(sessionId) has no origination to claim - "
+                + "proceeding on the request's own identifier")
         }
         if let identifier = keyRequest.identifier as? Data,
-           let expected = FairPlayStreamParser.keyIdentifier(inPSSH: claimed.initData),
+           let expected = FairPlayStreamParser.keyIdentifier(inPSSH: origination.initData),
            identifier != expected {
             FairPlayStreamParser.log(
                 "session \(sessionId) WARNING request identifier does not "
@@ -1051,7 +1142,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         }
         let ready = withLock { () -> Bool in
             requestArrived = true
-            originations[ObjectIdentifier(keyRequest)] = claimed
+            originations[ObjectIdentifier(keyRequest)] = origination
             if storedCertificate == nil {
                 heldRequests.append(keyRequest)
                 return false
