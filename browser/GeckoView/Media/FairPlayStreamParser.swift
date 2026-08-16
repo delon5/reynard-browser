@@ -32,6 +32,11 @@
 import AVFoundation
 import Foundation
 import ObjectiveC
+// For the on-screen proof in showLayerIfRequested. This file otherwise
+// touches no UI at all.
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// One EME generateRequest: the id the content process filed it under,
 /// and the bytes it was raised from.
@@ -1207,6 +1212,7 @@ public final class FairPlayStreamParser: NSObject {
             }
             layer.videoGravity = .resizeAspect
             withState { slot.displayLayer = layer }
+            Self.showLayerIfRequested(layer, label: streamKey)
             Self.log("stream \(streamKey) built a display layer - "
                      + "status \(layer.status.rawValue) "
                      + "timebase \(timebase != nil)")
@@ -1243,6 +1249,66 @@ public final class FairPlayStreamParser: NSObject {
         if changed || count == 1 {
             Self.log("stream \(streamKey) enqueued \(count) - " + report)
         }
+    }
+
+    /// Put the layer on screen, if a marker file asks for it.
+    ///
+    /// Acceptance is not pixels. Fix 21 proved an
+    /// AVSampleBufferDisplayLayer takes these samples and reports
+    /// rendering with no error - and then stopped asking for more at 55,
+    /// which is what a layer with nothing to present to does. Whether
+    /// they DECODE and PAINT has never been measured.
+    ///
+    /// The proper home is the compositor, and that waits on a trigger
+    /// this route does not have: NativeLayerCA builds its layer from a
+    /// surface Gecko publishes and marks it DRM from Image::SetIsDRM,
+    /// both of which come from AVPlayerDecoder::PublishPlaceholderFrame -
+    /// which an MSE element never reaches. Building that plumbing before
+    /// knowing there are pixels to place would be the expensive order to
+    /// do this in.
+    ///
+    /// So: the app's own window, a fixed rect, once. Marker-gated like
+    /// the render probe, because a hardcoded video rectangle over the
+    /// page is right for one measurement and wrong for everything else.
+    ///
+    /// The border is drawn regardless. An empty bordered rectangle means
+    /// placed but not painting; no rectangle at all means placement
+    /// failed. Those are different problems and the log should not have
+    /// to guess between them.
+    private static func showLayerIfRequested(_ layer: AVSampleBufferDisplayLayer,
+                                             label: String) {
+#if canImport(UIKit)
+        let documents = NSSearchPathForDirectoriesInDomains(
+            .documentDirectory, .userDomainMask, true)
+        let marker = (documents.first ?? "") + "/fps-show-layer.on"
+        guard FileManager.default.fileExists(atPath: marker) else {
+            return
+        }
+        // Main queue: this is UIKit, and the parser's callbacks arrive on
+        // AVFoundation's own queues.
+        DispatchQueue.main.async {
+            let scenes = UIApplication.shared.connectedScenes
+            let window = scenes.compactMap { $0 as? UIWindowScene }
+                               .flatMap { $0.windows }
+                               .first { $0.isKeyWindow }
+                ?? scenes.compactMap { $0 as? UIWindowScene }
+                         .flatMap { $0.windows }.first
+            guard let window else {
+                log("cannot show \(label) - no window")
+                return
+            }
+            let width = min(window.bounds.width - 32, 360)
+            layer.frame = CGRect(x: 16, y: 120, width: width,
+                                 height: width * 9.0 / 16.0)
+            layer.backgroundColor = UIColor.black.cgColor
+            layer.borderColor = UIColor.systemPink.cgColor
+            layer.borderWidth = 2
+            window.layer.addSublayer(layer)
+            log("layer for \(label) placed on screen at \(layer.frame) - "
+                + "a pink border with nothing in it means placed but not "
+                + "painting")
+        }
+#endif
     }
 
     /// The page's FPS application certificate, for one session.
