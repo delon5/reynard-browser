@@ -1053,7 +1053,23 @@ public final class AVPlayerHost: NSObject {
         guard let buffer = output.copyPixelBuffer(forItemTime: itemTime,
                                                   itemTimeForDisplay: nil)
         else {
+            // ADDED the detector call - see
+            // fix_stall_detector_on_refused_copy.py's docstring.
+            //
+            // This is a protected shape too, and it was the branch
+            // without the detector on it. The output knows a frame
+            // exists at this item time - that is what got us past
+            // hasNewPixelBuffer above - and then declines to hand the
+            // pixels over, because they live in memory the CPU may not
+            // read. Until now that fell straight through to the idle
+            // tick and returned.
+            //
+            // The stall window needs no adjustment: lastBufferItemTime
+            // is updated only after a SUCCESSFUL copy, so a refused
+            // copy accumulates item time exactly as an absent buffer
+            // does.
             report("copyPixelBuffer returned nil")
+            noteProtectedStall(at: CMTimeGetSeconds(itemTime))
             noteIdleTick()
             return
         }
