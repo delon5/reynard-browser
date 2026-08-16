@@ -247,7 +247,7 @@ index 3d33f9916a24..7315821b5984 100644
      value: false
    #else
      value: true
-@@ -13156,6 +13197,65 @@
+@@ -13156,6 +13197,86 @@
    value: true
    mirror: always
  
@@ -301,6 +301,27 @@ index 3d33f9916a24..7315821b5984 100644
 +  value: true
 +  mirror: always
 +
++# Open the MSE FairPlay route: cenc and sinf are advertised and accepted
++# so a page's generateRequest reaches AVStreamDataParser and the
++# AVContentKeySession behind it.
++#
++# Separate from hls-only-initdata above, which is overloaded - flipping
++# that one also changes what every page is told, and the tree records
++# what came of it: bitmovin granted a cenc configuration and stalled,
++# max.com took MSE+FairPlay into FairPlayCDMProxy::Decrypt's
++# MOZ_ASSERT_UNREACHABLE. This says only "try the parser route", and
++# nothing in Swift pushes it, so unlike hls-only-initdata the value here
++# is the value on the device.
++#
++# Off until the route is proven end to end. The last capture had
++# processContentKeyRequest refuse the page's initialisation data, and a
++# half-working DRM path that captures configurations a player would
++# otherwise resolve another way is worse than one that is switched off.
++- name: media.reynard.fairplay.mse-parser-route
++  type: bool
++  value: false
++  mirror: always
++
 +# Hand HLS to AVFoundation instead of Gecko, so AVURLAsset owns the URL
 +# and FairPlay can attach an AVContentKeySession to it. Off until the
 +# pipeline is complete; turning it on changes which decoder claims every
@@ -313,7 +334,7 @@ index 3d33f9916a24..7315821b5984 100644
  # Hls
  - name: media.hls.enabled
    type: RelaxedAtomicBool
-@@ -15074,7 +15174,10 @@
+@@ -15074,7 +15195,10 @@
  - name: network.process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -325,7 +346,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: false # see bug 1641427
  #else
    value: true
-@@ -15123,7 +15226,13 @@
+@@ -15123,7 +15247,13 @@
  - name: network.http.network_access_on_socket_process.enabled
    type: RelaxedAtomicBool
    mirror: always
@@ -339,7 +360,7 @@ index 3d33f9916a24..7315821b5984 100644
  
  # Telemetry of traffic categories. Whether or not to enable HttpTrafficAnalyzer.
  - name: network.traffic_analyzer.enabled
-@@ -19129,7 +19238,7 @@
+@@ -19129,7 +19259,7 @@
  # If the service is available, set threads to low-power mode when in the background.
  - name: threads.use_low_power.enabled
    type: RelaxedAtomicBool
@@ -348,7 +369,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19138,10 +19247,10 @@
+@@ -19138,10 +19268,10 @@
  
  
  # If the process priority is set to background, put the main thread in the background.
@@ -361,7 +382,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: true
  #else
    value: @IS_NIGHTLY_BUILD@
-@@ -19296,7 +19405,7 @@
+@@ -19296,7 +19426,7 @@
  # Use 17 for Ctrl, 18 for Alt, 91 or 224 for Meta, 0 for none.
  - name: ui.key.accelKey
    type: uint32_t
@@ -370,7 +391,7 @@ index 3d33f9916a24..7315821b5984 100644
    value: 224
  #else
    value: 17
-@@ -19938,7 +20047,7 @@
+@@ -19938,7 +20068,7 @@
  # on a platform that supports the GPU process, else true.
  - name: webgl.allow-in-parent
    type: bool

@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1268 @@
+@@ -0,0 +1,1312 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -504,7 +504,12 @@ index 000000000000..e859b69f6239
 +  // rejection is also what lets a well-written player fall through to
 +  // its HLS choice - the fallthrough the pref was added for, which
 +  // silence defeats.
++  // The parser route accepts what it advertised. Mirrors
++  // CreateFairPlayKeySystemConfigs exactly, so the engine never refuses
++  // a configuration it offered - the mismatch that produced a granted
++  // config followed by silence.
 +  if (StaticPrefs::media_reynard_fairplay_hls_only_initdata() &&
++      !StaticPrefs::media_reynard_fairplay_mse_parser_route() &&
 +      !aInitDataType.EqualsLiteral("skd")) {
 +    nsCString reason("FairPlay serves skd init data only"_ns);
 +    printf_stderr("avPlayer: FairPlay refusing generateRequest, initDataType "
@@ -862,6 +867,21 @@ index 000000000000..e859b69f6239
 +  if (mRemote) {
 +    {
 +      StaticMutexAutoLock lock(sRemoteProxiesMutex);
++      // Release the unbound registration BEFORE claiming the real id.
++      //
++      // SendRemoteKeyRequest registers an unbound proxy under 0 so an
++      // MSE SPC can be resolved. If this proxy did that and is now
++      // acquiring a player, the key-0 entry becomes unreachable
++      // bookkeeping that Shutdown - which only ever looked at
++      // mBoundPlayerId - could no longer find. It then outlived the
++      // object and the next SPC in this process dereferenced it.
++      //
++      // Identity-tested, because key 0 is shared: another MSE proxy may
++      // legitimately own it, and tearing out its entry here would
++      // silence it for good.
++      if (RemoteProxies().Get(0) == this) {
++        RemoteProxies().Remove(0);
++      }
 +      RemoteProxies().InsertOrUpdate(static_cast<uint64_t>(aPlayerId), this);
 +    }
 +    // Anything the page asked for before this bind had no id to be
@@ -925,19 +945,24 @@ index 000000000000..e859b69f6239
 +
 +  if (mRemote) {
 +    StaticMutexAutoLock lock(sRemoteProxiesMutex);
-+    const uint64_t key = static_cast<uint64_t>(mBoundPlayerId);
-+    // Only when the entry is still OURS, and no longer skipped for id
-+    // 0 - player 0 is a real registration on the MSE path now.
++    // EVERY key this proxy can occupy, not just the one it is bound to,
++    // because a proxy can occupy TWO keys: 0, from SendRemoteKeyRequest
++    // while it was still unbound, and its real id once BindToPlayer
++    // ran. Removing only mBoundPlayerId left the key-0 entry pointing
++    // at freed memory, and the next MSE SPC in this content process
++    // delivered into it - a use-after-free needing no unusual timing,
++    // just register-unbound, bind, tear down, receive.
 +    //
-+    // Both halves matter. Skipping 0 would strand a dangling proxy
-+    // there for the life of the process, and the next MSE element in
-+    // this child would deliver its SPC into freed memory. Removing by
-+    // id alone would be just as wrong in the other direction: an
-+    // unbound native-HLS proxy also carries id 0, having never
-+    // registered anything, and would tear out the live MSE entry on its
-+    // way down.
++    // Each removal is identity-tested. Key 0 is shared by every MSE
++    // proxy in the process, and an unbound native-HLS proxy carries id
++    // 0 without ever having registered, so removing by id alone would
++    // tear out a live entry belonging to someone else.
++    const uint64_t key = static_cast<uint64_t>(mBoundPlayerId);
 +    if (RemoteProxies().Get(key) == this) {
 +      RemoteProxies().Remove(key);
++    }
++    if (key != 0 && RemoteProxies().Get(0) == this) {
++      RemoteProxies().Remove(0);
 +    }
 +  }
 +  if (mDelegate) {
@@ -1170,9 +1195,28 @@ index 000000000000..e859b69f6239
 +    // as "SPC for unknown player 0".
 +    //
 +    // Registered under 0, which is the id it comes back addressed to.
-+    // One MSE proxy per content process, matching the scope the parser
-+    // session and the application certificate already use.
++    //
++    // One slot for the whole content process, and that is a real
++    // limitation rather than a scoping choice: the broker discriminates
++    // MSE by exactly (aKey & 0xffffffff) == 0, so a unique id here
++    // would route these requests back down the player path. Two MediaKeys
++    // objects in one process therefore contend for this entry and the
++    // later one wins - the earlier stops receiving messages.
++    //
++    // Said out loud, because that failure is otherwise invisible and
++    // looks exactly like the silence this whole route replaced. The
++    // identity guards in BindToPlayer and Shutdown keep it a misroute
++    // rather than a use-after-free: a displaced proxy can no longer
++    // remove the winner's entry on its way out.
 +    StaticMutexAutoLock lock(sRemoteProxiesMutex);
++    if (FairPlayCDMProxy* existing = RemoteProxies().Get(0)) {
++      if (existing != this) {
++        printf_stderr(
++            "avPlayer: FairPlay WARNING second MSE proxy in this process - "
++            "displacing the one registered for SPC delivery; the earlier "
++            "MediaKeys will stop receiving messages\n");
++      }
++    }
 +    RemoteProxies().InsertOrUpdate(0, this);
 +  }
 +  cc->SendAVPlayerKeyGenerateRequest(static_cast<uint64_t>(mBoundPlayerId),

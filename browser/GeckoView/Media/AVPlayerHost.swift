@@ -328,12 +328,23 @@ public final class AVPlayerHost: NSObject {
         // the SESSION, which takes initialisation data rather than a
         // parsed track and raises a request that can make an SPC.
         //
-        // The append's answer is read now. Discarding it meant a parser
-        // that declined the bytes produced exactly the silence this
-        // whole route exists to replace.
+        // The append's answer is a HOST-side precondition, not a parse
+        // result, and saying otherwise here was wrong: append() returns
+        // false only for an unknown session or a missing
+        // appendStreamData:, and true the moment the bytes are handed
+        // over. perform() discards whatever the parser makes of them, so
+        // a parser that silently ignores a PSSH - the entire reason this
+        // route exists - still returns true.
+        //
+        // Worth reading anyway, because false means the SPI is gone and
+        // that is a real thing to know. What it can never mean is that
+        // the parser looked at the bytes and declined them; the only
+        // report of that is didFailToParseStreamDataWithError, on the
+        // delegate.
         if !parser.append(sessionId, initSegment: initData) {
-            avLog("parser declined the append for child \(childId) - "
-                  + "the direct key request below is the only route left")
+            avLog("parser has no appendStreamData: for child \(childId) - "
+                  + "the OS moved, and only the direct key request below "
+                  + "can still work")
         }
         parser.requestKey(sessionId, contentId: contentId, initData: initData)
     }
@@ -391,8 +402,14 @@ public final class AVPlayerHost: NSObject {
                                                contentId: String,
                                                response: Data) {
         avLog("parser CKC for child \(childId), \(response.count) bytes")
+        // The content id is the correlation key, and it was being
+        // dropped here: one session serves the whole child, so without
+        // it the licence lands on whichever request happened to be
+        // armed - and with two exchanges in flight that is provably the
+        // wrong one, with the second CKC discarded outright.
         let applied = FairPlayStreamParser.shared
-            .provideResponse("child-\(childId)", ckc: response)
+            .provideResponse("child-\(childId)", contentId: contentId,
+                             ckc: response)
         if !applied {
             // Said out loud rather than dropped. A licence that cannot be
             // applied leaves the page believing playback is about to

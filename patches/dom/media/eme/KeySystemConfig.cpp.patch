@@ -38,7 +38,7 @@ index e812f981e91d..a10b5ef3f204 100644
  #ifdef MOZ_WIDGET_ANDROID
    // Check if we can use MediaDrm for this keysystem.
    if (mozilla::java::MediaDrmProxy::IsSchemeSupported(
-@@ -119,6 +141,85 @@ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
+@@ -119,6 +141,92 @@ bool KeySystemConfig::Supports(const nsAString& aKeySystem) {
    }
  }
  
@@ -66,7 +66,14 @@ index e812f981e91d..a10b5ef3f204 100644
 +  // through to its next choice, which is the HLS one. Behind a pref
 +  // because it changes what sites are told rather than what the engine
 +  // does, and that is worth being able to undo on the device.
-+  if (!StaticPrefs::media_reynard_fairplay_hls_only_initdata()) {
++  //
++  // media.reynard.fairplay.mse-parser-route opens the same door
++  // deliberately, for the AVStreamDataParser path. It is its own pref
++  // rather than a reuse of the one above because the two decisions
++  // differ: hls-only-initdata is about what every page is told, and
++  // this is about whether one specific route is armed.
++  if (!StaticPrefs::media_reynard_fairplay_hls_only_initdata() ||
++      StaticPrefs::media_reynard_fairplay_mse_parser_route()) {
 +    config->mInitDataTypes.AppendElement(u"cenc"_ns);
 +    config->mInitDataTypes.AppendElement(u"sinf"_ns);
 +  }
@@ -124,7 +131,7 @@ index e812f981e91d..a10b5ef3f204 100644
  /* static */ void KeySystemConfig::CreateWivineL3KeySystemConfigs(
      const KeySystemConfigRequest& aRequest,
      nsTArray<KeySystemConfig>& aOutConfigs) {
-@@ -232,6 +333,11 @@ KeySystemConfig::CreateKeySystemConfigs(
+@@ -232,6 +340,11 @@ KeySystemConfig::CreateKeySystemConfigs(
      } else if (IsWidevineKeySystem(keySystem)) {
        CreateWivineL3KeySystemConfigs(request, outConfigs);
      }

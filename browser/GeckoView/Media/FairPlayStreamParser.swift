@@ -33,6 +33,20 @@ import AVFoundation
 import Foundation
 import ObjectiveC
 
+/// One EME generateRequest: the id the content process filed it under,
+/// and the bytes it was raised from.
+///
+/// Both are needed for the whole life of the exchange and neither can be
+/// recovered later. FairPlayCDMProxy files its session under base64 of
+/// the init data and matches the SPC coming back by exactly that string,
+/// so the SPC must be reported under the id it ARRIVED with; and a
+/// request raised with a nil identifier can only be addressed by reading
+/// a key id back out of the init data that raised it.
+struct FairPlayOrigination {
+    let contentId: String
+    let initData: Data
+}
+
 @objc(ReynardFairPlayStreamParser)
 public final class FairPlayStreamParser: NSObject {
     public static let shared = FairPlayStreamParser()
@@ -60,22 +74,33 @@ public final class FairPlayStreamParser: NSObject {
         /// and neither EME message carries it - the page has never heard
         /// of a track id.
         var trackIDs: [Int32] = []
-        /// The content id FairPlayCDMProxy keys this exchange by, kept
-        /// from the generateRequest that opened it.
+        /// Originations this session has asked for and whose key
+        /// requests have not come back yet, oldest first.
         ///
-        /// The proxy files a session under base64 of the whole init data
-        /// blob and matches the SPC coming back by exactly that string.
-        /// Deriving an id here from AVContentKeyRequest.identifier would
-        /// produce a different encoding and strand every message, so the
-        /// one the request arrived with is the one it goes back with.
-        var contentId: String = ""
-        /// The initialisation data the request was raised from.
+        /// A QUEUE, not a slot, and that is the correction. One
+        /// AVContentKeySession serves a whole content process, but EME
+        /// raises one generateRequest per MediaKeySession and real
+        /// services raise several - separate audio and video keys, and
+        /// again on rotation. Two scalars here meant request #2
+        /// overwrote request #1's identity before #1's SPC callback had
+        /// run, so every SPC went out under the last content id seen and
+        /// every earlier EME session hung with no message at all.
         ///
-        /// Kept because the SPC still needs a content identifier and a
-        /// request raised with a nil identifier has none to offer - the
-        /// key id has to be read back out of these bytes. See
-        /// KeySessionDelegate's ladder.
-        var initData: Data = Data()
+        /// Drained by the delegate, which pins one origination to the
+        /// request object that answers it - see claimOrigination.
+        var pendingOriginations: [FairPlayOrigination] = []
+        /// Whether requestKey drives this session's key requests.
+        ///
+        /// True for anything parserAppendInitData opened, false for the
+        /// render probe. Both routes end at the same
+        /// processContentKeyRequest, so a session driven directly must
+        /// not ALSO raise one from the parser's specifier callback when
+        /// a real init segment happens to parse - that answers one EME
+        /// exchange with two AVContentKeyRequests.
+        ///
+        /// A flag, not a count: a session with three exchanges queued
+        /// still wants three requests. This says which route makes them.
+        var directRouteOwnsSession = false
 
         init(parser: NSObject,
              recipient: AVContentKeyRecipient,
@@ -139,6 +164,22 @@ public final class FairPlayStreamParser: NSObject {
         let initializationData = specifier.value(forKey: "initializationData") as? Data
         guard identifier != nil || initializationData != nil else {
             Self.log("specifier carries neither identifier nor initialisation data")
+            return
+        }
+        // Stand down when the direct route drives this session.
+        //
+        // Both routes end at the same processContentKeyRequest, so if a
+        // real init segment does parse here, raising one now would be
+        // the SECOND request answering a single EME exchange - the first
+        // having come from requestKey the moment the bytes arrived.
+        //
+        // The render probe is unaffected: it never calls requestKey, so
+        // this callback remains its only way to raise a key request, and
+        // it is the path the 6480-byte SPC came back through.
+        if withState({ entry.directRouteOwnsSession }) {
+            Self.log("session \(sessionId) parser raised a specifier, but the "
+                     + "direct route already asked for this key - not raising "
+                     + "a second request")
             return
         }
         Self.log("handing the specifier to the key session - id "
@@ -292,8 +333,9 @@ public final class FairPlayStreamParser: NSObject {
             return false
         }
         withState {
-            entry.contentId = contentId
-            entry.initData = initData
+            entry.pendingOriginations.append(
+                FairPlayOrigination(contentId: contentId, initData: initData))
+            entry.directRouteOwnsSession = true
         }
         let keyId = Self.keyIdentifier(inPSSH: initData)
         // CHANGED - see fix_key_request_unwraps_pssh.py's docstring.
@@ -347,14 +389,25 @@ public final class FairPlayStreamParser: NSObject {
         return true
     }
 
-    /// The content id this session reports its SPC under, or nil.
-    func contentId(for sessionId: String) -> String? {
-        return withState { entries[sessionId]?.contentId }
+    /// Take the oldest origination this session has not yet matched to a
+    /// key request.
+    ///
+    /// Claimed rather than read, so two requests can never resolve to
+    /// the same exchange. Nil when a request arrives that nothing here
+    /// asked for, which the delegate reports rather than guessing at.
+    func claimOrigination(for sessionId: String) -> FairPlayOrigination? {
+        return withState { () -> FairPlayOrigination? in
+            guard let entry = entries[sessionId],
+                  !entry.pendingOriginations.isEmpty else {
+                return nil
+            }
+            return entry.pendingOriginations.removeFirst()
+        }
     }
 
-    /// The initialisation data this session's request was raised from.
-    func initData(for sessionId: String) -> Data? {
-        return withState { entries[sessionId]?.initData }
+    /// The originations this session is still waiting on, for logging.
+    func pendingOriginationCount(for sessionId: String) -> Int {
+        return withState { entries[sessionId]?.pendingOriginations.count ?? 0 }
     }
 
     /// The key id inside a cenc PSSH box, or nil when the bytes are not
@@ -372,39 +425,144 @@ public final class FairPlayStreamParser: NSObject {
     /// Objective-C, where a non-zero startIndex is legal and indexing a
     /// Data by absolute offset is a well-known way to read the wrong
     /// bytes.
+    /// FairPlay Streaming's registered SystemID,
+    /// 94CE86FB-07FF-4F43-ADB8-93D2FA968CA2, as it sits in the box.
+    static let fairPlaySystemId: [UInt8] = [
+        0x94, 0xCE, 0x86, 0xFB, 0x07, 0xFF, 0x4F, 0x43,
+        0xAD, 0xB8, 0x93, 0xD2, 0xFA, 0x96, 0x8C, 0xA2,
+    ]
+
+    /// The key id for the FairPlay key this init data names, or nil.
     static func keyIdentifier(inPSSH data: Data) -> Data? {
         let bytes = [UInt8](data)
-        guard bytes.count >= 32,
-              bytes[4] == 0x70, bytes[5] == 0x73,
-              bytes[6] == 0x73, bytes[7] == 0x68 else {
-            return nil
-        }
+
         func be32(_ at: Int) -> Int {
+            guard at >= 0, at + 4 <= bytes.count else { return -1 }
             return (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
                  | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
         }
-        var cursor = 28  // size, type, version+flags, system id
-        if bytes[8] >= 1 {
-            guard bytes.count >= cursor + 4 else { return nil }
-            let count = be32(cursor)
-            cursor += 4
-            guard count > 0, bytes.count >= cursor + 16 else { return nil }
-            return Data(bytes[cursor..<(cursor + 16)])
+
+        func fourCC(_ at: Int) -> String {
+            guard at + 4 <= bytes.count else { return "????" }
+            return String(bytes[at..<(at + 4)].map { byte -> Character in
+                (byte >= 0x20 && byte <= 0x7e) ? Character(UnicodeScalar(byte))
+                                               : "."
+            })
         }
-        guard bytes.count >= cursor + 4 else { return nil }
-        let payload = be32(cursor)
-        cursor += 4
-        guard payload >= 16, bytes.count >= cursor + 16 else { return nil }
-        // CHANGED - see fix_key_request_unwraps_pssh.py's docstring.
-        // A version 0 box names no key ids, and this branch assumed
-        // Apple's opens its payload with one. The box the page actually
-        // sends opens with a nested fpsd box, so what came back was
-        // four bytes of length and four of ASCII reported as a key id.
-        // A payload that is box-shaped is not one.
-        if Self.looksLikeBox(bytes, at: cursor, within: payload) {
+
+        // The first bytes, always, so a shape this cannot read is
+        // diagnosable from the capture instead of from another build.
+        // Every failure on this path has been silent; this is the line
+        // that makes the NEXT unknown layout cost a log line rather than
+        // a device cycle.
+        Self.log("init data \(bytes.count) bytes, box \(fourCC(4)), head "
+                 + bytes.prefix(40).map { String(format: "%02x", $0) }
+                        .joined())
+
+        var fallback: Data?
+        var boxAt = 0
+
+        // "cenc" initialisation data is a CONCATENATION of pssh boxes,
+        // one per DRM the content was packaged for, so this walks by each
+        // box's own length rather than reading only the first.
+        while boxAt + 8 <= bytes.count {
+            let size = be32(boxAt)
+            guard size >= 8, boxAt + size <= bytes.count else {
+                break
+            }
+            guard fourCC(boxAt + 4) == "pssh", boxAt + 32 <= bytes.count else {
+                boxAt += size
+                continue
+            }
+
+            let version = bytes[boxAt + 8]
+            let systemId = Array(bytes[(boxAt + 12)..<(boxAt + 28)])
+            let isFairPlay = systemId == Self.fairPlaySystemId
+            Self.log("  pssh v\(version) system "
+                     + systemId.map { String(format: "%02x", $0) }.joined()
+                     + (isFairPlay ? " (FairPlay)" : ""))
+
+            var cursor = boxAt + 28
+            if version >= 1 {
+                let count = be32(cursor)
+                cursor += 4
+                if count > 0, cursor + 16 <= bytes.count {
+                    let kid = Data(bytes[cursor..<(cursor + 16)])
+                    if isFairPlay {
+                        return kid
+                    }
+                    // Under Common Encryption the KID is often shared
+                    // across systems, so another system's is better than
+                    // nothing - but it is a guess, and it says so.
+                    if fallback == nil {
+                        fallback = kid
+                    }
+                }
+            } else if isFairPlay {
+                // Apple's own layout, decoded from a device capture:
+                // the v0 payload is a box tree, fpsd > fpsk > fkri, and
+                // fkri's body is four reserved bytes followed by the key
+                // id. Confirmed against the identifier AVFoundation
+                // derived from the matching init segment - they are the
+                // same sixteen bytes.
+                let payloadSize = be32(cursor)
+                cursor += 4
+                let payloadEnd = min(cursor + max(payloadSize, 0),
+                                     boxAt + size)
+                if let kid = Self.fkriKeyIdentifier(bytes, from: cursor,
+                                                    to: payloadEnd) {
+                    return kid
+                }
+                // Older packagings really do open the payload with the
+                // key id. Tried only after the box tree, and only for a
+                // FairPlay box, so it can no longer fire on a foreign
+                // system's private payload.
+                if cursor + 16 <= payloadEnd {
+                    Self.log("  no fkri - taking the payload's first 16 bytes")
+                    return Data(bytes[cursor..<(cursor + 16)])
+                }
+            }
+            boxAt += size
+        }
+
+        if fallback != nil {
+            Self.log("no FairPlay key id - falling back to another system's, "
+                     + "which may not be the right key")
+        }
+        return fallback
+    }
+
+    /// The key id inside a FairPlay PSSH payload's fkri box.
+    ///
+    /// Scanned for within the payload rather than walked through
+    /// fpsd > fpsk, because only this one field is wanted and the
+    /// surrounding nesting has already varied between packagers. The
+    /// scan is bounded to this box's payload, and "fkri" preceded by its
+    /// own length cannot occur by accident in a structure this small.
+    ///
+    /// Layout from the start of the fkri box: size 4, type 4, reserved
+    /// 4, then the key id for 16.
+    static func fkriKeyIdentifier(_ bytes: [UInt8], from: Int,
+                                  to: Int) -> Data? {
+        guard from >= 0, to <= bytes.count, from < to else {
             return nil
         }
-        return Data(bytes[cursor..<(cursor + 16)])
+        let marker: [UInt8] = [0x66, 0x6b, 0x72, 0x69]  // "fkri"
+        var typeAt = from
+        while typeAt + 4 <= to {
+            if Array(bytes[typeAt..<(typeAt + 4)]) == marker {
+                let kidAt = typeAt + 8       // past type, past reserved
+                guard kidAt + 16 <= to else {
+                    return nil
+                }
+                let kid = Data(bytes[kidAt..<(kidAt + 16)])
+                Self.log("  fkri key id "
+                         + kid.map { String(format: "%02x", $0) }.joined())
+                return kid
+            }
+            typeAt += 1
+        }
+        return nil
     }
 
     /// Whether the bytes at `at` open an MP4 box that fills `within`.
@@ -553,12 +711,14 @@ public final class FairPlayStreamParser: NSObject {
     /// real init segment raised, which names a track and takes the
     /// licence through the parser instead.
     @discardableResult
-    @objc public func provideResponse(_ sessionId: String, ckc: Data) -> Bool {
+    @objc public func provideResponse(_ sessionId: String,
+                                      contentId: String,
+                                      ckc: Data) -> Bool {
         guard let entry = withState({ entries[sessionId] }) else {
             Self.log("CKC for unknown session \(sessionId)")
             return false
         }
-        if entry.keyDelegate.provide(response: ckc) {
+        if entry.keyDelegate.provide(response: ckc, contentId: contentId) {
             return true
         }
         guard let trackID = withState({ entry.trackIDs.first }) else {
@@ -787,34 +947,30 @@ public final class FairPlayStreamParser: NSObject {
 final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     let sessionId: String
 
-    /// The certificate and the requests waiting for it, under one lock.
+    /// Everything per-request, under one lock.
     ///
-    /// One lock rather than two, because "is there a certificate" and
-    /// "hold this request" have to be decided together. The request
+    /// One lock rather than several, because "is there a certificate"
+    /// and "hold this request" have to be decided together: the request
     /// arrives on the session's dedicated queue while the certificate
-    /// arrives from Gecko's main thread, so a certificate landing
+    /// arrives from Gecko's main thread, and a certificate landing
     /// between those two decisions would leave a request parked with
-    /// nothing left to wake it - the exact race this file already
-    /// learned about the hard way on the delegate queue.
+    /// nothing left to wake it.
     private let lock = NSLock()
     private var storedCertificate: Data?
     private var heldRequests: [AVContentKeyRequest] = []
-    /// The request an outstanding SPC belongs to.
+    /// The origination each live request answers.
     ///
-    /// The licence is addressed to the REQUEST on this path, not to a
-    /// track: nothing was ever parsed, so there is no track to name.
-    private var awaitingResponse: AVContentKeyRequest?
+    /// Keyed by the request OBJECT. One AVContentKeySession serves a
+    /// whole content process, so "the current content id" is not a thing
+    /// that exists once two exchanges are in flight - every read has to
+    /// name which request it means.
+    private var originations: [ObjectIdentifier: FairPlayOrigination] = [:]
+    /// Requests whose SPC has gone out, by EME content id, waiting for a
+    /// licence addressed to that id.
+    private var outstanding: [String: AVContentKeyRequest] = [:]
     /// Whether any key request has ever arrived for this session.
-    ///
-    /// ADDED - see fix_key_request_watchdog.py's docstring.
-    /// processContentKeyRequest returns void and reports nothing when
-    /// it declines, so "no request came back" is a fact nothing in
-    /// this file could previously state. This is what lets the
-    /// watchdog state it.
     private var requestArrived = false
 
-    /// Read from the watchdog block, through the same lock as the
-    /// rest of this class's state.
     var sawRequest: Bool { withLock { requestArrived } }
 
     init(sessionId: String) {
@@ -835,15 +991,13 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         set { setCertificate(newValue) }
     }
 
-    /// Held rather than dropped, which is the correction here.
+    /// Held rather than dropped.
     ///
-    /// The certificate cannot arrive first. The page calls
+    /// The certificate cannot arrive first: the page calls
     /// setServerCertificate while handling an 'encrypted' event, and
     /// that event is produced by the very key request that needs it - so
-    /// a delegate that returned early on a missing certificate discarded
-    /// the request in the ORDINARY case, and nothing ever re-raised it.
-    /// The native path has always held these; see AVPlayerHost's
-    /// awaitingCertificate.
+    /// returning early on a missing certificate discarded the request in
+    /// the ORDINARY case, and nothing ever re-raised it.
     func setCertificate(_ data: Data?) {
         let waiting = withLock { () -> [AVContentKeyRequest] in
             storedCertificate = data
@@ -861,39 +1015,43 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         }
     }
 
-    /// The CKC, applied to the request that asked for it.
-    ///
-    /// processContentKeyResponseData:forTrackID: - the parser's call -
-    /// names a track a key request was raised for, and this route has
-    /// none: the request came from the session, from initialisation data
-    /// alone. AVContentKeyResponse into the request is the matching
-    /// half of processContentKeyRequest, and the only one that can work
-    /// here.
-    func provide(response ckc: Data) -> Bool {
-        guard let request = withLock({ awaitingResponse }) else {
-            FairPlayStreamParser.log(
-                "session \(sessionId) has no key request awaiting a licence")
-            return false
-        }
-        request.processContentKeyResponse(
-            AVContentKeyResponse(fairPlayStreamingKeyResponseData: ckc))
-        withLock { awaitingResponse = nil }
-        FairPlayStreamParser.log(
-            "session \(sessionId) licence applied to the key request, "
-            + "\(ckc.count) bytes")
-        return true
-    }
-
     func contentKeySession(_ session: AVContentKeySession,
                            didProvide keyRequest: AVContentKeyRequest) {
+        // Pin this request to the origination it answers, BEFORE
+        // anything reads an identity off it.
+        //
+        // FIFO, and that is an assumption worth naming: AVFoundation is
+        // not documented to raise requests in the order they were asked
+        // for. It is forced by raising requests with a nil identifier,
+        // which is the shape MSE needs and which removes the per-request
+        // handle AVFoundation would otherwise hand back. Where the
+        // request DOES carry an identifier the queue order is checked
+        // against it below, so a mismatch shows up in the log instead of
+        // silently addressing the wrong key.
+        let claimed = FairPlayStreamParser.shared.claimOrigination(for: sessionId)
         FairPlayStreamParser.log(
             "session \(sessionId) REAL AVContentKeyRequest arrived - "
-            + "identifier \(String(describing: keyRequest.identifier))")
+            + "identifier \(String(describing: keyRequest.identifier)), "
+            + "claimed "
+            + (claimed.map { "id \($0.contentId)" } ?? "NOTHING - no "
+               + "origination was waiting, so this request was not asked "
+               + "for by this process")
+            + ", \(FairPlayStreamParser.shared.pendingOriginationCount(for: sessionId))"
+            + " still queued")
+        guard let claimed else {
+            return
+        }
+        if let identifier = keyRequest.identifier as? Data,
+           let expected = FairPlayStreamParser.keyIdentifier(inPSSH: claimed.initData),
+           identifier != expected {
+            FairPlayStreamParser.log(
+                "session \(sessionId) WARNING request identifier does not "
+                + "match the origination claimed for it - FIFO order may be "
+                + "wrong, and this SPC may address the wrong key")
+        }
         let ready = withLock { () -> Bool in
-            // Before the certificate test, deliberately: a request
-            // that arrives and is HELD has still arrived, and the
-            // watchdog is asking about AVFoundation, not about us.
             requestArrived = true
+            originations[ObjectIdentifier(keyRequest)] = claimed
             if storedCertificate == nil {
                 heldRequests.append(keyRequest)
                 return false
@@ -909,95 +1067,127 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         makeSPC(for: keyRequest)
     }
 
-    /// The SPC itself, once there is a certificate to make one with.
+    /// The SPC, once there is a certificate to make one with.
     private func makeSPC(for keyRequest: AVContentKeyRequest) {
-        guard let certificate = withLock({ storedCertificate }) else {
+        let state = withLock { () -> (Data, FairPlayOrigination)? in
+            guard let certificate = storedCertificate,
+                  let origination = originations[ObjectIdentifier(keyRequest)] else {
+                return nil
+            }
+            return (certificate, origination)
+        }
+        guard let (certificate, origination) = state else {
             return
         }
-        // Kept so the licence has something to be applied to when it
-        // comes back - see provide(response:).
-        withLock { awaitingResponse = keyRequest }
-        guard let contentId = contentIdentifier(for: keyRequest) else {
+        guard let contentId = contentIdentifier(for: keyRequest,
+                                                origination: origination) else {
             FairPlayStreamParser.log(
-                "session \(sessionId) has nothing to address an SPC with")
+                "session \(sessionId) has nothing to address an SPC with "
+                + "for id \(origination.contentId)")
             return
         }
         keyRequest.makeStreamingContentKeyRequestData(
             forApp: certificate, contentIdentifier: contentId, options: nil
-        ) { spc, error in
+        ) { [weak self] spc, error in
+            guard let self else { return }
             guard let spc else {
                 FairPlayStreamParser.log(
-                    "SPC failed for session \(self.sessionId): "
+                    "SPC failed for session \(self.sessionId) id "
+                    + "\(origination.contentId): "
                     + (error.map { String(describing: $0) } ?? "no error given"))
+                // Nothing outstanding: a request with no SPC can never
+                // be answered by a licence, and leaving it armed would
+                // let an unrelated CKC be applied to it.
+                self.withLock { _ = self.originations.removeValue(
+                    forKey: ObjectIdentifier(keyRequest)) }
                 return
             }
             FairPlayStreamParser.log(
-                "SPC PRODUCED for session \(self.sessionId): \(spc.count) bytes")
-            self.report(spc: spc)
+                "SPC PRODUCED for session \(self.sessionId) id "
+                + "\(origination.contentId): \(spc.count) bytes")
+            // Armed only now, and under the id the licence will name.
+            // Arming before the SPC existed meant a failed SPC left a
+            // request waiting for a licence that was never requested.
+            self.withLock {
+                self.outstanding[origination.contentId] = keyRequest
+            }
+            self.report(spc: spc, contentId: origination.contentId)
         }
     }
 
     /// What the SPC covers.
     ///
-    /// A request raised by processContentKeyRequest(withIdentifier: nil,
-    /// ...) carries no identifier of its own - that is the shape this
-    /// path deliberately uses, since on MSE the initialisation data is
-    /// the identity - so the key id is read back out of those bytes
-    /// instead.
-    ///
-    /// A ladder rather than a single answer, ordered most specific
-    /// first, and it logs which rung it landed on: whether AVFoundation
-    /// accepts a PSSH's key id here is the next unknown, and the capture
-    /// has to be able to say which one produced the SPC.
-    private func contentIdentifier(for keyRequest: AVContentKeyRequest) -> Data? {
+    /// A request raised with a nil identifier has none of its own, so
+    /// the key id is read back out of the initialisation data that
+    /// raised THIS request - not out of whatever the session last saw.
+    private func contentIdentifier(for keyRequest: AVContentKeyRequest,
+                                   origination: FairPlayOrigination) -> Data? {
         if let data = keyRequest.identifier as? Data {
             FairPlayStreamParser.log("addressing the SPC by the request's identifier")
             return data
         }
         if let string = keyRequest.identifier as? String {
-            // Scheme stripped, like the native path and Apple's HLS
-            // Catalog sample: what a key server is told is the asset id,
-            // not the URI that named it.
             let assetId = string.hasPrefix("skd://")
                 ? String(string.dropFirst("skd://".count))
                 : string
             FairPlayStreamParser.log("addressing the SPC by the request's URI identifier")
             return Data(assetId.utf8)
         }
-        let initData = FairPlayStreamParser.shared.initData(for: sessionId) ?? Data()
-        if let keyId = FairPlayStreamParser.keyIdentifier(inPSSH: initData) {
+        if let keyId = FairPlayStreamParser.keyIdentifier(inPSSH: origination.initData) {
             FairPlayStreamParser.log("addressing the SPC by the PSSH's key id")
             return keyId
         }
-        guard !initData.isEmpty else {
+        guard !origination.initData.isEmpty else {
             return nil
         }
         FairPlayStreamParser.log("addressing the SPC by the whole init data")
-        return initData
+        return origination.initData
+    }
+
+    /// The CKC, applied to the request the content id names.
+    ///
+    /// Named rather than assumed. One session serves the whole content
+    /// process, so "the request awaiting a licence" is ambiguous the
+    /// moment two exchanges are in flight - and the content id that
+    /// disambiguates it has been crossing both IPC legs all along.
+    func provide(response ckc: Data, contentId: String) -> Bool {
+        let request = withLock { () -> AVContentKeyRequest? in
+            guard let found = outstanding.removeValue(forKey: contentId) else {
+                return nil
+            }
+            _ = originations.removeValue(forKey: ObjectIdentifier(found))
+            return found
+        }
+        guard let request else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) has no key request outstanding for id "
+                + "\(contentId) - licence not applied")
+            return false
+        }
+        request.processContentKeyResponse(
+            AVContentKeyResponse(fairPlayStreamingKeyResponseData: ckc))
+        FairPlayStreamParser.log(
+            "session \(sessionId) licence applied to the request for id "
+            + "\(contentId), \(ckc.count) bytes")
+        return true
     }
 
     /// The SPC's way back to the content process that asked for it.
     ///
     /// Main thread, because ReynardFairPlayNotifyParserKeyMessage
     /// asserts it and everything it touches on the Gecko side is
-    /// main-thread-only. This delegate deliberately runs on its own
-    /// queue - see createSession - so the hop is required rather than
-    /// incidental.
+    /// main-thread-only; this delegate runs on its own queue.
     ///
-    /// Reported under the content id the request ARRIVED with, never one
-    /// derived from AVContentKeyRequest.identifier. FairPlayCDMProxy
-    /// files the session under base64 of the whole init data and matches
-    /// the message coming back by exactly that string; any other
-    /// encoding parks the SPC in mRemotePendingSpc for ever.
-    private func report(spc: Data) {
+    /// Reported under the id the request ARRIVED with, which is now the
+    /// id of the origination this particular request answers rather than
+    /// whatever the session last recorded.
+    private func report(spc: Data, contentId: String) {
         guard let childId = Self.childId(ofSession: sessionId) else {
             FairPlayStreamParser.log(
                 "session \(sessionId) is not a child session - "
                 + "SPC produced but not routed")
             return
         }
-        let contentId =
-            FairPlayStreamParser.shared.contentId(for: sessionId) ?? ""
         FairPlayStreamParser.log(
             "session \(sessionId) SPC on its way to child \(childId), "
             + "\(spc.count) bytes under id \(contentId)")
@@ -1010,8 +1200,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         }
     }
 
-    /// "child-9" -> 9. Nothing else has a content process to go back to;
-    /// the render probe's session deliberately does not.
+    /// "child-9" -> 9. Nothing else has a content process to go back to.
     private static func childId(ofSession sessionId: String) -> UInt? {
         let prefix = "child-"
         guard sessionId.hasPrefix(prefix) else {
