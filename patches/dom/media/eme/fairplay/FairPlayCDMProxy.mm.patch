@@ -1,9 +1,9 @@
 diff --git a/dom/media/eme/fairplay/FairPlayCDMProxy.mm b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
 new file mode 100644
-index 000000000000..5fd25a830ab7
+index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1188 @@
+@@ -0,0 +1,1220 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -923,9 +923,22 @@ index 000000000000..5fd25a830ab7
 +  MOZ_ASSERT(NS_IsMainThread());
 +  EME_LOG("FairPlayCDMProxy::Shutdown({})", fmt::ptr(this));
 +
-+  if (mRemote && mBoundPlayerId) {
++  if (mRemote) {
 +    StaticMutexAutoLock lock(sRemoteProxiesMutex);
-+    RemoteProxies().Remove(static_cast<uint64_t>(mBoundPlayerId));
++    const uint64_t key = static_cast<uint64_t>(mBoundPlayerId);
++    // Only when the entry is still OURS, and no longer skipped for id
++    // 0 - player 0 is a real registration on the MSE path now.
++    //
++    // Both halves matter. Skipping 0 would strand a dangling proxy
++    // there for the life of the process, and the next MSE element in
++    // this child would deliver its SPC into freed memory. Removing by
++    // id alone would be just as wrong in the other direction: an
++    // unbound native-HLS proxy also carries id 0, having never
++    // registered anything, and would tear out the live MSE entry on its
++    // way down.
++    if (RemoteProxies().Get(key) == this) {
++      RemoteProxies().Remove(key);
++    }
 +  }
 +  if (mDelegate) {
 +    [mDelegate detach];
@@ -1102,6 +1115,18 @@ index 000000000000..5fd25a830ab7
 +  if (!cc) {
 +    return;
 +  }
++  if (!mBoundPlayerId) {
++    // MSE. No player will ever be bound, so BindToPlayer - the only
++    // place that registers a proxy for the return leg - will never run,
++    // and the SPC would arrive in the right process only to be dropped
++    // as "SPC for unknown player 0".
++    //
++    // Registered under 0, which is the id it comes back addressed to.
++    // One MSE proxy per content process, matching the scope the parser
++    // session and the application certificate already use.
++    StaticMutexAutoLock lock(sRemoteProxiesMutex);
++    RemoteProxies().InsertOrUpdate(0, this);
++  }
 +  cc->SendAVPlayerKeyGenerateRequest(static_cast<uint64_t>(mBoundPlayerId),
 +                                     aRequest.mContentId,
 +                                     aRequest.mInitDataType,
@@ -1133,8 +1158,9 @@ index 000000000000..5fd25a830ab7
 +          "avPlayer: FairPlay SPC for %s adopted by session %s, which had "
 +          "no content id (%zu bytes)\n",
 +          contentId.get(), sessionId.get(), (size_t)aSpc.Length());
-+      // Record the REVERSE mapping only, and leave the degenerate
-+      // entry alone.
++      // Record the REVERSE mapping, and consume the degenerate entry
++      // - CHANGED, it used to be left in place. See
++      // fix_degenerate_session_not_reused.py's docstring.
 +      //
 +      // Re-filing under the real id was the obvious move and it was
 +      // wrong: it pinned this session there for the life of the
@@ -1143,11 +1169,17 @@ index 000000000000..5fd25a830ab7
 +      // showed all three attempts delivered to the same session while
 +      // two newer ones waited.
 +      //
-+      // Left where it is, the degenerate entry is overwritten by each
-+      // new CreateSession, so the NEWEST session always receives. The
-+      // session -> id direction is the half UpdateSession needs, to
-+      // tag the CKC with something the app process can match.
++      // Removing it keeps the adoption one-shot. A retry builds
++      // another session with no content id, and CreateSession files
++      // that one under the same degenerate key, so the NEWEST session
++      // still receives - the property this comment has always wanted.
++      // What no longer happens is an already-served session
++      // intercepting the next SPC, which belongs in the parking
++      // branch below. The session -> id direction is the half
++      // UpdateSession needs, to tag the CKC with something the app
++      // process can match.
 +      mRemoteContentIdBySession.InsertOrUpdate(sessionId, contentId);
++      mRemoteSessionByContentId.Remove(degenerateId);
 +      OnSessionMessage(NS_ConvertUTF8toUTF16(sessionId),
 +                       dom::MediaKeyMessageType::License_request, aSpc);
 +      return;

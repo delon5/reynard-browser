@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2566 @@
+@@ -0,0 +0,2661 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -853,15 +853,35 @@ index 000000000000..b56efaa8479c
 +          [retained release];
 +          return;
 +        }
++        // CHANGED - see fix_layer_attach_retries_on_licence.py's
++        // docstring. A 0 here used to end the story: the layer was
++        // released and no other was ever offered, because a republish
++        // at the same geometry and DRM mark does not rebuild one. But 0
++        // is the NORMAL answer at this point - the layer is built when
++        // the surface is first marked, which is MediaKeys construction,
++        // while the host learns which player is protected when the CKC
++        // lands, a licence round trip later.
++        //
++        // So hand the layer over either way. An id that names no player
++        // - 0 included; the host's ids start at 1 - means "hold this
++        // until a licence names one", which is what the host does with
++        // it. -protectedPlayerId's contract is unchanged; only what
++        // this side does with a 0 is.
 +        NSUInteger playerId = [host protectedPlayerId];
-+        if (!playerId) {
-+          printf_stderr("avPlayer: attachLayer - no protected player yet\n");
-+          [retained release];
-+          return;
-+        }
 +        [host attachLayer:(AVPlayerLayer*)retained to:playerId];
-+        printf_stderr("avPlayer: attachLayer - bound layer to player %lu\n",
-+                      (unsigned long)playerId);
++        if (playerId) {
++          printf_stderr("avPlayer: attachLayer - bound layer to player %lu\n",
++                        (unsigned long)playerId);
++        } else {
++          printf_stderr("avPlayer: attachLayer - no protected player yet, "
++                        "layer left with the host to bind on licence\n");
++        }
++        // Balances the retain taken before the hop, on every path and
++        // exactly once, as it did before. Nothing extra is retained for
++        // the stash: -attachLayer:to: is synchronous and the host's own
++        // strong reference is in place before it returns, so ownership
++        // is continuous. A second retain here would leak one layer per
++        // title - nothing tells this side when the stash is drained.
 +        [retained release];
 +      }));
 +}
@@ -967,6 +987,21 @@ index 000000000000..b56efaa8479c
 +                         aCert);
 +    }
 +  }
++
++  // And this child's parser session, which owns no player and so
++  // matches nothing in the loop above. That omission is why MSE could
++  // never make an SPC: the certificate arrived, was stored, and was
++  // then offered only to players that do not exist on this path.
++  //
++  // Sent unconditionally rather than after checking for a session. The
++  // host holds it per child and applies it when the session is built,
++  // so arriving before the init data is as valid as arriving after -
++  // and the page is entitled to either order.
++  if ([host respondsToSelector:@selector(parserSetCertificate:certificate:)]) {
++    [host parserSetCertificate:static_cast<NSUInteger>(aChildID)
++                   certificate:[NSData dataWithBytes:aCert.Elements()
++                                              length:aCert.Length()]];
++  }
 +}
 +
 +void ReynardAVPlayerBrokerGenerateKeyRequest(
@@ -1027,6 +1062,34 @@ index 000000000000..b56efaa8479c
 +  auto& players = BrokeredPlayers();
 +  auto entry = players.find(aKey);
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
++
++  // Player id 0 is MSE, exactly as in GenerateKeyRequest above - and
++  // this is the counterpart that was never written. Without it
++  // players.find misses every time (a child's player ids start at 1, so
++  // a key whose low half is zero can never be registered), the function
++  // returns with no log at all, and the licence the page went and
++  // fetched is dropped on the floor one step from being applied.
++  if ((aKey & 0xffffffff) == 0) {
++    SEL parserResponse =
++        @selector(parserProvideKeyResponse:contentId:response:);
++    if (!host || ![host respondsToSelector:parserResponse]) {
++      printf_stderr(
++          "avPlayer: FairPlay parser CKC route unavailable for child %llu\n",
++          (unsigned long long)(aKey >> 32));
++      return;
++    }
++    printf_stderr(
++        "avPlayer: FairPlay parser CKC child=%llu id=%s %zu bytes\n",
++        (unsigned long long)(aKey >> 32), aContentId.get(),
++        (size_t)aResponse.Length());
++    [host parserProvideKeyResponse:static_cast<NSUInteger>(aKey >> 32)
++                         contentId:[NSString stringWithUTF8String:aContentId
++                                                                      .get()]
++                          response:[NSData dataWithBytes:aResponse.Elements()
++                                                  length:aResponse.Length()]];
++    return;
++  }
++
 +  if (entry == players.end() || !host ||
 +      ![host respondsToSelector:@selector(provideKeyResponse:contentId:response:)]) {
 +    return;
@@ -2382,6 +2445,37 @@ index 000000000000..b56efaa8479c
 +                                            std::move(spc));
 +}
 +
++// APP PROCESS: the SPC a PARSER session produced, for a content process
++// that owns no player.
++//
++// ReynardFairPlayNotifyKeyMessage above cannot serve this one. It routes
++// by BrokeredKeyFor(aPlayerId), and the MSE route deliberately registers
++// no brokered player - "there is deliberately no entry" - so that lookup
++// answers 0 and the SPC has nowhere to go. This composes the same
++// composite key the REQUEST arrived under, (childID << 32) | 0, which is
++// the whole reason player id 0 is reserved for "no player".
++//
++// No single-process branch, unlike its sibling: a parser session only
++// exists because a content process asked for one, so there is always a
++// far end to send to.
++extern "C" __attribute__((visibility("default")))
++__attribute__((used)) void
++ReynardFairPlayNotifyParserKeyMessage(
++    uintptr_t aChildId, const char* aContentId, const uint8_t* aSpc,
++    size_t aSpcLength) {
++  MOZ_ASSERT(NS_IsMainThread());
++  nsTArray<uint8_t> spc;
++  if (aSpc && aSpcLength) {
++    spc.AppendElements(aSpc, aSpcLength);
++  }
++  nsCString contentId(aContentId ? aContentId : "");
++  printf_stderr("avPlayer: FairPlay parser SPC child=%llu id=%s %zu bytes\n",
++                (unsigned long long)aChildId, contentId.get(),
++                (size_t)spc.Length());
++  mozilla::ReynardFairPlaySendKeyMessage(
++      static_cast<uint64_t>(aChildId) << 32, contentId, spc);
++}
++
 +// The two functions above are called ONLY from Swift, and that is the
 +// whole reason this array has to exist.
 +//
@@ -2418,6 +2512,7 @@ index 000000000000..b56efaa8479c
 +    uintptr_t, const char*, const uint8_t*, size_t) = {
 +    &ReynardFairPlayNotifyEncrypted,
 +    &ReynardFairPlayNotifyKeyMessage,
++    &ReynardFairPlayNotifyParserKeyMessage,
 +};
 +
 +// CONTENT PROCESS: the far end of ReynardAVPlayerSendFrame. A frame the

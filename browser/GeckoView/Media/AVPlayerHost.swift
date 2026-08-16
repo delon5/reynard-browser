@@ -83,6 +83,17 @@ public final class AVPlayerHost: NSObject {
     /// own lock and two init segments arriving together cannot both
     /// think they are first.
     private var parserSessions: Set<String> = []
+    /// FPS application certificates by child id, for parser sessions.
+    ///
+    /// The per-player store cannot serve MSE: setAppCertificate(_:
+    /// forPlayer:) looks a player up, an MSE child owns none, and the
+    /// certificate was dropped for exactly the path that needed it.
+    ///
+    /// Kept here because the certificate and the init data race - the
+    /// page sets the certificate while handling the 'encrypted' event
+    /// that the key request produced - so whichever lands second applies
+    /// it and neither order loses.
+    private var parserCertificates: [UInt: Data] = [:]
     /// Layers bound by attachLayer, so destroy() can unbind them.
     ///
     /// Without this a destroyed player leaves layer.player pointing at it.
@@ -90,6 +101,21 @@ public final class AVPlayerHost: NSObject {
     /// capture caught player=1 and player=2 in one run - so the compositor
     /// can be left showing a layer bound to a player that no longer exists.
     private var attachedLayers: [UInt: AVPlayerLayer] = [:]
+    /// ADDED - see fix_layer_attach_retries_on_licence.py's docstring.
+    /// A protected layer handed over before any player was known to be
+    /// protected, held until one is.
+    ///
+    /// The compositor builds the AVPlayerLayer as soon as the surface
+    /// carries the DRM mark and offers it exactly once; the licence that
+    /// resolves a player is a network round trip behind that, and a
+    /// republish at the same geometry and mark no longer rebuilds the
+    /// layer. Without this slot that one offer is dropped and the picture
+    /// stays black for the whole title.
+    ///
+    /// One slot, most recent wins. A player draws into one layer at a
+    /// time and protectedPlayerId() resolves exactly one player, so a
+    /// queue would only bind layers that then unbind one another.
+    private var pendingProtectedLayer: AVPlayerLayer?
     // Display link -> player id. Kept out of the Player so the link never
     // holds a strong reference back to the object whose lifetime it is
     // supposed to follow.
@@ -233,6 +259,11 @@ public final class AVPlayerHost: NSObject {
         }
         withState { lastProtectedPlayerId = playerId }
         delegate.provideResponse(response, contentId: contentId)
+        // ADDED - see fix_layer_attach_retries_on_licence.py's docstring.
+        // The assignment above is the first moment protectedPlayerId()
+        // answers anything but 0, and the compositor asked its one
+        // question a licence round trip ago. Bind what it left stashed.
+        drainPendingProtectedLayer()
     }
 
     /// The player a protected layer should bind to, or 0 if none.
@@ -275,12 +306,68 @@ public final class AVPlayerHost: NSObject {
                 withState { _ = parserSessions.remove(sessionId) }
                 return
             }
+            // A certificate that arrived before any init data, applied
+            // now rather than lost.
+            if let stored = withState({ parserCertificates[childId] }) {
+                parser.setCertificate(sessionId, certificate: stored)
+            }
         }
         avLog("parser init data for child \(childId), id \(contentId), "
               + "\(initData.count) bytes")
-        // The PSSH the page appended IS what the parser wants - no
-        // repackaging, which is what makes this route cheap.
-        parser.append(sessionId, initSegment: initData)
+        // Two routes, because the bytes decide which one can work, and
+        // only one of them has ever been observed to.
+        //
+        // The append is kept for the case this file was written for: a
+        // real fMP4 init segment, ftyp/moov carrying sinf, which the
+        // parser does originate a key request from. What arrives today
+        // is an EME PSSH - "type=cenc 104 bytes" in the capture - and
+        // the parser ignores one in silence, so an append alone leaves
+        // the page waiting forever.
+        //
+        // The direct call is what carries this path: the same bytes to
+        // the SESSION, which takes initialisation data rather than a
+        // parsed track and raises a request that can make an SPC.
+        //
+        // The append's answer is read now. Discarding it meant a parser
+        // that declined the bytes produced exactly the silence this
+        // whole route exists to replace.
+        if !parser.append(sessionId, initSegment: initData) {
+            avLog("parser declined the append for child \(childId) - "
+                  + "the direct key request below is the only route left")
+        }
+        parser.requestKey(sessionId, contentId: contentId, initData: initData)
+    }
+
+    /// The page's FPS application certificate, for a child's parser
+    /// session. The MSE counterpart of setAppCertificate(_:forPlayer:).
+    @objc public func parserSetCertificate(_ childId: UInt,
+                                           certificate: Data) {
+        withState { parserCertificates[childId] = certificate }
+        avLog("parser certificate for child \(childId), "
+              + "\(certificate.count) bytes")
+        // Applied to a session already built. If none exists yet the
+        // store above covers it, and parserAppendInitData applies it at
+        // creation.
+        FairPlayStreamParser.shared.setCertificate("child-\(childId)",
+                                                   certificate: certificate)
+    }
+
+    /// update(): the CKC from the page's licence server, for a parser
+    /// session. The MSE counterpart of provideKeyResponse(_:contentId:
+    /// response:).
+    @objc public func parserProvideKeyResponse(_ childId: UInt,
+                                               contentId: String,
+                                               response: Data) {
+        avLog("parser CKC for child \(childId), \(response.count) bytes")
+        let applied = FairPlayStreamParser.shared
+            .provideResponse("child-\(childId)", ckc: response)
+        if !applied {
+            // Said out loud rather than dropped. A licence that cannot be
+            // applied leaves the page believing playback is about to
+            // start, and silence here is what made the last one
+            // untraceable.
+            avLog("parser CKC for child \(childId) was NOT applied")
+        }
     }
 
     @objc public func parserDestroySession(_ childId: UInt) {
@@ -1197,6 +1284,21 @@ public final class AVPlayerHost: NSObject {
     /// player renders nowhere, which is expected.
     @objc public func attachLayer(_ layer: AVPlayerLayer, to id: UInt) {
         guard let entry = withState({ players[id] }) else {
+            // CHANGED - see fix_layer_attach_retries_on_licence.py's
+            // docstring. This used to return, and the layer was never
+            // seen again: the compositor offers it once, and "no
+            // protected player yet" is the normal answer for as long as
+            // the CKC is in flight. Hold it instead, and bind it in
+            // drainPendingProtectedLayer() once a licence names a player.
+            //
+            // id 0 is how the bridge says "nobody is protected yet" -
+            // ids start at 1, so it can never name a live player. An id
+            // whose player was torn down between protectedPlayerId() and
+            // the main-thread hop arrives here too, and wants the same
+            // treatment.
+            withState { pendingProtectedLayer = layer }
+            avLog("no player \(id) for this layer - stashed until a "
+                  + "licence names one")
             return
         }
         // Unbind whatever was bound before. A rotation or any other
@@ -1216,6 +1318,63 @@ public final class AVPlayerHost: NSObject {
         }
         layer.player = entry.player
         avLog("attached layer to \(id) \(layerOrigin(of: layer))")
+    }
+
+    /// Bind the stashed layer now that a licence has named a player.
+    ///
+    /// ADDED - see fix_layer_attach_retries_on_licence.py's docstring.
+    /// Called from provideKeyResponse, the one writer of
+    /// lastProtectedPlayerId that can run after the compositor has
+    /// already built and offered its layer.
+    ///
+    /// Re-enters attachLayer rather than binding here, so the unbind of
+    /// whatever was bound before, the attachedLayers bookkeeping
+    /// destroy() depends on, and the log all stay in one place.
+    ///
+    /// Hops to the GCD main queue: the caller is on GECKO's main thread,
+    /// a spawned thread in a content process (see withState above),
+    /// while layer.player and the layer's tree belong on the real main
+    /// thread - which is why ReynardAVPlayerAttachLayer hops before
+    /// calling in here at all.
+    private func drainPendingProtectedLayer() {
+        let pending = withState { () -> (layer: AVPlayerLayer, id: UInt)? in
+            guard let layer = pendingProtectedLayer,
+                  lastProtectedPlayerId != 0,
+                  // ADDED - see
+                  // fix_stashed_layer_fills_empty_slot_only.py's
+                  // docstring. A player that already has a layer is
+                  // painting into it, and attachLayer unbinds the
+                  // previous layer for an id. The stash carries no
+                  // element identity and lastProtectedPlayerId names
+                  // whichever player's licence landed LAST, so
+                  // binding here would black out whichever element
+                  // owns that live layer - a second tab, or the
+                  // other display. Fill empty slots only.
+                  //
+                  // Refusing KEEPS the stash: an occupied slot means
+                  // this layer belongs to an element that still has
+                  // no player, and a later licence can bind it.
+                  attachedLayers[lastProtectedPlayerId] == nil else {
+                return nil
+            }
+            pendingProtectedLayer = nil
+            return (layer, lastProtectedPlayerId)
+        }
+        guard let pending else {
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            // A layer in no tree cannot paint - the compositor discarded
+            // or rebuilt it while the licence was in flight. Binding it
+            // would take the player away from the layer that IS on
+            // screen, so drop it and leave that binding alone.
+            guard pending.layer.superlayer != nil else {
+                avLog("stashed layer for \(pending.id) is in no tree "
+                      + "- dropped")
+                return
+            }
+            self?.attachLayer(pending.layer, to: pending.id)
+        }
     }
 
     /// Which layer tree this AVPlayerLayer sits in, for the log only.

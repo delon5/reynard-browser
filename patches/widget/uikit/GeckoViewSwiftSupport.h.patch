@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,194 @@
+@@ -18,16 +18,221 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -135,6 +135,12 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +- (void)parserAppendInitData:(NSUInteger)childId
 +                   contentId:(NSString*)contentId
 +                    initData:(NSData*)initData;
++// The same certificate setAppCertificate:forPlayer: carries, routed by
++// CHILD instead - an MSE content process owns no player for the
++// per-player fan-out to find, so without this the certificate never
++// reaches the session that needs it and no SPC can be made.
++- (void)parserSetCertificate:(NSUInteger)childId
++                 certificate:(NSData*)certificate;
 +// generateRequest(): produce an SPC for this identifier. If the asset
 +// already raised a request for it - the usual case, since the page is
 +// replying to an 'encrypted' event that came from exactly that
@@ -147,6 +153,13 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +- (void)provideKeyResponse:(NSUInteger)playerId
 +                 contentId:(NSString*)contentId
 +                  response:(NSData*)response;
++// The same licence for a parser session, routed by CHILD. The method
++// above looks a player up, and an MSE content process owns none - so
++// without this the CKC arrives in the app process and is dropped one
++// step from the key request that asked for it.
++- (void)parserProvideKeyResponse:(NSUInteger)childId
++                       contentId:(NSString*)contentId
++                        response:(NSData*)response;
 +
 +// The compositor's layer for a protected stream.
 +//
@@ -157,6 +170,20 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +// player is bound to a layer that is really in the view hierarchy.
 +// NativeLayerCA builds that layer when the DRM mark arrives and hands
 +// it over here.
++//
++// CHANGED - see fix_layer_attach_retries_on_licence.py's docstring.
++// playerId may be 0, and 0 is the ordinary case rather than a caller
++// error: the DRM mark arrives with MediaKeys construction, while
++// -protectedPlayerId only answers once a licence has named a player,
++// a network round trip later.
++//
++// An id that names no player - 0, which can never name one because
++// the host's ids start at 1, or a player torn down since the id was
++// read - means HOLD this layer and bind it when one is named. The
++// compositor offers a layer exactly ONCE per construction, and a
++// republish at the same geometry and mark does not rebuild it, so a
++// layer refused here is a black picture for the rest of the title.
++// The host keeps one such layer, most recent wins.
 +- (void)attachLayer:(AVPlayerLayer*)layer to:(NSUInteger)playerId;
 +
 +// The player the compositor should bind a protected layer to, or 0.
@@ -197,7 +224,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +233,44 @@
+@@ -55,8 +260,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -242,7 +269,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +279,91 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +306,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  
@@ -330,6 +357,14 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +                                                const char* aContentId,
 +                                                const uint8_t* aSpc,
 +                                                size_t aSpcLength);
++
++// The same message from a PARSER session, which has no player to be
++// named by. Keyed by child id, because that is the half of the composite
++// broker key an MSE request still carries - see
++// ReynardAVPlayerBrokerGenerateKeyRequest's id-0 branch.
++MOZ_EXPORT void ReynardFairPlayNotifyParserKeyMessage(
++    uintptr_t aChildId, const char* aContentId, const uint8_t* aSpc,
++    size_t aSpcLength);
 +
  MOZ_END_EXTERN_C
  

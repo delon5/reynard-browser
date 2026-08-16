@@ -60,6 +60,22 @@ public final class FairPlayStreamParser: NSObject {
         /// and neither EME message carries it - the page has never heard
         /// of a track id.
         var trackIDs: [Int32] = []
+        /// The content id FairPlayCDMProxy keys this exchange by, kept
+        /// from the generateRequest that opened it.
+        ///
+        /// The proxy files a session under base64 of the whole init data
+        /// blob and matches the SPC coming back by exactly that string.
+        /// Deriving an id here from AVContentKeyRequest.identifier would
+        /// produce a different encoding and strand every message, so the
+        /// one the request arrived with is the one it goes back with.
+        var contentId: String = ""
+        /// The initialisation data the request was raised from.
+        ///
+        /// Kept because the SPC still needs a content identifier and a
+        /// request raised with a nil identifier has none to offer - the
+        /// key id has to be read back out of these bytes. See
+        /// KeySessionDelegate's ladder.
+        var initData: Data = Data()
 
         init(parser: NSObject,
              recipient: AVContentKeyRecipient,
@@ -244,6 +260,117 @@ public final class FairPlayStreamParser: NSObject {
         return true
     }
 
+    // MARK: - Key origination without a parsed segment
+
+    /// Raise a key request from EME initialisation data alone.
+    ///
+    /// The parser cannot do this, and the device log is unambiguous
+    /// about it - "appended 104 bytes" and then silence, with no key
+    /// request and no parse error. AVStreamDataParser wants an init
+    /// segment (ftyp/moov carrying sinf); a cenc PSSH is not one, so it
+    /// is dropped without comment.
+    ///
+    /// The session has no such requirement. processContentKeyRequest
+    /// takes initialisation data, raises a genuine AVContentKeyRequest,
+    /// and that object is the one carrying
+    /// makeStreamingContentKeyRequestData - the call processSpecifier
+    /// already makes, reached here without waiting for a parser callback
+    /// that this shape of bytes will never produce.
+    ///
+    /// Identifier nil, deliberately. ccf88e5 established that a nil
+    /// identifier is the normal MSE shape and that on this path the
+    /// initialisation data IS the identity. The key id is read out and
+    /// logged rather than passed, so the next capture can say whether
+    /// AVFoundation wanted one without this call having changed two
+    /// things at once.
+    @discardableResult
+    @objc public func requestKey(_ sessionId: String,
+                                 contentId: String,
+                                 initData: Data) -> Bool {
+        guard let entry = withState({ entries[sessionId] }) else {
+            Self.log("key request for unknown session \(sessionId)")
+            return false
+        }
+        withState {
+            entry.contentId = contentId
+            entry.initData = initData
+        }
+        let keyId = Self.keyIdentifier(inPSSH: initData)
+        Self.log("session \(sessionId) raising a key request directly from "
+                 + "\(initData.count) bytes of init data - key id "
+                 + (keyId.map { "\($0.count) bytes" } ?? "not found"))
+        entry.keySession.processContentKeyRequest(withIdentifier: nil,
+                                                  initializationData: initData,
+                                                  options: nil)
+        return true
+    }
+
+    /// The content id this session reports its SPC under, or nil.
+    func contentId(for sessionId: String) -> String? {
+        return withState { entries[sessionId]?.contentId }
+    }
+
+    /// The initialisation data this session's request was raised from.
+    func initData(for sessionId: String) -> Data? {
+        return withState { entries[sessionId]?.initData }
+    }
+
+    /// The key id inside a cenc PSSH box, or nil when the bytes are not
+    /// one.
+    ///
+    /// Big-endian throughout: [4 size][4 'pssh'][1 version][3 flags]
+    /// [16 system id], then for version >= 1 [4 kid count][16 bytes
+    /// each], and finally [4 data size][data]. A version 0 box names no
+    /// key ids in the header; Apple's FairPlay box opens its payload
+    /// with one.
+    ///
+    /// Read rather than passed - see requestKey - but read so the log
+    /// can say whether what arrived was even the shape it claims to be.
+    /// Copied to an array first: this Data comes across from
+    /// Objective-C, where a non-zero startIndex is legal and indexing a
+    /// Data by absolute offset is a well-known way to read the wrong
+    /// bytes.
+    static func keyIdentifier(inPSSH data: Data) -> Data? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 32,
+              bytes[4] == 0x70, bytes[5] == 0x73,
+              bytes[6] == 0x73, bytes[7] == 0x68 else {
+            return nil
+        }
+        func be32(_ at: Int) -> Int {
+            return (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                 | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+        }
+        var cursor = 28  // size, type, version+flags, system id
+        if bytes[8] >= 1 {
+            guard bytes.count >= cursor + 4 else { return nil }
+            let count = be32(cursor)
+            cursor += 4
+            guard count > 0, bytes.count >= cursor + 16 else { return nil }
+            return Data(bytes[cursor..<(cursor + 16)])
+        }
+        guard bytes.count >= cursor + 4 else { return nil }
+        let payload = be32(cursor)
+        cursor += 4
+        guard payload >= 16, bytes.count >= cursor + 16 else { return nil }
+        return Data(bytes[cursor..<(cursor + 16)])
+    }
+
+    /// The page's FPS application certificate, for one session.
+    ///
+    /// Reaches here from setServerCertificate by way of the broker,
+    /// keyed by child - the per-player fan-out cannot serve a path with
+    /// no player.
+    @objc public func setCertificate(_ sessionId: String, certificate: Data) {
+        guard let entry = withState({ entries[sessionId] }) else {
+            Self.log("certificate for unknown session \(sessionId)")
+            return
+        }
+        Self.log("session \(sessionId) certificate set, "
+                 + "\(certificate.count) bytes")
+        entry.keyDelegate.setCertificate(certificate)
+    }
+
     // MARK: - SPC out, CKC in
 
     /// The SPC for this session's pending key request.
@@ -314,14 +441,25 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     /// The CKC the page's licence server returned.
+    ///
+    /// Two routes, tried in the order they can actually occur. The
+    /// session path is the one this file runs on now - the key request
+    /// came from processContentKeyRequest, so its licence belongs to
+    /// the request object. The parser path below is kept for a request a
+    /// real init segment raised, which names a track and takes the
+    /// licence through the parser instead.
     @discardableResult
     @objc public func provideResponse(_ sessionId: String, ckc: Data) -> Bool {
         guard let entry = withState({ entries[sessionId] }) else {
             Self.log("CKC for unknown session \(sessionId)")
             return false
         }
+        if entry.keyDelegate.provide(response: ckc) {
+            return true
+        }
         guard let trackID = withState({ entry.trackIDs.first }) else {
-            Self.log("CKC for session \(sessionId) with no track to apply it to")
+            Self.log("CKC for session \(sessionId) with neither a pending "
+                     + "request nor a track to apply it to")
             return false
         }
         let selector = NSSelectorFromString("processContentKeyResponseData:forTrackID:")
@@ -544,11 +682,90 @@ public final class FairPlayStreamParser: NSObject {
 /// from the page's setServerCertificate and cannot be invented here.
 final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     let sessionId: String
-    var certificate: Data?
+
+    /// The certificate and the requests waiting for it, under one lock.
+    ///
+    /// One lock rather than two, because "is there a certificate" and
+    /// "hold this request" have to be decided together. The request
+    /// arrives on the session's dedicated queue while the certificate
+    /// arrives from Gecko's main thread, so a certificate landing
+    /// between those two decisions would leave a request parked with
+    /// nothing left to wake it - the exact race this file already
+    /// learned about the hard way on the delegate queue.
+    private let lock = NSLock()
+    private var storedCertificate: Data?
+    private var heldRequests: [AVContentKeyRequest] = []
+    /// The request an outstanding SPC belongs to.
+    ///
+    /// The licence is addressed to the REQUEST on this path, not to a
+    /// track: nothing was ever parsed, so there is no track to name.
+    private var awaitingResponse: AVContentKeyRequest?
 
     init(sessionId: String) {
         self.sessionId = sessionId
         super.init()
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    /// The FPS application certificate. Assigning one releases every
+    /// request that arrived before it.
+    var certificate: Data? {
+        get { withLock { storedCertificate } }
+        set { setCertificate(newValue) }
+    }
+
+    /// Held rather than dropped, which is the correction here.
+    ///
+    /// The certificate cannot arrive first. The page calls
+    /// setServerCertificate while handling an 'encrypted' event, and
+    /// that event is produced by the very key request that needs it - so
+    /// a delegate that returned early on a missing certificate discarded
+    /// the request in the ORDINARY case, and nothing ever re-raised it.
+    /// The native path has always held these; see AVPlayerHost's
+    /// awaitingCertificate.
+    func setCertificate(_ data: Data?) {
+        let waiting = withLock { () -> [AVContentKeyRequest] in
+            storedCertificate = data
+            guard data != nil else { return [] }
+            let held = heldRequests
+            heldRequests = []
+            return held
+        }
+        guard !waiting.isEmpty else { return }
+        FairPlayStreamParser.log(
+            "session \(sessionId) certificate arrived - replaying "
+            + "\(waiting.count) held key request(s)")
+        for request in waiting {
+            makeSPC(for: request)
+        }
+    }
+
+    /// The CKC, applied to the request that asked for it.
+    ///
+    /// processContentKeyResponseData:forTrackID: - the parser's call -
+    /// names a track a key request was raised for, and this route has
+    /// none: the request came from the session, from initialisation data
+    /// alone. AVContentKeyResponse into the request is the matching
+    /// half of processContentKeyRequest, and the only one that can work
+    /// here.
+    func provide(response ckc: Data) -> Bool {
+        guard let request = withLock({ awaitingResponse }) else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) has no key request awaiting a licence")
+            return false
+        }
+        request.processContentKeyResponse(
+            AVContentKeyResponse(fairPlayStreamingKeyResponseData: ckc))
+        withLock { awaitingResponse = nil }
+        FairPlayStreamParser.log(
+            "session \(sessionId) licence applied to the key request, "
+            + "\(ckc.count) bytes")
+        return true
     }
 
     func contentKeySession(_ session: AVContentKeySession,
@@ -556,37 +773,131 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         FairPlayStreamParser.log(
             "session \(sessionId) REAL AVContentKeyRequest arrived - "
             + "identifier \(String(describing: keyRequest.identifier))")
-        guard let certificate else {
-            FairPlayStreamParser.log("no application certificate yet - cannot make an SPC")
+        let ready = withLock { () -> Bool in
+            if storedCertificate == nil {
+                heldRequests.append(keyRequest)
+                return false
+            }
+            return true
+        }
+        guard ready else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) has no application certificate yet - "
+                + "holding the request for setServerCertificate")
             return
         }
-        // The content identifier the SPC covers. Apple's HLS Catalog
-        // sample takes the ASSET ID rather than the whole skd:// URI, and
-        // AVPlayerHost does the same on the native path - but MSE's
-        // identifier is raw key-id bytes rather than a URI, so it is used
-        // as-is when it is already Data.
-        let contentId: Data
-        if let data = keyRequest.identifier as? Data {
-            contentId = data
-        } else if let string = keyRequest.identifier as? String {
-            contentId = Data(string.utf8)
-        } else {
-            FairPlayStreamParser.log("identifier is neither Data nor String - cannot address an SPC")
+        makeSPC(for: keyRequest)
+    }
+
+    /// The SPC itself, once there is a certificate to make one with.
+    private func makeSPC(for keyRequest: AVContentKeyRequest) {
+        guard let certificate = withLock({ storedCertificate }) else {
+            return
+        }
+        // Kept so the licence has something to be applied to when it
+        // comes back - see provide(response:).
+        withLock { awaitingResponse = keyRequest }
+        guard let contentId = contentIdentifier(for: keyRequest) else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) has nothing to address an SPC with")
             return
         }
         keyRequest.makeStreamingContentKeyRequestData(
             forApp: certificate, contentIdentifier: contentId, options: nil
         ) { spc, error in
-            if let spc {
-                FairPlayStreamParser.log(
-                    "SPC PRODUCED for session \(self.sessionId): \(spc.count) bytes - "
-                    + "the MSE FairPlay route is open")
-            } else {
+            guard let spc else {
                 FairPlayStreamParser.log(
                     "SPC failed for session \(self.sessionId): "
                     + (error.map { String(describing: $0) } ?? "no error given"))
+                return
+            }
+            FairPlayStreamParser.log(
+                "SPC PRODUCED for session \(self.sessionId): \(spc.count) bytes")
+            self.report(spc: spc)
+        }
+    }
+
+    /// What the SPC covers.
+    ///
+    /// A request raised by processContentKeyRequest(withIdentifier: nil,
+    /// ...) carries no identifier of its own - that is the shape this
+    /// path deliberately uses, since on MSE the initialisation data is
+    /// the identity - so the key id is read back out of those bytes
+    /// instead.
+    ///
+    /// A ladder rather than a single answer, ordered most specific
+    /// first, and it logs which rung it landed on: whether AVFoundation
+    /// accepts a PSSH's key id here is the next unknown, and the capture
+    /// has to be able to say which one produced the SPC.
+    private func contentIdentifier(for keyRequest: AVContentKeyRequest) -> Data? {
+        if let data = keyRequest.identifier as? Data {
+            FairPlayStreamParser.log("addressing the SPC by the request's identifier")
+            return data
+        }
+        if let string = keyRequest.identifier as? String {
+            // Scheme stripped, like the native path and Apple's HLS
+            // Catalog sample: what a key server is told is the asset id,
+            // not the URI that named it.
+            let assetId = string.hasPrefix("skd://")
+                ? String(string.dropFirst("skd://".count))
+                : string
+            FairPlayStreamParser.log("addressing the SPC by the request's URI identifier")
+            return Data(assetId.utf8)
+        }
+        let initData = FairPlayStreamParser.shared.initData(for: sessionId) ?? Data()
+        if let keyId = FairPlayStreamParser.keyIdentifier(inPSSH: initData) {
+            FairPlayStreamParser.log("addressing the SPC by the PSSH's key id")
+            return keyId
+        }
+        guard !initData.isEmpty else {
+            return nil
+        }
+        FairPlayStreamParser.log("addressing the SPC by the whole init data")
+        return initData
+    }
+
+    /// The SPC's way back to the content process that asked for it.
+    ///
+    /// Main thread, because ReynardFairPlayNotifyParserKeyMessage
+    /// asserts it and everything it touches on the Gecko side is
+    /// main-thread-only. This delegate deliberately runs on its own
+    /// queue - see createSession - so the hop is required rather than
+    /// incidental.
+    ///
+    /// Reported under the content id the request ARRIVED with, never one
+    /// derived from AVContentKeyRequest.identifier. FairPlayCDMProxy
+    /// files the session under base64 of the whole init data and matches
+    /// the message coming back by exactly that string; any other
+    /// encoding parks the SPC in mRemotePendingSpc for ever.
+    private func report(spc: Data) {
+        guard let childId = Self.childId(ofSession: sessionId) else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) is not a child session - "
+                + "SPC produced but not routed")
+            return
+        }
+        let contentId =
+            FairPlayStreamParser.shared.contentId(for: sessionId) ?? ""
+        FairPlayStreamParser.log(
+            "session \(sessionId) SPC on its way to child \(childId), "
+            + "\(spc.count) bytes under id \(contentId)")
+        DispatchQueue.main.async {
+            spc.withUnsafeBytes { raw in
+                ReynardFairPlayNotifyParserKeyMessage(
+                    childId, contentId,
+                    raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
             }
         }
+    }
+
+    /// "child-9" -> 9. Nothing else has a content process to go back to;
+    /// the render probe's session deliberately does not.
+    private static func childId(ofSession sessionId: String) -> UInt? {
+        let prefix = "child-"
+        guard sessionId.hasPrefix(prefix) else {
+            return nil
+        }
+        return UInt(sessionId.dropFirst(prefix.count))
     }
 }
 

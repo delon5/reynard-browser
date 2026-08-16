@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,7 +17,1279 @@
+@@ -17,7 +17,1366 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -261,10 +261,17 @@ index 9ca6e15..799455c 100644
 +  // UTF-8 (a page that built it itself). Normalise to what
 +  // generateRequest wants, and surface any certificate found.
 +  function normaliseInitData(initData) {
-+    var bytes =
-+      initData instanceof Uint8Array
-+        ? initData
-+        : new Uint8Array(initData.buffer || initData);
++    // ArrayBuffer.isView, not an instanceof Uint8Array test: this
++    // shim is evaluated in its own Cu.Sandbox realm, so a typed array
++    // the PAGE built is never an instance of OUR Uint8Array. That test
++    // always failed and took the .buffer branch, which spans the whole
++    // backing ArrayBuffer and throws away byteOffset/byteLength - a
++    // page passing a subarray view got foreign bytes on both ends and
++    // parseAppleConcat's length balance then rejected the lot.
++    // See fix_cross_realm_typed_array_view.py.
++    var bytes = ArrayBuffer.isView(initData)
++      ? new Uint8Array(initData.buffer, initData.byteOffset, initData.byteLength)
++      : new Uint8Array(initData);
 +
 +    var concat = parseAppleConcat(bytes);
 +    if (concat) {
@@ -335,13 +342,40 @@ index 9ca6e15..799455c 100644
 +  // Prefixed isTypeSupported is SYNCHRONOUS; requestMediaKeySystemAccess is
 +  // not. Answer optimistically for FairPlay key systems (this build
 +  // supports com.apple.fps and its versioned aliases) and warm a cache in
-+  // the background so later calls are truthful.
++  // the background so later calls are truthful. Any other key system is
++  // answered false straight away: that is what Safari does, and it is
++  // where the probe below would land anyway once it rejects.
 +
 +  var supportCache = Object.create(null);
++
++  // Which key systems earn the optimistic answer. Mirrors
++  // IsFairPlayKeySystem in dom/media/eme/EMEUtils.cpp (added by
++  // patches/dom/media/eme/EMEUtils.cpp.patch): the bare name, or any
++  // versioned alias under it - 1_0, 2_0, 3_0. Duplicated here by hand
++  // because page script has no synchronous way to ask the engine,
++  // which is the reason this cache exists at all. ADDED - see
++  // fix_is_type_supported_checks_key_system.py's docstring.
++  function isFairPlayKeySystem(keySystem) {
++    return (
++      keySystem === "com.apple.fps" ||
++      (typeof keySystem === "string" &&
++        keySystem.indexOf("com.apple.fps.") === 0)
++    );
++  }
 +
 +  function warmSupport(keySystem, contentType) {
 +    var key = keySystem + "|" + (contentType || "");
 +    if (key in supportCache) {
++      return;
++    }
++    // CHANGED - the optimistic seed is FairPlay-only now. It used to be
++    // written for every key system before the probe was even fired, so
++    // isTypeSupported("com.widevine.alpha") - or any string at all -
++    // answered true on the first call and stayed wrong until the
++    // rejection landed. Safari says false to those, synchronously,
++    // every time. See fix_is_type_supported_checks_key_system.py.
++    if (!isFairPlayKeySystem(keySystem)) {
++      supportCache[key] = false;
 +      return;
 +    }
 +    supportCache[key] = true;
@@ -559,10 +593,13 @@ index 9ca6e15..799455c 100644
 +
 +  WebKitMediaKeySession.prototype.update = function (response) {
 +    var self = this;
-+    var bytes =
-+      response instanceof Uint8Array
-+        ? response
-+        : new Uint8Array(response.buffer || response);
++    // Same cross-realm trap as normaliseInitData: a page handing us a
++    // subarray view of its licence response would otherwise have the
++    // whole underlying buffer sent to the CDM as the CKC.
++    // See fix_cross_realm_typed_array_view.py.
++    var bytes = ArrayBuffer.isView(response)
++      ? new Uint8Array(response.buffer, response.byteOffset, response.byteLength)
++      : new Uint8Array(response);
 +    debug("update() with", bytes.byteLength, "bytes");
 +    if (!this._session) {
 +      this._fail(new Error("update() before the session was ready"));
@@ -882,11 +919,13 @@ index 9ca6e15..799455c 100644
 +  // Object.keys and are both undefined. The HTTP response is where the
 +  // reason is, and nothing has ever looked at it.
 +  //
-+  // Logged: method, origin + pathname, status, and 400 characters of
-+  // the RESPONSE body. Not logged: the query string, which carries
-+  // Amazon's session and device tokens, and the request body, which
-+  // carries the SPC - a licence request for a real account has no
-+  // business in a log file.
++  // Logged: method, origin + pathname, status, and the SHAPE of both
++  // bodies - top-level key names with their types and lengths, never
++  // values. Not logged: the query string, which carries Amazon's
++  // session and device tokens; the request body, which carries the
++  // SPC; and the response body, which on a successful exchange is the
++  // CKC. A licence exchange for a real account has no business in a
++  // log file. See fix_licence_body_not_logged.py's docstring.
 +
 +  var DRM_URL = /drm|licence|license|cdp|fairplay|widevine|playready|getplayback/i;
 +
@@ -973,7 +1012,10 @@ index 9ca6e15..799455c 100644
 +    return "json{" + bits.join(" ") + "}";
 +  }
 +
-+  function logResponse(method, url, status, body) {
++  // CHANGED - takes a DESCRIPTION of a body, never a body. Callers
++  // run it through describeBody first; the two response paths used to
++  // pass the raw text. See fix_licence_body_not_logged.py's docstring.
++  function logResponse(method, url, status, shape) {
 +    debug(
 +      "NET",
 +      method,
@@ -981,7 +1023,7 @@ index 9ca6e15..799455c 100644
 +      "->",
 +      status,
 +      "body:",
-+      String(body === undefined || body === null ? "" : body).slice(0, 400)
++      String(shape === undefined || shape === null ? "" : shape).slice(0, 400)
 +    );
 +  }
 +
@@ -1028,12 +1070,13 @@ index 9ca6e15..799455c 100644
 +          // clone() so the page still gets an unconsumed body. If the
 +          // response cannot be cloned, report without one rather than
 +          // touching the stream the page is about to read.
-+          // Only read a TEXTUAL body. On a successful exchange the body
-+          // is the CKC - real content key material - and it has no
-+          // business in a log that gets pasted into other tools. Both
-+          // diagnostic cases this exists for (a 4xx body, and a 200
-+          // carrying an error envelope) are JSON or text, so nothing is
-+          // lost by declining to decode anything else.
++          // Only decode a TEXTUAL body. This is no longer what keeps
++          // key material out of the log - describeBody does that, on
++          // every path - it just avoids decoding a binary blob to
++          // learn nothing from it. Both diagnostic cases this exists
++          // for (a 4xx body, and a 200 carrying an error envelope) are
++          // JSON or text, so nothing is lost by declining to decode
++          // anything else. See fix_licence_body_not_logged.py.
 +          var contentType = "";
 +          try {
 +            contentType = res.headers.get("content-type") || "";
@@ -1050,7 +1093,8 @@ index 9ca6e15..799455c 100644
 +          try {
 +            res.clone().text().then(
 +              function (body) {
-+                logResponse(method, url, res.status, body);
++                // Described, never printed: a 200 here is the CKC.
++                logResponse(method, url, res.status, describeBody(body));
 +              },
 +              function () {
 +                logResponse(method, url, res.status, "<unreadable>");
@@ -1092,23 +1136,51 @@ index 9ca6e15..799455c 100644
 +            "request",
 +            describeBody(arguments.length ? arguments[0] : null)
 +          );
-+          self.addEventListener("loadend", function () {
-+            var body = "";
++          // What this particular send() is for. open() overwrites
++          // __reynardUrl and __reynardMethod on the same object, and
++          // nothing removes a listener, so a player that reuses one
++          // XHR would otherwise have this handler read whatever the
++          // NEXT request left behind and log its shape under the
++          // licence URL's name. ADDED - see
++          // fix_xhr_loadend_listener_once.py's docstring.
++          var sentMethod = self.__reynardMethod || "GET";
++          var sentUrl = String(self.__reynardUrl || "");
++          var onLoadEnd = function () {
++            if (String(self.__reynardUrl || "") !== sentUrl) {
++              // Reused object, pointing somewhere else by now: this
++              // fetch cycle is not the one the listener was attached
++              // for. Say so and log nothing - this response was never
++              // matched against DRM_URL.
++              debug(
++                "NET",
++                sentMethod,
++                safeUrl(sentUrl),
++                "loadend arrived for a later request on the same XHR;",
++                "not logging"
++              );
++              return;
++            }
++            // Described, never printed. Apple's prefixed FairPlay
++            // sample reads responseText for a base64 CKC, so this is
++            // the path key material actually arrives on. See
++            // fix_licence_body_not_logged.py's docstring.
++            var shape = "";
 +            try {
-+              body =
++              shape =
 +                self.responseType === "" || self.responseType === "text"
-+                  ? self.responseText
++                  ? describeBody(self.responseText)
 +                  : "<" + self.responseType + ">";
 +            } catch (e) {
-+              body = "<unreadable>";
++              shape = "<unreadable>";
 +            }
-+            logResponse(
-+              self.__reynardMethod || "GET",
-+              self.__reynardUrl || "",
-+              self.status,
-+              body
-+            );
-+          });
++            logResponse(sentMethod, sentUrl, self.status, shape);
++          };
++          // once:true so a run of licence sends on one XHR does not
++          // leave a listener per send behind for the object's
++          // lifetime. Only half of it: removal alone still lets the
++          // one pending listener fire for whichever cycle ends first,
++          // which is what the check above refuses.
++          self.addEventListener("loadend", onLoadEnd, { once: true });
 +        }
 +      } catch (e) {}
 +      return nativeSend.apply(this, arguments);
@@ -1192,6 +1264,21 @@ index 9ca6e15..799455c 100644
 +    document.addEventListener("fullscreenchange", function () {
 +      var el = document.fullscreenElement;
 +      if (el && el.tagName === "VIDEO") {
++        // A direct switch from one fullscreen video to another fires
++        // a single fullscreenchange, with the second video already the
++        // fullscreen element. ADDED - the install below is gated on an
++        // empty slot, and the slot still holds the first video, so
++        // without this the second one lands fullscreen with neither
++        // engine controls nor the site's overlay. Release the previous
++        // element, then fall through and adopt the new one. See
++        // fix_fullscreen_retargets_between_videos.py's docstring.
++        if (restoreControls && restoreControls.element !== el) {
++          if (!restoreControls.had) {
++            restoreControls.element.removeAttribute("controls");
++          }
++          restoreControls = null;
++          debug("fullscreen video changed: released previous element");
++        }
 +        if (restoreControls === null) {
 +          restoreControls = { element: el, had: el.hasAttribute("controls") };
 +          el.setAttribute("controls", "");
@@ -1282,7 +1369,7 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1337,338 @@
+@@ -65,8 +1424,338 @@
        return windowUtils.SCROLL_MODE_INSTANT;
      }
      return windowUtils.SCROLL_MODE_SMOOTH;
@@ -1621,7 +1708,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1786,21 @@
+@@ -184,6 +1873,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1643,7 +1730,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +1816,158 @@
+@@ -199,11 +1903,189 @@
      return false;
    }
  
@@ -1733,7 +1820,37 @@ index 9ca6e15..799455c 100644
 +      const wanted = WEBKIT_MEDIA_KEYS_SHIM_HOSTS.concat(extraHosts).some(
 +        domain => host === domain || host.endsWith("." + domain)
 +      );
-+      if (extraHosts.length) {
++      // Report a rejection only when it says something.
++      //
++      // CHANGED - this was guarded on extraHosts.length alone, so once
++      // the setting held anything at all, every page and every iframe
++      // the user opened, anywhere, wrote its hostname to stdout: a
++      // capture taken for a licence bug carried the session's whole
++      // browsing history. See fix_extra_hosts_logs_matches_only.py's
++      // docstring.
++      //
++      // An allowed host is worth the line either way - it is one this
++      // tree or the user named. A rejection is worth the line only
++      // when the host is plausibly what the setting was aimed at,
++      // taken here as "shares an identifying label with an entry":
++      // labels under the trailing public suffix, long enough and not
++      // pure structure. That still catches the mistakes people make -
++      // wrong TLD, a pasted scheme or path, a stray www, the wrong
++      // subdomain - while an unrelated site logs nothing. A typo
++      // inside a label (aple.com for apple.com) shares nothing and
++      // stays silent; catching that needs fuzzy matching, and logging
++      // the whole web is the worse trade.
++      const generic = "www web mobile com net org edu gov ac co".split(" ");
++      const labelsOf = name =>
++        name
++          .split(".")
++          .slice(0, -1)
++          .filter(label => label.length > 2 && !generic.includes(label));
++      const hostLabels = labelsOf(host);
++      const related = extraHosts.some(domain =>
++        labelsOf(domain).some(label => hostLabels.includes(label))
++      );
++      if (extraHosts.length && (wanted || related)) {
 +        // dump(), not debug``. Two reasons, one of which was a bug.
 +        //
 +        // debug here is GeckoViewUtils' tagged-template logger, and
@@ -1747,9 +1864,10 @@ index 9ca6e15..799455c 100644
 +        // And its output would not have been visible anyway: the
 +        // GeckoView logger is silent unless geckoview.logging is set,
 +        // while this line exists to be read in a device capture beside
-+        // the other webkitEME lines. Reporting the rejections too,
-+        // since "the host did not match" is the answer worth having
-+        // when a site does nothing.
++        // the other webkitEME lines. Rejections are reported too -
++        // "the host did not match" is the answer worth having when a
++        // site does nothing - but only for the hosts the guard above
++        // lets through.
 +        dump(
 +          "webkitEME: host " +
 +            host +
