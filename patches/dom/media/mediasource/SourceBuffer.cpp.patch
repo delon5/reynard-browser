@@ -2,7 +2,7 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,67 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +568,91 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -53,9 +53,33 @@ index d79526afbbfa..cb10fad683d0 100644
 +    //
 +    // Declared here rather than included: this file does not pull in
 +    // ContentChild.h and does not need to for one call.
-+    if (mseLength >= 8 && mseLength <= (256 * 1024) &&
-+        (memcmp(mseBox, "ftyp", 4) == 0 ||
-+         memcmp(mseBox, "moov", 4) == 0)) {
++    //
++    // AND ONE MEDIA FRAGMENT, ONCE. The rule above was right while the
++    // parser had no key: moof carries nothing it could use, and the
++    // capture's 7.1 MB append is a real cost. It is exactly wrong now.
++    // The licence loop closed, the parser holds real keys, and media
++    // fragments are the only bytes that can answer whether it will hand
++    // back a DECRYPTED sample - the question everything downstream
++    // depends on and the one thing the render probe could never ask.
++    //
++    // One, per process, then never again: this is a measurement, not a
++    // pipeline. If samples come back the pipeline is worth building and
++    // this goes away; if they do not, nothing more gets built.
++    static bool sForwardedOneFragment = false;
++    const bool mseIsInit = memcmp(mseBox, "ftyp", 4) == 0 ||
++                           memcmp(mseBox, "moov", 4) == 0;
++    const bool mseIsMedia = memcmp(mseBox, "moof", 4) == 0;
++    const bool mseForwardMedia = mseIsMedia && !sForwardedOneFragment &&
++                                 mseLength <= (16 * 1024 * 1024);
++    if (mseForwardMedia) {
++      sForwardedOneFragment = true;
++      printf_stderr(
++          "mseAppend: forwarding ONE media fragment, %zu bytes - asking "
++          "whether the parser vends a decrypted sample\n",
++          mseLength);
++    }
++    if (mseLength >= 8 &&
++        ((mseIsInit && mseLength <= (256 * 1024)) || mseForwardMedia)) {
 +      // A block-scope declaration names the ENCLOSING namespace, which
 +      // here is mozilla::dom - so the definition is in mozilla::dom too.
 +      // extern "C" would sidestep that, and is not permitted at block

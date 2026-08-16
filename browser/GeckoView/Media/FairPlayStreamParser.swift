@@ -109,6 +109,14 @@ public final class FairPlayStreamParser: NSObject {
         /// is swapped for the one being asked about, so one template
         /// serves every key in the presentation.
         var templateSinf: Data?
+        /// Track ids the parsed asset reported.
+        ///
+        /// Separate from trackIDs, which only ever holds tracks a KEY
+        /// REQUEST named. Media data is asked for per track, and the
+        /// tracks that carry media are the asset's - on this route the
+        /// key request arrives through the session rather than the
+        /// parser, so trackIDs can be empty while the asset has two.
+        var assetTrackIDs: [Int32] = []
 
         init(parser: NSObject,
              recipient: AVContentKeyRecipient,
@@ -627,6 +635,62 @@ public final class FairPlayStreamParser: NSObject {
             typeAt += 1
         }
         return nil
+    }
+
+    /// Ask the parser for media data on every track it knows about.
+    ///
+    /// Called once a licence is applied. Both track lists are tried: the
+    /// asset's, which is where media actually lives, and any a key
+    /// request named - on this route the request comes through the
+    /// session rather than the parser, so the second list is usually
+    /// empty and the first is the one that matters.
+    ///
+    /// Whatever comes back arrives at the delegate's didProvideMediaData,
+    /// below. Nothing is enqueued anywhere yet: the question is whether
+    /// samples exist and whether they are decrypted, and a display layer
+    /// would only add a second thing that could be wrong.
+    func requestMediaData(_ sessionId: String) {
+        guard let entry = withState({ entries[sessionId] }) else {
+            return
+        }
+        var tracks = withState { entry.assetTrackIDs }
+        for extra in withState({ entry.trackIDs }) where !tracks.contains(extra) {
+            tracks.append(extra)
+        }
+        guard !tracks.isEmpty else {
+            Self.log("session \(sessionId) has a licence but no tracks to ask "
+                     + "for media on - nothing has been parsed yet")
+            return
+        }
+        let shouldProvide = NSSelectorFromString("setShouldProvideMediaData:forTrackID:")
+        let provide = NSSelectorFromString("providePendingMediaData")
+        guard entry.parser.responds(to: shouldProvide),
+              let implementation = entry.parser.method(for: shouldProvide) else {
+            Self.log("no setShouldProvideMediaData:forTrackID: on the parser")
+            return
+        }
+        typealias ProvideFunction = @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
+        let call = unsafeBitCast(implementation, to: ProvideFunction.self)
+        for trackID in tracks {
+            call(entry.parser, shouldProvide, true, trackID)
+        }
+        Self.log("session \(sessionId) asked for media data on tracks "
+                 + "\(tracks) - the licence is in, so anything vended now "
+                 + "should be decrypted")
+        if entry.parser.responds(to: provide) {
+            entry.parser.perform(provide)
+        } else {
+            Self.log("no providePendingMediaData on the parser")
+        }
+    }
+
+    fileprivate func noteAssetTracks(sessionId: String, tracks: [Int32]) {
+        withState {
+            guard let entry = entries[sessionId] else { return }
+            for track in tracks where !entry.assetTrackIDs.contains(track) {
+                entry.assetTrackIDs.append(track)
+            }
+        }
     }
 
     /// Take the oldest origination this session has not yet matched to a
@@ -1427,6 +1491,17 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         FairPlayStreamParser.log(
             "session \(sessionId) licence applied to the request for id "
             + "\(contentId), \(ckc.count) bytes")
+        // THE RENDER QUESTION, asked for the first time with a real key.
+        //
+        // Everything up to here is settled: the page's licence is inside
+        // an AVContentKeySession whose content key recipient is the
+        // parser. What has never been asked is whether that parser will
+        // hand back a DECRYPTED sample - the probe could not ask it,
+        // having no key server, and said so.
+        //
+        // Asked here rather than on a timer because this is the exact
+        // moment the answer changes.
+        FairPlayStreamParser.shared.requestMediaData(sessionId)
         return true
     }
 
@@ -1548,6 +1623,72 @@ private final class ParserDelegate: NSObject {
                   + "enabled=\(track.isEnabled) formats=\(track.formatDescriptions.count)\n",
                   stderr)
         }
+        // Kept, because media data is asked for per track and these are
+        // the tracks that carry it. trackIDs holds only tracks a KEY
+        // REQUEST named, and on this route the request arrives through
+        // the session rather than the parser, so it is usually empty.
+        FairPlayStreamParser.shared.noteAssetTracks(
+            sessionId: sessionId, tracks: asset.tracks.map { $0.trackID })
+    }
+
+    /// A sample the parser vended - the answer to the render question.
+    ///
+    /// Declaring this commits to a signature, and this file records what
+    /// that costs when it is wrong: a previous probe answered callbacks
+    /// by counting colons, sent isKindOfClass: to a track id, and
+    /// crashed the app on every launch. These are the types WebKit uses.
+    ///
+    /// The ENTRY is logged before any argument is touched, so a wrong
+    /// signature names itself in the log instead of leaving another
+    /// silent launch crash to bisect.
+    @objc(streamDataParser:didProvideMediaData:forTrackID:mediaType:flags:)
+    func streamDataParser(_ parser: Any,
+                          didProvideMediaData sampleBuffer: CMSampleBuffer,
+                          forTrackID trackID: Int32,
+                          mediaType: String,
+                          flags: UInt) {
+        fputs("fpsParser: session \(sessionId) didProvideMediaData ENTERED\n",
+              stderr)
+        let samples = CMSampleBufferGetNumSamples(sampleBuffer)
+        let ready = CMSampleBufferDataIsReady(sampleBuffer)
+        let hasData = CMSampleBufferGetDataBuffer(sampleBuffer) != nil
+        // Whether the sample still carries an encryption attachment is
+        // the whole answer: present means the parser handed back
+        // something still encrypted, absent means it decrypted it.
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer, createIfNecessary: false)
+        let attachmentCount = attachments.map { CFArrayGetCount($0) } ?? 0
+        // THE VERDICT, and it is this rather than the attachments.
+        //
+        // Attachment dictionaries exist on ordinary samples for
+        // ordinary reasons - sync flags, dependency info - so a
+        // non-zero count says nothing about encryption on its own.
+        // The format subtype does: under Common Encryption a
+        // protected track reads 'encv' or 'enca', and once the sample
+        // is decrypted it reads the real codec, 'avc1' or 'mp4a'.
+        //
+        // The count is kept beside it as supporting detail. If the
+        // two ever disagree, that is worth knowing before anything
+        // is built on top of either.
+        let subtype = CMSampleBufferGetFormatDescription(sampleBuffer)
+            .map { CMFormatDescriptionGetMediaSubType($0) }
+        let subtypeFourCC = subtype.map { code -> String in
+            String([24, 16, 8, 0].map { shift -> Character in
+                let byte = UInt8((code >> UInt32(shift)) & 0xff)
+                return (byte >= 0x20 && byte <= 0x7e)
+                    ? Character(UnicodeScalar(byte)) : "."
+            })
+        } ?? "none"
+        let stillEncrypted = subtypeFourCC == "encv"
+            || subtypeFourCC == "enca"
+        fputs("fpsParser: session \(sessionId) MEDIA DATA track \(trackID) "
+              + "(\(mediaType)) samples=\(samples) ready=\(ready) "
+              + "dataBuffer=\(hasData) attachments=\(attachmentCount) "
+              + "flags=\(flags) subtype=\(subtypeFourCC) -> "
+              + (stillEncrypted ? "STILL ENCRYPTED - the parser did not "
+                                  + "decrypt it"
+                                : "DECRYPTED - the route has an end")
+              + "\n", stderr)
     }
 
     /// Only the arity-2 spelling is declared, and only because its types
