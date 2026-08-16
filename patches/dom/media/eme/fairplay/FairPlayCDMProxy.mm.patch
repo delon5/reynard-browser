@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1220 @@
+@@ -0,0 +1,1254 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1107,6 +1107,40 @@ index 000000000000..e859b69f6239
 +  return mOwnerThread ? mOwnerThread->IsOnCurrentThread() : NS_IsMainThread();
 +}
 +#endif
++
++// CONTENT PROCESS: an fMP4 init segment the page appended, on its way
++// to the app process's parser session.
++//
++// ADDED - see fix_forward_init_segment_to_parser.py's docstring. The
++// parser originates a key request from a parsed init segment and from
++// nothing else; the session only RESOLVES a requirement a recipient
++// has raised, which is why feeding it EME init data produced no
++// request across two builds.
++//
++// Sent on the message the parser route already uses, with player id 0
++// and a type nobody else sends. A new message would mean PContent.ipdl
++// and a 25-35 minute rebuild for a payload the existing one already
++// carries; ContentParent composes the child half of the key from
++// ChildID() itself, so there is nothing here that needs to know it.
++//
++// Free function, not a method: SourceBuffer has no proxy to call
++// through, and on this path there may be no proxy at all yet.
++void ReynardMSEForwardInitSegment(const uint8_t* aData, size_t aLength) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!aData || !aLength) {
++    return;
++  }
++  dom::ContentChild* cc = dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  nsTArray<uint8_t> segment;
++  segment.AppendElements(aData, aLength);
++  printf_stderr("avPlayer: MSE forwarding a %zu byte init segment to "
++                "the parser\n", aLength);
++  cc->SendAVPlayerKeyGenerateRequest(0, nsCString(""),
++                                     nsCString("initseg"), segment);
++}
 +
 +void FairPlayCDMProxy::SendRemoteKeyRequest(
 +    const RemoteKeyRequest& aRequest) {

@@ -2,7 +2,7 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,38 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +568,62 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -36,6 +36,30 @@ index d79526afbbfa..cb10fad683d0 100644
 +      }
 +    }
 +    printf_stderr("mseAppend: %zu bytes box=%s\n", mseLength, mseBox);
++
++    // And forward it, when it is the thing AVStreamDataParser can
++    // actually use. See fix_forward_init_segment_to_parser.py.
++    //
++    // The parser is not optional after all: the session resolves a
++    // key requirement a recipient has raised, it does not originate
++    // one, so processContentKeyRequest on EME init data produced
++    // nothing across two builds. Only a parsed init segment has ever
++    // made a key request appear on this device.
++    //
++    // ftyp or moov only, and small. Media fragments are moof and run
++    // to megabytes - one append in the capture was 7.1 MB - and
++    // shipping those across IPC would be a real cost for bytes the
++    // parser has no use for. The cap is a belt to the type test.
++    //
++    // Declared here rather than included: this file does not pull in
++    // ContentChild.h and does not need to for one call.
++    if (mseLength >= 8 && mseLength <= (256 * 1024) &&
++        (memcmp(mseBox, "ftyp", 4) == 0 ||
++         memcmp(mseBox, "moov", 4) == 0)) {
++      extern void ReynardMSEForwardInitSegment(const uint8_t* aData,
++                                               size_t aLength);
++      ReynardMSEForwardInitSegment(aData->Elements(), mseLength);
++    }
 +  }
 +
    StartUpdating();

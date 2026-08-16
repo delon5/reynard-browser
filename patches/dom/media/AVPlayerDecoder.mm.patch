@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2661 @@
+@@ -0,0 +0,2683 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1022,6 +1022,28 @@ index 000000000000..b56efaa8479c
 +  // session uses, matching how the app certificate is already delivered
 +  // per child. No players.find here: there is deliberately no entry.
 +  if ((aKey & 0xffffffff) == 0) {
++    // An fMP4 init segment the page appended, rather than EME init
++    // data. See fix_forward_init_segment_to_parser.py. Distinct
++    // because the two want opposite things of the host: this one is
++    // parsed and must NOT raise a direct key request, since the
++    // parser raising a specifier is the entire point of sending it.
++    if (aInitDataType.EqualsLiteral("initseg")) {
++      SEL parserSegment = @selector(parserAppendMediaSegment:segment:);
++      if (!host || ![host respondsToSelector:parserSegment]) {
++        printf_stderr(
++            "avPlayer: MSE init segment route unavailable for child "
++            "%llu\n", (unsigned long long)(aKey >> 32));
++        return;
++      }
++      printf_stderr(
++          "avPlayer: MSE init segment child=%llu %zu bytes\n",
++          (unsigned long long)(aKey >> 32), (size_t)aInitData.Length());
++      [host parserAppendMediaSegment:static_cast<NSUInteger>(aKey >> 32)
++                             segment:[NSData
++                                         dataWithBytes:aInitData.Elements()
++                                                length:aInitData.Length()]];
++      return;
++    }
 +    SEL parserAppend = @selector(parserAppendInitData:contentId:initData:);
 +    if (!host || ![host respondsToSelector:parserAppend]) {
 +      printf_stderr(

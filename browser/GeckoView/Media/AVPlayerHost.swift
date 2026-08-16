@@ -340,6 +340,38 @@ public final class AVPlayerHost: NSObject {
 
     /// The page's FPS application certificate, for a child's parser
     /// session. The MSE counterpart of setAppCertificate(_:forPlayer:).
+    /// A fragmented-MP4 init segment the page appended, handed to the
+    /// parser so it can raise a key request the way it actually does.
+    ///
+    /// ADDED - see fix_forward_init_segment_to_parser.py's docstring.
+    /// Deliberately does NOT call requestKey. The session resolves a
+    /// requirement a recipient has raised rather than originating one,
+    /// so the direct call produced no request across two builds; what
+    /// should fire here is the parser's own
+    /// didProvideContentKeySpecifier, which processSpecifier already
+    /// handles and which is the only path that has produced an SPC on
+    /// this device.
+    @objc public func parserAppendMediaSegment(_ childId: UInt,
+                                               segment: Data) {
+        let sessionId = "child-\(childId)"
+        let parser = FairPlayStreamParser.shared
+        if withState({ parserSessions.insert(sessionId).inserted }) {
+            guard parser.createSession(sessionId) else {
+                withState { _ = parserSessions.remove(sessionId) }
+                return
+            }
+            if let stored = withState({ parserCertificates[childId] }) {
+                parser.setCertificate(sessionId, certificate: stored)
+            }
+        }
+        avLog("parser media init segment for child \(childId), "
+              + "\(segment.count) bytes")
+        if !parser.append(sessionId, initSegment: segment) {
+            avLog("parser declined the media init segment for child "
+                  + "\(childId)")
+        }
+    }
+
     @objc public func parserSetCertificate(_ childId: UInt,
                                            certificate: Data) {
         withState { parserCertificates[childId] = certificate }
