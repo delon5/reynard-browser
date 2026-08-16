@@ -309,11 +309,17 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         hideMediaSourceSwitch.isOn = Prefs.CompatibilitySettings.hideMediaSourceForSafariUA
         fairPlayHLSOnlySwitch.isOn = Prefs.CompatibilitySettings.fairPlayHLSOnlyInitData
         safariStreamingSwitch.isOn = Prefs.CompatibilitySettings.useSafariUserAgentForStreaming
-        // Pushes the stored value into the GeckoView probe as a side
-        // effect of the getter/setter pair, so opening this screen also
-        // re-syncs it. registerDefaults does the same at launch.
-        Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion =
-            Prefs.CompatibilitySettings.fairPlaySPCProtocolVersion
+        // Re-syncs the stored value into the GeckoView probe, so
+        // opening this screen also puts the engine back in step.
+        // registerDefaults does the same at launch.
+        //
+        // CHANGED - was an assignment of the preference to itself, which
+        // pushed via the setter but also STORED the getter's fallback 1,
+        // so one visit here permanently forged a user-set version and
+        // killed the probe's REYNARD_FAIRPLAY_SPC_VERSION seed. The
+        // helper pushes without storing, and only when there is
+        // something stored to push. See fix_spc_version_env_seed_wins.py.
+        Prefs.CompatibilitySettings.syncFairPlaySPCVersionToProbe()
         fairPlaySPCFullKeyURISwitch.isOn =
             Prefs.CompatibilitySettings.fairPlaySPCUseFullKeyURI
     }

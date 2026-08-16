@@ -83,7 +83,8 @@ struct ReynardMigrationTransaction {
             let journal = ReynardMigrationJournal(
                 version: ReynardMigrationJournal.currentVersion,
                 applicationSupportExisted: applicationSupportExisted,
-                downloadsExisted: downloadsExisted
+                downloadsExisted: downloadsExisted,
+                phase: .prepared
             )
             try fileSystem.writeData(try JSONEncoder().encode(journal), to: journalURL)
             journalWritten = true
@@ -112,18 +113,23 @@ struct ReynardMigrationTransaction {
 
             try verifyAppliedBackup(staged, importedPreferences: importedPreferences)
 
-            // Removing the journal is the durable commit point. Recovery treats an
-            // operation without a journal as committed and only removes its debris.
+            // CHANGED - the durable commit point is this write of the journal's
+            // committed phase, not an unlink. See
+            // fix_migration_commit_marker.py's docstring: clearing journalWritten
+            // after a failed unlink only suppressed the rollback in this process,
+            // and a journal that survived both that unlink and the removeItem
+            // below still read as in-flight at the next launch, where recovery
+            // rolled back this verified import.
             //
-            // The import is applied and verified by this point, so a failed unlink
-            // must not reach the catch below with journalWritten still set - that
-            // would roll back committed data over an I/O error.
-            do {
-                try fileSystem.removeItem(at: journalURL)
-                journalWritten = false
-            } catch {
-                journalWritten = false
-            }
+            // A failure here means the commit is not durable, so the import must
+            // not be reported successful: it falls through to the catch below with
+            // journalWritten still set and rolls back now, while the rollback
+            // copies are still on disk.
+            try fileSystem.writeData(
+                try JSONEncoder().encode(journal.committed()),
+                to: journalURL
+            )
+            journalWritten = false
 
             try? fileSystem.removeItem(at: operationRoot)
             removeMigrationRootIfEmpty(migrationRoot)

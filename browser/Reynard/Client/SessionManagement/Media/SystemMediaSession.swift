@@ -103,6 +103,25 @@ final class SystemMediaSession: MediaSessionDelegate {
         )
     }
     
+    /// Whether the now playing entry currently belongs to a live
+    /// session - the card the lock screen and CarPlay drive their
+    /// transport controls from.
+    ///
+    /// ADDED - see fix_background_audio_keeps_jit.py's docstring.
+    /// A narrow accessor rather than widening the activeSession
+    /// stored property above: the callers that need this are the
+    /// identity-independent ones, and handing them the session
+    /// object re-opens the `=== tab.session` trap that sleeping a
+    /// tab springs. A Bool cannot be compared for identity.
+    ///
+    /// activeSession is weak, revalidate() drops sessions that died
+    /// without reporting, and applicationDidEnterBackground clears it
+    /// when nothing is playing or paused - so this goes false on its
+    /// own and needs no separate teardown.
+    var hasNowPlayingSession: Bool {
+        return activeSession != nil
+    }
+    
     init() {
         registerRemoteCommands()
         apply(MediaSessionFeatures())

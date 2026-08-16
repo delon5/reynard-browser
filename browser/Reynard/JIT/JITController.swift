@@ -172,6 +172,17 @@ final class JITController {
         applicationActiveLock.lock()
         applicationActiveMirror = active
         applicationActiveLock.unlock()
+        // ADDED - see fix_prewarm_checks_foreground.py's docstring.
+        //
+        // JITEnabler.m cannot read the mirror above - it compiles into
+        // the Reynard Helper target, which has no Reynard-Swift.h - and
+        // prewarmSharedTunnel has to know whether the foreground it was
+        // queued in is still the foreground it is running in. Pushed
+        // from here because this is the only writer, so the copy can
+        // only ever be as stale as this call. Outside the lock: the
+        // ObjC setter takes a serial queue of its own and does not need
+        // this one.
+        JITEnabler.setApplicationForeground(active)
     }
 
     private init() {
@@ -373,6 +384,32 @@ final class JITController {
             if prunedAttached > 0 {
                 logger(String(format: "%@: pruned %ld dead pid(s) from the attach ledger", label, prunedAttached))
             }
+
+            // ADDED - see fix_helper_type_wait_pruned.py's docstring.
+            //
+            // helperTypeWaitStart is the sixth per-pid collection and
+            // the only one the sweep above cannot reach: it lives on
+            // the controller, not the ledger. Same liveness test, same
+            // queue - this block is already attachQueue-confined, which
+            // is where that map is only ever touched.
+            //
+            // Growth is the small half. The real one is number reuse.
+            // The entry written when a Helper request is deferred for
+            // an unannounced type is removed on the drain pass that
+            // finally attaches the pid - and that pass never comes if
+            // the Helper deletes its own request first, which it does
+            // 20s in. A stranded timestamp makes the deferral's
+            // `waited < 0.5` read false the first time the recycled
+            // number is seen, so the new child is attached WITHOUT
+            // waiting for its type - the over-attaching the deferral
+            // exists to prevent.
+            let helperWaitsBefore = self.helperTypeWaitStart.count
+            self.helperTypeWaitStart = self.helperTypeWaitStart.filter { Self.pidIsAlive($0.key) }
+            let prunedHelperWaits = helperWaitsBefore - self.helperTypeWaitStart.count
+            if prunedHelperWaits > 0 {
+                logger(String(format: "%@: pruned %ld dead pid(s) from the helper type-wait map", label, prunedHelperWaits))
+            }
+
             let census = self.ledger.childCensus()
             logger("\(label): \(self.ledger.announcedChildTotal()) child(ren) announced this launch, \(census.count) alive")
             for entry in census {
@@ -411,7 +448,7 @@ final class JITController {
     /// Closes the JIT transport on the way into a suspension, if and
     /// only if nothing can still be using it.
     ///
-    /// ADDED - see fix_foreground_scoped_jit_transport.py. Three gates,
+    /// ADDED - see fix_foreground_scoped_jit_transport.py. Four gates,
     /// because freeing an AdapterHandle another thread is inside an FFI
     /// call with is a use-after-free, and that is exactly what
     /// fix_provider_use_after_free.py was written to end:
@@ -419,10 +456,22 @@ final class JITController {
     ///   attachInFlightCount   an attach this app started and is waiting on
     ///   orphanedAttachCount   one that timed out and may still be running
     ///   vAttachInFlightSince  a vAttach actually inside the FFI right now
+    ///   liveDebugSessionCount a registered runDebugService loop, which
+    ///                         holds a debug_proxy opened off this adapter
     ///
-    /// All three are read on attachQueue, which is also the queue every
-    /// attach marks itself in flight on - so no attach can start between
-    /// the check and the close.
+    /// The first three are read on attachQueue, which is also the queue
+    /// every attach marks itself in flight on - so no attach can start
+    /// between the check and the close.
+    ///
+    /// The fourth was ADDED - see
+    /// fix_tunnel_close_waits_for_debug_loops.py. The other three are all
+    /// attach-phase state, so a session that finished attaching is
+    /// invisible to them, and the 0.15s between the cancel in
+    /// sceneDidEnterBackground and this call is not a substitute: cancel
+    /// is not sticky, and a loop's teardown keeps issuing FFI calls -
+    /// a detach, a 50ms sleep, a retry - after it logs "Debug loop
+    /// ended". It is read on debugSessionStateQueue, the queue every loop
+    /// registers and unregisters its proxy on.
     ///
     /// Skip rather than force: the next background gets another go, and a
     /// missed close costs one cycle of JIT, where a wrong one costs a
@@ -432,11 +481,17 @@ final class JITController {
             let inFlight = self.ledger.attachInFlightCount()
             let orphaned = Self.orphanedAttachCount
             let vAttachRunning = JITEnabler.vAttachInFlightSince() != nil
+            // ADDED - see fix_tunnel_close_waits_for_debug_loops.py's
+            // docstring. The three counters above are all attach-phase
+            // state; this one is the loops that are already running, each
+            // holding a debug_proxy carved off the very adapter
+            // closeSharedTunnel frees.
+            let liveSessions = Int(JITEnabler.liveDebugSessionCount())
 
-            guard inFlight == 0, orphaned == 0, !vAttachRunning else {
+            guard inFlight == 0, orphaned == 0, !vAttachRunning, liveSessions == 0 else {
                 logger(String(
-                    format: "tunnelClose: SKIPPED - %d attach(es) in flight, %d orphaned, vAttach %@ - leaving the tunnel alone",
-                    inFlight, orphaned, vAttachRunning ? "RUNNING" : "idle"
+                    format: "tunnelClose: SKIPPED - %d attach(es) in flight, %d orphaned, vAttach %@, %d live debug session(s) - leaving the tunnel alone",
+                    inFlight, orphaned, vAttachRunning ? "RUNNING" : "idle", liveSessions
                 ))
                 return
             }

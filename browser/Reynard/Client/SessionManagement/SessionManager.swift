@@ -193,8 +193,16 @@ final class SessionManager {
     /// head unit keeps showing transport controls for a page whose
     /// content process has been closed underneath it.
     var hasSystemMediaSession: Bool {
+        // ADDED the hasNowPlayingSession arm - see
+        // fix_background_audio_keeps_jit.py's docstring. prioritySession
+        // is set in exactly one place, CarPlay connect, so the two tests
+        // above made the comment true of PiP and CarPlay and false of
+        // the lock screen: plain backgrounded audio failed this guard
+        // and had the content process producing it torn down about
+        // 1.65s after backgrounding.
         return pictureInPictureSession != nil
             || SystemMediaSession.shared.prioritySession != nil
+            || SystemMediaSession.shared.hasNowPlayingSession
     }
     
     /// Exposed for tab eviction, which must not sleep a tab whose

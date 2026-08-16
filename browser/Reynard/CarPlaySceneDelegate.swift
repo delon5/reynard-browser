@@ -85,6 +85,11 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         
         configureAudioSessionForCarPlay()
         
+        // One-shot cleanup of the autoplay grants this delegate used
+        // to write itself. See
+        // fix_carplay_autoplay_grant_migration.py.
+        Self.clearLegacyAutoplayGrantsIfNeeded()
+        
         logCarPlayGeometry(scene: templateApplicationScene, window: window)
     }
     
@@ -149,6 +154,92 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             logger("CarPlay: audio session claimed for playback")
         } catch {
             logger(String(format: "CarPlay: audio session failed - %@", error.localizedDescription))
+        }
+    }
+    
+    /// Clears the autoplay grants the OLD delegate wrote, once per
+    /// profile. ADDED - see
+    /// fix_carplay_autoplay_grant_migration.py's docstring.
+    ///
+    /// Until 45f2c0b this delegate answered .allow for autoplay, and
+    /// GeckoViewPermission persists whatever it is told with
+    /// addFromPrincipal(..., EXPIRE_NEVER) into the profile-wide store
+    /// Site Settings reads. 45f2c0b stopped writing them and shipped
+    /// nothing to remove the ones already written - and nothing else
+    /// removes them either: every removeFromPrincipal path is
+    /// user-driven, and restorePermissions skips a host whose
+    /// Swift-side action resolves to the default, which for these
+    /// hosts it always does since this delegate never wrote a row.
+    ///
+    /// Only grants with no row in the Swift store are removed. A row
+    /// there is a deliberate Site Settings choice and is left alone.
+    /// A Gecko entry without one is either this bug or a copy of the
+    /// current profile default, and the copy is re-pushed on the next
+    /// navigation to that site.
+    private static func clearLegacyAutoplayGrantsIfNeeded() {
+        let flagKey = Prefs.shared.key("CarPlaySettings", "didClearLegacyAutoplayGrants")
+        guard !UserDefaults.standard.bool(forKey: flagKey) else {
+            return
+        }
+        
+        Task { @MainActor in
+            // ADDED - see
+            // fix_carplay_autoplay_migration_checks_store_ready.py's
+            // docstring. chosenHosts below is built from the Swift
+            // store, and storedHosts returns [] for an unreadable
+            // database exactly as it does for an empty one. Without
+            // this, a store that failed to open means nothing looks
+            // chosen and EVERY autoplay grant is deleted, including
+            // the ones the user set in Site Settings - and the flag
+            // below would retire the migration before anyone could
+            // notice.
+            //
+            // Not recorded, for the same reason as the guard below.
+            guard SitePermissionStore.shared.isReady else {
+                logger("CarPlay: site permission store unreadable - legacy autoplay grants left for the next connect")
+                return
+            }
+            
+            guard let permissions = try? await PermissionDelegate.allPermissions() else {
+                // Deliberately NOT recorded. An enumeration that
+                // failed, or ran before Gecko was ready to answer,
+                // has cleared nothing - writing the flag here would
+                // retire the migration without it ever running.
+                logger("CarPlay: permission store unreadable - legacy autoplay grants left for the next connect")
+                return
+            }
+            
+            let actions: [SitePermissionAction] = [
+                .allowed,
+                .askToAllow,
+                .blocked,
+            ]
+            var chosenHosts: Set<String> = []
+            for action in actions {
+                for entry in SitePermissionStore.shared.storedHosts(for: .autoplay, action: action) {
+                    chosenHosts.insert(entry.host)
+                }
+            }
+            
+            var cleared = 0
+            for permission in permissions {
+                guard permission.permission == .autoplay,
+                      permission.value == .allow,
+                      !permission.privateMode,
+                      let host = URLUtils.normalizedHost(fromRawURI: permission.uri),
+                      !chosenHosts.contains(host) else {
+                    continue
+                }
+                
+                // By the enumerated permission's own principal
+                // rather than by a rebuilt origin, so what is
+                // removed is exactly what was found.
+                PermissionDelegate.removePermission(permission)
+                cleared += 1
+            }
+            
+            UserDefaults.standard.set(true, forKey: flagKey)
+            logger(String(format: "CarPlay: cleared %d legacy autoplay grant(s)", cleared))
         }
     }
     
@@ -444,6 +535,31 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         logger("CarPlay script: " + String(title.dropFirst(3)))
     }
 
+    /// Grants user activation again, once the document that will be
+    /// playing actually exists.
+    ///
+    /// ADDED - see fix_carplay_activation_on_page_stop.py's docstring.
+    /// The grant in onPageStart cannot be trusted to reach the document
+    /// it names: GeckoView:PageStart is emitted at STATE_START, before
+    /// the load commits, and the query resolves the actor at receipt
+    /// time - so for a network load it activates the OUTGOING document
+    /// and the incoming one boots with nothing.
+    ///
+    /// A contentful paint cannot happen before the document that paints
+    /// it, so this one lands on the right document, and it lands far
+    /// earlier than onPageStop - which is the end of the load, well
+    /// after a player that calls play() during boot has been refused.
+    ///
+    /// onPageStop still grants as well, and must: a load that paints
+    /// nothing contentful never gets here.
+    func onFirstContentfulPaint(session: GeckoSession) {
+        Task { @MainActor in
+            let activated = await session.markUserActivated()
+            logger(String(format: "CarPlay: user activation %@ at first contentful paint",
+                          activated ? "granted" : "FAILED"))
+        }
+    }
+
     // MARK: - PermissionEmbedderDelegate
 
     /// Allows autoplay, and only autoplay. See
@@ -526,6 +642,15 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
     /// and a tap probe on device confirmed it - so no document here ever
     /// gets a real gesture. Activation is granted on its behalf, at page
     /// start so a player feature-detecting during boot already sees it.
+    ///
+    /// CHANGED - nothing depends on this one landing on the document it
+    /// names any more. See fix_carplay_activation_on_page_stop.py's
+    /// docstring: page start is emitted before the load commits, so for
+    /// anything slower to commit than the data: homepage this activates
+    /// the document being replaced. It stays because it is cheap and it
+    /// is right whenever the load commits before the query arrives, but
+    /// the grant that is guaranteed to reach the new document is the one
+    /// in onFirstContentfulPaint.
     func onPageStart(session: GeckoSession, url: String) {
         Task { @MainActor in
             let activated = await session.markUserActivated()

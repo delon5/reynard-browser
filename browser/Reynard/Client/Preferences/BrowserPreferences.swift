@@ -22,6 +22,10 @@ final class BrowserPreferences {
     
     let profile: String
     private(set) var registeredDefaults: [String: Any] = [:]
+    /// Whether fairPlaySPCProtocolVersion has a value somebody actually
+    /// stored, as opposed to the registered default. ADDED - see
+    /// fix_spc_version_env_seed_wins.py's docstring.
+    fileprivate(set) var hasStoredFairPlaySPCVersion = false
     
     init(profile: String = "default") {
         self.profile = profile
@@ -178,6 +182,20 @@ final class BrowserPreferences {
             key("TrackingProtection", "customSuspectedFingerprinterScope"): CustomBlockingScope.privateOnly.rawValue,
             key("TrackingProtection", "globalPrivacyControlEnabled"): false,
         ]
+        // Sampled BEFORE register(defaults:) below, because
+        // afterwards object(forKey:) answers out of the registration
+        // domain and is non-nil for every registered key - "the user
+        // chose 1" and "nobody has ever touched this" stop being
+        // distinguishable. Same ordering as
+        // migrateToolbarSettingsIfNeeded and the donation show-time
+        // seed above. ADDED - see fix_spc_version_env_seed_wins.py's
+        // docstring.
+        hasStoredFairPlaySPCVersion = UserDefaults.standard.object(
+            forKey: key(
+                "CompatibilitySettings",
+                "fairPlaySPCProtocolVersion"
+            )
+        ) != nil
         UserDefaults.standard.register(defaults: registeredDefaults)
         // The FairPlay SPC version has to reach the GeckoView probe at
         // startup, not only when the Compatibility screen is opened.
@@ -192,17 +210,26 @@ final class BrowserPreferences {
         // depend on that static's storage being wired up yet. Same
         // validation either way, so an absent or corrupted value still
         // lands on 1.
-        FairPlaySPCVersionProbe.configuredVersion =
-            FairPlaySPCVersionProbe.selectedVersion(
-                from: String(
-                    UserDefaults.standard.integer(
-                        forKey: key(
-                            "CompatibilitySettings",
-                            "fairPlaySPCProtocolVersion"
+        //
+        // CHANGED - conditional now. Pushing unconditionally wrote the
+        // registered default 1 over the value the probe had just seeded
+        // from REYNARD_FAIRPLAY_SPC_VERSION, on every launch, which made
+        // that environment variable impossible to use. An untouched
+        // preference must leave the seed alone. See
+        // fix_spc_version_env_seed_wins.py.
+        if hasStoredFairPlaySPCVersion {
+            FairPlaySPCVersionProbe.configuredVersion =
+                FairPlaySPCVersionProbe.selectedVersion(
+                    from: String(
+                        UserDefaults.standard.integer(
+                            forKey: key(
+                                "CompatibilitySettings",
+                                "fairPlaySPCProtocolVersion"
+                            )
                         )
                     )
                 )
-            )
+        }
         FairPlaySPCVersionProbe.configuredUseFullKeyURI =
             UserDefaults.standard.bool(
                 forKey: key(
@@ -983,8 +1010,30 @@ final class BrowserPreferences {
                 )
                 prefs.set(validated, forSetting: "CompatibilitySettings",
                           key: "fairPlaySPCProtocolVersion")
+                // ADDED - a store made here is exactly the user-set
+                // state registerDefaults samples at launch, so record it
+                // now instead of leaving the flag stale for the rest of
+                // this run. See fix_spc_version_env_seed_wins.py.
+                prefs.hasStoredFairPlaySPCVersion = true
                 FairPlaySPCVersionProbe.configuredVersion = validated
             }
+        }
+
+        /// Re-push the stored SPC version to the GeckoView probe, for
+        /// screens that want the engine back in sync when they appear.
+        ///
+        /// Does nothing when nobody has set the preference, so the probe
+        /// keeps whatever REYNARD_FAIRPLAY_SPC_VERSION seeded it with.
+        /// The Compatibility screen used to do this by assigning the
+        /// getter's result back through the setter, which stored the
+        /// fallback 1 and thereby forged the user-set state this checks.
+        /// ADDED - see fix_spc_version_env_seed_wins.py's docstring.
+        static func syncFairPlaySPCVersionToProbe() {
+            guard prefs.hasStoredFairPlaySPCVersion else {
+                return
+            }
+            FairPlaySPCVersionProbe.configuredVersion =
+                fairPlaySPCProtocolVersion
         }
 
         /// Whether the SPC carries the whole skd:// URI as its content

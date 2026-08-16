@@ -606,7 +606,7 @@ final class FaviconStore {
         }
         lastPruneAt = now
 
-        let imageKeysBeforePruning = Set(fetchImageKeysLocked())
+        let imageKeysBeforePruning = trackedImageKeysLocked()
         let startOfToday = Calendar.current.startOfDay(for: now)
         let cutoff = (Calendar.current.date(byAdding: .day, value: 1 - Self.expirationDays, to: startOfToday) ?? startOfToday).timeIntervalSince1970
         
@@ -622,11 +622,19 @@ final class FaviconStore {
             """
         )
         
-        let imageKeysAfterPruning = Set(fetchImageKeysLocked())
-        for imageKey in imageKeysBeforePruning where !imageKeysAfterPruning.contains(imageKey) {
-            let imageURL = imageFileURL(for: imageKey)
-            if fileManager.fileExists(atPath: imageURL.path) {
-                try? fileManager.removeItem(at: imageURL)
+        // A failed key query is not an empty table. If either read
+        // fails we cannot tell what the prune orphaned, and an empty
+        // "after" set means unlinking every tracked image - including
+        // the files behind rows that survived. Skip the sweep and let
+        // the next prune redo it. See
+        // fix_favicon_prune_guards_failed_query.py's docstring.
+        if let keysBeforePruning = imageKeysBeforePruning,
+           let keysAfterPruning = trackedImageKeysLocked() {
+            for imageKey in keysBeforePruning where !keysAfterPruning.contains(imageKey) {
+                let imageURL = imageFileURL(for: imageKey)
+                if fileManager.fileExists(atPath: imageURL.path) {
+                    try? fileManager.removeItem(at: imageURL)
+                }
             }
         }
         removeOrphanedImageFilesLocked()
@@ -846,10 +854,6 @@ final class FaviconStore {
         return sqlite3_step(statement) == SQLITE_DONE
     }
     
-    private func fetchImageKeysLocked() -> [String] {
-        Array(trackedImageKeysLocked() ?? []).sorted()
-    }
-
     private func trackedImageKeysLocked() -> Set<String>? {
         guard let statement = prepareStatementLocked(
             "SELECT image_key FROM favicon_images;"

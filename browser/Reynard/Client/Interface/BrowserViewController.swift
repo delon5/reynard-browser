@@ -1047,11 +1047,24 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         // legitimately zero while the user is still typing, and ending
         // the session under them would be its own bug. Same condition
         // the relocation path above already trusts.
+        //
+        // Guarded on the address bar scroll dismissal too - see
+        // fix_keyboard_hide_respects_scroll_dismissal.py's docstring.
+        // Dragging the suggestion list resigns the address bar on
+        // purpose and keeps the session alive, and because the list
+        // sets keyboardDismissMode = .none that resign is the only
+        // thing that hides the keyboard. Without this term the
+        // gesture ends the very session it was meant to preserve,
+        // in either notification order: .pending when this arrives
+        // first, .dismissed when addressBarDidEndEditing does.
         let isInHardwareKeyboardMode =
             tabManager.selectedTab?.session.isInHardwareKeyboardMode() == true
+        let isDismissingAddressBarByScroll =
+            overlayCoordinator.chromeStateForAddressBarScrollDismissal(layout: browserLayout) != nil
         if searchOverlayCoordinator.isFocused
             && !tabOverview.isPresented
-            && !isInHardwareKeyboardMode {
+            && !isInHardwareKeyboardMode
+            && !isDismissingAddressBarByScroll {
             searchOverlayCoordinator.endSearchSession()
         }
 

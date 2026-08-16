@@ -8,9 +8,60 @@ import Foundation
 struct ReynardMigrationJournal: Codable, Equatable {
     static let currentVersion = 1
 
+    // ADDED - see fix_migration_commit_marker.py's docstring. Whether
+    // the import committed has to be recorded in the journal itself:
+    // the file's absence cannot carry it, because the unlink that
+    // removes it is allowed to fail.
+    enum Phase: String, Codable {
+        case prepared
+        case committed
+    }
+
     let version: Int
     let applicationSupportExisted: Bool
     let downloadsExisted: Bool
+    let phase: Phase
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case applicationSupportExisted
+        case downloadsExisted
+        case phase
+    }
+
+    init(
+        version: Int,
+        applicationSupportExisted: Bool,
+        downloadsExisted: Bool,
+        phase: Phase = .prepared
+    ) {
+        self.version = version
+        self.applicationSupportExisted = applicationSupportExisted
+        self.downloadsExisted = downloadsExisted
+        self.phase = phase
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        applicationSupportExisted = try container.decode(
+            Bool.self,
+            forKey: .applicationSupportExisted
+        )
+        downloadsExisted = try container.decode(Bool.self, forKey: .downloadsExisted)
+        // A journal with no phase was written by a build that committed
+        // by unlinking the journal, so one still on disk never committed.
+        phase = try container.decodeIfPresent(Phase.self, forKey: .phase) ?? .prepared
+    }
+
+    func committed() -> ReynardMigrationJournal {
+        ReynardMigrationJournal(
+            version: version,
+            applicationSupportExisted: applicationSupportExisted,
+            downloadsExisted: downloadsExisted,
+            phase: .committed
+        )
+    }
 }
 
 struct ReynardMigrationRecovery {
@@ -75,6 +126,16 @@ struct ReynardMigrationRecovery {
         }
 
         let journal = try decodeJournal(fileSystem.readData(at: journalURL))
+        // ADDED - see fix_migration_commit_marker.py's docstring. A
+        // committed journal means apply() finished and verified the
+        // import and only its debris is left here, so clear that and
+        // stop. Rolling back would delete the live imported data.
+        guard journal.phase == .prepared else {
+            try fileSystem.removeItem(at: operation)
+            try removeRecoveryRootIfEmpty()
+            return
+        }
+
         let rollbackRoot = operation.appendingPathComponent("rollback", isDirectory: true)
         let rollbackPreferences = rollbackRoot.appendingPathComponent(
             "preferences.plist",

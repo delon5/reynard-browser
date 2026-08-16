@@ -102,6 +102,16 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// in JITSupport.h, which Swift cannot see directly.
 + (BOOL)hasActiveDebugSessionForPID:(int32_t)pid NS_SWIFT_NAME(hasActiveDebugSession(forPID:));
 
+/// How many runDebugService loops are registered right now. Wraps the C
+/// function in JITSupport.h, which Swift cannot see directly.
+///
+/// The fourth gate on closeSharedTunnel below: every live loop holds a
+/// debug_proxy opened off the shared adapter, and freeing that adapter
+/// while a loop is inside an FFI call on it is the use-after-free the
+/// other three gates exist to prevent. See
+/// fix_tunnel_close_waits_for_debug_loops.py.
++ (NSUInteger)liveDebugSessionCount NS_SWIFT_NAME(liveDebugSessionCount());
+
 /// What the kernel says this child is doing - RUN, SLEEP, STOP, ZOMB, or
 /// why it could not be read. See fix_report_child_run_state.py.
 + (NSString *)runStateForPID:(int32_t)pid NS_SWIFT_NAME(runState(forPID:));
@@ -130,7 +140,22 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 
 /// Builds the shared tunnel if there is not one, so a child does not
 /// have to discover its absence by failing. See the same docstring.
+///
+/// The build happens asynchronously, and returns without building at
+/// all if setApplicationForeground: below says the app has left the
+/// foreground in the meantime. See fix_prewarm_checks_foreground.py.
 - (void)prewarmSharedTunnel NS_SWIFT_NAME(prewarmSharedTunnel());
+
+/// Mirrors JITController's own application-active flag into this file,
+/// which cannot see it: JITEnabler.m compiles into the Reynard Helper
+/// target as well, and Reynard-Swift.h is the app target's private
+/// bridging header.
+///
+/// Call this from every write of that flag and from nowhere else - it
+/// is a copy of a decision made in Swift, not an independent judgement
+/// about the application state. prewarmSharedTunnel is the only
+/// reader. See fix_prewarm_checks_foreground.py.
++ (void)setApplicationForeground:(BOOL)foreground NS_SWIFT_NAME(setApplicationForeground(_:));
 
 // Timestamp of when the most recent vAttach FFI call started, if it
 // might still genuinely be running - nil if none is currently thought

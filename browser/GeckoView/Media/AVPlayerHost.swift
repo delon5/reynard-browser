@@ -790,6 +790,16 @@ public final class AVPlayerHost: NSObject {
                     return false
                 }
                 entry.reportedProtected = true
+                // ADDED - see fix_stall_protected_player_id.py's
+                // docstring. The stall detector is the ONLY producer
+                // of "this is protected" for a native-HLS FairPlay
+                // stream, which never reaches provideKeyResponse, so
+                // without this the compositor asks protectedPlayerId()
+                // the moment it builds the layer, gets 0, and drops
+                // the layer on the floor. Set under the same lock that
+                // claims the report: the report is one-shot, so the id
+                // must never be published later than the flag.
+                lastProtectedPlayerId = id
                 return true
             }
             guard shouldReport else { return }
@@ -1329,6 +1339,18 @@ public final class AVPlayerHost: NSObject {
         // once the frame has been shown and nothing further arrives, so
         // this does not leave it running.
         resumeFrameDelivery(for: entry)
+        // ADDED - see fix_seek_rebases_stall_window.py's docstring.
+        // Restart the protected-output-stall window at the requested
+        // target. noteProtectedStall measures item time elapsed since
+        // the last vended buffer, and nothing here used to move that
+        // base, so a forward skip of more than a second left a stale
+        // one and the first post-seek tick with no buffer met the
+        // window on the spot - latching a clear stream as protected,
+        // which nothing can undo.
+        withState {
+            entry.lastBufferItemTime =
+                (seconds.isFinite && seconds >= 0) ? seconds : -1
+        }
         entry.player.seek(
             to: CMTime(seconds: seconds, preferredTimescale: 600)
         ) { [weak self] finished in
@@ -1344,6 +1366,23 @@ public final class AVPlayerHost: NSObject {
             let landed = entry.player.currentTime()
             if landed.isValid, landed.isNumeric {
                 self.pushTime(id, entry, landed.seconds)
+                // ADDED - see fix_seek_rebases_stall_window.py's
+                // docstring. The rebase issued at seek start is not
+                // enough on its own: a default seek has infinite
+                // tolerance, so keyframe snapping can land AHEAD of the
+                // requested target by more than the one-second window.
+                // Only ever moved FORWARD - a buffer vended between the
+                // landing and this callback has already set a later
+                // base, and lowering it would bring the window closer
+                // to firing rather than push it away.
+                let landedSeconds = landed.seconds
+                if landedSeconds.isFinite {
+                    self.withState {
+                        if landedSeconds > entry.lastBufferItemTime {
+                            entry.lastBufferItemTime = landedSeconds
+                        }
+                    }
+                }
             }
         }
     }
@@ -1524,6 +1563,50 @@ final class ContentKeyDelegate: NSObject, AVContentKeySessionDelegate {
                     avLog("SPC FAILED for \(contentId) at protocol version "
                           + "\(protocolVersion): "
                           + "\(error?.localizedDescription ?? "no data")")
+                    // ADDED - see fix_spc_gate_clears_on_failure.py's
+                    // docstring. This used to log and return, which left
+                    // the content id in spcIssued on a request that has
+                    // no SPC and was never failed. Nothing else clears
+                    // it: the only spcIssued.remove is the isNewRequest
+                    // one in didProvide below, and AVFoundation raises
+                    // no replacement request for one it was never told
+                    // had failed. Every later generateRequest then
+                    // adopts the same held request and stops at "SPC
+                    // already issued" - the key blocked for the life of
+                    // the item, and silently.
+                    //
+                    // Identity-guarded: this callback comes off
+                    // AVFoundation's queue via the hop above, so by the
+                    // time it lands didProvide may already have
+                    // installed a NEWER request for this content id and
+                    // cleared the gate for it. Clearing it again would
+                    // let that one issue two SPCs, which is the -11879
+                    // the gate exists to prevent.
+                    guard self.requests[contentId] === request else {
+                        return
+                    }
+                    self.spcIssued.remove(contentId)
+                    // Dropped so the next generateRequest asks
+                    // AVFoundation for a fresh request instead of
+                    // adopting this one. Re-attempting on a request
+                    // whose SPC generation failed is not a retry.
+                    self.requests.removeValue(forKey: contentId)
+                    // Unlike the "no certificate yet" hold above, this
+                    // request cannot be satisfied by anything that
+                    // arrives later - its SPC never existed. Left
+                    // pending it stalls the item anyway AND blocks a
+                    // replacement, so telling AVFoundation is the
+                    // cheaper failure. Same call, same reasoning, as the
+                    // certificate-missing path in
+                    // FairPlayCDMProxy.mm.patch.
+                    let failure: Error = error ?? NSError(
+                        domain: "ReynardFairPlay",
+                        code: -4,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "SPC generation returned no data",
+                        ])
+                    request.processContentKeyResponseError(failure)
                     return
                 }
                 // The byte count is the only thing tying this line to the

@@ -124,6 +124,14 @@ void interruptAttachingDebugSessions(void);
 /// fix_reattach_orphaned_sessions_on_foreground.py.
 BOOL hasActiveDebugSessionForPID(int32_t pid);
 
+/// How many runDebugService loops are registered right now, counted from
+/// the same proxy table cancelAllDebugSessionCalls above walks.
+///
+/// Every entry is a debug_proxy opened off the shared provider's adapter,
+/// so this has to be zero before that adapter can be freed. See
+/// fix_tunnel_close_waits_for_debug_loops.py.
+NSUInteger liveDebugSessionCount(void);
+
 DeviceProvider *_Nullable createDeviceProvider(
                                                NSString *pairingFilePath, NSString *targetAddress,
                                                NSError *_Nullable *_Nullable error);

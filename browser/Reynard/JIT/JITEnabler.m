@@ -26,6 +26,15 @@
 @property(nonatomic, strong) dispatch_queue_t providerQueue;
 @property(nonatomic, assign) BOOL didEnsureDDIMounted;
 
+// ADDED - see fix_retired_provider_freed.py's docstring.
+// Providers the invalidate paths retired but deliberately did not
+// free, boxed because DeviceProvider * is a raw C pointer. Touched
+// only from inside providerQueue, exactly like sharedProvider, so
+// it needs no lock of its own. Drained by closeSharedTunnel, which
+// is the one place that has established nothing is still inside an
+// FFI call holding these adapters.
+@property(nonatomic, strong) NSMutableArray<NSValue *> *retiredProviders;
+
 - (DeviceProvider *)getProviderForPID:(int32_t)pid error:(NSError **)error;
 
 @end
@@ -174,6 +183,8 @@ static void jitHangBacktraceHandler(int signalNumber) {
         _sharedProvider = NULL;
         _providerQueue = dispatch_queue_create("com.minh-ton.Reynard.JITEnabler.ProviderQueue", DISPATCH_QUEUE_SERIAL);
         _didEnsureDDIMounted = NO;
+        // ADDED - see fix_retired_provider_freed.py.
+        _retiredProviders = [NSMutableArray array];
     }
     return self;
 }
@@ -740,6 +751,12 @@ static void jitHangBacktraceHandler(int signalNumber) {
     return hasActiveDebugSessionForPID(pid);
 }
 
+// ADDED - see fix_tunnel_close_waits_for_debug_loops.py's docstring.
+// Another thin forwarder, for closeTunnelForSuspension's fourth gate.
++ (NSUInteger)liveDebugSessionCount {
+    return liveDebugSessionCount();
+}
+
 // Deliberately does NOT call freeDeviceProvider on the current
 // sharedProvider before clearing it - see
 // fix_invalidate_provider_on_timeout.py's docstring for the full
@@ -756,6 +773,15 @@ static void jitHangBacktraceHandler(int signalNumber) {
 // concurrent call reading or writing sharedProvider.
 - (void)invalidateSharedProviderAfterTimeout {
     dispatch_sync(self.providerQueue, ^{
+        // CHANGED - still does not free here, for every reason the
+        // comment above gives, but no longer drops the pointer
+        // either. It is retired instead, and closeSharedTunnel frees
+        // it once the gates establish nothing can still be inside
+        // its adapter. See fix_retired_provider_freed.py.
+        if (self.sharedProvider) {
+            [self.retiredProviders addObject:[NSValue valueWithPointer:self.sharedProvider]];
+            logger([NSString stringWithFormat:@"tunnelRetire: timeout invalidated the cached provider - retired, %lu now waiting for a tunnel close", (unsigned long)self.retiredProviders.count]);
+        }
         self.sharedProvider = NULL;
         self.didEnsureDDIMounted = NO;
     });
@@ -778,6 +804,11 @@ static void jitHangBacktraceHandler(int signalNumber) {
     __block BOOL invalidated = NO;
     dispatch_sync(self.providerQueue, ^{
         if (provider && self.sharedProvider == provider) {
+            // CHANGED - retire rather than drop, so the pointer
+            // survives to be freed by closeSharedTunnel. Still not
+            // freed here. See fix_retired_provider_freed.py.
+            [self.retiredProviders addObject:[NSValue valueWithPointer:provider]];
+            logger([NSString stringWithFormat:@"tunnelRetire: transport failure invalidated the cached provider - retired, %lu now waiting for a tunnel close", (unsigned long)self.retiredProviders.count]);
             self.sharedProvider = NULL;
             self.didEnsureDDIMounted = NO;
             invalidated = YES;
@@ -853,6 +884,28 @@ static void jitHangBacktraceHandler(int signalNumber) {
 // path that must not block on it.
 - (void)closeSharedTunnel {
     dispatch_async(self.providerQueue, ^{
+        // ADDED - drain the retired providers. See
+        // fix_retired_provider_freed.py. Deliberately ahead of the
+        // "nothing to close" return below: the usual shape is a
+        // tunnel that already died, so sharedProvider is NULL by the
+        // time we get here and the retired list is the only thing
+        // left holding an adapter. Draining after that return would
+        // free nothing in exactly the case that leaks.
+        //
+        // Safe here and only here for the reason in the comment
+        // above: this method runs only once closeTunnelForSuspension
+        // has read attachInFlightCount, orphanedAttachCount and
+        // vAttachInFlightSince all clear, which is what rules out an
+        // orphaned call still being inside one of these adapters.
+        NSUInteger retiredCount = self.retiredProviders.count;
+        for (NSValue *boxedProvider in self.retiredProviders) {
+            freeDeviceProvider((DeviceProvider *)boxedProvider.pointerValue);
+        }
+        [self.retiredProviders removeAllObjects];
+        if (retiredCount > 0) {
+            logger([NSString stringWithFormat:@"tunnelClose: freed %lu retired provider(s) - their adapters and sockets to the pairing endpoint are released", (unsigned long)retiredCount]);
+        }
+
         DeviceProvider *doomed = self.sharedProvider;
         if (!doomed) {
             logger(@"tunnelClose: nothing to close - no shared tunnel");
@@ -865,6 +918,45 @@ static void jitHangBacktraceHandler(int signalNumber) {
     });
 }
 
+// ADDED - see fix_prewarm_checks_foreground.py's docstring.
+//
+// A copy of JITController.isApplicationActiveFromAnyQueue, not a second
+// opinion about it: setApplicationActiveMirror is the only writer of
+// that flag and it pushes every write through here. Nothing in this
+// file can read the Swift property directly - JITEnabler.m compiles
+// into the Reynard Helper target too, and Reynard-Swift.h is not
+// available there. The ptrace_jit temp-path fallback above hit the
+// same wall.
+//
+// A serial queue rather than a lock, to match vAttachStateQueue.
+// Starts YES: the Helper never writes it and never calls the prewarm,
+// and in the app sceneWillResignActive writes it on the main thread
+// well before any background teardown runs.
+static dispatch_queue_t applicationForegroundStateQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.minh-ton.Reynard.JITEnabler.ForegroundStateQueue", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static BOOL sApplicationForeground = YES;
+
++ (void)setApplicationForeground:(BOOL)foreground {
+    dispatch_sync(applicationForegroundStateQueue(), ^{
+        sApplicationForeground = foreground;
+    });
+}
+
+static BOOL applicationForegroundFromAnyQueue(void) {
+    __block BOOL foreground = YES;
+    dispatch_sync(applicationForegroundStateQueue(), ^{
+        foreground = sApplicationForeground;
+    });
+    return foreground;
+}
+
 // ADDED - fix_foreground_scoped_jit_transport.py. Deliberately routed
 // through getProviderForPID: rather than calling createDeviceProvider
 // directly, so the DDI mount and the caching behave exactly as they do
@@ -872,6 +964,19 @@ static void jitHangBacktraceHandler(int signalNumber) {
 // call in the getProvider logs.
 - (void)prewarmSharedTunnel {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        // ADDED - see fix_prewarm_checks_foreground.py's docstring.
+        //
+        // This block captures nothing, re-checks nothing, and is the
+        // only creator of a tunnel that closeTunnelForSuspension's
+        // three gates cannot see - they guard a free, not a create. So
+        // the foreground it was queued in has to be re-established
+        // where it actually runs, or a backgrounding between the two
+        // leaves a fresh socket open across the suspension with
+        // nothing left to close it.
+        if (!applicationForegroundFromAnyQueue()) {
+            logger(@"tunnelPrewarm: SKIPPED - app left the foreground while this was queued, not building a tunnel into a suspension");
+            return;
+        }
         NSError *prewarmError = nil;
         DeviceProvider *provider = [self getProviderForPID:0 error:&prewarmError];
         logger([NSString stringWithFormat:@"tunnelPrewarm: %@ at foreground%@",
@@ -882,6 +987,15 @@ static void jitHangBacktraceHandler(int signalNumber) {
 
 - (void)dealloc {
     resetJITEndpointMonitor();
+    // ADDED - see fix_retired_provider_freed.py. Unreachable in
+    // practice, since JITEnabler is a dispatch_once singleton; kept
+    // so the retired list is freed in both places sharedProvider is.
+    // Direct ivar access with no queue hop, matching the existing
+    // free below - dealloc means nothing else holds a reference.
+    for (NSValue *boxedProvider in _retiredProviders) {
+        freeDeviceProvider((DeviceProvider *)boxedProvider.pointerValue);
+    }
+    [_retiredProviders removeAllObjects];
     if (_sharedProvider) {
         freeDeviceProvider(_sharedProvider);
         _sharedProvider = NULL;

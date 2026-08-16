@@ -169,8 +169,9 @@ final class DDIManager: NSObject {
     
     func cancelActiveDownload() {
         stateQueue.async {
+            // CHANGED - a cancel with no download in flight no longer
+            // deletes DDI storage. See fix_ddi_cleanup_preserves_valid_image.py.
             guard let active = self.activeDownload else {
-                _ = try? self.removeDDIRootDirectory()
                 return
             }
             
@@ -335,7 +336,9 @@ final class DDIManager: NSObject {
         active.currentTask?.cancel()
         activeDownload = nil
         
-        if shouldCleanup {
+        // CHANGED - cleanup no longer removes an install the app still
+        // reads as valid. See fix_ddi_cleanup_preserves_valid_image.py.
+        if shouldCleanup, !hasRequiredDDIFiles() {
             _ = try? removeDDIRootDirectory()
         }
         

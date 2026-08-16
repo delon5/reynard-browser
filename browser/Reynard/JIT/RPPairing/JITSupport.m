@@ -1314,6 +1314,32 @@ BOOL hasActiveDebugSessionForPID(int32_t pid) {
     return isActive;
 }
 
+// ADDED - see fix_tunnel_close_waits_for_debug_loops.py's docstring.
+//
+// The count the tunnel close needs. Its three existing gates are all
+// attach-phase state, and a loop that finished attaching appears in none
+// of them - while still holding a debug_proxy that connectDebugSession
+// opened against provider->adapter, the adapter that close frees.
+//
+// debugSessionProxies() rather than activeDebugSessionPIDs(): the proxies
+// are the handles, and handles are what a free can pull out from under a
+// caller. Registered at the top of runDebugService and unregistered only
+// after the loop's last FFI call - after the detach and its 50ms retry,
+// not at "Debug loop ended" - so zero here means no loop is still
+// issuing calls on the adapter.
+//
+// Same dispatch_sync onto debugSessionStateQueue as
+// hasActiveDebugSessionForPID above, which is what stops the count being
+// read mid-registration. The caller is JITController's attachQueue, a
+// private serial queue, never the main thread.
+NSUInteger liveDebugSessionCount(void) {
+    __block NSUInteger count = 0;
+    dispatch_sync(debugSessionStateQueue(), ^{
+        count = debugSessionProxies().count;
+    });
+    return count;
+}
+
 static BOOL shouldDetachDebugSessionPID(int32_t pid) {
     if (pid <= 0) return NO;
     

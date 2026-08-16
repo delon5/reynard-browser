@@ -90,6 +90,14 @@ final class AttachLedger {
     /// boundedEnableJIT's per-pid in-flight check could not catch it:
     /// the duplicate was not concurrent with the original, it was
     /// queued behind it.
+    ///
+    /// CHANGED - no longer pruned by pid liveness, in either eviction
+    /// path. See fix_inflight_gate_survives_prune.py's docstring. A
+    /// running FFI call does not end when its target dies, and this set
+    /// is what closeTunnelForSuspension reads before freeing the adapter
+    /// (JITController.swift:432), so the only fact that may retire an
+    /// entry is the call returning - which clearAttachInFlight already
+    /// does from a defer, bounded by enableJITMaxWaitSeconds.
     private var attachInFlightPIDs: Set<Int32> = []
 
     init(confinedTo queue: DispatchQueue) {
@@ -236,7 +244,13 @@ final class AttachLedger {
         attachedPIDs = attachedPIDs.filter { isAlive($0) }
         rejectedPIDs = rejectedPIDs.filter { isAlive($0) }
         pendingAttachPIDs = pendingAttachPIDs.filter { isAlive($0) }
-        attachInFlightPIDs = attachInFlightPIDs.filter { isAlive($0) }
+        // attachInFlightPIDs is deliberately NOT swept here - see
+        // fix_inflight_gate_survives_prune.py's docstring. It records a
+        // running enableJIT call, not a live process, and the call does
+        // not abort when its target dies: it stays inside
+        // connectDebugSession on the raw provider pointer. Evicting the
+        // pid here lets closeTunnelForSuspension read zero in flight and
+        // free the adapter underneath it.
         return before - attachedPIDs.count
     }
 
@@ -256,7 +270,14 @@ final class AttachLedger {
         attachedPIDs.remove(pid)
         rejectedPIDs.remove(pid)
         pendingAttachPIDs.remove(pid)
-        attachInFlightPIDs.remove(pid)
+        // attachInFlightPIDs is not dropped here either, and this path is
+        // the structural one: the exit notification is posted by the
+        // debug loop enableJITForPID: dispatched at JITEnabler.m:607,
+        // while that same call is still finishing - it has yet to run the
+        // @finally that hops onto providerQueue at JITEnabler.m:648. A
+        // child exiting in that window would clear the gate on a call
+        // that is still holding the provider. See
+        // fix_inflight_gate_survives_prune.py's docstring.
     }
 
     /// Every child ever announced this launch, including pruned ones.

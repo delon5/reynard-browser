@@ -339,9 +339,41 @@ if ! rg -q 'AVContentKeyRequestProtocolVersionsKey: \[protocolVersion\]' \
     echo "FairPlay SPC generation is not using the validated singleton version." >&2
     exit 1
 fi
-if [ "$(rg -c 'spcIssued\.remove\(contentId\)' \
-    "$FAIRPLAY_AVPLAYER_HOST" || true)" -ne 1 ]; then
-    echo "FairPlay one-SPC state is reset outside the fresh-request path." >&2
+# The one-SPC gate may be released on exactly two paths, and this is
+# written as "those two sites, and nothing else" rather than as an
+# occurrence count. A count cannot be right in both states: the
+# SPC-generation failure path releases the gate too once
+# fix_spc_gate_clears_on_failure.py is applied, so the number of
+# resets is 1 or 2 depending on a sibling change, while the invariant
+# - released only where releasing it is correct - does not move.
+# See fix_verify_script_zero_match_check.py.
+#
+# 1. didProvide's fresh-request path, and it must stay under the
+#    isNewRequest test: only a genuinely new request object earns a
+#    new SPC, and an unconditional reset here would hand a second one
+#    to a repeat callback for the same object. Mandatory, so its
+#    absence is an error - rg exits 1 on no match and ! takes the
+#    failure branch, with no number for [ ] to choke on.
+if ! rg -qU \
+    'if isNewRequest \{(\n *//[^\n]*)*\n *(self\.)?spcIssued\.remove\(contentId\)' \
+    "$FAIRPLAY_AVPLAYER_HOST"; then
+    echo "FairPlay one-SPC state is no longer reset on the fresh-request path." >&2
+    exit 1
+fi
+# 2. makeSPC's SPC-generation failure path, which must stay inside the
+#    requests[contentId] === request identity guard - that completion
+#    hops to the main queue, and releasing the gate for a request
+#    AVFoundation has already replaced would let the newer one issue
+#    two SPCs. Optional: it exists only with the sibling fix applied.
+#
+#    --passthru erases both sanctioned sites from the stream, so
+#    anything still matching is a release on some third path.
+if rg --passthru -NU -r '' \
+    -e 'if isNewRequest \{(\n *//[^\n]*)*\n *(self\.)?spcIssued\.remove\(contentId\)' \
+    -e 'guard self\.requests\[contentId\] === request else \{[^{}]*\}(\n *//[^\n]*)*\n *(self\.)?spcIssued\.remove\(contentId\)' \
+    "$FAIRPLAY_AVPLAYER_HOST" |
+    rg -q 'spcIssued\.remove\(contentId\)'; then
+    echo "FairPlay one-SPC state is reset outside the fresh-request and SPC-failure paths." >&2
     exit 1
 fi
 # The page-error diagnostics are allowed to exist, but only inside the

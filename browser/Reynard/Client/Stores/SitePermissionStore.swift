@@ -270,6 +270,24 @@ final class SitePermissionStore {
         }
     }
     
+    /// Whether the backing database actually opened.
+    ///
+    /// ADDED - see
+    /// fix_carplay_autoplay_migration_checks_store_ready.py's docstring.
+    /// storedHosts below answers [] both for "no rows" and for
+    /// "the statement could not be prepared", because hostsLocked
+    /// returns [] when prepareStatementLocked hands back nil. A
+    /// caller that DELETES on the strength of a host's absence has
+    /// to be able to tell those apart, or a store that failed to
+    /// open reads as a user who chose nothing.
+    ///
+    /// Through stateQueue like every other accessor here, so it
+    /// observes the same serialisation as the query it stands in
+    /// for.
+    var isReady: Bool {
+        return stateQueue.sync { database != nil }
+    }
+    
     func storedHosts(for permission: SitePermission, action: SitePermissionAction) -> [(host: String, updatedAt: Date)] {
         return stateQueue.sync {
             hostsLocked(for: permission, action: action)
