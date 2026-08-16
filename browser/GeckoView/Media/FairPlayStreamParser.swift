@@ -296,11 +296,28 @@ public final class FairPlayStreamParser: NSObject {
             entry.initData = initData
         }
         let keyId = Self.keyIdentifier(inPSSH: initData)
+        // CHANGED - see fix_key_request_unwraps_pssh.py's docstring.
+        // What the page hands us is a complete MP4 PSSH box, and
+        // AVFoundation ignores one in silence: six calls with the box
+        // produced no key request at all, while the probe's 147
+        // sinf-derived bytes produce one every time. The FairPlay data
+        // is the box's PAYLOAD, so that is what goes to the session.
+        //
+        // The bytes as they ARRIVED are still what the exchange is
+        // keyed by - FairPlayCDMProxy files the session under base64 of
+        // exactly them - so entry.initData above is left alone. Only
+        // what AVFoundation is handed changes.
+        let payload = Self.psshPayload(in: initData)
+        let forSession = payload ?? initData
         Self.log("session \(sessionId) raising a key request directly from "
-                 + "\(initData.count) bytes of init data - key id "
+                 + "\(forSession.count) bytes of "
+                 + (payload == nil ? "init data as it arrived"
+                                   : "PSSH payload (unwrapped from "
+                                     + "\(initData.count))")
+                 + " - key id "
                  + (keyId.map { "\($0.count) bytes" } ?? "not found"))
         entry.keySession.processContentKeyRequest(withIdentifier: nil,
-                                                  initializationData: initData,
+                                                  initializationData: forSession,
                                                   options: nil)
         return true
     }
@@ -353,7 +370,69 @@ public final class FairPlayStreamParser: NSObject {
         let payload = be32(cursor)
         cursor += 4
         guard payload >= 16, bytes.count >= cursor + 16 else { return nil }
+        // CHANGED - see fix_key_request_unwraps_pssh.py's docstring.
+        // A version 0 box names no key ids, and this branch assumed
+        // Apple's opens its payload with one. The box the page actually
+        // sends opens with a nested fpsd box, so what came back was
+        // four bytes of length and four of ASCII reported as a key id.
+        // A payload that is box-shaped is not one.
+        if Self.looksLikeBox(bytes, at: cursor, within: payload) {
+            return nil
+        }
         return Data(bytes[cursor..<(cursor + 16)])
+    }
+
+    /// Whether the bytes at `at` open an MP4 box that fills `within`.
+    ///
+    /// ADDED - see fix_key_request_unwraps_pssh.py's docstring. Both
+    /// tests matter: a 16-byte key id can begin with anything, so the
+    /// declared size has to account for the whole payload before a box
+    /// is the better reading of it.
+    private static func looksLikeBox(_ bytes: [UInt8], at: Int,
+                                     within: Int) -> Bool {
+        guard bytes.count >= at + 8 else { return false }
+        let size = (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                 | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+        guard size == within else { return false }
+        return bytes[(at + 4)..<(at + 8)].allSatisfy {
+            $0 >= 0x20 && $0 <= 0x7E
+        }
+    }
+
+    /// The data payload of a PSSH box, or nil when these bytes are not
+    /// one.
+    ///
+    /// ADDED - see fix_key_request_unwraps_pssh.py's docstring. This is
+    /// what AVFoundation wants: the FairPlay initialisation data, with
+    /// the MP4 wrapper the page delivers it in taken off.
+    ///
+    /// Same layout walk as keyIdentifier(inPSSH:) above, and copied to
+    /// an array first for the same reason - this Data crosses from
+    /// Objective-C, where a non-zero startIndex is legal and indexing
+    /// by absolute offset reads the wrong bytes.
+    static func psshPayload(in data: Data) -> Data? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 32,
+              bytes[4] == 0x70, bytes[5] == 0x73,
+              bytes[6] == 0x73, bytes[7] == 0x68 else {
+            return nil
+        }
+        func be32(_ at: Int) -> Int {
+            return (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                 | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+        }
+        var cursor = 28  // size, type, version+flags, system id
+        if bytes[8] >= 1 {
+            guard bytes.count >= cursor + 4 else { return nil }
+            cursor += 4 + 16 * be32(cursor)
+        }
+        guard bytes.count >= cursor + 4 else { return nil }
+        let length = be32(cursor)
+        cursor += 4
+        guard length > 0, bytes.count >= cursor + length else {
+            return nil
+        }
+        return Data(bytes[cursor..<(cursor + length)])
     }
 
     /// The page's FPS application certificate, for one session.
