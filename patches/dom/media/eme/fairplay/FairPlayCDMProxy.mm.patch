@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1254 @@
+@@ -0,0 +1,1255 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1125,7 +1125,8 @@ index 000000000000..e859b69f6239
 +//
 +// Free function, not a method: SourceBuffer has no proxy to call
 +// through, and on this path there may be no proxy at all yet.
-+void ReynardMSEForwardInitSegment(const uint8_t* aData, size_t aLength) {
++extern "C" void ReynardMSEForwardInitSegment(const uint8_t* aData,
++                                             size_t aLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (!aData || !aLength) {
 +    return;
