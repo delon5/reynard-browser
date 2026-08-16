@@ -363,6 +363,7 @@ public final class AVPlayerHost: NSObject {
     /// handles and which is the only path that has produced an SPC on
     /// this device.
     @objc public func parserAppendMediaSegment(_ childId: UInt,
+                                               stream: String,
                                                segment: Data) {
         let sessionId = "child-\(childId)"
         let parser = FairPlayStreamParser.shared
@@ -375,11 +376,15 @@ public final class AVPlayerHost: NSObject {
                 parser.setCertificate(sessionId, certificate: stored)
             }
         }
-        avLog("parser media init segment for child \(childId), "
+        avLog("parser segment for child \(childId) stream \(stream), "
               + "\(segment.count) bytes")
-        if !parser.append(sessionId, initSegment: segment) {
-            avLog("parser declined the media init segment for child "
-                  + "\(childId)")
+        // Routed to the parser for THIS SourceBuffer. One parser per
+        // stream: a page's audio and video are separate presentations,
+        // and one AVStreamDataParser fed both ends up -11853 and stays
+        // failed for good.
+        if !parser.append(sessionId, stream: stream, segment: segment) {
+            avLog("parser declined the segment for child \(childId) "
+                  + "stream \(stream)")
         }
     }
 

@@ -132,6 +132,8 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     private var entries: [String: Entry] = [:]
+    /// Stream parsers by "<sessionId>|<stream>". See append(_:stream:).
+    fileprivate var streamParsers: [String: StreamParser] = [:]
     private let lock = NSLock()
 
     private func withState<T>(_ body: () -> T) -> T {
@@ -671,22 +673,27 @@ public final class FairPlayStreamParser: NSObject {
     /// Four big-endian length bytes, then a NAL header: forbidden_zero
     /// clear, type in 1...23, and a length that fits what is actually
     /// there. Deliberately strict - the point is a test ciphertext fails.
-    static func looksLikeLengthPrefixedH264(_ head: [UInt8],
-                                            total: Int) -> Bool {
-        guard head.count >= 5 else {
-            return false
+    static func h264Framing(_ head: [UInt8], total: Int) -> String {
+        func plausibleNAL(_ byte: UInt8) -> Bool {
+            guard byte & 0x80 == 0 else { return false }
+            let nalType = byte & 0x1f
+            return nalType >= 1 && nalType <= 23
         }
-        let length = (Int(head[0]) << 24) | (Int(head[1]) << 16)
-                   | (Int(head[2]) << 8) | Int(head[3])
-        guard length > 0, length <= total - 4 else {
-            return false
+        // Length-prefixed: four big-endian bytes that fit the buffer,
+        // then a NAL header.
+        if head.count >= 5 {
+            let length = (Int(head[0]) << 24) | (Int(head[1]) << 16)
+                       | (Int(head[2]) << 8) | Int(head[3])
+            if length > 0, length <= total - 4, plausibleNAL(head[4]) {
+                return "length-prefixed"
+            }
         }
-        let header = head[4]
-        guard header & 0x80 == 0 else {
-            return false
+        // Raw: the payload IS the NAL, header first. What this parser
+        // actually produces.
+        if let first = head.first, plausibleNAL(first) {
+            return "raw NAL type \(first & 0x1f)"
         }
-        let nalType = header & 0x1f
-        return nalType >= 1 && nalType <= 23
+        return "neither"
     }
 
     /// Ask the parser for media data on every track it knows about.
@@ -972,6 +979,134 @@ public final class FairPlayStreamParser: NSObject {
             return nil
         }
         return Data(bytes[cursor..<(cursor + length)])
+    }
+
+    /// One parser per stream, all recipients of the session's ONE key
+    /// session.
+    ///
+    /// A page appends audio and video to separate SourceBuffers, and
+    /// AVStreamDataParser parses a single stream: fed two presentations
+    /// it reports one track as `soun` and another as `vide` under the
+    /// same id, then fails -11853 and never recovers.
+    ///
+    /// The key session stays shared, and that is deliberate rather than
+    /// convenient - a licence applied to a request on it decrypts for
+    /// every recipient, so the whole EME exchange (key request, SPC,
+    /// CKC, all keyed by child) is untouched by this.
+    fileprivate final class StreamParser {
+        let parser: NSObject
+        let recipient: AVContentKeyRecipient
+        let delegate: ParserDelegate
+        /// AVFoundation says a failed parser cannot recover - "create a
+        /// new AVStreamDataParser to try again" - so this marks one for
+        /// replacement rather than pretending it still works.
+        var failed = false
+
+        init(parser: NSObject, recipient: AVContentKeyRecipient,
+             delegate: ParserDelegate) {
+            self.parser = parser
+            self.recipient = recipient
+            self.delegate = delegate
+        }
+    }
+
+    /// Append to the parser for one stream, building it if needed.
+    @discardableResult
+    @objc public func append(_ sessionId: String, stream: String,
+                             segment: Data) -> Bool {
+        guard let entry = withState({ entries[sessionId] }) else {
+            Self.log("segment for unknown session \(sessionId)")
+            return false
+        }
+        let key = sessionId + "|" + stream
+        var slot = withState { streamParsers[key] }
+        if let existing = slot, existing.failed {
+            Self.log("stream \(stream) parser had failed - building a new one")
+            entry.keySession.removeContentKeyRecipient(existing.recipient)
+            withState { streamParsers[key] = nil }
+            slot = nil
+        }
+        if slot == nil {
+            guard let built = Self.buildParser(sessionId: sessionId,
+                                               stream: stream) else {
+                return false
+            }
+            entry.keySession.addContentKeyRecipient(built.recipient)
+            withState { streamParsers[key] = built }
+            Self.log("stream \(stream) parser built and added to the key "
+                     + "session - recipients "
+                     + "\(entry.keySession.contentKeyRecipients.count)")
+            slot = built
+        }
+        guard let slot else {
+            return false
+        }
+        let append = NSSelectorFromString("appendStreamData:")
+        guard slot.parser.responds(to: append) else {
+            Self.log("no appendStreamData: on the stream parser")
+            return false
+        }
+        slot.parser.perform(append, with: segment)
+        Self.log("stream \(stream) appended \(segment.count) bytes")
+        // Asked for again after EVERY append, not once when the licence
+        // landed. setShouldProvideMediaData is armed per track and
+        // providePendingMediaData drains what is pending NOW - fragments
+        // that arrive later were simply never asked for, which is why
+        // eight forwarded fragments produced one sample.
+        Self.drainMediaData(slot.parser, label: stream)
+        return true
+    }
+
+    /// A parser bound to one stream, with its own delegate.
+    private static func buildParser(sessionId: String,
+                                    stream: String) -> StreamParser? {
+        guard let parserClass = NSClassFromString("AVStreamDataParser") as? NSObject.Type else {
+            log("AVStreamDataParser is absent")
+            return nil
+        }
+        let parser = parserClass.init()
+        let delegate = ParserDelegate(sessionId: sessionId)
+        let setDelegate = NSSelectorFromString("setDelegate:")
+        guard parser.responds(to: setDelegate) else {
+            log("no setDelegate: on the stream parser")
+            return nil
+        }
+        parser.perform(setDelegate, with: delegate)
+        guard let recipient = parser as? AVContentKeyRecipient else {
+            log("stream parser does not declare AVContentKeyRecipient")
+            return nil
+        }
+        return StreamParser(parser: parser, recipient: recipient,
+                            delegate: delegate)
+    }
+
+    /// Arm every track and drain whatever is pending.
+    private static func drainMediaData(_ parser: NSObject, label: String) {
+        let shouldProvide = NSSelectorFromString("setShouldProvideMediaData:forTrackID:")
+        let provide = NSSelectorFromString("providePendingMediaData")
+        if parser.responds(to: shouldProvide),
+           let implementation = parser.method(for: shouldProvide) {
+            typealias ProvideFunction =
+                @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
+            let call = unsafeBitCast(implementation, to: ProvideFunction.self)
+            // Tracks 1 and 2 cover a single-presentation stream, which is
+            // what each of these parsers now holds. Cheap and idempotent:
+            // arming a track that does not exist is a no-op.
+            for trackID in Int32(1)...Int32(2) {
+                call(parser, shouldProvide, true, trackID)
+            }
+        }
+        if parser.responds(to: provide) {
+            parser.perform(provide)
+        }
+    }
+
+    fileprivate func noteStreamParseFailure(sessionId: String) {
+        withState {
+            for (key, slot) in streamParsers where key.hasPrefix(sessionId + "|") {
+                slot.failed = true
+            }
+        }
     }
 
     /// The page's FPS application certificate, for one session.
@@ -1658,6 +1793,12 @@ private final class ParserDelegate: NSObject {
     @objc(streamDataParser:didFailToParseStreamDataWithError:)
     func streamDataParser(_ parser: Any, didFailToParseStreamDataWithError error: Error) {
         fputs("fpsParser: session \(sessionId) parse FAILED: \(error)\n", stderr)
+        // Marked for replacement, not just logged. AVFoundation is
+        // explicit that this is terminal - "Ignoring appendStreamData:
+        // because we're failed or expired, create a new
+        // AVStreamDataParser to try again" - so every later append went
+        // into a dead object, silently.
+        FairPlayStreamParser.shared.noteStreamParseFailure(sessionId: sessionId)
     }
 
     /// The parser understood the segment and built an asset for it.
@@ -1751,13 +1892,20 @@ private final class ParserDelegate: NSObject {
         // length fitting the buffer. Ciphertext passes that by accident
         // essentially never.
         // FairPlayStreamParser, not Self: these helpers live on the parser
-        // and this callback is on KeySessionDelegate, so Self resolves to
-        // the wrong type. swiftc -parse cannot see that - it checks syntax
-        // and does not resolve names.
+        // while this callback is on KeySessionDelegate. Self resolves to
+        // the wrong type and does not compile - swiftc -parse passes it
+        // because it checks syntax and never resolves names.
         let (head, totalBytes) = FairPlayStreamParser.samplePrefix(
             sampleBuffer, count: 16)
-        let looksLikeH264 = FairPlayStreamParser.looksLikeLengthPrefixedH264(
-            head, total: totalBytes)
+        // Both framings, because the first capture disproved the
+        // assumption behind testing only one. A 6-byte sample came back
+        // as 21 00 03 40 68 1c and was reported "NOT H.264" - but 0x21
+        // read as a RAW NAL header is forbidden_zero 0, nal_ref_idc 1,
+        // type 1, a perfectly ordinary non-IDR slice. The test was
+        // looking for a length prefix that this parser does not add.
+        let framing = FairPlayStreamParser.h264Framing(head,
+                                                      total: totalBytes)
+        let looksLikeH264 = framing != "neither"
         // And the extension a protected track carries to name the codec
         // underneath its encryption. Absent beside subtype=avc1 is what
         // a real decryption looks like; present would mean the
@@ -1776,7 +1924,7 @@ private final class ParserDelegate: NSObject {
         }
         fputs("fpsParser: session \(sessionId)   payload \(totalBytes) bytes, "
               + "head \(head.map { String(format: "%02x", $0) }.joined()) "
-              + "-> \(looksLikeH264 ? "length-prefixed H.264" : "NOT H.264") "
+              + "-> \(looksLikeH264 ? "H.264 (\(framing))" : "NOT H.264") "
               + "| ProtectedContentOriginalFormat \(protectedOriginal) "
               + "| pts \(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))) "
               + "dts \(CMTimeGetSeconds(CMSampleBufferGetDecodeTimeStamp(sampleBuffer)))\n",

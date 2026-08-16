@@ -2,7 +2,7 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,112 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +568,127 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -106,9 +106,24 @@ index d79526afbbfa..cb10fad683d0 100644
 +      // extern "C" would sidestep that, and is not permitted at block
 +      // scope; declaring at file scope would mean a second hunk in this
 +      // file for one line. See fix_forward_init_segment_to_parser.py.
-+      extern void ReynardMSEForwardInitSegment(const uint8_t* aData,
++      // WHICH SourceBuffer, because one parser cannot hold two.
++      //
++      // A page appends audio and video to separate SourceBuffers, and
++      // both were being forwarded into a single AVStreamDataParser -
++      // which parses ONE stream. The second init segment corrupted it,
++      // the next fragment came back -11853 "Cannot Parse", and every
++      // fragment after that went into an object AVFoundation had already
++      // marked failed.
++      //
++      // `this` is the identity: unique per SourceBuffer, stable for its
++      // life, and needing no IPDL change to carry - see
++      // ReynardMSEForwardInitSegment, which files it in the contentId
++      // field the initseg route leaves empty.
++      extern void ReynardMSEForwardInitSegment(uintptr_t aStreamId,
++                                               const uint8_t* aData,
 +                                               size_t aLength);
-+      ReynardMSEForwardInitSegment(aData->Elements(), mseLength);
++      ReynardMSEForwardInitSegment(reinterpret_cast<uintptr_t>(this),
++                                   aData->Elements(), mseLength);
 +    }
 +  }
 +

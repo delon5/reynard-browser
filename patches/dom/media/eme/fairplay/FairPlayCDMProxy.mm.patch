@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1312 @@
+@@ -0,0 +1,1317 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1162,7 +1162,8 @@ index 000000000000..e859b69f6239
 +// spelled form would nest to mozilla::mozilla::dom and the caller's
 +// symbol would go on being undefined.
 +namespace dom {
-+void ReynardMSEForwardInitSegment(const uint8_t* aData, size_t aLength) {
++void ReynardMSEForwardInitSegment(uintptr_t aStreamId, const uint8_t* aData,
++                                  size_t aLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  if (!aData || !aLength) {
 +    return;
@@ -1174,10 +1175,14 @@ index 000000000000..e859b69f6239
 +  }
 +  nsTArray<uint8_t> segment;
 +  segment.AppendElements(aData, aLength);
-+  printf_stderr("avPlayer: MSE forwarding a %zu byte init segment to "
-+                "the parser\n", aLength);
-+  cc->SendAVPlayerKeyGenerateRequest(0, nsCString(""),
-+                                     nsCString("initseg"), segment);
++  // The stream id rides in the contentId field, which this route leaves
++  // empty - so a page's audio and video reach different parsers without
++  // a PContent change and the wide rebuild that comes with it.
++  nsPrintfCString streamId("sb-%llu", (unsigned long long)aStreamId);
++  printf_stderr("avPlayer: MSE forwarding a %zu byte segment for %s\n",
++                aLength, streamId.get());
++  cc->SendAVPlayerKeyGenerateRequest(0, streamId, nsCString("initseg"),
++                                     segment);
 +}
 +}  // namespace dom
 +

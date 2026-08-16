@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2683 @@
+@@ -0,0 +0,2687 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1028,7 +1028,8 @@ index 000000000000..b56efaa8479c
 +    // parsed and must NOT raise a direct key request, since the
 +    // parser raising a specifier is the entire point of sending it.
 +    if (aInitDataType.EqualsLiteral("initseg")) {
-+      SEL parserSegment = @selector(parserAppendMediaSegment:segment:);
++      SEL parserSegment =
++          @selector(parserAppendMediaSegment:stream:segment:);
 +      if (!host || ![host respondsToSelector:parserSegment]) {
 +        printf_stderr(
 +            "avPlayer: MSE init segment route unavailable for child "
@@ -1036,9 +1037,12 @@ index 000000000000..b56efaa8479c
 +        return;
 +      }
 +      printf_stderr(
-+          "avPlayer: MSE init segment child=%llu %zu bytes\n",
-+          (unsigned long long)(aKey >> 32), (size_t)aInitData.Length());
++          "avPlayer: MSE segment child=%llu stream=%s %zu bytes\n",
++          (unsigned long long)(aKey >> 32), aContentId.get(),
++          (size_t)aInitData.Length());
 +      [host parserAppendMediaSegment:static_cast<NSUInteger>(aKey >> 32)
++                              stream:[NSString
++                                         stringWithUTF8String:aContentId.get()]
 +                             segment:[NSData
 +                                         dataWithBytes:aInitData.Elements()
 +                                                length:aInitData.Length()]];
