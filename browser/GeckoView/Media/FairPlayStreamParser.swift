@@ -1287,7 +1287,18 @@ public final class FairPlayStreamParser: NSObject {
         // Main queue: this is UIKit, and the parser's callbacks arrive on
         // AVFoundation's own queues.
         DispatchQueue.main.async {
-            let scenes = UIApplication.shared.connectedScenes
+            // UIApplication.shared is unavailable in this target - it is
+            // built extension-API-only - so the instance is fetched
+            // dynamically. No compile-time reference, same object.
+            let selector = NSSelectorFromString("sharedApplication")
+            guard let appClass = NSClassFromString("UIApplication") as? NSObject.Type,
+                  appClass.responds(to: selector),
+                  let application = appClass.perform(selector)?
+                      .takeUnretainedValue() as? UIApplication else {
+                log("cannot show \(label) - no UIApplication")
+                return
+            }
+            let scenes = application.connectedScenes
             let window = scenes.compactMap { $0 as? UIWindowScene }
                                .flatMap { $0.windows }
                                .first { $0.isKeyWindow }
