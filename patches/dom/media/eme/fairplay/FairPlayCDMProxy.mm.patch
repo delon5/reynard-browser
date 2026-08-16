@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1262 @@
+@@ -0,0 +1,1263 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1137,7 +1137,8 @@ index 000000000000..e859b69f6239
 +  if (!aData || !aLength) {
 +    return;
 +  }
-+  ContentChild* cc = ContentChild::GetSingleton();
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
 +  if (!cc) {
 +    return;
 +  }
