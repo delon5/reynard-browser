@@ -320,31 +320,28 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // Always send, for the same reason as setToolbarLimits above:
         // the widget already ignores an unchanged value, and gating here
         // loses the send whenever there is no session to send it to.
-        if inset != safeAreaInsetBottom {
+        let changed = inset != safeAreaInsetBottom
+        if changed {
             NSLog("dynToolbar: env(safe-area-inset-bottom) \(safeAreaInsetBottom) -> \(inset)pt (session \(session == nil ? "MISSING" : "live"))")
         }
         safeAreaInsetBottom = inset
         session?.setSafeAreaInsetBottom(inset)
 
-        // MEASUREMENT. We send POINTS; the page sees CSS PIXELS, and
-        // the conversion runs through the page's own layout viewport -
-        // which is why a value that looks right on a mobile-optimised
-        // page can be several times too large on one declaring a ~980px
-        // desktop viewport. Rather than bisect it again, ask the page
-        // what env() actually resolved to.
-        guard let session, inset > 0 else {
+        // GROUND TRUTH, 700ms after a nonzero send so the content
+        // restyle has landed: ask the classifier actor, whose response
+        // carries what env(safe-area-inset-bottom) actually resolved
+        // to inside the document (logged by
+        // GeckoSession.bottomReservation as "page resolves env(...)").
+        // The old runUserScript probe here could never carry an answer
+        // back - that API's success return is nil by design, so its
+        // "returned nothing" line meant the script RAN and its value
+        // went nowhere.
+        guard let session, inset > 0, changed else {
             return
         }
         Task { @MainActor in
-            let probe = "(() => { const p = document.createElement('div'); p.style.cssText = 'position:fixed;left:-9999px;bottom:env(safe-area-inset-bottom);height:0;width:0'; document.documentElement.appendChild(p); const env = getComputedStyle(p).bottom; p.remove(); return JSON.stringify({env: env, innerWidth: window.innerWidth, visualWidth: window.visualViewport ? window.visualViewport.width : null, dpr: window.devicePixelRatio}); })()"
-            if let answer = await session.runUserScript(probe) {
-
-                NSLog("dynToolbar: page reports \(answer)")
-            } else {
-                // The measurement that never reported. Silence here is
-                // what left the CSS-px question open across two captures.
-                NSLog("dynToolbar: page probe returned nothing - runUserScript unavailable or refused")
-            }
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            _ = await session.bottomReservation()
         }
     }
     
