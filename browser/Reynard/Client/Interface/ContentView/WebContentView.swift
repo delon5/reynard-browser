@@ -227,6 +227,15 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         }
     }
     
+    /// Whether a pull-to-refresh drag is currently held (recognizer
+    /// in .began/.changed). Read by ScrollChromeCoordinator via
+    /// ContentView to defer a chrome expand that would otherwise
+    /// re-anchor the content and resize the ICB mid-gesture.
+    var isPullToRefreshActive: Bool {
+        let state = pullToRefreshRecognizer?.state
+        return state == .began || state == .changed
+    }
+    
     func didFinishLoading(session: GeckoSession) {
         guard session === refreshingSession else {
             return

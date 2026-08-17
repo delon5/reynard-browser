@@ -1057,6 +1057,14 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         onHistorySwipeEnded?()
     }
     
+    /// Whether a pull-to-refresh drag is currently held on the web
+    /// surface. The chrome-condense coordinator consults this so a
+    /// mid-pull expand never resizes the page under the user's
+    /// finger.
+    var isPullToRefreshActive: Bool {
+        return webContentView.isPullToRefreshActive
+    }
+    
     private func updatePullToRefreshAvailability() {
         let isHistoryNavigationIdle: Bool
         if case .idle = historySwipeState {

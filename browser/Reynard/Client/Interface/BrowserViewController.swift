@@ -206,6 +206,17 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
                 && !self.tabOverview.isPresented
                 && !self.searchOverlayCoordinator.isFocused
         }
+        // While a pull-to-refresh drag is held, the +40pt expand is
+        // deferred to the end of the gesture: expanding mid-pull
+        // swaps the content anchor un-animated and flips the
+        // dynamic-toolbar max from 0 to the full toolbar height - a
+        // real ICB resize under the user's finger. The refresh
+        // threshold (350pt) is far past the 40pt decision threshold,
+        // so every refresh-strength pull from the pill would
+        // otherwise cross it mid-gesture.
+        scrollChromeCoordinator.isPullToRefreshActive = { [weak self] in
+            self?.contentView.isPullToRefreshActive == true
+        }
         
         scrollbarHapticCoordinator.attach(to: contentView)
         // Pixel-perfect activation: APZ reports the exact moment a

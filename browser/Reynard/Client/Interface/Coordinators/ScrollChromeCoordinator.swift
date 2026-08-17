@@ -37,6 +37,22 @@ final class ScrollChromeCoordinator: NSObject {
     /// browsing.
     var isEnabled: () -> Bool = { true }
     
+    /// Consulted before an EXPAND decision. While a pull-to-refresh
+    /// drag is held, expanding mid-gesture re-anchors the content
+    /// view un-animated and flips the dynamic-toolbar max from 0 to
+    /// the full toolbar height - a real ICB resize and reflow under
+    /// the user's finger. The pull survives (its engine approval is
+    /// latched per touch sequence) but the page visibly jolts, and
+    /// the refresh threshold (350pt) sits far past the 40pt decision
+    /// threshold, so every refresh-strength pull from the condensed
+    /// pill would cross this. The expand is deferred to the end of
+    /// the gesture instead. Condensing needs no gate: it requires an
+    /// UPWARD drag, which cannot co-occur with a downward pull.
+    var isPullToRefreshActive: () -> Bool = { false }
+    /// An expand decision that fired mid-pull and is waiting for the
+    /// gesture to end.
+    private var hasDeferredExpand = false
+    
     init(browserChrome: BrowserChrome) {
         self.browserChrome = browserChrome
         super.init()
@@ -66,6 +82,7 @@ final class ScrollChromeCoordinator: NSObject {
         switch recognizer.state {
         case .began:
             lastDecisionTranslationY = recognizer.translation(in: recognizer.view).y
+            hasDeferredExpand = false
         case .changed:
             guard isEnabled() else {
                 return
@@ -80,8 +97,29 @@ final class ScrollChromeCoordinator: NSObject {
                 browserChrome.setScrollCondensed(true, animated: true)
                 lastDecisionTranslationY = currentTranslationY
             } else if netMovement >= UX.decisionThreshold, browserChrome.isScrollCondensed {
-                browserChrome.setScrollCondensed(false, animated: true)
+                if isPullToRefreshActive() {
+                    // Not while a finger is holding a pull - remember
+                    // the decision and act on it at gesture end.
+                    hasDeferredExpand = true
+                } else {
+                    browserChrome.setScrollCondensed(false, animated: true)
+                }
                 lastDecisionTranslationY = currentTranslationY
+            }
+        case .ended, .cancelled, .failed:
+            guard hasDeferredExpand else {
+                break
+            }
+            hasDeferredExpand = false
+            // The finger is up. If the pull triggered a reload, the
+            // navigation reset expands the chrome anyway - both
+            // paths funnel through setScrollCondensed's state guard,
+            // so they compose idempotently. If the pull was
+            // cancelled, this honors the drag-down-to-expand the
+            // user performed, now that the resize cannot land under
+            // a held pull.
+            if isEnabled(), browserChrome.isScrollCondensed {
+                browserChrome.setScrollCondensed(false, animated: true)
             }
         default:
             break
