@@ -74,7 +74,19 @@ final class OverlayCoordinator {
     }
     
     func chromeStateForAddressBarScrollDismissal(layout: BrowserLayout) -> BrowserChrome.SearchState? {
-        guard addressBarScrollDismissal != nil else {
+        // Only a SEARCH-page dismissal keeps the scrolling chrome
+        // state: the user drag-dismissed the keyboard to browse the
+        // suggestion list, which stays on screen. A HOMEPAGE-page
+        // dismissal has no suggestions to keep browsing - the view
+        // left on screen is the homepage, which must present the
+        // full standard toolbar, exactly as a fresh new tab does.
+        // Answering for the homepage here parked the toolbar in a
+        // buttons-hidden state indefinitely (the record is consumed
+        // but never cleared), and - through keyboardWillHide's guard
+        // reading this same query - kept endSearchSession from ever
+        // running for the homepage drag, un-fixing a1484d3 for the
+        // exact gesture it was written for.
+        guard addressBarScrollDismissal?.page == .search else {
             return nil
         }
         

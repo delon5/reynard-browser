@@ -360,6 +360,65 @@ final class JITController {
         }
     }
 
+    /// Emergency counterpart to the +2s foreground recovery in
+    /// SceneDelegate.sceneWillEnterForeground, for the one case where
+    /// that recovery can never run: the main thread is parked inside
+    /// ExtensionFoundation's synchronous lifecycle XPC to a content
+    /// process that a dying debug transport left stopped. The +2s
+    /// block sits on the MAIN queue (see
+    /// fix_defer_reattach_past_transition.py), so it waits behind the
+    /// hang forever while FrontBoard's 10-second scene-update budget
+    /// runs out - 0x8BADF00D with 0.1s of CPU used, watched from the
+    /// hang watchdog with 8 seconds to spare and, until now, no lever
+    /// to pull: kill() on an extension process returns EPERM. See
+    /// fix_resume_stopped_children_on_foreground_hang.py.
+    ///
+    /// Re-attaching IS the resume mechanism, not just a JIT repair: a
+    /// fresh session's first action is either a continue (the loop
+    /// re-arms) or an immediate clean detach (a teardown request is
+    /// still standing and runDebugService joins it) - and both leave
+    /// the target RUNNING. Once the stopped child runs, it answers
+    /// the parked XPC, the main thread unblocks, and the scene update
+    /// completes inside the budget: the watchdog fires at 2.0s and an
+    /// attach takes ~1.4s, so recovery lands around +3.5s of the 10s.
+    ///
+    /// Called from MainThreadHangWatchdog's background queue - never
+    /// the main thread, which is the one that is stuck.
+    func recoverStoppedChildrenAfterForegroundHang() {
+        attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
+
+            // No session was ever attached in these modes, so no
+            // child can be holding a debugger stop - and the hang,
+            // whatever it is, is not one a re-attach can fix.
+            guard !self.isJITLessModeActive, !self.hasHandledFailure else {
+                logger("hangRecovery: skipped - JIT-less mode or a latched failure, no child holds a debugger stop")
+                return
+            }
+
+            // The background teardown's standing detach request would
+            // make every recovered loop detach on its first
+            // iteration. Even that resumes the child - but the
+            // watchdog only runs foregrounded (it pauses on
+            // didEnterBackground), and the applicationDidBecomeActive
+            // that normally lifts the request is parked behind the
+            // hang. Lift it here, mirroring that handler's ordering,
+            // so the recovered loops re-arm instead of churning.
+            JITEnabler.clearDebuggerTeardownRequest()
+
+            logger("hangRecovery: main thread parked - re-attaching orphaned children from the watchdog path")
+
+            // The same census + reattach pair the main-queue recovery
+            // runs, dispatched from a queue that is actually alive.
+            // Idempotent against the main-queue copy running later,
+            // once the hang clears: a pid with a live session is not
+            // an orphan, and boundedEnableJIT's per-pid in-flight
+            // guard covers the overlap window.
+            self.dumpChildCensus(labelled: "childCensus at hangRecovery")
+            self.reattachOrphanedProcesses()
+        }
+    }
+
     /// Logs every child the app knows about, with its type, whether the
     /// JIT layer attached it, and whether it is still alive.
     ///

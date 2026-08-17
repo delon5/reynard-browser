@@ -39,6 +39,16 @@ final class HomepageOverlayCoordinator {
     private let homepageThumbnailRenderer: HomepageThumbnailRenderer
     private var presentationIntent: HomepagePresentationIntent = .inactive
     
+    /// Whether the homepage overlay is presented over the selected
+    /// tab because the address bar took focus. The pill-condense
+    /// coordinator consults this: the homepage must present the full
+    /// toolbar and never condense to the pill - the same rule the
+    /// blank-tab hasRealURL gate has always enforced, which cannot
+    /// see the homepage-over-a-real-URL-tab case.
+    var isPresentedForAddressBarFocus: Bool {
+        return presentationIntent == .addressBarFocus
+    }
+    
     private struct HomepagePresentation: Equatable {
         let host: OverlayCoordinator.Host
         let contentMode: HomepageContentMode

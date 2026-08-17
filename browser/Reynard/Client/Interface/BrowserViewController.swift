@@ -204,6 +204,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             return hasRealURL
                 && !self.isShowingFullscreenMedia
                 && !self.tabOverview.isPresented
+                && !self.homepageOverlayCoordinator.isPresentedForAddressBarFocus
                 && !self.searchOverlayCoordinator.isFocused
         }
         // While a pull-to-refresh drag is held, the +40pt expand is

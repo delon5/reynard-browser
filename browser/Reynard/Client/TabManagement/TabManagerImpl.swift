@@ -127,6 +127,18 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// app already flushes on.
     private lazy var hangWatchdog = MainThreadHangWatchdog { [weak self] in
         self?.performEmergencyFlush()
+        // The tabs are safe on disk; now try to save the process. A
+        // main thread parked this long is, in every device capture so
+        // far, ExtensionFoundation's synchronous lifecycle XPC waiting
+        // on a content process that a dying debug transport left
+        // stopped. kill() cannot help - extension processes answer to
+        // RunningBoard, not the host, and every attempt returns EPERM
+        // - so the only actor able to resume the child is a debugger.
+        // The normal +2s foreground recovery is queued on the main
+        // thread, BEHIND the very hang it would fix; this runs the
+        // same recovery from the watchdog's queue instead. See
+        // fix_resume_stopped_children_on_foreground_hang.py.
+        JITController.shared.recoverStoppedChildrenAfterForegroundHang()
     }
     
     private var memoryWarningObservationToken: NSObjectProtocol?

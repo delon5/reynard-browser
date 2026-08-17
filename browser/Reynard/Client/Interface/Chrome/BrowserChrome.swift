@@ -504,6 +504,19 @@ final class BrowserChrome: UIView {
         }
         
         let animations = {
+            // Read the LIVE flag, not the captured parameter.
+            // onScrollCondensedChange (fired above, before any
+            // animation) runs applyBrowserLayout, and apply(state:)
+            // force-expands while search or a non-browsing
+            // presentation is active - re-entering this method and
+            // flipping the flag before the outer call's animation
+            // block has run. Animating toward the captured value
+            // then strands the chrome in the state the re-entrant
+            // call just left - toolbars at alpha 0 with the flag
+            // already false, which no later call can repair because
+            // of the change guard at the top. Reading the flag makes
+            // a stale animation converge on whatever state won.
+            let condensed = self.isScrollCondensed
             self.topToolbar.alpha = condensed ? 0 : 1
             self.topToolbar.transform = condensed
                 ? CGAffineTransform(scaleX: 0.92, y: 0.92)
