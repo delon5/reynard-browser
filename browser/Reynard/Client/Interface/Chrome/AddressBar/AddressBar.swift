@@ -282,6 +282,19 @@ final class AddressBar: UIView {
         return textField.canBecomeFirstResponder
     }
     
+    /// The capsule's frame, for callers that must cut it out of an
+    /// opaque overlay painted behind it - the toolbars' OLED black
+    /// fill, which otherwise gives the capsule's Liquid Glass an
+    /// opaque backdrop and makes it read as a solid capsule.
+    func capsuleFrame(in view: UIView) -> CGRect {
+        return addressBarBackground.convert(addressBarBackground.bounds, to: view)
+    }
+    
+    /// The capsule's corner radius, matching capsuleFrame(in:).
+    static var capsuleCornerRadius: CGFloat {
+        return UX.addressBarBackgroundCornerRadius
+    }
+    
     override func becomeFirstResponder() -> Bool {
         return textField.becomeFirstResponder()
     }

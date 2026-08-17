@@ -176,6 +176,7 @@ final class BottomToolbar: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         applyConfiguredActionsIfNeeded()
+        updateOledCutout()
     }
     
     // MARK: - Layout
@@ -189,6 +190,8 @@ final class BottomToolbar: UIView {
     }
     
     func attachAddressBar(_ addressBar: AddressBar) {
+        attachedAddressBar = addressBar
+        setNeedsLayout()
         if addressBar.superview !== contentView {
             addressBar.removeFromSuperview()
             contentView.addSubview(addressBar)
@@ -211,6 +214,36 @@ final class BottomToolbar: UIView {
     func detachAddressBar() {
         NSLayoutConstraint.deactivate(addressBarConstraints)
         standardButtonsTopConstraint?.isActive = false
+        attachedAddressBar = nil
+        updateOledCutout()
+    }
+    
+    private weak var attachedAddressBar: AddressBar?
+    
+    /// Cuts the address bar capsule out of the OLED overlay, so the
+    /// capsule's glass samples the toolbar's real glass instead of an
+    /// opaque black fill. The overlay is pure black exactly when OLED
+    /// mode is on in dark mode; when it resolves .clear the mask is
+    /// invisible and harmless.
+    private func updateOledCutout() {
+        guard let addressBar = attachedAddressBar,
+              addressBar.superview === contentView,
+              oledOverlayView.bounds.width > 0 else {
+            oledOverlayView.layer.mask = nil
+            return
+        }
+        let capsule = addressBar.capsuleFrame(in: oledOverlayView)
+        guard capsule.width > 0, oledOverlayView.bounds.intersects(capsule) else {
+            oledOverlayView.layer.mask = nil
+            return
+        }
+        let path = UIBezierPath(rect: oledOverlayView.bounds)
+        path.append(UIBezierPath(roundedRect: capsule, cornerRadius: AddressBar.capsuleCornerRadius))
+        let mask = (oledOverlayView.layer.mask as? CAShapeLayer) ?? CAShapeLayer()
+        mask.fillRule = .evenOdd
+        mask.frame = oledOverlayView.bounds
+        mask.path = path.cgPath
+        oledOverlayView.layer.mask = mask
     }
     
     func apply(state: LayoutState, hidesButtons: Bool) {
