@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..799455c 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,7 +17,1366 @@
+@@ -17,7 +17,1455 @@
  
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -20,6 +20,95 @@ index 9ca6e15..799455c 100644
 +// Embedded rather than shipped as a resource:// file on purpose: no
 +// jar.mn entry, no packaging step, nothing to get out of sync with the
 +// actor that uses it.
++// Reynard: who is being denied?
++//
++// A capture carried 131497 "Permission denied to access object" errors -
++// about one per line of the whole log - starting right after the EME
++// shim installed, with Apple's own scripts throwing XHR errors
++// alongside them. That is a page whose JS is failing, not a page whose
++// media is.
++//
++// Gecko prints them with an empty filename and line 0, so nothing in
++// the log says who threw. This listener supplies the missing half:
++// source, line, column and the JS stack, which names the function and
++// the file.
++//
++// Twenty, then it stops. There are 131k; the first few carry the
++// diagnosis and the rest would bury it.
++let gReynardPermDeniedSeen = 0;
++let gReynardPermDeniedListener = null;
++
++function reynardWatchPermissionDenied() {
++  if (gReynardPermDeniedListener) {
++    return;
++  }
++  gReynardPermDeniedListener = {
++    QueryInterface: ChromeUtils.generateQI(["nsIConsoleListener"]),
++    observe(aMessage) {
++      try {
++        if (gReynardPermDeniedSeen >= 20) {
++          return;
++        }
++        if (!(aMessage instanceof Ci.nsIScriptError)) {
++          return;
++        }
++        if (!aMessage.errorMessage.includes("Permission denied")) {
++          return;
++        }
++        gReynardPermDeniedSeen++;
++        const n = gReynardPermDeniedSeen;
++        dump(
++          "permDenied #" +
++            n +
++            " at " +
++            (aMessage.sourceName || "<no source>") +
++            ":" +
++            aMessage.lineNumber +
++            ":" +
++            aMessage.columnNumber +
++            " - " +
++            aMessage.errorMessage +
++            "\n"
++        );
++        // The stack is the answer. nsIScriptError carries a SavedFrame
++        // when the throw had one; without it the error came from a
++        // context with no script, which is itself informative.
++        let frames = [];
++        let frame = aMessage.stack;
++        while (frame && frames.length < 12) {
++          frames.push(
++            (frame.functionDisplayName || "<anon>") +
++              "@" +
++              frame.source +
++              ":" +
++              frame.line
++          );
++          frame = frame.parent || frame.asyncParent;
++        }
++        dump(
++          "permDenied #" +
++            n +
++            " stack: " +
++            (frames.length ? frames.join(" | ") : "<none - no script frame>") +
++            "\n"
++        );
++        if (n === 20) {
++          dump("permDenied: 20 reported, no more will be\n");
++        }
++      } catch (e) {
++        dump("permDenied listener failed: " + e + "\n");
++      }
++    },
++  };
++  try {
++    Services.console.registerListener(gReynardPermDeniedListener);
++    dump("permDenied: listener installed in this content process\n");
++  } catch (e) {
++    gReynardPermDeniedListener = null;
++    dump("permDenied: listener could not be installed: " + e + "\n");
++  }
++}
++
 +const WEBKIT_MEDIA_KEYS_SHIM = `
 +/*
 + * webkitmediakeys-shim.js - Apple's legacy prefixed EME, implemented on
@@ -1369,7 +1458,7 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1424,350 @@
+@@ -65,8 +1513,350 @@
        return windowUtils.SCROLL_MODE_INSTANT;
      }
      return windowUtils.SCROLL_MODE_SMOOTH;
@@ -1720,7 +1809,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1885,21 @@
+@@ -184,6 +1974,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1742,7 +1831,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +1915,189 @@
+@@ -199,11 +2004,193 @@
      return false;
    }
  
@@ -1925,6 +2014,10 @@ index 9ca6e15..799455c 100644
  
      switch (aEvent.type) {
 +      case "DOMWindowCreated": {
++        // Before the shim, not after: if the shim's own installation
++        // provokes the first denial, a listener registered afterwards
++        // would miss exactly the error worth having.
++        reynardWatchPermissionDenied();
 +        this.maybeInstallWebKitMediaKeysShim();
 +        break;
 +      }
