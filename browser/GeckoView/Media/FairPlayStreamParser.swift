@@ -32,6 +32,10 @@
 import AVFoundation
 import Foundation
 import ObjectiveC
+// For the decode probe in runDecodeProbe: a decompression session that
+// answers "do these samples decode" without going through the display
+// layer, so the sink and the samples can be blamed separately.
+import VideoToolbox
 // For the on-screen proof in showLayerIfRequested. This file otherwise
 // touches no UI at all.
 #if canImport(UIKit)
@@ -1015,6 +1019,30 @@ public final class FairPlayStreamParser: NSObject {
         /// changes.
         var lastReport = ""
         var enqueued = 0
+        /// Has the layer got somewhere to render yet?
+        ///
+        /// Fix 21 fed it from the moment it was constructed, and
+        /// showLayerIfRequested attaches it on the main queue - which in
+        /// the capture ran sixty log lines later. Every sample before
+        /// that went into a layer attached to nothing, which fills and
+        /// stops. Nothing is fed until this is true.
+        var layerAttached = false
+        /// Samples waiting for the layer to want them.
+        ///
+        /// Bounded: a queue that grows without limit turns a display
+        /// stall into a memory problem, and this is a diagnostic.
+        var pending: [CMSampleBuffer] = []
+        var overflowed = 0
+        /// requestMediaDataWhenReady calls its block in a loop while the
+        /// layer is hungry, so it is stopped when the queue empties and
+        /// re-armed when something arrives. Otherwise it spins.
+        var drainArmed = false
+        var failObserver: NSObjectProtocol?
+        var drainQueue: DispatchQueue?
+        /// The independent decode probe - see runDecodeProbe.
+        var probeSession: VTDecompressionSession?
+        var probeIn = 0
+        var probeOut = 0
 
         init(parser: NSObject, recipient: AVContentKeyRecipient,
              delegate: ParserDelegate) {
@@ -1198,8 +1226,17 @@ public final class FairPlayStreamParser: NSObject {
             // A control timebase, because a layer with no clock has
             // nothing to schedule against and can report itself ready
             // while showing nothing - which would read as acceptance and
-            // mean nothing. Started at this sample's presentation time so
-            // the first frame is due immediately rather than in the past.
+            // mean nothing.
+            //
+            // STARTED PAUSED, at rate 0, and that is the whole of fix 26.
+            // Fix 21 started it at rate 1 the instant the layer was
+            // constructed, and the layer is not attached to anything for
+            // another sixty log lines - so 2.3 seconds of media time
+            // elapsed on the clock while the queue filled with frames due
+            // at times the clock had already passed. Every one of them
+            // was late before the layer had anywhere to paint. The rate
+            // is released in markLayerAttached, when there is a renderer
+            // for it to be a clock for.
             var timebase: CMTimebase?
             let start = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             if CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault,
@@ -1207,48 +1244,338 @@ public final class FairPlayStreamParser: NSObject {
                                                timebaseOut: &timebase) == noErr,
                let timebase {
                 CMTimebaseSetTime(timebase, time: start)
-                CMTimebaseSetRate(timebase, rate: 1.0)
+                CMTimebaseSetRate(timebase, rate: 0.0)
                 layer.controlTimebase = timebase
             }
             layer.videoGravity = .resizeAspect
-            withState { slot.displayLayer = layer }
-            Self.showLayerIfRequested(layer, label: streamKey)
+            withState {
+                slot.displayLayer = layer
+                slot.drainQueue = DispatchQueue(
+                    label: "org.reynard.fps.display")
+            }
+            Self.observeDecodeFailures(layer, label: streamKey)
             Self.log("stream \(streamKey) built a display layer - "
                      + "status \(layer.status.rawValue) "
-                     + "timebase \(timebase != nil)")
+                     + "timebase \(timebase != nil) - paused until attached")
+            if Self.showLayerMarkerPresent() {
+                Self.showLayerIfRequested(layer, label: streamKey)
+            } else {
+                // No marker, so no placement is coming and none is
+                // wanted: this is fix 21's original measurement, which
+                // asks only whether the layer ACCEPTS the samples. Waiting
+                // for an attachment that will never happen would turn
+                // that measurement into silence.
+                markLayerAttached(streamKey: streamKey)
+            }
         }
         guard let layer = withState({ slot.displayLayer }) else {
             return
         }
 
-        // Guarded: enqueue RAISES on a sample it dislikes rather than
-        // returning an error, and this route has already had one
-        // AVFoundation SPI take the process down.
-        if let failure = GeckoRuntimeBridge.catchException(from: {
-            layer.enqueue(sampleBuffer)
-        }) {
-            Self.log("stream \(streamKey) layer REFUSED the sample: "
-                     + failure)
+        // The independent answer, before anything to do with the layer:
+        // whether these bytes decode is a fact about the bytes, and it
+        // should not depend on the sink being wired correctly.
+        runDecodeProbe(streamKey: streamKey, sampleBuffer: sampleBuffer)
+
+        // Held, not enqueued. The layer is asked for samples through
+        // requestMediaDataWhenReady, which is the API that exists because
+        // pushing into a full renderer is undefined - and fix 21 pushed
+        // 429 frames at a layer that stopped consuming after 55.
+        let queued = withState { () -> Int in
+            guard slot.pending.count < 240 else {
+                slot.overflowed += 1
+                return -1
+            }
+            slot.pending.append(sampleBuffer)
+            return slot.pending.count
+        }
+        if queued < 0 {
+            let dropped = withState { slot.overflowed }
+            if dropped == 1 || dropped % 100 == 0 {
+                Self.log("stream \(streamKey) pending queue FULL - "
+                         + "\(dropped) samples dropped. The layer is not "
+                         + "draining.")
+            }
             return
         }
-        let count = withState { () -> Int in
-            slot.enqueued += 1
-            return slot.enqueued
-        }
+        armDrainIfNeeded(streamKey: streamKey)
+    }
 
-        // Reported on change, plus the first one. status 2 is .failed and
-        // is where an authorization refusal would appear.
-        let report = "status=\(layer.status.rawValue) "
-            + "ready=\(layer.isReadyForMoreMediaData) "
-            + "error=\(layer.error.map { String(describing: $0) } ?? "nil")"
-        let changed = withState { () -> Bool in
-            guard slot.lastReport != report else { return false }
-            slot.lastReport = report
+    /// The layer has somewhere to render. Start its clock and start
+    /// feeding it.
+    ///
+    /// Called from the placement block on the main queue - through every
+    /// exit of it, including the failures, because a feeder that waits
+    /// for an attachment that did not happen produces no rectangle at all
+    /// rather than an empty one, and those look identical in a log.
+    fileprivate func markLayerAttached(streamKey: String) {
+        let started = withState { () -> Bool in
+            guard let slot = streamParsers[streamKey],
+                  !slot.layerAttached else { return false }
+            slot.layerAttached = true
             return true
         }
-        if changed || count == 1 {
-            Self.log("stream \(streamKey) enqueued \(count) - " + report)
+        guard started else { return }
+        if let layer = withState({ streamParsers[streamKey]?.displayLayer }),
+           let timebase = layer.controlTimebase {
+            // Re-anchored to the OLDEST sample still waiting, not to
+            // wherever the clock was left. The point of pausing was that
+            // the queue's contents should not be stale when the clock
+            // starts, and that only holds if the clock starts where the
+            // queue starts.
+            let head = withState { streamParsers[streamKey]?.pending.first }
+            if let head {
+                CMTimebaseSetTime(
+                    timebase,
+                    time: CMSampleBufferGetPresentationTimeStamp(head))
+            }
+            CMTimebaseSetRate(timebase, rate: 1.0)
+            Self.log("stream \(streamKey) released the timebase at "
+                     + "\(CMTimebaseGetTime(timebase).seconds) - layer "
+                     + "attached, feeding starts now")
         }
+        armDrainIfNeeded(streamKey: streamKey)
+    }
+
+    /// Ask the layer to come and get them, if it is not already asking.
+    private func armDrainIfNeeded(streamKey: String) {
+        let work = withState { () -> (layer: AVSampleBufferDisplayLayer,
+                                      queue: DispatchQueue)? in
+            guard let slot = streamParsers[streamKey],
+                  slot.layerAttached, !slot.drainArmed,
+                  !slot.pending.isEmpty,
+                  let layer = slot.displayLayer,
+                  let queue = slot.drainQueue else { return nil }
+            slot.drainArmed = true
+            return (layer, queue)
+        }
+        guard let work else { return }
+        work.layer.requestMediaDataWhenReady(on: work.queue) {
+            [weak layer = work.layer] in
+            guard let layer else { return }
+            FairPlayStreamParser.shared.drainPending(streamKey: streamKey,
+                                                     layer: layer)
+        }
+    }
+
+    /// Feed the layer while it is hungry, and stop asking when it is not.
+    fileprivate func drainPending(streamKey: String,
+                                  layer: AVSampleBufferDisplayLayer) {
+        while layer.isReadyForMoreMediaData {
+            let next = withState { () -> CMSampleBuffer? in
+                guard let slot = streamParsers[streamKey],
+                      !slot.pending.isEmpty else { return nil }
+                return slot.pending.removeFirst()
+            }
+            guard let sample = next else {
+                // Nothing left. Stop, or the block spins on an empty
+                // queue for as long as the layer stays ready.
+                layer.stopRequestingMediaData()
+                withState { streamParsers[streamKey]?.drainArmed = false }
+                return
+            }
+            // Guarded: enqueue RAISES on a sample it dislikes rather than
+            // returning an error, and this route has already had one
+            // AVFoundation SPI take the process down.
+            if let failure = GeckoRuntimeBridge.catchException(from: {
+                layer.enqueue(sample)
+            }) {
+                Self.log("stream \(streamKey) layer REFUSED the sample: "
+                         + failure)
+                return
+            }
+            let count = withState { () -> Int in
+                guard let slot = streamParsers[streamKey] else { return 0 }
+                slot.enqueued += 1
+                return slot.enqueued
+            }
+
+            // Reported on change, plus the first one. status 2 is .failed
+            // and is where an authorization refusal would appear.
+            let report = "status=\(layer.status.rawValue) "
+                + "ready=\(layer.isReadyForMoreMediaData) "
+                + "error=\(layer.error.map { String(describing: $0) } ?? "nil")"
+            let changed = withState { () -> Bool in
+                guard let slot = streamParsers[streamKey],
+                      slot.lastReport != report else { return false }
+                slot.lastReport = report
+                return true
+            }
+            if changed || count == 1 {
+                Self.log("stream \(streamKey) enqueued \(count) - " + report)
+            }
+            // Drift is the failure this fix is about, so it is measured
+            // rather than assumed. A timebase far ahead of the samples
+            // means everything is late and nothing paints; far behind
+            // means nothing is due yet.
+            if count % 30 == 0, let timebase = layer.controlTimebase {
+                let now = CMTimebaseGetTime(timebase).seconds
+                let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+                Self.log("stream \(streamKey) at \(count) - timebase "
+                         + "\(now) vs sample pts \(pts), drift "
+                         + "\(now - pts)")
+            }
+        }
+    }
+
+    /// Does VideoToolbox decode these samples, independently of the layer?
+    ///
+    /// The display layer can be starved, misclocked or unattached, and all
+    /// three look the same from outside: a black rectangle. A
+    /// decompression session has none of those failure modes. It takes the
+    /// same format description and the same samples and either produces
+    /// pixels or says why not.
+    ///
+    /// Eight frames, marker gated on the same file as the on-screen layer,
+    /// because this is a measurement and not a decode path.
+    private func runDecodeProbe(streamKey: String,
+                                sampleBuffer: CMSampleBuffer) {
+        guard Self.showLayerMarkerPresent() else { return }
+        guard let slot = withState({ streamParsers[streamKey] }),
+              slot.probeIn < 8,
+              let format = CMSampleBufferGetFormatDescription(sampleBuffer)
+        else { return }
+
+        if slot.probeSession == nil {
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format)
+            var sets = 0
+            var nalLength: Int32 = 0
+            let parameterStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                format, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                parameterSetSizeOut: nil, parameterSetCountOut: &sets,
+                nalUnitHeaderLengthOut: &nalLength)
+            Self.log("stream \(streamKey) decode probe format - "
+                     + "\(dimensions.width)x\(dimensions.height), "
+                     + "parameter sets \(sets) (status \(parameterStatus)), "
+                     + "NAL length prefix \(nalLength)")
+            var session: VTDecompressionSession?
+            let attributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String:
+                    Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+            ]
+            let status = VTDecompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                formatDescription: format,
+                decoderSpecification: nil,
+                imageBufferAttributes: attributes as CFDictionary,
+                outputCallback: nil,
+                decompressionSessionOut: &session)
+            guard status == noErr, let session else {
+                Self.log("stream \(streamKey) decode probe could NOT create a "
+                         + "decompression session - status \(status). The "
+                         + "format description itself is unusable.")
+                withState { slot.probeIn = 99 }
+                return
+            }
+            withState { slot.probeSession = session }
+        }
+        guard let session = withState({ slot.probeSession }) else { return }
+        let index = withState { () -> Int in
+            slot.probeIn += 1
+            return slot.probeIn
+        }
+        let submitStatus = VTDecompressionSessionDecodeFrame(
+            session, sampleBuffer: sampleBuffer, flags: [],
+            infoFlagsOut: nil
+        ) { decodeStatus, _, image, _, _ in
+            guard decodeStatus == noErr, let image else {
+                FairPlayStreamParser.log(
+                    "stream \(streamKey) decode probe frame \(index) FAILED - "
+                    + "status \(decodeStatus)")
+                return
+            }
+            let width = CVPixelBufferGetWidth(image)
+            let height = CVPixelBufferGetHeight(image)
+            let pixelFormat = CVPixelBufferGetPixelFormatType(image)
+            let luma = FairPlayStreamParser.meanLuma(image)
+            FairPlayStreamParser.shared.withStateNoteProbeFrame(
+                streamKey: streamKey)
+            FairPlayStreamParser.log(
+                "stream \(streamKey) decode probe frame \(index) - "
+                + "\(width)x\(height) format "
+                + "\(FairPlayStreamParser.pixelFormatName(pixelFormat)) "
+                + "mean luma \(luma) - a real number here means these bytes "
+                + "decode to pixels and the sink is the only thing left")
+        }
+        if submitStatus != noErr {
+            Self.log("stream \(streamKey) decode probe submit \(index) failed "
+                     + "- status \(submitStatus)")
+        }
+    }
+
+    fileprivate func withStateNoteProbeFrame(streamKey: String) {
+        withState { streamParsers[streamKey]?.probeOut += 1 }
+    }
+
+    /// Average luma over a coarse grid, so "decoded" and "decoded to
+    /// black" are different answers.
+    fileprivate static func meanLuma(_ image: CVImageBuffer) -> Int {
+        guard CVPixelBufferLockBaseAddress(image, .readOnly) == kCVReturnSuccess
+        else { return -1 }
+        defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
+        let planar = CVPixelBufferGetPlaneCount(image) > 0
+        let base = planar ? CVPixelBufferGetBaseAddressOfPlane(image, 0)
+                          : CVPixelBufferGetBaseAddress(image)
+        guard let base else { return -1 }
+        let rowBytes = planar ? CVPixelBufferGetBytesPerRowOfPlane(image, 0)
+                              : CVPixelBufferGetBytesPerRow(image)
+        let height = planar ? CVPixelBufferGetHeightOfPlane(image, 0)
+                            : CVPixelBufferGetHeight(image)
+        let width = planar ? CVPixelBufferGetWidthOfPlane(image, 0)
+                           : CVPixelBufferGetWidth(image)
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var total = 0
+        var samples = 0
+        var y = 0
+        while y < height {
+            var x = 0
+            while x < width {
+                total += Int(bytes[y * rowBytes + x])
+                samples += 1
+                x += 16
+            }
+            y += 8
+        }
+        return samples > 0 ? total / samples : -1
+    }
+
+    fileprivate static func pixelFormatName(_ value: OSType) -> String {
+        let bytes = [UInt8((value >> 24) & 0xFF), UInt8((value >> 16) & 0xFF),
+                     UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)]
+        let text = String(bytes: bytes, encoding: .ascii) ?? ""
+        return text.isEmpty ? String(value) : text
+    }
+
+    /// Listen for the decoder's own opinion.
+    ///
+    /// AVSampleBufferDisplayLayer reports a rejected sample through a
+    /// notification, not through its error property, and until now
+    /// nothing was listening - so "status=1 error=nil" was consistent
+    /// with a decoder refusing every frame. Raw strings rather than the
+    /// Swift symbols, so the availability of a constant cannot break a
+    /// build over a diagnostic.
+    private static func observeDecodeFailures(
+        _ layer: AVSampleBufferDisplayLayer, label: String) {
+        let name = NSNotification.Name(
+            rawValue: "AVSampleBufferDisplayLayerFailedToDecodeNotification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: name, object: layer, queue: nil) { note in
+            let error = note.userInfo?[
+                "AVSampleBufferDisplayLayerFailedToDecodeNotificationErrorKey"]
+            log("stream \(label) FAILED TO DECODE: "
+                + String(describing: error))
+        }
+        shared.withState {
+            shared.streamParsers[label]?.failObserver = observer
+        }
+    }
+
+    /// Is the measurement switched on?
+    private static func showLayerMarkerPresent() -> Bool {
+        let documents = NSSearchPathForDirectoriesInDomains(
+            .documentDirectory, .userDomainMask, true)
+        let marker = (documents.first ?? "") + "/fps-show-layer.on"
+        return FileManager.default.fileExists(atPath: marker)
     }
 
     /// Put the layer on screen, if a marker file asks for it.
@@ -1287,6 +1614,14 @@ public final class FairPlayStreamParser: NSObject {
         // Main queue: this is UIKit, and the parser's callbacks arrive on
         // AVFoundation's own queues.
         DispatchQueue.main.async {
+            // However this ends - placed, or no window at all - the
+            // feeder has to be released. Samples held for a placement
+            // that never happens produce no rectangle rather than an
+            // empty one, and in a log those look the same.
+            defer {
+                FairPlayStreamParser.shared.markLayerAttached(
+                    streamKey: label)
+            }
             // UIApplication.shared is unavailable in this target - it is
             // built extension-API-only - so the instance is fetched
             // dynamically. No compile-time reference, same object.
