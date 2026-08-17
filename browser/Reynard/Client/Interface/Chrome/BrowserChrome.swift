@@ -530,6 +530,32 @@ final class BrowserChrome: UIView {
             // the scroll left behind; it is what expanded means.
             self.topToolbar.setContentAlpha(condensed ? 0 : 1)
             self.bottomToolbar.setContentAlpha(condensed ? 0 : 1)
+            // And isHidden, which nothing on this path ever asserted.
+            //
+            // Content alpha was one of THREE ways to reach the same band,
+            // and the only one that got fixed. The other two are recorded
+            // as reachable after that fix: bottomToolbar.isHidden stranded
+            // true by an interrupted TabOverviewPresentation - it is set
+            // true in three places and cleared only inside completion
+            // blocks, so a transition that never completes leaves it set
+            // and setScrollCondensed never touched it - and a toolbar that
+            // settles off-screen, opaque and unhidden at f=0,874.
+            //
+            // Asserted rather than diagnosed, because expanding MEANS
+            // fully shown: alpha 1, content alpha 1, identity transform,
+            // not hidden. None of those four is a guess about what an
+            // interrupted transition left behind, which is what makes it
+            // safe to state them unconditionally - and it means any of the
+            // three paths self-heals on the next condense cycle instead of
+            // needing its own fix.
+            //
+            // The transform and alpha above already do their half; this
+            // completes the set. Only on expand: while condensed the pill
+            // owns the screen and hiding is the point.
+            if !condensed {
+                self.topToolbar.isHidden = false
+                self.bottomToolbar.isHidden = false
+            }
             self.logChromeState("applied")
         }
 
