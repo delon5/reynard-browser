@@ -2896,7 +2896,7 @@ private final class ParserDelegate: NSObject {
         let verdict: String
         if stillEncrypted {
             verdict = "STILL ENCRYPTED - the parser did not decrypt it"
-        } else if FairPlayOrigination.protectedSubtypes.contains(subtypeFourCC) {
+        } else if FairPlayStreamParser.protectedSubtypes.contains(subtypeFourCC) {
             verdict = "PROTECTED - decrypt is deferred to the decoder, so "
                 + "the sink has to be a content key recipient"
         } else {
