@@ -540,6 +540,12 @@ public class GeckoSession {
             return nil
         }
 
+        // Ground truth from inside the document: what the page's own
+        // style system resolved env(safe-area-inset-bottom) to at
+        // detection time. -1 means the measurement itself failed.
+        if let envProbe = values["envProbePx"] as? Double {
+            NSLog("safeArea: page resolves env(safe-area-inset-bottom) = %.1fpx", envProbe)
+        }
         if values["usesSafeAreaInset"] as? Bool == true {
             return .readsSafeAreaInset
         }

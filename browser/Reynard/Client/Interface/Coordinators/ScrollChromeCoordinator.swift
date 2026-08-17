@@ -26,10 +26,17 @@ final class ScrollChromeCoordinator: NSObject {
         /// this threshold doesn't cause flicker, since only net movement
         /// since the last decision counts.
         static let decisionThreshold: CGFloat = 40
+        /// Minimum time between condense/expand flips. A flip is
+        /// expensive on env-branch pages - a content restyle plus
+        /// the chrome animation - and a device log showed a single
+        /// drag flapping the chrome every ~600ms without this.
+        static let flipCooldown: CFTimeInterval = 0.7
     }
     
     private weak var browserChrome: BrowserChrome?
     private var lastDecisionTranslationY: CGFloat = 0
+    private var lastObservedCondensed = false
+    private var lastFlipTime: CFTimeInterval = 0
     
     /// Consulted on every gesture update. Return `false` while search is
     /// focused, tab overview is presented, fullscreen media is active,
@@ -90,6 +97,23 @@ final class ScrollChromeCoordinator: NSObject {
             
             let currentTranslationY = recognizer.translation(in: recognizer.view).y
             let netMovement = currentTranslationY - lastDecisionTranslationY
+            
+            // FLIP COOLDOWN. Watch the flag itself so flips from any
+            // source (this pan, the pill tap, a deferred expand)
+            // start the window; while it is open, absorb a threshold
+            // crossing instead of firing, so one drag cannot flap
+            // the chrome - and the env restyle each flip costs -
+            // every few hundred milliseconds.
+            let now = CACurrentMediaTime()
+            if browserChrome.isScrollCondensed != lastObservedCondensed {
+                lastObservedCondensed = browserChrome.isScrollCondensed
+                lastFlipTime = now
+            }
+            if now - lastFlipTime < UX.flipCooldown,
+               abs(netMovement) >= UX.decisionThreshold {
+                lastDecisionTranslationY = currentTranslationY
+                return
+            }
             
             // Dragging up (finger moves toward the top, negative
             // translation) is scrolling the page content down.

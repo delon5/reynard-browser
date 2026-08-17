@@ -1410,7 +1410,14 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// handshake plus a multi-hop redirect on an old device; short
     /// enough to fire well before the 22 seconds of dead air in the
     /// captured twitch.tv trace.
-    private static let commitWatchdogSeconds: TimeInterval = 12.0
+    ///
+    /// Retuned from 12s on device evidence: healthy commits land
+    /// within 2.4s in every captured trace, while a user facing a
+    /// blank page gives up and backgrounds the app at about 8s - a
+    /// 12s retry is real but invisible, which reads exactly like the
+    /// bug it fixes. Six seconds is 2.5x the slowest healthy commit
+    /// observed and lands the retry while the user is still watching.
+    private static let commitWatchdogSeconds: TimeInterval = 6.0
 
     /// URLs are evidence in logs that exist to be handed to strangers:
     /// Documents/reynard_stdout.txt and reynard_jit_log.txt both sit

@@ -1458,7 +1458,7 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1513,370 @@
+@@ -65,8 +1513,387 @@
        return windowUtils.SCROLL_MODE_INSTANT;
      }
      return windowUtils.SCROLL_MODE_SMOOTH;
@@ -1571,6 +1571,21 @@ index 9ca6e15..799455c 100644
 +    // verdict; it is reported as incomplete below so the app keeps its
 +    // cached/seeded value and asks again at the settle re-asks, by
 +    // which time the sheets have finished loading.
++    //
++    // Also measure what env(safe-area-inset-bottom) actually resolves
++    // to in THIS document, so the app can log ground truth instead of
++    // inferring it. (The old ContentView probe used runUserScript,
++    // whose success return is nil by design - the measurement ran and
++    // its answer went nowhere.)
++    let envProbePx = -1;
++    try {
++      const probe = document.createElement("div");
++      probe.style.cssText =
++        "position:fixed;left:-9999px;bottom:env(safe-area-inset-bottom);height:0;width:0";
++      document.documentElement.appendChild(probe);
++      envProbePx = parseFloat(contentWindow.getComputedStyle(probe).bottom) || 0;
++      probe.remove();
++    } catch (e) {}
 +    let unreadableSheets = 0;
 +    for (const sheet of document.styleSheets) {
 +      let rules;
@@ -1615,7 +1630,7 @@ index 9ca6e15..799455c 100644
 +          }
 +        }
 +
-+        return { usesSafeAreaInset: true, hasBottomBar: false };
++        return { usesSafeAreaInset: true, hasBottomBar: false, envProbePx };
 +      }
 +    }
 +
@@ -1688,6 +1703,7 @@ index 9ca6e15..799455c 100644
 +                hasBottomBar: true,
 +                hasFullViewportOverlay: rect.top <= bottomBand,
 +                incomplete: unreadableSheets > 0,
++                envProbePx,
 +              };
 +            }
 +            // Fixed but not a bottom bar - keep climbing in case this is
@@ -1703,6 +1719,7 @@ index 9ca6e15..799455c 100644
 +      usesSafeAreaInset: false,
 +      hasBottomBar: false,
 +      incomplete: unreadableSheets > 0,
++      envProbePx,
 +    };
 +  }
 +
@@ -1829,7 +1846,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1994,21 @@
+@@ -184,6 +2011,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1851,7 +1868,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +2024,193 @@
+@@ -199,11 +2041,193 @@
      return false;
    }
  
