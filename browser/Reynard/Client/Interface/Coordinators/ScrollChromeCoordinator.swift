@@ -26,10 +26,14 @@ final class ScrollChromeCoordinator: NSObject {
         /// this threshold doesn't cause flicker, since only net movement
         /// since the last decision counts.
         static let decisionThreshold: CGFloat = 40
-        /// Minimum time between condense/expand flips. A flip is
-        /// expensive on env-branch pages - a content restyle plus
-        /// the chrome animation - and a device log showed a single
-        /// drag flapping the chrome every ~600ms without this.
+        /// Minimum time after a flip before an EXPAND crossing fires
+        /// again. Expand-only on purpose: damping one direction is
+        /// enough to kill the condensed<->expanded flap (which needs
+        /// both directions), while a condense must never be delayed -
+        /// the toolbar slide has no cooldown and has already hidden
+        /// the toolbar by the time the crossing fires, so an absorbed
+        /// condense left the bottom bare (no toolbar, no pill) until
+        /// a re-scroll. Seen on device on reddit.com.
         static let flipCooldown: CFTimeInterval = 0.7
     }
     
@@ -98,19 +102,23 @@ final class ScrollChromeCoordinator: NSObject {
             let currentTranslationY = recognizer.translation(in: recognizer.view).y
             let netMovement = currentTranslationY - lastDecisionTranslationY
             
-            // FLIP COOLDOWN. Watch the flag itself so flips from any
-            // source (this pan, the pill tap, a deferred expand)
-            // start the window; while it is open, absorb a threshold
-            // crossing instead of firing, so one drag cannot flap
-            // the chrome - and the env restyle each flip costs -
-            // every few hundred milliseconds.
+            // FLIP COOLDOWN, expand direction only. Watch the flag so
+            // flips from any source (this pan, the pill tap, a
+            // deferred expand) start the window; while it is open an
+            // EXPAND crossing is absorbed (the flap needs both
+            // directions, so damping one kills it). A CONDENSE is
+            // never absorbed: the toolbar slide has no cooldown and
+            // has already hidden the toolbar by then, and a device
+            // capture showed the absorbed condense leaving the bottom
+            // bare - toolbar slid away, no pill - until a re-scroll.
             let now = CACurrentMediaTime()
             if browserChrome.isScrollCondensed != lastObservedCondensed {
                 lastObservedCondensed = browserChrome.isScrollCondensed
                 lastFlipTime = now
             }
             if now - lastFlipTime < UX.flipCooldown,
-               abs(netMovement) >= UX.decisionThreshold {
+               netMovement >= UX.decisionThreshold,
+               browserChrome.isScrollCondensed {
                 lastDecisionTranslationY = currentTranslationY
                 return
             }
