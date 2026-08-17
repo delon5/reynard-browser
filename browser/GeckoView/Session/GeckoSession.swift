@@ -537,6 +537,17 @@ public class GeckoSession {
             return .readsSafeAreaInset
         }
         if values["hasBottomBar"] as? Bool == true {
+            // A bar inside a FULL-VIEWPORT fixed overlay (a web video
+            // player, a modal) classifies as an env-reader: the
+            // compositor fixed-layer margin provably cannot lift a
+            // screen-filling, top-anchored layer, so env() is the only
+            // mechanism with any chance of reaching its bottom
+            // controls - and it costs nothing when the page never
+            // reads it, which is exactly what the margin was
+            // achieving for such pages.
+            if values["hasFullViewportOverlay"] as? Bool == true {
+                return .readsSafeAreaInset
+            }
             return .hasBottomBar
         }
         // Only treat a well-formed negative as "none"; a response missing

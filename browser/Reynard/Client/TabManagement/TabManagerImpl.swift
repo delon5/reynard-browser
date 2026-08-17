@@ -2120,11 +2120,23 @@ extension TabManagerImplementation: NavigationDelegate {
 
     private static var reservationByHost: [String: GeckoSession.BottomReservation] = loadReservations()
 
+    /// Hosts whose verdict is known ahead of any visit. Seeds only -
+    /// a persisted entry, and any later live detection, always wins.
+    /// tv.apple.com: the player is a full-viewport fixed overlay whose
+    /// bottom controls only env() can reach; its CSS is CDN-served, so
+    /// the stylesheet scan cannot prove it reads env, and the first
+    /// detection can run before the player exists. The overlay probe
+    /// reaches the same verdict once playback starts - the seed just
+    /// makes the very first player paint correct too.
+    private static let seededReservations: [String: GeckoSession.BottomReservation] = [
+        "tv.apple.com": .readsSafeAreaInset,
+    ]
+
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
         guard let raw = UserDefaults.standard.dictionary(forKey: reservationStoreKey) as? [String: String] else {
-            return [:]
+            return seededReservations
         }
-        return raw.reduce(into: [:]) { result, entry in
+        var reservations = raw.reduce(into: [String: GeckoSession.BottomReservation]()) { result, entry in
             switch entry.value {
             case "readsSafeAreaInset": result[entry.key] = .readsSafeAreaInset
             case "hasBottomBar": result[entry.key] = .hasBottomBar
@@ -2132,6 +2144,10 @@ extension TabManagerImplementation: NavigationDelegate {
             default: break
             }
         }
+        for (host, reservation) in seededReservations where reservations[host] == nil {
+            reservations[host] = reservation
+        }
+        return reservations
     }
 
     /// Drops every remembered bottom-reservation verdict, on disk and in
@@ -2139,7 +2155,9 @@ extension TabManagerImplementation: NavigationDelegate {
     /// list and belongs with the history it was derived from - clearing
     /// history must clear this too.
     static func clearReservationCache() {
-        reservationByHost.removeAll()
+        // Back to the built-in seeds, not to empty: seeds are shipped
+        // knowledge, not derived from browsing history.
+        reservationByHost = seededReservations
         UserDefaults.standard.removeObject(forKey: reservationStoreKey)
     }
 

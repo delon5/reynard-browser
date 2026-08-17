@@ -1369,7 +1369,7 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1424,338 @@
+@@ -65,8 +1424,350 @@
        return windowUtils.SCROLL_MODE_INSTANT;
      }
      return windowUtils.SCROLL_MODE_SMOOTH;
@@ -1565,13 +1565,25 @@ index 9ca6e15..799455c 100644
 +              // the page consumes env(safe-area-inset-bottom). Reported
 +              // separately: on device, Facebook's composer did not move
 +              // at all when the inset was reported correctly, because it
-+              // never reads the variable - such a page needs the layout
-+              // viewport shortened instead. Cross-origin sheets mean
-+              // this cannot distinguish "does not use env()" from "uses
-+              // it where we cannot see it", so the app treats a bar as
-+              // the weaker signal and shortens the viewport, which moves
-+              // page content either way.
-+              return { usesSafeAreaInset: false, hasBottomBar: true };
++              // never reads the variable. Cross-origin sheets mean this
++              // cannot distinguish "does not use env()" from "uses it
++              // where we cannot see it".
++              //
++              // Also report WHAT KIND of fixed thing was found. A
++              // full-viewport overlay (a web video player, a modal
++              // lightbox - tv.apple.com's player) reaches the TOP edge
++              // as well as the bottom. The compositor fixed-layer margin
++              // can never lift such a layer: it is top-anchored, and a
++              // screen-filling element cannot move up by the pill's
++              // height. For these pages env() is the only mechanism with
++              // any chance of clearing the chrome - it costs nothing
++              // when the page never reads it, which is exactly what the
++              // margin was achieving.
++              return {
++                usesSafeAreaInset: false,
++                hasBottomBar: true,
++                hasFullViewportOverlay: rect.top <= bottomBand,
++              };
 +            }
 +            // Fixed but not a bottom bar - keep climbing in case this is
 +            // a child inside a wider fixed bar, then fall through to the
@@ -1708,7 +1720,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1873,21 @@
+@@ -184,6 +1885,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1730,7 +1742,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +1903,189 @@
+@@ -199,11 +1915,189 @@
      return false;
    }
  
