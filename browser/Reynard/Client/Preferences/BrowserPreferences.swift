@@ -85,7 +85,7 @@ final class BrowserPreferences {
             key("BrowsingSettings", "swipeUpForTabSwitcher"): true,
             key("AppearanceSettings", "hidesToolbarOnScroll"): true,
             key("AppearanceSettings", "pillSafeAreaInset"): 60,
-            key("AppearanceSettings", "pillFloatsOverPage"): false,
+            key("AppearanceSettings", "pillFloatsOverPage"): true,
             
             // Compatibility
             key("CompatibilitySettings", "androidUserAgentDomains"): [],

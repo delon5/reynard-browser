@@ -6,6 +6,7 @@
 //
 
 import UIKit
+import GeckoView
 
 final class ToolbarController {
     enum LockReason: Hashable {
@@ -40,6 +41,14 @@ final class ToolbarController {
     private var pendingSnap: DispatchWorkItem?
     private var snapDisplayLink: CADisplayLink?
     private var lockReasons = Set<LockReason>()
+    
+    /// The selected tab's bottom-reservation verdict, injected by
+    /// BrowserViewController so this controller does not grow a
+    /// TabManager dependency. nil (no provider, or no verdict yet)
+    /// must be treated as "not an env-reader": the compositor
+    /// margin needs no cooperation from the page, so it is the safe
+    /// default; env with a wrong page does nothing at all.
+    var bottomReservation: (() -> GeckoSession.BottomReservation?)?
     
     // MARK: - Lifecycle
     
@@ -95,30 +104,35 @@ final class ToolbarController {
             self.maxToolbarOffset = maxToolbarOffset
             self.maxTopToolbarOffset = maxTopToolbarOffset
         }
-        // Two modes, and each uses exactly ONE mechanism. Everything
-        // that went wrong here was two of them running at once.
+        // Two modes. Stopping keeps its single mechanism: the content
+        // view ends at the pill's top edge
+        // (BrowserViewController.condensedContentBottomAnchor) and the
+        // engine is told nothing.
         //
-        //   stopping (default) - the content view ends at the pill's top
-        //     edge (BrowserViewController.condensedContentBottomAnchor).
-        //     The page is simply a shorter window: nothing reserved,
-        //     nothing offset, nothing for the page to read. Gecko cannot
-        //     leave an unpainted strip because it was never told to
-        //     reserve one.
+        // Floating sends exactly ONE engine lift per PAGE, chosen by the
+        // verdict the safe-area detector already produces:
         //
-        //   floating - the page runs full bleed and paints the whole
-        //     height, so there is no black bar, and the compositor
-        //     fixed-layer margin lifts position:fixed and sticky bottom
-        //     bars clear of the pill. Ordinary content still scrolls
-        //     behind it, which is what floating means.
+        //   readsSafeAreaInset - env(safe-area-inset-bottom) carries the
+        //     clearance. The page positions its own bottom controls
+        //     (YouTube, Twitch - including env-reading elements that are
+        //     NOT fixed layers, which the margin can never reach), and
+        //     its background keeps painting behind the pill.
         //
-        //     The margin rather than env(safe-area-inset-bottom),
-        //     because env only reaches pages that READ it and Facebook's
-        //     "Open app" banner does not - it is fixed to bottom:0 and
-        //     sat under the pill while every other site was fine. The
-        //     margin reaches any fixed or sticky layer regardless of
-        //     what the page believes. Not BOTH: a bar that is fixed AND
-        //     on an env-reading page moves twice, which is the 188pt
-        //     overshoot this hit before.
+        //   everything else (hasBottomBar, none, no verdict yet) - the
+        //     compositor fixed-layer margin carries it. It lifts
+        //     position:fixed and sticky-bottom layers of the root
+        //     document with no cooperation from the page (Facebook's
+        //     "Open app" banner is fixed to bottom:0 and reads no env).
+        //     The margin only moves layers holding a WebRender animation
+        //     id, which patches/layout/painting/nsDisplayList.cpp.patch
+        //     grants unconditionally on this port - without that patch
+        //     the ids vanish whenever the max is 0, the margin moves
+        //     nothing, and it gets written off as "never observed to
+        //     move anything", which is precisely what happened once.
+        //
+        // Never both on one page: a bar that is fixed AND on an
+        // env-reading page moves twice - the 188pt overshoot this hit
+        // before.
         //
         // What is NOT sent in either: the layout-viewport reservation.
         // setDynamicToolbarMaxHeight shortens Gecko's ICB without giving
@@ -128,21 +142,20 @@ final class ToolbarController {
         let condensed = browserChrome.isScrollCondensed
         let floats = Prefs.AppearanceSettings.pillFloatsOverPage
         let maxHeight = condensed ? 0 : maxToolbarOffset
-        // env, NOT the compositor margin. This is what worked before the
-        // merge and what I replaced while chasing Facebook's banner - a
-        // page that reads env(safe-area-inset-bottom) lifts its own
-        // bottom controls clear of the pill, which is how YouTube and
-        // Twitch were correct. The compositor fixed-layer margin was
-        // swapped in on the theory that it reaches pages env cannot; it
-        // has never been observed to move anything on this port, so the
-        // swap cost the sites that worked and bought nothing.
-        //
-        // Facebook's "Open app" banner is fixed to bottom:0 and reads no
-        // env, so it stays under the pill while floating. That is the
-        // real limit of float mode, and stop mode is the answer for it -
-        // not zeroing env for every other site.
-        let env = (condensed && floats) ? Prefs.AppearanceSettings.pillSafeAreaInset : 0
-        let margin: CGFloat = 0
+        let env: CGFloat
+        let margin: CGFloat
+        if condensed && floats {
+            if bottomReservation?() == .readsSafeAreaInset {
+                env = Prefs.AppearanceSettings.pillSafeAreaInset
+                margin = 0
+            } else {
+                env = 0
+                margin = Prefs.AppearanceSettings.pillSafeAreaInset
+            }
+        } else {
+            env = 0
+            margin = 0
+        }
 
         // The pill's real top edge in window coordinates, next to what
         // the page is being told, so a capture shows the gap and its

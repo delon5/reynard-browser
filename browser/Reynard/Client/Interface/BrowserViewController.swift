@@ -80,10 +80,6 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         addonPopupLoadingIndicator.translatesAutoresizingMaskIntoConstraints = false
         loadingView.addSubview(addonPopupLoadingIndicator)
         NSLayoutConstraint.activate([
-            pillUnderlayView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            pillUnderlayView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            pillUnderlayView.topAnchor.constraint(equalTo: contentView.bottomAnchor),
-            pillUnderlayView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             addonPopupLoadingIndicator.centerXAnchor.constraint(equalTo: loadingView.centerXAnchor),
             addonPopupLoadingIndicator.centerYAnchor.constraint(equalTo: loadingView.centerYAnchor)
         ])
@@ -226,6 +222,12 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             let selectedURL = self.tabManager.selectedTab?.url?.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasRealURL = !(selectedURL?.isEmpty ?? true)
             return hasRealURL && !self.isShowingFullscreenMedia
+        }
+        // The per-page verdict feeding float mode's env-vs-margin
+        // choice. A closure, so ToolbarController does not grow a
+        // TabManager dependency.
+        toolbarController.bottomReservation = { [weak self] in
+            self?.tabManager.selectedTab?.state.bottomReservation
         }
         browserChrome.onScrollCondensedChange = { [weak self] condensed in
             guard let self else {
@@ -424,6 +426,14 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         )
         
         NSLayoutConstraint.activate([
+            // Formerly declared inside the addonPopupLoadingView lazy
+            // initializer, where they never activated until an add-on
+            // popup happened to load - leaving the strip under the
+            // pill unconstrained in stop mode.
+            pillUnderlayView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pillUnderlayView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pillUnderlayView.topAnchor.constraint(equalTo: contentView.bottomAnchor),
+            pillUnderlayView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             contentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             contentView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor).withPriority(.defaultHigh),

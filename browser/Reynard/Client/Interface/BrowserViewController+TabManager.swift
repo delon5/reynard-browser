@@ -118,6 +118,14 @@ extension BrowserViewController: TabManagerDelegate {
         // not have changed. Only fires when the value actually changed, so
         // this is not a per-navigation relayout.
         applyBrowserLayout(animated: false)
+        // Re-send the engine report too: in float mode this verdict
+        // picks which lift (env vs compositor margin) carries the
+        // pill's clearance, and applyBrowserLayout alone only
+        // re-evaluates the UIKit anchor.
+        toolbarController.updateLayout(
+            chromeMode: browserLayout.chromeMode,
+            isToolbarEnabled: !isShowingFullscreenMedia
+        )
     }
 
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession) {

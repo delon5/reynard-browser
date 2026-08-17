@@ -1,0 +1,37 @@
+diff --git a/layout/painting/nsDisplayList.cpp b/layout/painting/nsDisplayList.cpp
+index f958ef7438a7..7ee2ce8791c8 100644
+--- a/layout/painting/nsDisplayList.cpp
++++ b/layout/painting/nsDisplayList.cpp
+@@ -5509,10 +5509,32 @@ bool nsDisplayOwnLayer::HasDynamicToolbar(nsIFrame* aFrame) {
+   if (!aFrame->PresContext()->IsRootContentDocumentCrossProcess()) {
+     return false;
+   }
++#ifdef MOZ_WIDGET_UIKIT
++  // The iOS browser chrome overlays the bottom of the window. While the
++  // toolbar is condensed to the floating pill the app keeps the
++  // dynamic-toolbar max height at 0 (a nonzero max leaves an unpainted
++  // strip on short pages) and instead holds the page's fixed/sticky
++  // bottom content above the pill with an APZ fixed-layer margin
++  // (nsWindow::SetFixedLayerMarginBottom). That margin only reaches a
++  // layer that owns a WebRender animation id, which is what this gate
++  // hands out - and the checks below would refuse it exactly when the
++  // pill needs it, because PresContext()->HasDynamicToolbar() is false
++  // whenever the max is 0. Granting the id unconditionally is what makes
++  // the condensed-pill margin able to move anything at all.
++  //
++  // While the full toolbar is up the max is nonzero and the stock check
++  // would pass anyway, so this only ADDS ids in the condensed state.
++  // The cost is an animation id for every fixed/sticky root-content
++  // layer even while the margin is 0 - a small amount of compositor
++  // bookkeeping, bought so toolbar state never has to be plumbed back
++  // into layout.
++  return true;
++#else
+   return aFrame->PresContext()->HasDynamicToolbar() ||
+          // For tests on Android, this pref is set to simulate the dynamic
+          // toolbar
+          StaticPrefs::apz_fixed_margin_override_enabled();
++#endif
+ }
+ 
+ bool nsDisplayOwnLayer::HasDynamicToolbar() const {

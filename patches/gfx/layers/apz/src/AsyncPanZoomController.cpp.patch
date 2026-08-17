@@ -2,7 +2,39 @@ diff --git a/gfx/layers/apz/src/AsyncPanZoomController.cpp b/gfx/layers/apz/src/
 index e0c930d19dde..c75449ed84e6 100644
 --- a/gfx/layers/apz/src/AsyncPanZoomController.cpp
 +++ b/gfx/layers/apz/src/AsyncPanZoomController.cpp
-@@ -2809,6 +2809,7 @@ nsEventStatus AsyncPanZoomController::OnPanMayBegin(
+@@ -2523,6 +2523,23 @@ SideBits AsyncPanZoomController::ScrollableDirections() const {
+     result = mX.ScrollableDirections() | mY.ScrollableDirections();
+   }
+ 
++#ifndef MOZ_WIDGET_UIKIT
++  // Deliberately skipped on this port. A non-zero fixed-layer bottom
++  // margin means different things on the two platforms:
++  //
++  // On Android it means the dynamic toolbar is displaced, so scrolling up
++  // can bring it back and scrolling down can hide it further - "up" and
++  // "down" stay meaningful even at the scroll extremes, which is why
++  // ScrollableDirectionsWithDynamicToolbar adds eTop and eBottom.
++  //
++  // Here the margin means the browser chrome overlays the page and the
++  // compositor holds fixed content above it - the toolbar's reveal is
++  // driven by the app's own pan gesture, never by APZ. Adding eTop only
++  // makes the page claim it can always scroll upwards. That is never
++  // harmless: pull-to-refresh arms on "top is NOT among the scrollable
++  // edges" (WebContentView's canOverscrollTop), so with the condensed
++  // pill's margin permanently non-zero it would silently disable
++  // pull-to-refresh for every page, with no error anywhere to say why.
+   if (IsRootContent()) {
+     if (APZCTreeManager* treeManagerLocal = GetApzcTreeManager()) {
+       ScreenMargin fixedLayerMargins =
+@@ -2533,6 +2550,7 @@
+       }
+     }
+   }
++#endif
+ 
+   return result;
+ }
+@@ -2809,6 +2827,7 @@ nsEventStatus AsyncPanZoomController::OnPanMayBegin(
    APZC_LOG_DETAIL("got a pan-maybegin in state %s\n", this,
                    ToString(mState).c_str());
  
@@ -10,7 +42,7 @@ index e0c930d19dde..c75449ed84e6 100644
    StartTouch(aEvent.mLocalPanStartPoint, aEvent.mTimeStamp);
    MOZ_ASSERT(GetCurrentPanGestureBlock());
    GetCurrentPanGestureBlock()->GetOverscrollHandoffChain()->CancelAnimations(
-@@ -2824,6 +2825,7 @@ nsEventStatus AsyncPanZoomController::OnPanCancelled(
+@@ -2824,6 +2843,7 @@ nsEventStatus AsyncPanZoomController::OnPanCancelled(
  
    mX.CancelGesture();
    mY.CancelGesture();
@@ -18,7 +50,7 @@ index e0c930d19dde..c75449ed84e6 100644
  
    MOZ_ASSERT(GetCurrentPanGestureBlock());
    GetCurrentPanGestureBlock()
-@@ -2845,6 +2847,14 @@ nsEventStatus AsyncPanZoomController::OnPanBegin(
+@@ -2845,6 +2865,14 @@ nsEventStatus AsyncPanZoomController::OnPanBegin(
    GetCurrentPanGestureBlock()->GetOverscrollHandoffChain()->CancelAnimations(
        ExcludeOverscroll);
  
@@ -33,7 +65,7 @@ index e0c930d19dde..c75449ed84e6 100644
    StartTouch(aEvent.mLocalPanStartPoint, aEvent.mTimeStamp);
  
    if (!UsingStatefulAxisLock()) {
-@@ -3105,6 +3115,13 @@ nsEventStatus AsyncPanZoomController::OnPan(
+@@ -3105,6 +3133,13 @@ nsEventStatus AsyncPanZoomController::OnPan(
                                      aEvent.mTimeStamp);
    }
  
@@ -47,7 +79,7 @@ index e0c930d19dde..c75449ed84e6 100644
    if (aFingersOnTouchpad == FingersOnTouchpad::No) {
      if (IsOverscrolled() && GetState() != OVERSCROLL_ANIMATION) {
        StartOverscrollAnimation(velocity, GetOverscrollSideBits());
-@@ -3146,6 +3163,9 @@ nsEventStatus AsyncPanZoomController::OnPanEnd(const PanGestureInput& aEvent) {
+@@ -3146,6 +3181,9 @@ nsEventStatus AsyncPanZoomController::OnPanEnd(const PanGestureInput& aEvent) {
    // Use HandleEndOfPan for fling on platforms that don't
    // emit momentum events (Gtk).
    if (aEvent.mSimulateMomentum) {
@@ -57,7 +89,7 @@ index e0c930d19dde..c75449ed84e6 100644
      return HandleEndOfPan();
    }
  
-@@ -3264,6 +3284,7 @@ nsEventStatus AsyncPanZoomController::OnPanInterrupted(
+@@ -3264,6 +3302,7 @@ nsEventStatus AsyncPanZoomController::OnPanInterrupted(
    APZC_LOG_DETAIL("got a pan-interrupted in state %s\n", this,
                    ToString(mState).c_str());
  

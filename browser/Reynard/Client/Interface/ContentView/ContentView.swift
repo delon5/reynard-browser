@@ -403,9 +403,11 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             // belongs to a toolbar that is no longer on screen.
             offset = floatingChromeInset
         } else {
-            offset = floatingChromeInset > 0
-                ? floatingChromeInset
-                : -(toolbarTopOffset + toolbarBottomOffset)
+            // Never the pill inset here: while not condensed it can
+            // only be stale, and a POSITIVE value sent down the
+            // toolbar path is the viewport corruption
+            // SetFixedLayerMarginBottom exists to prevent.
+            offset = -(toolbarTopOffset + toolbarBottomOffset)
         }
         guard offset != contentBottomOffset else {
             return
@@ -655,7 +657,21 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         webContentView.setTab(tab, pageBackgroundColor: pageBackgroundColor)
         onPageBackgroundColorChange?(pageBackgroundColor ?? .systemBackground)
         tab?.session.setDynamicToolbarMaxHeight(dynamicToolbarMaxHeight)
-        tab?.session.setContentBottomOffset(contentBottomOffset)
+        // Re-seed the channel the cached value BELONGS to.
+        // contentBottomOffset is one cache feeding two engine entry
+        // points: while condensed it holds the pill's compositor
+        // margin and must go back through setFixedLayerMarginBottom.
+        // Sending it as a (positive) toolbar offset is the exact
+        // viewport corruption SetFixedLayerMarginBottom was added to
+        // remove ("nsPresContext RECEIVED offset=180 max=426"), and
+        // the margin channel was never re-seeded at all, so a tab
+        // switch while condensed left the incoming session's fixed
+        // bars behind the pill.
+        if isChromeCondensed {
+            tab?.session.setFixedLayerMarginBottom(contentBottomOffset)
+        } else {
+            tab?.session.setContentBottomOffset(contentBottomOffset)
+        }
         tab?.session.setSafeAreaInsetBottom(safeAreaInsetBottom)
         updatePullToRefreshAvailability()
     }
