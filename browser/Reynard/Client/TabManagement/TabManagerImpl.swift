@@ -2338,6 +2338,13 @@ extension TabManagerImplementation: NavigationDelegate {
     private static let seededReservations: [String: GeckoSession.BottomReservation] = [
         "tv.apple.com": .readsSafeAreaInset,
         "m.twitch.tv": .readsSafeAreaInset,
+        // Redirect aliases: the tab enters as twitch.tv or
+        // www.twitch.tv and only becomes m.twitch.tv after the
+        // ?desktop-redirect chain settles - a device log showed a
+        // condense inside that window taking the margin branch
+        // because the m.twitch.tv seed had no host to match yet.
+        "twitch.tv": .readsSafeAreaInset,
+        "www.twitch.tv": .readsSafeAreaInset,
     ]
 
     /// Bumped whenever seededReservations changes. An install that
@@ -2346,7 +2353,7 @@ extension TabManagerImplementation: NavigationDelegate {
     /// to it - so on a version bump the seeds are applied OVER the
     /// persisted entries exactly once; after that, live detection
     /// overwrites them as usual.
-    private static let seedVersion = 2
+    private static let seedVersion = 3
     private static let seedVersionKey = "Reynard.SafeArea.SeedVersion"
 
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {

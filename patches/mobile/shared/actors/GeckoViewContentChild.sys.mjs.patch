@@ -1458,7 +1458,7 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1513,350 @@
+@@ -65,8 +1513,370 @@
        return windowUtils.SCROLL_MODE_INSTANT;
      }
      return windowUtils.SCROLL_MODE_SMOOTH;
@@ -1555,14 +1555,29 @@ index 9ca6e15..799455c 100644
 +    const { contentWindow } = this;
 +    const document = contentWindow?.document;
 +    if (!document) {
-+      return { usesSafeAreaInset: false, hasBottomBar: false };
++      // No document is not "no usage" - it is no answer.
++      return { usesSafeAreaInset: false, hasBottomBar: false, incomplete: true };
 +    }
 +
++    // Sheets whose rules could not be read. With this actor's system
++    // principal, StyleSheet::AreRulesAvailable's origin-clean check is
++    // bypassed - its first substantive test allows the system
++    // principal outright ("Devtools needs this") - so a throw here is
++    // NOT the cross-origin folklore older comments describe. It is
++    // InvalidAccessError, "Can't access rules of still-loading style
++    // sheet", raised before any principal check, and it hits precisely
++    // the big CDN sheets an early scan cares about. A negative
++    // produced while any sheet was unreadable is therefore not a
++    // verdict; it is reported as incomplete below so the app keeps its
++    // cached/seeded value and asks again at the settle re-asks, by
++    // which time the sheets have finished loading.
++    let unreadableSheets = 0;
 +    for (const sheet of document.styleSheets) {
 +      let rules;
 +      try {
 +        rules = sheet.cssRules;
 +      } catch (e) {
++        unreadableSheets++;
 +        continue;
 +      }
 +      if (!rules) {
@@ -1672,6 +1687,7 @@ index 9ca6e15..799455c 100644
 +                usesSafeAreaInset: false,
 +                hasBottomBar: true,
 +                hasFullViewportOverlay: rect.top <= bottomBand,
++                incomplete: unreadableSheets > 0,
 +              };
 +            }
 +            // Fixed but not a bottom bar - keep climbing in case this is
@@ -1683,7 +1699,11 @@ index 9ca6e15..799455c 100644
 +      }
 +    }
 +
-+    return { usesSafeAreaInset: false, hasBottomBar: false };
++    return {
++      usesSafeAreaInset: false,
++      hasBottomBar: false,
++      incomplete: unreadableSheets > 0,
++    };
 +  }
 +
 +  async getFocusedInputMetrics() {
@@ -1809,7 +1829,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +1974,21 @@
+@@ -184,6 +1994,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1831,7 +1851,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +2004,193 @@
+@@ -199,11 +2024,193 @@
      return false;
    }
  

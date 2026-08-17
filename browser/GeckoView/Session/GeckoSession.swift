@@ -551,11 +551,29 @@ public class GeckoSession {
             // mechanism with any chance of reaching its bottom
             // controls - and it costs nothing when the page never
             // reads it, which is exactly what the margin was
-            // achieving for such pages.
+            // achieving for such pages. An incomplete scan does not
+            // taint this routing: env for a screen-filling overlay is
+            // correct-or-harmless whether or not the page reads it.
             if values["hasFullViewportOverlay"] as? Bool == true {
                 return .readsSafeAreaInset
             }
+            // An incomplete scan DOES taint a plain bar verdict: the
+            // env() rule the scan was looking for may sit in the very
+            // sheet that was still loading (the YouTube shape - a bar
+            // found, env in an unread CDN sheet). No verdict rather
+            // than a wrong one; the caller keeps the cached/seeded
+            // value and the settle re-asks retry once the sheets are
+            // complete.
+            if values["incomplete"] as? Bool == true {
+                return nil
+            }
             return .hasBottomBar
+        }
+        // Same for a bare negative: "found nothing, but could not
+        // read everything" must not become a confident .none in the
+        // per-host cache.
+        if values["incomplete"] as? Bool == true {
+            return nil
         }
         // Only treat a well-formed negative as "none"; a response missing
         // both keys means an engine without this actor change, which must
