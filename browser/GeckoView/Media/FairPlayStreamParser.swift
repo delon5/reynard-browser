@@ -1043,6 +1043,9 @@ public final class FairPlayStreamParser: NSObject {
         var probeSession: VTDecompressionSession?
         var probeIn = 0
         var probeOut = 0
+        /// So the "these are protected, the probe cannot help" note is
+        /// made once rather than 360 times.
+        var probeSkippedLogged = false
         /// Highest PTS taken IN so far, for discontinuity detection.
         ///
         /// Intake order is the order the layer will see, so a jump shows
@@ -1270,6 +1273,7 @@ public final class FairPlayStreamParser: NSObject {
                 slot.drainQueue = DispatchQueue(
                     label: "org.reynard.fps.display")
             }
+            joinKeySession(layer, streamKey: streamKey)
             Self.observeDecodeFailures(layer, label: streamKey)
             Self.log("stream \(streamKey) built a display layer - "
                      + "status \(layer.status.rawValue) "
@@ -1541,6 +1545,29 @@ public final class FairPlayStreamParser: NSObject {
               slot.probeIn < 500,
               let format = CMSampleBufferGetFormatDescription(sampleBuffer)
         else { return }
+
+        // A decompression session created here has no relationship with
+        // the content key session, so protected samples can only
+        // malfunction in it. HBO Max produced 360 of exactly that, every
+        // one -12911, which buried the one line worth reading. Say it
+        // once and stop.
+        let mediaSubtype = Self.pixelFormatName(
+            CMFormatDescriptionGetMediaSubType(format))
+        if Self.protectedSubtypes.contains(mediaSubtype) {
+            let first = withState { () -> Bool in
+                guard !slot.probeSkippedLogged else { return false }
+                slot.probeSkippedLogged = true
+                return true
+            }
+            if first {
+                Self.log("stream \(streamKey) decode probe SKIPPED - these "
+                         + "samples are \(mediaSubtype), which decrypts "
+                         + "inside the decoder. A decompression session "
+                         + "created here holds no key and can only report "
+                         + "-12911, so it is not asked.")
+            }
+            return
+        }
 
         if slot.probeSession == nil {
             let dimensions = CMVideoFormatDescriptionGetDimensions(format)
@@ -1864,6 +1891,52 @@ public final class FairPlayStreamParser: NSObject {
             .documentDirectory, .userDomainMask, true)
         let marker = (documents.first ?? "") + "/fps-show-layer.on"
         return FileManager.default.fileExists(atPath: marker)
+    }
+
+    /// Subtypes whose bytes are still ciphertext at this point.
+    ///
+    /// encv and enca are Common Encryption's protected boxes. qavc and
+    /// qaac are the deferred-decrypt forms - the sample is protected and
+    /// the DECODER is expected to hold the key. Neither can be decoded by
+    /// anything that is not registered with the content key session.
+    fileprivate static let protectedSubtypes: Set<String> =
+        ["encv", "enca", "qavc", "qaac"]
+
+    /// Register the display layer with the stream's content key session.
+    ///
+    /// HBO Max hands back qavc: protected samples that decrypt inside the
+    /// decoder rather than in the parser. The parser is a recipient -
+    /// createSession does addContentKeyRecipient and logs "recipients 1" -
+    /// but the layer never was, so it was given ciphertext with no key
+    /// and returned -11821 "Cannot Decode" 360 times, over a
+    /// kVTVideoDecoderMalfunctionErr.
+    ///
+    /// Conformance is tested at runtime through AnyObject rather than
+    /// declared, matching what createSession already does for the parser
+    /// at "guard let recipient = parser as? AVContentKeyRecipient". An OS
+    /// that will not take a display layer then says so in the log instead
+    /// of failing a build, which a diagnostic on this route has already
+    /// managed once.
+    private func joinKeySession(_ layer: AVSampleBufferDisplayLayer,
+                                streamKey: String) {
+        // "<sessionId>|<stream>" - see append(_:stream:).
+        let sessionId = String(streamKey.split(separator: "|").first ?? "")
+        guard !sessionId.isEmpty, let keySession = liveSession(sessionId) else {
+            Self.log("stream \(streamKey) has no live key session to join - "
+                     + "protected samples will not decode in the layer")
+            return
+        }
+        guard let recipient = (layer as AnyObject) as? AVContentKeyRecipient
+        else {
+            Self.log("stream \(streamKey) AVSampleBufferDisplayLayer is NOT "
+                     + "an AVContentKeyRecipient here - protected samples "
+                     + "cannot decode in it and the sink has to change")
+            return
+        }
+        keySession.addContentKeyRecipient(recipient)
+        Self.log("stream \(streamKey) display layer added as a content key "
+                 + "recipient - recipients now "
+                 + "\(keySession.contentKeyRecipients.count)")
     }
 
     /// Put the layer on screen, if a marker file asks for it.
@@ -2793,8 +2866,42 @@ private final class ParserDelegate: NSObject {
                     ? Character(UnicodeScalar(byte)) : "."
             })
         } ?? "none"
+        // THREE states, because there are three and collapsing two of
+        // them cost several rounds of this.
+        //
+        //   encv / enca   Common Encryption's protected boxes. The
+        //                 parser did not decrypt, full stop.
+        //   qavc / qaac   Decrypt is deferred to the DECODER. The bytes
+        //                 are still ciphertext here, and only a decoder
+        //                 registered with the content key session can
+        //                 turn them into pictures.
+        //   anything else Clear. Apple TV's avc1 was genuinely clear -
+        //                 a VTDecompressionSession decoded eight of
+        //                 eight.
+        //
+        // The old test named only the first pair, so HBO Max's 385 qavc
+        // samples were all reported "DECRYPTED - the route has an end"
+        // while every one of them failed to decode with -12911. The
+        // payload bytes did not contradict it either: cbcs leaves the
+        // NAL length prefix and the NAL header in the clear and encrypts
+        // the slice body, so a protected sample has an exact length
+        // prefix and a valid NAL header and looks, to a hex dump of its
+        // first sixteen bytes, precisely like a decrypted one.
         let stillEncrypted = subtypeFourCC == "encv"
             || subtypeFourCC == "enca"
+        // Built with if/else rather than a nested ternary of concatenated
+        // literals. Swift type-checks those badly and this file is
+        // already full of long string sums; "expression too complex" is
+        // not a failure worth risking for a log line.
+        let verdict: String
+        if stillEncrypted {
+            verdict = "STILL ENCRYPTED - the parser did not decrypt it"
+        } else if Self.protectedSubtypes.contains(subtypeFourCC) {
+            verdict = "PROTECTED - decrypt is deferred to the decoder, so "
+                + "the sink has to be a content key recipient"
+        } else {
+            verdict = "DECRYPTED - the route has an end"
+        }
 
         // THE PAYLOAD, because the description and the bytes are
         // separate things and only one of them has been looked at.
@@ -2862,9 +2969,7 @@ private final class ParserDelegate: NSObject {
               + "(\(mediaType)) samples=\(samples) ready=\(ready) "
               + "dataBuffer=\(hasData) attachments=\(attachmentCount) "
               + "flags=\(flags) subtype=\(subtypeFourCC) -> "
-              + (stillEncrypted ? "STILL ENCRYPTED - the parser did not "
-                                  + "decrypt it"
-                                : "DECRYPTED - the route has an end")
+              + verdict
               + "\n", stderr)
     }
 
