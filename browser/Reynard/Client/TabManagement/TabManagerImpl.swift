@@ -95,6 +95,17 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// process then emitted nothing at all for the 22 seconds until the
     /// tab was abandoned - two log lines for the tab's entire life.
     private var paintWaits: [UUID: (startedAt: CFAbsoluteTime, url: String, retryURL: String, workItem: DispatchWorkItem, attempt: Int)] = [:]
+    /// Whether this process has EVER received a first-contentful-paint
+    /// event from the engine. The paint watchdog's committed-page
+    /// escalation rests entirely on "no paint signal since arming"
+    /// meaning "nothing painted" - which is only true on a build whose
+    /// engine actually delivers the signal. This build's engine has no
+    /// emitter for GeckoView:FirstContentfulPaint (nothing in the
+    /// pinned release's geckoview modules or this repo's patches sends
+    /// it; on Android it comes from a compositor bridge this port does
+    /// not have), so until the first event proves the wire live, the
+    /// escalation must treat an expired wait as absence of evidence.
+    private var hasObservedFirstPaintSignal = false
     /// Long enough that a slow page is not reported as a failure; short
     /// enough to land before a user gives up and force-quits.
     private static let paintWatchdogSeconds: TimeInterval = 8.0
@@ -1488,6 +1499,21 @@ final class TabManagerImplementation: NSObject, TabManager {
                 isPendingLoad = false
             }
             if !isPendingLoad {
+                // "No paint signal since arming" only means "nothing
+                // painted" on a build whose engine actually DELIVERS
+                // the signal. This one does not (no emitter exists in
+                // the engine or its patches), so the wait ALWAYS
+                // expires, painted or not - and escalating a committed
+                // page on that non-evidence reloaded every site once
+                // at the 8s deadline. Until the first signal proves
+                // the wire live, a committed page's expiry is what it
+                // was before escalation existed: a log line. A PENDING
+                // page needs no such proof - its evidence is the
+                // missing COMMIT, not the missing paint.
+                guard self.hasObservedFirstPaintSignal else {
+                    NSLog("[PaintWatch] tab %@ not escalating - no paint signal has ever arrived from this engine", tabID.uuidString)
+                    return
+                }
                 guard let currentHost = DomainMatcher.host(from: tab.url ?? ""),
                       let watchedHost = DomainMatcher.host(from: wait.retryURL),
                       !currentHost.isEmpty,
@@ -1996,6 +2022,9 @@ extension TabManagerImplementation: ContentDelegate {
     /// question both callers are really asking: has this tab put
     /// anything on screen yet.
     func onFirstContentfulPaint(session: GeckoSession) {
+        // Proof the engine delivers the paint signal on this build -
+        // the committed-page escalation is gated on having seen it.
+        hasObservedFirstPaintSignal = true
         guard let location = tabLocation(for: session) else {
             return
         }
