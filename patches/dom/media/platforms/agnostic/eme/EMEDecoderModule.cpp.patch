@@ -1,0 +1,53 @@
+diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
+--- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
++++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
+@@ -19,4 +19,5 @@
+ #include "mozilla/CDMProxy.h"
++#include "mozilla/Debug.h"  // printf_stderr
+ #include "mozilla/EMEUtils.h"
+ #include "mozilla/RemoteCDMProxy.h"
+ #include "mozilla/StaticPrefs_media.h"
+@@ -402,13 +403,42 @@ EMEDecoderModule::CreateVideoDecoder(
+   }
+ 
+   if (aParams.mConfig.IsVideo()) {
+-    if (StaticPrefs::media_eme_video_blank()) {
++    // Reynard: protected MSE video must not reach EMEDecryptor.
++    //
++    // EMEDecryptor calls mProxy->Decrypt(aSample) and then waits on
++    // SamplesWaitingForKey. A FairPlay proxy never returns a decrypted
++    // sample - on this platform decryption happens INSIDE the decoder,
++    // which is what the qavc sample subtype means - so that wait never
++    // ends. HBO Max appends about eight seconds of media, reaches
++    // HAVE_METADATA at 768x322, and stops there with readyState 1 and a
++    // clock that never starts.
++    //
++    // This branch already exists and already sits ahead of both the GMP
++    // and the platform paths; it only ever tested one pref. Widened by
++    // the pref that gates this route as a whole - the same one
++    // FairPlayCDMProxy.mm reads - rather than by a key-system string
++    // test, because it is the correct feature flag and because it is in
++    // the media pref group that this line's StaticPrefs header already
++    // provides.
++    //
++    // Blank IMAGES, not image-less frames: BlankDecoderModule publishes
++    // real blank pictures, so the element's own box goes blank while the
++    // decoded picture stays in the overlay. The question here is whether
++    // the clock advances and the page keeps appending, not what it looks
++    // like.
++    const bool reynardTimingOnly =
++        StaticPrefs::media_reynard_fairplay_mse_parser_route();
++    if (StaticPrefs::media_eme_video_blank() || reynardTimingOnly) {
++      printf_stderr(
++          "mseDecoderRoute: blank video decoder (reynard=%d pref=%d)\n",
++          reynardTimingOnly ? 1 : 0,
++          StaticPrefs::media_eme_video_blank() ? 1 : 0);
+       EME_LOG(
+           "EMEDecoderModule::CreateVideoDecoder() creating a blank decoder.");
+       RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
+       RefPtr<MediaDataDecoder> decoder = m->CreateVideoDecoder(aParams);
+       return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
+                                                                       __func__);
+     }
+ 
+     const bool gmpSupported =
