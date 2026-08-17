@@ -1,0 +1,22 @@
+diff --git a/mobile/shared/modules/geckoview/GeckoViewNavigation.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewNavigation.sys.mjs
+--- a/mobile/shared/modules/geckoview/GeckoViewNavigation.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewNavigation.sys.mjs
+@@ -686,7 +686,7 @@ export class GeckoViewNavigation extends GeckoViewModule {
+   }
+
+   // WebProgress event handler.
+-  onLocationChange(aWebProgress, aRequest, aLocationURI) {
++  onLocationChange(aWebProgress, aRequest, aLocationURI, aFlags) {
+     debug`onLocationChange`;
+
+     let fixedURI = aLocationURI;
+@@ -747,6 +747,9 @@ export class GeckoViewNavigation extends GeckoViewModule {
+       canGoBack: this.browser.canGoBack,
+       canGoForward: this.browser.canGoForward,
+       isTopLevel: aWebProgress.isTopLevel,
++      isSameDocument: !!(
++        aFlags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT
++      ),
+       permissions,
+       hasUserGesture:
+         this.window.document.hasValidTransientUserGestureActivation !== null

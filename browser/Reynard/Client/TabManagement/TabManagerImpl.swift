@@ -1962,7 +1962,8 @@ extension TabManagerImplementation: NavigationDelegate {
         session: GeckoSession,
         url: String?,
         permissions: [ContentPermission],
-        hasUserGesture: Bool
+        hasUserGesture: Bool,
+        isSameDocument: Bool
     ) {
         guard let location = tabLocation(for: session) else {
             return
@@ -1977,7 +1978,37 @@ extension TabManagerImplementation: NavigationDelegate {
         // about:blank commits within a second while the requested load
         // can still have been swallowed, which is precisely the failure
         // the watchdog exists to catch.
-        if let normalizedURL, !normalizedURL.isEmpty, !normalizedURL.hasPrefix("about:blank") {
+        //
+        // Nor is a SAME-DOCUMENT change while a load is pending: a
+        // pushState or hashchange from the page being LEFT - any SPA -
+        // used to be indistinguishable from a real commit here,
+        // clearing the watchdog and flipping displayState to
+        // .committed with the OLD page's URL - the address bar visibly
+        // reverted and the pending load lost its only protection: the
+        // historical "press Go twice" hole through another event. The
+        // engine reports the distinction now (isSameDocument; false on
+        // an engine built without this fix's patch, which keeps the
+        // old behavior exactly). A pending CROSS-document load can
+        // never commit as a same-document change; the one same-doc
+        // arrival that may commit the pending state is a typed
+        // fragment jump within the current page. Input carrying a
+        // fragment is therefore never filtered at all - the engine's
+        // fixup can rewrite such a URL (inserted slash, punycode,
+        // percent-encoding) beyond what string matching can follow, so
+        // for that rare input the pre-fix behavior is kept wholesale.
+        // The exact-match arm then covers the fragmentless shape of
+        // the same corner: typing the current page's own URL, which
+        // the engine may resolve same-document by stripping the hash.
+        let isOutgoingPageNoise: Bool
+        if isSameDocument, case let .pending(pendingInput) = tab.state.displayState,
+           !pendingInput.contains("#") {
+            isOutgoingPageNoise = URLUtils.normalizedURLMatchString(from: url ?? "")
+                != URLUtils.normalizedURLMatchString(from: pendingInput)
+        } else {
+            isOutgoingPageNoise = false
+        }
+        if let normalizedURL, !normalizedURL.isEmpty, !normalizedURL.hasPrefix("about:blank"),
+           !isOutgoingPageNoise {
             clearLoadWatchdog(for: tab, signal: "locationChange")
         }
         
@@ -2018,7 +2049,9 @@ extension TabManagerImplementation: NavigationDelegate {
         } else {
             tab.url = url
         }
-        tab.state.displayState = .committed
+        if !isOutgoingPageNoise {
+            tab.state.displayState = .committed
+        }
         tab.favicon = nil
 
         notifyUpdate(at: location.index, mode: location.mode, reason: .location)
@@ -2337,6 +2370,40 @@ extension TabManagerImplementation: NavigationDelegate {
         return .allow
     }
 
+    func onLoadError(session: GeckoSession, uri: String?, error: Int, errorModule: Int, errorClass: Int) -> String? {
+        guard let location = tabLocation(for: session) else {
+            return nil
+        }
+        let tab = tabs(for: location.mode)[location.index]
+
+        // One line per failed navigation, mirroring the LoadUri log: a
+        // load that died used to leave no app-side trace at all.
+        NSLog("[LoadError] tab %@ failed %@ (error=%d module=%d class=%d)",
+              tab.id.uuidString, uri ?? "?", error, errorModule, errorClass)
+
+        // Nothing will paint out of a failed load, and an escalating
+        // paint watch must not re-dispatch a load the engine just
+        // declared dead.
+        if let wait = paintWaits.removeValue(forKey: tab.id) {
+            wait.workItem.cancel()
+        }
+
+        // A still-armed ladder for a pending user load is LEFT ARMED:
+        // this error is the flaky-network variant of "press Go twice"
+        // (cold DNS/TLS dying on a redirect leg), and the ladder's own
+        // re-dispatch is the automated second press. The spinner stays,
+        // honestly - a retry is coming.
+        if case .pending = tab.state.displayState, loadWatchdogs[tab.id] != nil {
+            return nil
+        }
+
+        // Otherwise the failure is final. The stuck progress bar was
+        // the only thing the user ever saw of it.
+        tab.state.loadingState = .idle
+        notifyUpdate(at: location.index, mode: location.mode, reason: .loading)
+        return nil
+    }
+
     func onLinkActivated(
         session: GeckoSession,
         uri: String,
@@ -2521,6 +2588,21 @@ extension TabManagerImplementation: ProgressDelegate {
             tabID: tab.id
         ) {
             loadURL(url, in: tab)
+            // This restart CANCELS the in-flight navigation and issues
+            // a fresh LoadUri mid-flight - across a twitch.tv ->
+            // m.twitch.tv style redirect that lands right in the
+            // cross-site process switch, which is the documented window
+            // for a LoadUri to be swallowed whole. browse() pairs every
+            // load with a watchdog; this one ran bare, so a swallowed
+            // restart left the tab pending forever and the next Go
+            // press was the only recovery. Re-arm around it, keyed to
+            // the NEW url so a retry re-issues what was actually
+            // cancelled. Only a user-initiated load carries .pending
+            // state; SPA and engine-initiated traffic stays out of the
+            // ladder.
+            if case let .pending(pendingInput) = tab.state.displayState {
+                armLoadWatchdog(for: tab, pendingInput: pendingInput, retryURL: url)
+            }
         }
         
         tab.state.loadingState = .loading(progress: 0)

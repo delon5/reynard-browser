@@ -131,14 +131,18 @@ final class AddressBar: UIView {
     private let addressBarContent: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ? .tertiarySystemBackground : .appBackground
-        }
+        // Liquid Glass carries the capsule now - addressBarGlassBackground,
+        // installed back-most in configureHierarchy. Same treatment as the
+        // condensed pill, with the same Reduce Transparency and pre-iOS-26
+        // fallbacks inside ToolbarGlassBackgroundView.
+        view.backgroundColor = .clear
         view.layer.cornerCurve = .continuous
         view.layer.cornerRadius = UX.addressBarBackgroundCornerRadius
         view.clipsToBounds = true
         return view
     }()
+    
+    private let addressBarGlassBackground = ToolbarGlassBackgroundView()
     
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)
@@ -541,6 +545,7 @@ final class AddressBar: UIView {
         addSubview(addressBarBackground)
         addSubview(dismissButton)
         addressBarBackground.addSubview(addressBarContent)
+        addressBarGlassBackground.install(in: addressBarContent)
         addressBarContent.addSubview(leadingButton)
         addressBarContent.addSubview(pageMenuUpdateBadge)
         addressBarContent.addSubview(addonButton)

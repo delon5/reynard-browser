@@ -57,6 +57,13 @@ final class SessionSettingsManager {
               currentHost != requestedHost else {
             return false
         }
-        return session.settings != requestedSettings
+        // Raw against raw, deliberately: session.settings holds the
+        // viewport-CLAMPED value actually sent to the engine, which
+        // for a clamped site can never equal the raw store value -
+        // comparing those looped the mid-navigation restart forever.
+        // After one updateSettings application the raw values are
+        // identical by construction, so this converges in at most one
+        // restart.
+        return session.requestedSettings != requestedSettings
     }
 }

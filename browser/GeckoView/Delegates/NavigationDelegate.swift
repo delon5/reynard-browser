@@ -33,10 +33,27 @@ public protocol NavigationDelegate {
         permissions: [ContentPermission],
         hasUserGesture: Bool
     )
+    /// The flag-carrying variant the handler actually invokes.
+    /// isSameDocument is true for pushState/hashchange-style changes
+    /// within the current document - plumbed from the engine by
+    /// GeckoViewNavigation.sys.mjs.patch, and always false on an
+    /// engine built without it.
+    func onLocationChange(
+        session: GeckoSession,
+        url: String?,
+        permissions: [ContentPermission],
+        hasUserGesture: Bool,
+        isSameDocument: Bool
+    )
     func onCanGoBack(session: GeckoSession, canGoBack: Bool)
     func onCanGoForward(session: GeckoSession, canGoForward: Bool)
     func onLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny
     func onSubframeLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny
+    /// A top-level load failed (DNS, TLS, connection, redirect loop,
+    /// ...). The return value is the error page URI to load in place
+    /// of the failed document, or nil for none - the engine's own
+    /// contract for GeckoView:OnLoadError.
+    func onLoadError(session: GeckoSession, uri: String?, error: Int, errorModule: Int, errorClass: Int) -> String?
     func onLinkActivated(
         session: GeckoSession,
         uri: String,
@@ -59,10 +76,25 @@ extension NavigationDelegate {
         permissions: [ContentPermission],
         hasUserGesture: Bool
     ) {}
+    public func onLocationChange(
+        session: GeckoSession,
+        url: String?,
+        permissions: [ContentPermission],
+        hasUserGesture: Bool,
+        isSameDocument: Bool
+    ) {
+        onLocationChange(
+            session: session,
+            url: url,
+            permissions: permissions,
+            hasUserGesture: hasUserGesture
+        )
+    }
     public func onCanGoBack(session: GeckoSession, canGoBack: Bool) {}
     public func onCanGoForward(session: GeckoSession, canGoForward: Bool) {}
     public func onLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny { .allow }
     public func onSubframeLoadRequest(session: GeckoSession, request: LoadRequest) async -> AllowOrDeny { .allow }
+    public func onLoadError(session: GeckoSession, uri: String?, error: Int, errorModule: Int, errorClass: Int) -> String? { nil }
     public func onLinkActivated(
         session: GeckoSession,
         uri: String,
@@ -110,7 +142,8 @@ func newNavigationHandler(_ session: GeckoSession) -> GeckoSessionHandler {
                     session: session,
                     url: message?["uri"] as? String,
                     permissions: permissionPayloads?.map(ContentPermission.fromDictionary) ?? [],
-                    hasUserGesture: message?["hasUserGesture"] as? Bool ?? false
+                    hasUserGesture: message?["hasUserGesture"] as? Bool ?? false,
+                    isSameDocument: message?["isSameDocument"] as? Bool ?? false
                 )
             }
             
@@ -147,7 +180,19 @@ func newNavigationHandler(_ session: GeckoSession) -> GeckoSessionHandler {
             return false
             
         case .onLoadError:
-            return nil
+            // Payload per the engine's LoadURIDelegateChild
+            // .handleLoadError: {uri, error, errorModule, errorClass}.
+            // The response is the error page URI, or nil for none -
+            // which was the ONLY thing this case used to say,
+            // silently, without telling anyone a load had died.
+            let errorPageURI = delegate?.onLoadError(
+                session: session,
+                uri: message?["uri"] as? String,
+                error: PayloadValue.int(message?["error"]) ?? 0,
+                errorModule: PayloadValue.int(message?["errorModule"]) ?? 0,
+                errorClass: PayloadValue.int(message?["errorClass"]) ?? 0
+            ) ?? nil
+            return errorPageURI
 
         case .linkActivated:
             guard let uri = message?["uri"] as? String,

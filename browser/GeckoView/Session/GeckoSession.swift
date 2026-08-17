@@ -28,7 +28,14 @@ public class GeckoSession {
     public let isPrivateMode: Bool
     lazy var addonSessionListener = AddonSessionListener(session: self)
     public private(set) var settings: GeckoSessionSettings
-    private var requestedSettings: GeckoSessionSettings
+    /// The raw settings the embedder last asked for, before the
+    /// viewport clamp that effectiveSettings applies to what is sent
+    /// to the engine. Read-only public so needsUpdate can compare the
+    /// embedder's request against the embedder's request - comparing
+    /// the CLAMPED value against a fresh RAW value can never converge
+    /// while the clamp is active, which turned the cross-host settings
+    /// restart into an infinite load/cancel loop.
+    public private(set) var requestedSettings: GeckoSessionSettings
     private var viewportWidth: Double?
     
     // MARK: - Delegates

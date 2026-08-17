@@ -17,6 +17,12 @@ final class AddressBarDismissButton: UIButton {
         static let dismissButtonSymbolPointSize: CGFloat = 20
     }
     
+    /// The pill's structure in miniature: the button's own layer keeps
+    /// masksToBounds=false for its shadow, so a dedicated clipped
+    /// container hosts the glass and tracks the corner radius.
+    private let glassContainer = UIView()
+    private let glassBackground = ToolbarGlassBackgroundView()
+    
     // MARK: - Lifecycle
     
     override init(frame: CGRect) {
@@ -33,6 +39,7 @@ final class AddressBarDismissButton: UIButton {
         super.layoutSubviews()
         layer.shadowOpacity = UX.dismissButtonShadowOpacity
         layer.cornerRadius = bounds.height / UX.dismissButtonCornerRadiusDivisor
+        glassContainer.layer.cornerRadius = layer.cornerRadius
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
     }
     
@@ -42,9 +49,22 @@ final class AddressBarDismissButton: UIButton {
         translatesAutoresizingMaskIntoConstraints = false
         alpha = 0
         isHidden = true
-        backgroundColor = UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ? .tertiarySystemBackground : .appBackground
-        }
+        // Liquid Glass, matching the condensed pill and the address bar
+        // capsule; ToolbarGlassBackgroundView carries the Reduce
+        // Transparency and pre-iOS-26 fallbacks.
+        backgroundColor = .clear
+        glassContainer.translatesAutoresizingMaskIntoConstraints = false
+        glassContainer.clipsToBounds = true
+        glassContainer.layer.cornerCurve = .continuous
+        glassContainer.isUserInteractionEnabled = false
+        insertSubview(glassContainer, at: 0)
+        NSLayoutConstraint.activate([
+            glassContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glassContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            glassContainer.topAnchor.constraint(equalTo: topAnchor),
+            glassContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        glassBackground.install(in: glassContainer)
         tintColor = .label
         layer.cornerCurve = .continuous
         layer.shadowColor = UITraitCollection.current.userInterfaceStyle == .dark
