@@ -1043,6 +1043,23 @@ public final class FairPlayStreamParser: NSObject {
         var probeSession: VTDecompressionSession?
         var probeIn = 0
         var probeOut = 0
+        /// Highest PTS taken IN so far, for discontinuity detection.
+        ///
+        /// Intake order is the order the layer will see, so a jump shows
+        /// up here before it can strand anything. NaN until the first
+        /// sample.
+        var lastIntakePTS = Double.nan
+        /// After a flush or a drop, nothing is fed until a sync sample: a
+        /// display layer handed a mid-GOP frame has no reference to
+        /// decode from.
+        var needsSyncSample = false
+        var flushes = 0
+        var videoSeen = 0
+        /// The second sink: a plain CALayer whose contents are set from
+        /// the decoded pixel buffers. No renderer, no timebase, no
+        /// readiness - it either shows the image or it does not.
+        var proofLayer: CALayer?
+        var proofFrames = 0
 
         init(parser: NSObject, recipient: AVContentKeyRecipient,
              delegate: ParserDelegate) {
@@ -1272,6 +1289,62 @@ public final class FairPlayStreamParser: NSObject {
             return
         }
 
+        // ONE discontinuity in the whole capture, and it ended the
+        // picture.
+        //
+        // 429 samples produced 200 apparent PTS regressions. 199 were the
+        // ordinary B-frame reorder, one frame interval apart. The other
+        // one was not:
+        //
+        //     sample 191:  pts 17.9246 -> 17.8829   back 0.042s
+        //     sample 193:  pts 17.9663 -> 10.0000   back 7.966s
+        //
+        // At 193 the page re-appended the same range at a higher bitrate -
+        // 110-byte frames the first time through, 50506 the second - which
+        // is an ABR upswitch and entirely normal. The timebase was at 16.5,
+        // so every sample after it was six seconds stale and could never
+        // be presented. The layer kept accepting; the screen kept the last
+        // frame it had.
+        //
+        // Half a second of threshold. The reorder is 0.042s here and the
+        // real jump was 8s; nothing meaningful lives in between, so no
+        // finer policy is needed. Forwards is checked too, at 2s, because
+        // a seek strands the queue the same way in the other direction.
+        let intakePTS =
+            CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        let jump = withState { () -> Double? in
+            slot.videoSeen += 1
+            guard slot.lastIntakePTS.isFinite, intakePTS.isFinite else {
+                slot.lastIntakePTS = intakePTS
+                return nil
+            }
+            let delta = intakePTS - slot.lastIntakePTS
+            guard delta < -0.5 || delta > 2.0 else {
+                slot.lastIntakePTS = max(slot.lastIntakePTS, intakePTS)
+                return nil
+            }
+            // The new timeline starts here, so the high-water mark from
+            // the old one is discarded rather than carried forward.
+            slot.lastIntakePTS = intakePTS
+            return delta
+        }
+        if let jump {
+            resynchronise(streamKey: streamKey, to: intakePTS, jump: jump)
+        }
+
+        // Nothing is fed mid-GOP. After a flush the layer has no
+        // reference frame, and after a drop there is a hole where one
+        // used to be - either way the next usable sample is a keyframe
+        // and everything before it decodes to garbage.
+        if withState({ slot.needsSyncSample }) {
+            guard Self.isSyncSample(sampleBuffer) else {
+                return
+            }
+            withState { slot.needsSyncSample = false }
+            Self.log("stream \(streamKey) resync complete - first sync "
+                     + "sample at pts \(intakePTS)")
+        }
+
         // The independent answer, before anything to do with the layer:
         // whether these bytes decode is a fact about the bytes, and it
         // should not depend on the sink being wired correctly.
@@ -1281,9 +1354,20 @@ public final class FairPlayStreamParser: NSObject {
         // requestMediaDataWhenReady, which is the API that exists because
         // pushing into a full renderer is undefined - and fix 21 pushed
         // 429 frames at a layer that stopped consuming after 55.
+        // 900 rather than 240. A run that was otherwise healthy dropped
+        // 100+ samples at 240, because 240 frames is under ten seconds at
+        // 24fps and MSE buffers much further ahead than that - the parser
+        // hands over a whole appended segment at once, not in real time.
+        // 900 frames of compressed video is roughly 20MB at the sizes in
+        // that capture, which is real memory, and acceptable only because
+        // this whole path is behind a marker file.
         let queued = withState { () -> Int in
-            guard slot.pending.count < 240 else {
+            guard slot.pending.count < 900 else {
                 slot.overflowed += 1
+                // A hole in the middle of a GOP decodes to garbage, so
+                // the feed restarts at the next keyframe rather than
+                // resuming mid-picture.
+                slot.needsSyncSample = true
                 return -1
             }
             slot.pending.append(sampleBuffer)
@@ -1293,8 +1377,8 @@ public final class FairPlayStreamParser: NSObject {
             let dropped = withState { slot.overflowed }
             if dropped == 1 || dropped % 100 == 0 {
                 Self.log("stream \(streamKey) pending queue FULL - "
-                         + "\(dropped) samples dropped. The layer is not "
-                         + "draining.")
+                         + "\(dropped) samples dropped, will restart at the "
+                         + "next sync sample. The layer is not draining.")
             }
             return
         }
@@ -1392,8 +1476,21 @@ public final class FairPlayStreamParser: NSObject {
 
             // Reported on change, plus the first one. status 2 is .failed
             // and is where an authorization refusal would appear.
+            // requiresFlushToResumeDecoding is the one property whose
+            // true value would explain everything seen so far: the layer
+            // accepts and discards until flushed, with no error and a
+            // rendering status. Nothing has ever read it.
+            //
+            // Through KVC with a responds(to:) guard, not referenced
+            // directly - it is newer than this deployment target, and a
+            // diagnostic has already broken a build on this route once.
+            let flushKey = "requiresFlushToResumeDecoding"
+            let needsFlush = layer.responds(to: NSSelectorFromString(flushKey))
+                ? String(describing: layer.value(forKey: flushKey) ?? "?")
+                : "n/a"
             let report = "status=\(layer.status.rawValue) "
                 + "ready=\(layer.isReadyForMoreMediaData) "
+                + "needsFlush=\(needsFlush) "
                 + "error=\(layer.error.map { String(describing: $0) } ?? "nil")"
             let changed = withState { () -> Bool in
                 guard let slot = streamParsers[streamKey],
@@ -1431,8 +1528,17 @@ public final class FairPlayStreamParser: NSObject {
     private func runDecodeProbe(streamKey: String,
                                 sampleBuffer: CMSampleBuffer) {
         guard Self.showLayerMarkerPresent() else { return }
+        // Every sample in, every fortieth reported.
+        //
+        // Feeding every sample is what makes the later reports mean
+        // anything: a session handed only every fortieth frame has no
+        // reference frames and fails on all of them. Fix 26 reported the
+        // first eight and they were all mean luma 16 - true, and
+        // unrepresentative, because those eight are the black fade-in.
+        // The same run had a p50 of 25821 bytes and a max of 372645 at
+        // 720p, which is a real picture nobody had looked at yet.
         guard let slot = withState({ streamParsers[streamKey] }),
-              slot.probeIn < 8,
+              slot.probeIn < 500,
               let format = CMSampleBufferGetFormatDescription(sampleBuffer)
         else { return }
 
@@ -1477,25 +1583,34 @@ public final class FairPlayStreamParser: NSObject {
         let submitStatus = VTDecompressionSessionDecodeFrame(
             session, sampleBuffer: sampleBuffer, flags: [],
             infoFlagsOut: nil
-        ) { decodeStatus, _, image, _, _ in
+        ) { decodeStatus, _, image, framePTS, _ in
             guard decodeStatus == noErr, let image else {
+                // Failures are always reported. A decode that starts
+                // working and then stops is the interesting shape, and
+                // sampling would hide it.
                 FairPlayStreamParser.log(
                     "stream \(streamKey) decode probe frame \(index) FAILED - "
                     + "status \(decodeStatus)")
                 return
             }
+            FairPlayStreamParser.shared.withStateNoteProbeFrame(
+                streamKey: streamKey)
+            // The other sink, before the log line: a CVPixelBuffer needs
+            // nothing from AVFoundation to reach the screen.
+            FairPlayStreamParser.shared.presentProofFrame(
+                streamKey: streamKey, image: image, index: index)
+            guard index % 40 == 1 || index <= 2 else { return }
             let width = CVPixelBufferGetWidth(image)
             let height = CVPixelBufferGetHeight(image)
             let pixelFormat = CVPixelBufferGetPixelFormatType(image)
-            let luma = FairPlayStreamParser.meanLuma(image)
-            FairPlayStreamParser.shared.withStateNoteProbeFrame(
-                streamKey: streamKey)
+            let luma = FairPlayStreamParser.lumaStats(image)
             FairPlayStreamParser.log(
                 "stream \(streamKey) decode probe frame \(index) - "
                 + "\(width)x\(height) format "
                 + "\(FairPlayStreamParser.pixelFormatName(pixelFormat)) "
-                + "mean luma \(luma) - a real number here means these bytes "
-                + "decode to pixels and the sink is the only thing left")
+                + "luma min \(luma.min) mean \(luma.mean) max \(luma.max) "
+                + "at pts \(framePTS.seconds) - all three equal is a flat "
+                + "frame, a spread is real picture content")
         }
         if submitStatus != noErr {
             Self.log("stream \(streamKey) decode probe submit \(index) failed "
@@ -1503,20 +1618,187 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
+    /// A new timeline started. Throw away the old one and re-anchor.
+    ///
+    /// The held queue goes too, and that is the point: those samples
+    /// belong to a timeline the stream has abandoned, and feeding them
+    /// after the flush would put the layer straight back into the state
+    /// this exists to leave.
+    private func resynchronise(streamKey: String, to pts: Double,
+                               jump: Double) {
+        let work = withState { () -> (layer: AVSampleBufferDisplayLayer,
+                                      queue: DispatchQueue, abandoned: Int,
+                                      count: Int, at: Int)? in
+            guard let slot = streamParsers[streamKey],
+                  let layer = slot.displayLayer,
+                  let queue = slot.drainQueue else { return nil }
+            let abandoned = slot.pending.count
+            slot.pending.removeAll()
+            slot.needsSyncSample = true
+            slot.flushes += 1
+            return (layer, queue, abandoned, slot.flushes, slot.videoSeen)
+        }
+        guard let work else { return }
+        // The sample index is in the line because that is how the last
+        // one was found - by hand, counting through 429 samples to reach
+        // 193. It should not take that twice.
+        Self.log("stream \(streamKey) DISCONTINUITY \(jump)s at video "
+                 + "sample \(work.at) - flushing (\(work.abandoned) held "
+                 + "samples abandoned), re-anchoring the timebase to "
+                 + "\(pts). Flush \(work.count).")
+        // On the drain queue, because that is where enqueue happens.
+        // flush() racing an enqueue is the one collision these two calls
+        // can have, and a serial queue is the cheapest way to not have it.
+        work.queue.async {
+            work.layer.flush()
+            if let timebase = work.layer.controlTimebase {
+                CMTimebaseSetTime(timebase,
+                                  time: CMTime(seconds: pts,
+                                               preferredTimescale: 90_000))
+            }
+        }
+    }
+
+    /// Can the decoder start here?
+    ///
+    /// No attachments at all means nothing declared this sample to depend
+    /// on another, which is a sync sample. Absence of the NotSync key
+    /// means the same thing.
+    fileprivate static func isSyncSample(_ sampleBuffer: CMSampleBuffer)
+        -> Bool {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                  sampleBuffer, createIfNecessary: false)
+                  as? [[CFString: Any]],
+              let first = attachments.first else {
+            return true
+        }
+        if let notSync = first[kCMSampleAttachmentKey_NotSync] as? Bool {
+            return !notSync
+        }
+        return true
+    }
+
+    /// Put a decoded frame on screen without a display layer.
+    ///
+    /// The pink rectangle is composited - its border is visible - and it
+    /// consumes samples and reports no error and shows nothing. Rather
+    /// than keep guessing at why, this takes the pixel buffers the probe
+    /// already produces and sets them as a CALayer's contents. That path
+    /// has no renderer, no timebase, no queue and no dequeue policy, so it
+    /// removes every mechanism the display layer could be failing in.
+    ///
+    /// Both rectangles are on screen together, same stream, two sinks. If
+    /// cyan shows the movie and pink stays black, the samples and the
+    /// decode and the compositing are all right and the display layer is
+    /// simply the wrong sink here.
+    ///
+    /// Every sixth frame. A slideshow answers the question; smooth motion
+    /// would cost work that answers nothing.
+    fileprivate func presentProofFrame(streamKey: String,
+                                       image: CVImageBuffer, index: Int) {
+        // Guarded like showLayerIfRequested, and for the same reason: this
+        // is the only UIKit in the file, and the call site above is not
+        // conditional. The function always exists; its body does not.
+#if canImport(UIKit)
+        guard Self.showLayerMarkerPresent(), index % 6 == 1 else { return }
+        var cgImage: CGImage?
+        let status = VTCreateCGImageFromCVPixelBuffer(image, options: nil,
+                                                      imageOut: &cgImage)
+        guard status == noErr, let cgImage else {
+            Self.log("stream \(streamKey) proof frame \(index) could not "
+                     + "become a CGImage - status \(status)")
+            return
+        }
+        let count = withState { () -> Int in
+            guard let slot = streamParsers[streamKey] else { return 0 }
+            slot.proofFrames += 1
+            return slot.proofFrames
+        }
+        DispatchQueue.main.async {
+            let existing = self.withState {
+                self.streamParsers[streamKey]?.proofLayer
+            }
+            let layer: CALayer
+            if let existing {
+                layer = existing
+            } else {
+                guard let window = Self.reynardKeyWindow() else {
+                    Self.log("stream \(streamKey) proof frame - no window")
+                    return
+                }
+                let new = CALayer()
+                let width = min(window.bounds.width - 32, 360)
+                // Directly below the pink one, which fix 22 puts at y=120
+                // with the same width and a 16:9 height. Two rectangles,
+                // same stream, so the comparison is one glance.
+                new.frame = CGRect(x: 16, y: 120 + width * 9.0 / 16.0 + 8,
+                                   width: width, height: width * 9.0 / 16.0)
+                new.backgroundColor = UIColor.black.cgColor
+                new.borderColor = UIColor.systemTeal.cgColor
+                new.borderWidth = 2
+                new.contentsGravity = .resizeAspect
+                window.layer.addSublayer(new)
+                self.withState {
+                    self.streamParsers[streamKey]?.proofLayer = new
+                }
+                Self.log("stream \(streamKey) proof layer placed at "
+                         + "\(new.frame) - cyan border. Pictures here with "
+                         + "the pink one still black means the display "
+                         + "layer is the wrong sink, not the samples.")
+                layer = new
+            }
+            layer.contents = cgImage
+            if count <= 3 || count % 20 == 0 {
+                Self.log("stream \(streamKey) proof frame \(count) painted "
+                         + "(\(cgImage.width)x\(cgImage.height))")
+            }
+        }
+#endif
+    }
+
+#if canImport(UIKit)
+    /// The app's key window, without a compile-time UIApplication.
+    ///
+    /// This target is built extension-API-only, so UIApplication.shared is
+    /// unavailable and the instance is fetched by selector - the same way
+    /// showLayerIfRequested does it.
+    private static func reynardKeyWindow() -> UIWindow? {
+        let selector = NSSelectorFromString("sharedApplication")
+        guard let appClass = NSClassFromString("UIApplication") as? NSObject.Type,
+              appClass.responds(to: selector),
+              let application = appClass.perform(selector)?
+                  .takeUnretainedValue() as? UIApplication else {
+            return nil
+        }
+        let scenes = application.connectedScenes
+        return scenes.compactMap { $0 as? UIWindowScene }
+                     .flatMap { $0.windows }
+                     .first { $0.isKeyWindow }
+            ?? scenes.compactMap { $0 as? UIWindowScene }
+                     .flatMap { $0.windows }.first
+    }
+#endif
+
     fileprivate func withStateNoteProbeFrame(streamKey: String) {
         withState { streamParsers[streamKey]?.probeOut += 1 }
     }
 
-    /// Average luma over a coarse grid, so "decoded" and "decoded to
-    /// black" are different answers.
-    fileprivate static func meanLuma(_ image: CVImageBuffer) -> Int {
+    /// Luma range over a coarse grid, so "decoded", "decoded to black"
+    /// and "decoded to a real picture" are three different answers.
+    ///
+    /// The mean alone was not enough: mean 16 is the video-range black
+    /// floor, and it reads the same for a legitimate fade-in as it would
+    /// for a decoder producing nothing. min and max separate them - a
+    /// flat frame has all three equal.
+    fileprivate static func lumaStats(_ image: CVImageBuffer)
+        -> (min: Int, mean: Int, max: Int) {
         guard CVPixelBufferLockBaseAddress(image, .readOnly) == kCVReturnSuccess
-        else { return -1 }
+        else { return (-1, -1, -1) }
         defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
         let planar = CVPixelBufferGetPlaneCount(image) > 0
         let base = planar ? CVPixelBufferGetBaseAddressOfPlane(image, 0)
                           : CVPixelBufferGetBaseAddress(image)
-        guard let base else { return -1 }
+        guard let base else { return (-1, -1, -1) }
         let rowBytes = planar ? CVPixelBufferGetBytesPerRowOfPlane(image, 0)
                               : CVPixelBufferGetBytesPerRow(image)
         let height = planar ? CVPixelBufferGetHeightOfPlane(image, 0)
@@ -1526,17 +1808,23 @@ public final class FairPlayStreamParser: NSObject {
         let bytes = base.assumingMemoryBound(to: UInt8.self)
         var total = 0
         var samples = 0
+        var lowest = 255
+        var highest = 0
         var y = 0
         while y < height {
             var x = 0
             while x < width {
-                total += Int(bytes[y * rowBytes + x])
+                let value = Int(bytes[y * rowBytes + x])
+                total += value
+                lowest = min(lowest, value)
+                highest = max(highest, value)
                 samples += 1
                 x += 16
             }
             y += 8
         }
-        return samples > 0 ? total / samples : -1
+        guard samples > 0 else { return (-1, -1, -1) }
+        return (lowest, total / samples, highest)
     }
 
     fileprivate static func pixelFormatName(_ value: OSType) -> String {
