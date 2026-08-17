@@ -52,3 +52,38 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
      }
  
      const bool gmpSupported =
+@@ -470,6 +501,34 @@ EMEDecoderModule::CreateAudioDecoder(
+     return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
+                                                                     __func__);
+   }
+ 
++  // Reynard: protected MSE audio must not reach EMEDecryptor either.
++  //
++  // Fix 33 freed video and readyState stayed at 1, because readyState
++  // belongs to the ELEMENT: HAVE_CURRENT_DATA needs data for every
++  // selected track, so one audio decoder waiting on SamplesWaitingForKey
++  // pins the element at HAVE_METADATA however well video is doing.
++  //
++  // Inserted after the pref branch rather than widening its condition,
++  // so the pref keeps its own meaning and this catches only what it let
++  // through. The same disjunction as the video side - the proxy permits
++  // the MSE route when mse_parser_route is set OR hls_only_initdata is
++  // clear.
++  const bool reynardMSERoute =
++      StaticPrefs::media_reynard_fairplay_mse_parser_route() ||
++      !StaticPrefs::media_reynard_fairplay_hls_only_initdata();
++  printf_stderr(
++      "mseDecoderRoute: audio decoder - mseRoute=%d hlsOnly=%d -> blank=%d\n",
++      StaticPrefs::media_reynard_fairplay_mse_parser_route() ? 1 : 0,
++      StaticPrefs::media_reynard_fairplay_hls_only_initdata() ? 1 : 0,
++      reynardMSERoute ? 1 : 0);
++  if (reynardMSERoute) {
++    RefPtr<PlatformDecoderModule> blankModule(BlankDecoderModule::Create());
++    RefPtr<MediaDataDecoder> blankDecoder =
++        blankModule->CreateAudioDecoder(aParams);
++    return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(
++        blankDecoder, __func__);
++  }
++
+   UniquePtr<ADTSSampleConverter> converter = nullptr;
+   if (MP4Decoder::IsAAC(aParams.mConfig.mMimeType)) {
