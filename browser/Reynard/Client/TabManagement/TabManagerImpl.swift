@@ -2330,8 +2330,14 @@ extension TabManagerImplementation: NavigationDelegate {
     /// detection can run before the player exists. The overlay probe
     /// reaches the same verdict once playback starts - the seed just
     /// makes the very first player paint correct too.
+    /// m.twitch.tv: the documented env-reading page whose 'Open in App'
+    /// sheet is NOT a fixed root-content layer - only env() can reach
+    /// it (the pre-merge branch proved env at the pill height lifts
+    /// it), while its CDN CSS keeps the stylesheet scan blind and the
+    /// sheet's non-fixed position keeps the bottom-edge probe blind.
     private static let seededReservations: [String: GeckoSession.BottomReservation] = [
         "tv.apple.com": .readsSafeAreaInset,
+        "m.twitch.tv": .readsSafeAreaInset,
     ]
 
     /// Bumped whenever seededReservations changes. An install that
@@ -2340,7 +2346,7 @@ extension TabManagerImplementation: NavigationDelegate {
     /// to it - so on a version bump the seeds are applied OVER the
     /// persisted entries exactly once; after that, live detection
     /// overwrites them as usual.
-    private static let seedVersion = 1
+    private static let seedVersion = 2
     private static let seedVersionKey = "Reynard.SafeArea.SeedVersion"
 
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
