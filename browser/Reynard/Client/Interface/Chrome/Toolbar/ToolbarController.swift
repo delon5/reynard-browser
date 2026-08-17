@@ -104,55 +104,56 @@ final class ToolbarController {
             self.maxToolbarOffset = maxToolbarOffset
             self.maxTopToolbarOffset = maxTopToolbarOffset
         }
-        // Two modes. Stopping keeps its single mechanism: the content
-        // view ends at the pill's top edge
-        // (BrowserViewController.condensedContentBottomAnchor) and the
-        // engine is told nothing.
+        // Float mode sends exactly ONE engine lift per PAGE, chosen by
+        // the detector's verdict:
         //
-        // Floating sends exactly ONE engine lift per PAGE, chosen by the
-        // verdict the safe-area detector already produces:
+        //   needsViewportShrink - the layout viewport shrinks by the
+        //     pill's clearance (setDynamicToolbarMaxHeight, the same
+        //     trusted path the expanded toolbar uses at ~142pt). The
+        //     ICB lift reaches EVERYTHING - the measured last resort
+        //     for absolute app-shell sheets (m.twitch.tv resolved
+        //     env = 60px on device and its sheet did not move) and
+        //     full-viewport player overlays (tv.apple.com). The strip
+        //     behind the pill composites the canvas background, dark
+        //     on the sites in this class.
         //
-        //   readsSafeAreaInset - env(safe-area-inset-bottom) carries the
-        //     clearance. The page positions its own bottom controls
-        //     (YouTube, Twitch - including env-reading elements that are
-        //     NOT fixed layers, which the margin can never reach), and
-        //     its background keeps painting behind the pill.
+        //   readsSafeAreaInset - env(safe-area-inset-bottom) carries
+        //     the clearance; the page positions its own controls
+        //     (YouTube) and its background bleeds behind the pill.
         //
-        //   everything else (hasBottomBar, none, no verdict yet) - the
-        //     compositor fixed-layer margin carries it. It lifts
-        //     position:fixed and sticky-bottom layers of the root
-        //     document with no cooperation from the page (Facebook's
-        //     "Open app" banner is fixed to bottom:0 and reads no env).
-        //     The margin only moves layers holding a WebRender animation
-        //     id, which patches/layout/painting/nsDisplayList.cpp.patch
-        //     grants unconditionally on this port - without that patch
-        //     the ids vanish whenever the max is 0, the margin moves
-        //     nothing, and it gets written off as "never observed to
-        //     move anything", which is precisely what happened once.
+        //   everything else - the compositor fixed-layer margin lifts
+        //     root-document fixed/sticky bars with no page
+        //     cooperation (Facebook). Requires the animation ids
+        //     granted by patches/layout/painting/nsDisplayList.cpp.patch.
         //
-        // Never both on one page: a bar that is fixed AND on an
-        // env-reading page moves twice - the 188pt overshoot this hit
-        // before.
-        //
-        // What is NOT sent in either: the layout-viewport reservation.
-        // setDynamicToolbarMaxHeight shortens Gecko's ICB without giving
-        // Gecko anything to paint in the strip, so a short page composits
-        // it as unpainted black - the bar seen on google.com. It stays
-        // for the real toolbar, which does fill its strip.
+        // Never more than one on one page: a bar that is fixed AND on
+        // an env-reading page moves twice - the 188pt overshoot this
+        // hit before. Stopping mode keeps its single mechanism (the
+        // content view ends at the pill's top edge, engine told
+        // nothing), and the expanded toolbar keeps the full-height
+        // viewport reservation.
         let condensed = browserChrome.isScrollCondensed
         let floats = Prefs.AppearanceSettings.pillFloatsOverPage
-        let maxHeight = condensed ? 0 : maxToolbarOffset
+        let maxHeight: CGFloat
         let env: CGFloat
         let margin: CGFloat
         if condensed && floats {
-            if bottomReservation?() == .readsSafeAreaInset {
+            switch bottomReservation?() {
+            case .needsViewportShrink:
+                maxHeight = Prefs.AppearanceSettings.pillSafeAreaInset
+                env = 0
+                margin = 0
+            case .readsSafeAreaInset:
+                maxHeight = 0
                 env = Prefs.AppearanceSettings.pillSafeAreaInset
                 margin = 0
-            } else {
+            default:
+                maxHeight = 0
                 env = 0
                 margin = Prefs.AppearanceSettings.pillSafeAreaInset
             }
         } else {
+            maxHeight = condensed ? 0 : maxToolbarOffset
             env = 0
             margin = 0
         }

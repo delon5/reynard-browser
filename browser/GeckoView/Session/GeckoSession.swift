@@ -532,6 +532,13 @@ public class GeckoSession {
         /// device: Facebook's composer stayed behind the pill even once
         /// the inset was reported correctly.
         case hasBottomBar
+        /// The page's bottom UI can be lifted by NO overlay mechanism:
+        /// an absolute-positioned app-shell sheet (m.twitch.tv - measured
+        /// on device resolving env(safe-area-inset-bottom) = 60px while
+        /// the sheet stayed at the bottom), or controls inside a
+        /// full-viewport fixed overlay (tv.apple.com's player). Only
+        /// shrinking the layout viewport while condensed moves them.
+        case needsViewportShrink
     }
 
     public func bottomReservation() async -> BottomReservation? {
@@ -546,30 +553,27 @@ public class GeckoSession {
         if let envProbe = values["envProbePx"] as? Double {
             NSLog("safeArea: page resolves env(safe-area-inset-bottom) = %.1fpx", envProbe)
         }
+        // Precedence: the shapes NO overlay mechanism can lift come
+        // first - they are decided by the hit test, independent of the
+        // stylesheet scan, so an incomplete scan does not taint them.
+        // A full-viewport fixed overlay cannot be margin-lifted (it is
+        // top-anchored) and its env consumption is unknowable; an
+        // absolute app-shell bottom sheet was MEASURED not moving with
+        // env = 60px delivered. Both need the viewport shrink.
+        if values["hasFullViewportOverlay"] as? Bool == true {
+            return .needsViewportShrink
+        }
+        if values["hasAbsoluteBottomElement"] as? Bool == true {
+            return .needsViewportShrink
+        }
         if values["usesSafeAreaInset"] as? Bool == true {
             return .readsSafeAreaInset
         }
         if values["hasBottomBar"] as? Bool == true {
-            // A bar inside a FULL-VIEWPORT fixed overlay (a web video
-            // player, a modal) classifies as an env-reader: the
-            // compositor fixed-layer margin provably cannot lift a
-            // screen-filling, top-anchored layer, so env() is the only
-            // mechanism with any chance of reaching its bottom
-            // controls - and it costs nothing when the page never
-            // reads it, which is exactly what the margin was
-            // achieving for such pages. An incomplete scan does not
-            // taint this routing: env for a screen-filling overlay is
-            // correct-or-harmless whether or not the page reads it.
-            if values["hasFullViewportOverlay"] as? Bool == true {
-                return .readsSafeAreaInset
-            }
-            // An incomplete scan DOES taint a plain bar verdict: the
-            // env() rule the scan was looking for may sit in the very
-            // sheet that was still loading (the YouTube shape - a bar
-            // found, env in an unread CDN sheet). No verdict rather
-            // than a wrong one; the caller keeps the cached/seeded
-            // value and the settle re-asks retry once the sheets are
-            // complete.
+            // An incomplete scan taints a plain bar verdict: the env()
+            // rule the scan was looking for may sit in the very sheet
+            // that was still loading. No verdict rather than a wrong
+            // one; the settle re-asks retry once the sheets complete.
             if values["incomplete"] as? Bool == true {
                 return nil
             }

@@ -2343,15 +2343,15 @@ extension TabManagerImplementation: NavigationDelegate {
     /// it), while its CDN CSS keeps the stylesheet scan blind and the
     /// sheet's non-fixed position keeps the bottom-edge probe blind.
     private static let seededReservations: [String: GeckoSession.BottomReservation] = [
-        "tv.apple.com": .readsSafeAreaInset,
-        "m.twitch.tv": .readsSafeAreaInset,
+        "tv.apple.com": .needsViewportShrink,
+        "m.twitch.tv": .needsViewportShrink,
         // Redirect aliases: the tab enters as twitch.tv or
         // www.twitch.tv and only becomes m.twitch.tv after the
         // ?desktop-redirect chain settles - a device log showed a
         // condense inside that window taking the margin branch
         // because the m.twitch.tv seed had no host to match yet.
-        "twitch.tv": .readsSafeAreaInset,
-        "www.twitch.tv": .readsSafeAreaInset,
+        "twitch.tv": .needsViewportShrink,
+        "www.twitch.tv": .needsViewportShrink,
     ]
 
     /// Bumped whenever seededReservations changes. An install that
@@ -2360,7 +2360,7 @@ extension TabManagerImplementation: NavigationDelegate {
     /// to it - so on a version bump the seeds are applied OVER the
     /// persisted entries exactly once; after that, live detection
     /// overwrites them as usual.
-    private static let seedVersion = 3
+    private static let seedVersion = 4
     private static let seedVersionKey = "Reynard.SafeArea.SeedVersion"
 
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
@@ -2377,6 +2377,7 @@ extension TabManagerImplementation: NavigationDelegate {
             case "readsSafeAreaInset": result[entry.key] = .readsSafeAreaInset
             case "hasBottomBar": result[entry.key] = .hasBottomBar
             case "none": result[entry.key] = GeckoSession.BottomReservation.none
+            case "needsViewportShrink": result[entry.key] = .needsViewportShrink
             default: break
             }
         }
@@ -2407,6 +2408,8 @@ extension TabManagerImplementation: NavigationDelegate {
                 result[entry.key] = "hasBottomBar"
             case GeckoSession.BottomReservation.none:
                 result[entry.key] = "none"
+            case GeckoSession.BottomReservation.needsViewportShrink:
+                result[entry.key] = "needsViewportShrink"
             }
         }
         UserDefaults.standard.set(raw, forKey: reservationStoreKey)

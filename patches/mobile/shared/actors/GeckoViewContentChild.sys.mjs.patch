@@ -1458,7 +1458,7 @@ index 9ca6e15..799455c 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1513,387 @@
+@@ -65,8 +1513,411 @@
        return windowUtils.SCROLL_MODE_INSTANT;
      }
      return windowUtils.SCROLL_MODE_SMOOTH;
@@ -1587,7 +1587,9 @@ index 9ca6e15..799455c 100644
 +      probe.remove();
 +    } catch (e) {}
 +    let unreadableSheets = 0;
-+    for (const sheet of document.styleSheets) {
++    let foundSafeAreaUsage = false;
++    let hasAbsoluteBottomElement = false;
++    sheetScan: for (const sheet of document.styleSheets) {
 +      let rules;
 +      try {
 +        rules = sheet.cssRules;
@@ -1630,7 +1632,14 @@ index 9ca6e15..799455c 100644
 +          }
 +        }
 +
-+        return { usesSafeAreaInset: true, hasBottomBar: false, envProbePx };
++        // Do not return yet: the bottom-edge probe below must still
++        // run, because a page can read env() somewhere while its
++        // actual bottom UI is an absolute app-shell sheet env cannot
++        // move - m.twitch.tv, MEASURED on device resolving
++        // env(safe-area-inset-bottom) = 60px while its sheet stayed
++        // at the bottom. The probe decides which shape this is.
++        foundSafeAreaUsage = true;
++        break sheetScan;
 +      }
 +    }
 +
@@ -1677,6 +1686,19 @@ index 9ca6e15..799455c 100644
 +          element !== document.body
 +        ) {
 +          const { position } = contentWindow.getComputedStyle(element);
++          // An ABSOLUTE element pinned to the viewport bottom - an
++          // app-shell bottom sheet - can be lifted by NO overlay
++          // mechanism: the compositor margin moves only fixed/sticky
++          // layers, and env() only moves elements that read it (the
++          // Twitch sheet measurably does not). Only shrinking the
++          // layout viewport moves it. rect.top must clear the band so
++          // a full-height absolute backdrop does not count.
++          if (position === "absolute" && !hasAbsoluteBottomElement) {
++            const rect = element.getBoundingClientRect();
++            if (rect.bottom >= height - bottomBand && rect.top > bottomBand) {
++              hasAbsoluteBottomElement = true;
++            }
++          }
 +          if (position === "fixed" || position === "sticky") {
 +            const rect = element.getBoundingClientRect();
 +            if (rect.bottom >= height - bottomBand) {
@@ -1699,11 +1721,12 @@ index 9ca6e15..799455c 100644
 +              // when the page never reads it, which is exactly what the
 +              // margin was achieving.
 +              return {
-+                usesSafeAreaInset: false,
++                usesSafeAreaInset: foundSafeAreaUsage,
 +                hasBottomBar: true,
 +                hasFullViewportOverlay: rect.top <= bottomBand,
 +                incomplete: unreadableSheets > 0,
 +                envProbePx,
++                hasAbsoluteBottomElement,
 +              };
 +            }
 +            // Fixed but not a bottom bar - keep climbing in case this is
@@ -1716,10 +1739,11 @@ index 9ca6e15..799455c 100644
 +    }
 +
 +    return {
-+      usesSafeAreaInset: false,
++      usesSafeAreaInset: foundSafeAreaUsage,
 +      hasBottomBar: false,
 +      incomplete: unreadableSheets > 0,
 +      envProbePx,
++      hasAbsoluteBottomElement,
 +    };
 +  }
 +
@@ -1846,7 +1870,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +2011,21 @@
+@@ -184,6 +2035,21 @@
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1868,7 +1892,7 @@ index 9ca6e15..799455c 100644
      }
  
      return null;
-@@ -199,11 +2041,193 @@
+@@ -199,11 +2065,193 @@
      return false;
    }
  
