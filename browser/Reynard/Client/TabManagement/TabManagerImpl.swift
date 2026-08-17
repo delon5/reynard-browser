@@ -94,7 +94,7 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// committed on a fresh tab, produced pageStart, and its content
     /// process then emitted nothing at all for the 22 seconds until the
     /// tab was abandoned - two log lines for the tab's entire life.
-    private var paintWaits: [UUID: (startedAt: CFAbsoluteTime, url: String, workItem: DispatchWorkItem)] = [:]
+    private var paintWaits: [UUID: (startedAt: CFAbsoluteTime, url: String, retryURL: String, workItem: DispatchWorkItem, attempt: Int)] = [:]
     /// Long enough that a slow page is not reported as a failure; short
     /// enough to land before a user gives up and force-quits.
     private static let paintWatchdogSeconds: TimeInterval = 8.0
@@ -1391,6 +1391,16 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// press is itself a load, now backed by a working ladder.
     private static let loadWatchdogSeconds: TimeInterval = 3.0
 
+    /// The deadline for the second stage: pageStart arrived (the engine
+    /// is alive and took the LoadUri), but the navigation has not
+    /// committed. pageStart fires when the request STARTS - before DNS,
+    /// TLS, the redirect chain and any cross-site process switch - so
+    /// it is not proof the load will land. Long enough for a cold
+    /// handshake plus a multi-hop redirect on an old device; short
+    /// enough to fire well before the 22 seconds of dead air in the
+    /// captured twitch.tv trace.
+    private static let commitWatchdogSeconds: TimeInterval = 12.0
+
     /// URLs are evidence in logs that exist to be handed to strangers:
     /// Documents/reynard_stdout.txt and reynard_jit_log.txt both sit
     /// under UIFileSharingEnabled and persist across launches. Private
@@ -1400,10 +1410,13 @@ final class TabManagerImplementation: NSObject, TabManager {
         return isPrivate ? "<private>" : url
     }
 
-    /// Starts the composite clock for a tab. Reported either as a
-    /// latency when the frame arrives, or as an explicit absence after
-    /// paintWatchdogSeconds - the case that previously left no trace.
-    private func armPaintWatch(for tabID: UUID, url: String) {
+    /// Starts the composite clock for a tab. Reports the latency when
+    /// the frame arrives; on expiry it no longer merely logs the
+    /// absence - it escalates once, re-dispatching the watched load,
+    /// which is the user's second Go press automated. `url` is the
+    /// redacted display string and is all the logs ever print;
+    /// `retryURL` is the real URL and is all a retry ever loads.
+    private func armPaintWatch(for tabID: UUID, url: String, retryURL: String, attempt: Int = 0) {
         paintWaits[tabID]?.workItem.cancel()
         let startedAt = CFAbsoluteTimeGetCurrent()
         let workItem = DispatchWorkItem { [weak self] in
@@ -1414,24 +1427,103 @@ final class TabManagerImplementation: NSObject, TabManager {
             // A tab closed inside the window never had to paint, and
             // reporting it would be a false lead in exactly the logs
             // this exists to make readable.
-            guard self.tabLocation(for: tabID) != nil else {
+            guard let location = self.tabLocation(for: tabID) else {
                 return
             }
-            NSLog("[PaintWatch] tab %@ NO FIRST COMPOSITE %.1fs after load committed (%@) - engine accepted the navigation but never painted",
+            NSLog("[PaintWatch] tab %@ NO FIRST PAINT %.1fs after load started (%@, attempt %d)",
                   tabID.uuidString,
                   CFAbsoluteTimeGetCurrent() - wait.startedAt,
-                  wait.url)
+                  wait.url,
+                  wait.attempt)
+
+            let tab = self.tabs(for: location.mode)[location.index]
+
+            // The same respawn-while-inactive rule the ladder follows:
+            // an escalation load must not go to a process that may be
+            // suspended. Re-arm and judge on the foreground side.
+            guard UIApplication.shared.applicationState == .active else {
+                NSLog("[PaintWatch] tab %@ fired while app is not active - re-arming", tabID.uuidString)
+                self.armPaintWatch(for: tabID, url: wait.url, retryURL: wait.retryURL, attempt: wait.attempt)
+                return
+            }
+
+            // The load ladder still owns a pending load; a second
+            // recovery path re-dispatching alongside it would race it.
+            // The ladder re-arms this watch with each of its own loads.
+            guard self.loadWatchdogs[tabID] == nil else {
+                return
+            }
+
+            // Still visibly loading: the engine is working, so give it
+            // one more full window before concluding anything. Once
+            // only - the captured failure holds loadingState at
+            // .loading FOREVER, and a stuck spinner must not defer the
+            // escalation indefinitely.
+            if wait.attempt == 0, tab.state.loadingState.isLoading {
+                self.armPaintWatch(for: tabID, url: wait.url, retryURL: wait.retryURL, attempt: 1)
+                return
+            }
+
+            // Background tabs are left alone: they may legitimately
+            // not composite, and reloading them churns sessions the
+            // user is not looking at.
+            guard tab === self.selectedTab else {
+                return
+            }
+
+            // The tab may have moved on - a link click or back/forward
+            // navigation arms nothing here, so a wait can outlive the
+            // load it watched. Escalate only while the tab still
+            // corresponds to that load: displayState still .pending
+            // (the typed input never committed), or committed onto the
+            // watched URL's own site (twitch.tv committing as
+            // m.twitch.tv counts). Anything else means the user went
+            // somewhere else, and re-dispatching the watched URL would
+            // hijack that navigation. Judged against retryURL - the
+            // real one - because the display string may be redacted.
+            let isPendingLoad: Bool
+            if case .pending = tab.state.displayState {
+                isPendingLoad = true
+            } else {
+                isPendingLoad = false
+            }
+            if !isPendingLoad {
+                guard let currentHost = DomainMatcher.host(from: tab.url ?? ""),
+                      let watchedHost = DomainMatcher.host(from: wait.retryURL),
+                      !currentHost.isEmpty,
+                      !watchedHost.isEmpty,
+                      DomainMatcher.matches(host: currentHost, domain: watchedHost)
+                          || DomainMatcher.matches(host: watchedHost, domain: currentHost) else {
+                    return
+                }
+            }
+
+            // One escalation, ever, per armed watch: re-dispatch the
+            // load. The captured trace shows an identical second
+            // LoadUri forcing the engine to rebuild and commit within
+            // ~1.5 seconds - this is that second Go press, automated.
+            NSLog("[PaintWatch] tab %@ escalating - re-dispatching %@", tabID.uuidString, wait.url)
+            self.loadURL(wait.retryURL, in: tab)
         }
-        paintWaits[tabID] = (startedAt: startedAt, url: url, workItem: workItem)
+        paintWaits[tabID] = (startedAt: startedAt, url: url, retryURL: retryURL, workItem: workItem, attempt: attempt)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintWatchdogSeconds, execute: workItem)
     }
 
-    private func armLoadWatchdog(for tab: Tab, pendingInput: String, retryURL: String, attempt: Int = 0) {
+    private func armLoadWatchdog(
+        for tab: Tab,
+        pendingInput: String,
+        retryURL: String,
+        attempt: Int = 0,
+        delay: TimeInterval = TabManagerImplementation.loadWatchdogSeconds
+    ) {
         let tabID = tab.id
         loadWatchdogs[tabID]?.workItem.cancel()
         // Redacted at arm time, so every later PaintWatch line -
-        // success and timeout alike - is safe in a shared log.
-        armPaintWatch(for: tabID, url: loggableURL(retryURL, isPrivate: tab.isPrivate))
+        // success and timeout alike - is safe in a shared log. The
+        // real URL rides along separately: the watch's escalation
+        // re-dispatches it, and a redacted placeholder must never be
+        // what gets loaded.
+        armPaintWatch(for: tabID, url: loggableURL(retryURL, isPrivate: tab.isPrivate), retryURL: retryURL)
 
         let armedAt = CFAbsoluteTimeGetCurrent()
         let workItem = DispatchWorkItem { [weak self] in
@@ -1500,8 +1592,8 @@ final class TabManagerImplementation: NSObject, TabManager {
             retryURL: retryURL,
             armedAt: armedAt
         )
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.loadWatchdogSeconds, execute: workItem)
-        NSLog("[LoadWatchdog] tab %@ armed (attempt %d) for %@", tabID.uuidString, attempt, loggableURL(retryURL, isPrivate: tab.isPrivate))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        NSLog("[LoadWatchdog] tab %@ armed (attempt %d, %.0fs) for %@", tabID.uuidString, attempt, delay, loggableURL(retryURL, isPrivate: tab.isPrivate))
     }
 
     private func clearLoadWatchdog(for tab: Tab, signal: String) {
@@ -1510,6 +1602,55 @@ final class TabManagerImplementation: NSObject, TabManager {
         }
         watchdog.workItem.cancel()
         NSLog("[LoadWatchdog] tab %@ engine responded (%@) - watchdog cleared", tab.id.uuidString, signal)
+    }
+
+    /// pageStart is an ANSWER but not an OUTCOME: it proves the engine
+    /// took the LoadUri, and nothing more. The redirect chain, the
+    /// cross-site process switch, the commit and the first paint all
+    /// happen after it - and the captured twitch.tv trace is exactly a
+    /// pageStart followed by 22 seconds of nothing. Clearing here
+    /// (which this replaced) left that entire window unprotected, and
+    /// the user's second Go press was the only retry that existed.
+    ///
+    /// So instead of standing down, the ladder moves to a longer
+    /// deadline: same attempt, same inputs, commitWatchdogSeconds. The
+    /// fire-time guard - displayState still .pending(pendingInput) -
+    /// is untouched, so a load that commits (onLocationChange flips
+    /// the state to .committed) turns the staged timer into a no-op.
+    /// A tab with no armed watchdog stages nothing: SPA traffic and
+    /// engine-initiated loads never enter the ladder. Repeated
+    /// pageStarts (each rung's own re-dispatch) re-stage, which is
+    /// intended - each is fresh evidence the engine is still there.
+    private func stageLoadWatchdogForCommit(for tab: Tab, signal: String) {
+        guard let watchdog = loadWatchdogs[tab.id] else {
+            return
+        }
+        NSLog("[LoadWatchdog] tab %@ engine responded (%@) - watching for commit", tab.id.uuidString, signal)
+        armLoadWatchdog(
+            for: tab,
+            pendingInput: watchdog.pendingInput,
+            retryURL: watchdog.retryURL,
+            attempt: watchdog.attempt,
+            delay: Self.commitWatchdogSeconds
+        )
+    }
+
+    /// A user-initiated Stop supersedes the recovery machinery for the
+    /// tab's current load attempt: the ladder and the paint watch
+    /// exist to finish loads the ENGINE dropped, not to overrule the
+    /// user. Called from the stop button's path before session.stop().
+    /// Clears both by hand rather than through clearLoadWatchdog,
+    /// whose "engine responded" log line would misattribute a user
+    /// action to the engine in exactly the traces these logs exist to
+    /// make readable.
+    func cancelLoadRecovery(for tab: Tab, signal: String) {
+        if let watchdog = loadWatchdogs.removeValue(forKey: tab.id) {
+            watchdog.workItem.cancel()
+        }
+        if let wait = paintWaits.removeValue(forKey: tab.id) {
+            wait.workItem.cancel()
+        }
+        NSLog("[LoadWatchdog] tab %@ recovery stood down (%@)", tab.id.uuidString, signal)
     }
 
     func goBack() {
@@ -2570,8 +2711,13 @@ extension TabManagerImplementation: ProgressDelegate {
         // A pageStart for about:blank is a rebuilt window settling, not
         // the requested load being taken - it must not disarm the
         // watchdog.
+        //
+        // A real pageStart no longer CLEARS the watchdog either - it
+        // STAGES it. pageStart fires when the request starts, before
+        // the network answers, so it proves the engine is alive and
+        // nothing else. See stageLoadWatchdogForCommit.
         if !normalizedPageStartURL.hasPrefix("about:blank") {
-            clearLoadWatchdog(for: tab, signal: "pageStart")
+            stageLoadWatchdogForCommit(for: tab, signal: "pageStart")
         }
 
         if normalizedPageStartURL.hasPrefix("about:blank"),

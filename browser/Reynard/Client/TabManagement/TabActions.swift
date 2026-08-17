@@ -63,7 +63,17 @@ extension TabManager {
             return
         }
         
-        selectedTab.state.loadingState.isLoading ? selectedTab.session.stop() : selectedTab.session.reload()
+        if selectedTab.state.loadingState.isLoading {
+            // A user Stop is final for THIS load attempt. The retry
+            // ladder and the paint watch exist to finish loads the
+            // ENGINE dropped; left armed here they would re-issue the
+            // very load the user just cancelled (the stop produces
+            // only a pageStop, which deliberately never disarms them).
+            (self as? TabManagerImplementation)?.cancelLoadRecovery(for: selectedTab, signal: "userStop")
+            selectedTab.session.stop()
+        } else {
+            selectedTab.session.reload()
+        }
     }
     
     var activeTabs: [Tab] {
