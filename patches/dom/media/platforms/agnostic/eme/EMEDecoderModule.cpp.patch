@@ -7,7 +7,7 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
  #include "mozilla/EMEUtils.h"
  #include "mozilla/RemoteCDMProxy.h"
  #include "mozilla/StaticPrefs_media.h"
-@@ -402,13 +403,42 @@ EMEDecoderModule::CreateVideoDecoder(
+@@ -402,13 +403,43 @@ EMEDecoderModule::CreateVideoDecoder(
    }
  
    if (aParams.mConfig.IsVideo()) {
@@ -18,30 +18,31 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    // SamplesWaitingForKey. A FairPlay proxy never returns a decrypted
 +    // sample - on this platform decryption happens INSIDE the decoder,
 +    // which is what the qavc sample subtype means - so that wait never
-+    // ends. HBO Max appends about eight seconds of media, reaches
-+    // HAVE_METADATA at 768x322, and stops there with readyState 1 and a
-+    // clock that never starts.
++    // ends. HBO Max appends about eight seconds, reaches HAVE_METADATA
++    // at 768x322, and stops with a clock that never starts.
 +    //
-+    // This branch already exists and already sits ahead of both the GMP
-+    // and the platform paths; it only ever tested one pref. Widened by
-+    // the pref that gates this route as a whole - the same one
-+    // FairPlayCDMProxy.mm reads - rather than by a key-system string
-+    // test, because it is the correct feature flag and because it is in
-+    // the media pref group that this line's StaticPrefs header already
-+    // provides.
-+    //
-+    // Blank IMAGES, not image-less frames: BlankDecoderModule publishes
-+    // real blank pictures, so the element's own box goes blank while the
-+    // decoded picture stays in the overlay. The question here is whether
-+    // the clock advances and the page keeps appending, not what it looks
-+    // like.
-+    const bool reynardTimingOnly =
-+        StaticPrefs::media_reynard_fairplay_mse_parser_route();
-+    if (StaticPrefs::media_eme_video_blank() || reynardTimingOnly) {
-+      printf_stderr(
-+          "mseDecoderRoute: blank video decoder (reynard=%d pref=%d)\n",
-+          reynardTimingOnly ? 1 : 0,
-+          StaticPrefs::media_eme_video_blank() ? 1 : 0);
++    // The condition mirrors FairPlayCDMProxy's own disjunction rather
++    // than testing one half of it. That proxy permits the MSE route when
++    // mse_parser_route is set OR hls_only_initdata is clear, so gating on
++    // mse_parser_route alone left this branch dead in a build where the
++    // route was running perfectly well on the other term.
++    const bool reynardMSERoute =
++        StaticPrefs::media_reynard_fairplay_mse_parser_route() ||
++        !StaticPrefs::media_reynard_fairplay_hls_only_initdata();
++    const bool reynardBlank =
++        StaticPrefs::media_eme_video_blank() || reynardMSERoute;
++    // BEFORE the branch, deliberately. The previous version printed
++    // inside it and so reported only its own success - leaving "no line"
++    // to mean not-built or pref-off or never-called, which cost three
++    // captures. This fires on every encrypted video decoder creation, so
++    // silence now means exactly one thing: the code is not in the build.
++    printf_stderr(
++        "mseDecoderRoute: video decoder - mseRoute=%d hlsOnly=%d "
++        "blankPref=%d -> blank=%d\n",
++        StaticPrefs::media_reynard_fairplay_mse_parser_route() ? 1 : 0,
++        StaticPrefs::media_reynard_fairplay_hls_only_initdata() ? 1 : 0,
++        StaticPrefs::media_eme_video_blank() ? 1 : 0, reynardBlank ? 1 : 0);
++    if (reynardBlank) {
        EME_LOG(
            "EMEDecoderModule::CreateVideoDecoder() creating a blank decoder.");
        RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
