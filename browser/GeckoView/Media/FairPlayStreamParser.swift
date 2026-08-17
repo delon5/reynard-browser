@@ -1360,6 +1360,20 @@ public final class FairPlayStreamParser: NSObject {
                 + "the key session or the recipient registration is refused")
             return
         }
+        // Getting this far is already the architecture answer. The three
+        // things that decide whether this route can move to the content
+        // process - the class loading, the key session constructing, and
+        // addContentKeyRecipient accepting the parser - have all just
+        // happened, inside createSession above.
+        guard !initSegment.isEmpty else {
+            log("=== probe BUILT in this process with no segment to feed. "
+                + "The parser class, the key session and the recipient "
+                + "registration all work here, which is the sandbox "
+                + "question answered. A real key request additionally "
+                + "needs an init segment, which arrives only if the page "
+                + "appends ===")
+            return
+        }
         _ = shared.append(sessionId, initSegment: initSegment)
         log("=== probe fed. A 'session contentProbe key request on track N' "
             + "line means the parser and key session both work here, and "

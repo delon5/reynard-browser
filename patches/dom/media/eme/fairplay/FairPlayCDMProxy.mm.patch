@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1350 @@
+@@ -0,0 +1,1370 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -352,6 +352,14 @@ index 000000000000..e859b69f6239
 +  return *proxies;
 +}
 +
++namespace dom {
++// Defined further down, beside the other MSE forwarding entry points.
++// Declared here because Init calls it and C++ needs the declaration
++// first - and because it lives in dom:: while the proxy lives in
++// mozilla::, so the call has to be qualified.
++void ReynardMSEContentProcessProbe(const uint8_t* aData, size_t aLength);
++}  // namespace dom
++
 +FairPlayCDMProxy::FairPlayCDMProxy(dom::MediaKeys* aKeys,
 +                                   const nsAString& aKeySystem,
 +                                   bool aDistinctiveIdentifierRequired,
@@ -382,6 +390,14 @@ index 000000000000..e859b69f6239
 +    // to the app process, and every byte of the licence exchange
 +    // travels over PContent from the entry points below.
 +    printf_stderr("avPlayer: FairPlay proxy in REMOTE mode\n");
++    // The content-process probe from Init, because the append-driven
++    // trigger does not run when it matters.
++    //
++    // A capture had this exact page negotiate both keys and take both
++    // licences and then append nothing at all - so the probe hung off
++    // SourceBuffer::AppendData never fired. This branch is remote by
++    // definition, runs once per proxy, and runs before any media.
++    dom::ReynardMSEContentProcessProbe(nullptr, 0);
 +    if (!mKeys.IsNull()) {
 +      mKeys->OnCDMCreated(aPromiseId, 0);
 +    }
@@ -1168,9 +1184,11 @@ index 000000000000..e859b69f6239
 +// this process, so it is reached by name. One question, one call.
 +void ReynardMSEContentProcessProbe(const uint8_t* aData, size_t aLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
-+  if (!aData || !aLength) {
-+    return;
-+  }
++  // No early return on empty. The caller that matters most has no
++  // segment to offer: a page can build a CDM, negotiate both keys and
++  // take both licences without ever appending, and that is exactly the
++  // case in which the question needs answering.
++  //
 +  // Once. The answer cannot change within a process, and a parser per
 +  // init segment would be a leak rather than a measurement.
 +  static bool sProbed = false;
@@ -1188,7 +1206,9 @@ index 000000000000..e859b69f6239
 +  }
 +  printf_stderr("avPlayer: MSE content-process probe with %zu bytes\n",
 +                aLength);
-+  NSData* segment = [NSData dataWithBytes:aData length:aLength];
++  NSData* segment = (aData && aLength)
++                        ? [NSData dataWithBytes:aData length:aLength]
++                        : [NSData data];
 +#pragma clang diagnostic push
 +#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
 +  [parserClass performSelector:probe withObject:segment];
