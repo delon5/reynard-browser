@@ -2120,8 +2120,7 @@ extension TabManagerImplementation: NavigationDelegate {
 
     private static var reservationByHost: [String: GeckoSession.BottomReservation] = loadReservations()
 
-    /// Hosts whose verdict is known ahead of any visit. Seeds only -
-    /// a persisted entry, and any later live detection, always wins.
+    /// Hosts whose verdict is known ahead of any visit.
     /// tv.apple.com: the player is a full-viewport fixed overlay whose
     /// bottom controls only env() can reach; its CSS is CDN-served, so
     /// the stylesheet scan cannot prove it reads env, and the first
@@ -2132,8 +2131,22 @@ extension TabManagerImplementation: NavigationDelegate {
         "tv.apple.com": .readsSafeAreaInset,
     ]
 
+    /// Bumped whenever seededReservations changes. An install that
+    /// visited a seeded host BEFORE the seed existed has a stale
+    /// verdict persisted, and a seed that only fills absences loses
+    /// to it - so on a version bump the seeds are applied OVER the
+    /// persisted entries exactly once; after that, live detection
+    /// overwrites them as usual.
+    private static let seedVersion = 1
+    private static let seedVersionKey = "Reynard.SafeArea.SeedVersion"
+
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
-        guard let raw = UserDefaults.standard.dictionary(forKey: reservationStoreKey) as? [String: String] else {
+        let defaults = UserDefaults.standard
+        let applySeedsOverPersisted = defaults.integer(forKey: seedVersionKey) < seedVersion
+        if applySeedsOverPersisted {
+            defaults.set(seedVersion, forKey: seedVersionKey)
+        }
+        guard let raw = defaults.dictionary(forKey: reservationStoreKey) as? [String: String] else {
             return seededReservations
         }
         var reservations = raw.reduce(into: [String: GeckoSession.BottomReservation]()) { result, entry in
@@ -2144,7 +2157,8 @@ extension TabManagerImplementation: NavigationDelegate {
             default: break
             }
         }
-        for (host, reservation) in seededReservations where reservations[host] == nil {
+        for (host, reservation) in seededReservations
+        where applySeedsOverPersisted || reservations[host] == nil {
             reservations[host] = reservation
         }
         return reservations
