@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1370 @@
+@@ -0,0 +1,1490 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -486,6 +486,85 @@ index 000000000000..e859b69f6239
 +         aId.EqualsLiteral("skd://");
 +}
 +
++// The cenc key id inside sinf init data, if there is one.
++//
++// Safari's EME hands a page {"sinf":["<base64 of an 89-byte sinf>"]} and
++// HBO Max passes it straight back through generateRequest. Inside is an
++// ordinary ISO box structure - frma, schm, schi > tenc - and tenc
++// carries the 16-byte default_KID that the page will later look up in
++// keyStatuses.
++//
++// Objective-C++ already, so the JSON and the base64 are Foundation's
++// problem rather than this file's. Some pages hand the sinf bytes
++// directly with no JSON around them, so that is accepted too.
++static bool ReynardKeyIdFromSinf(const nsTArray<uint8_t>& aInitData,
++                                 nsTArray<uint8_t>& aKeyIdOut) {
++  if (aInitData.IsEmpty()) {
++    return false;
++  }
++  NSData* raw = [NSData dataWithBytes:aInitData.Elements()
++                               length:aInitData.Length()];
++  NSData* sinf = nil;
++  @try {
++    id json = [NSJSONSerialization JSONObjectWithData:raw options:0 error:nil];
++    if ([json isKindOfClass:[NSDictionary class]]) {
++      id entry = [(NSDictionary*)json objectForKey:@"sinf"];
++      if ([entry isKindOfClass:[NSArray class]] && [(NSArray*)entry count] > 0) {
++        entry = [(NSArray*)entry objectAtIndex:0];
++      }
++      if ([entry isKindOfClass:[NSString class]]) {
++        sinf = [[NSData alloc] initWithBase64EncodedString:(NSString*)entry
++                                                   options:0];
++      }
++    }
++  } @catch (NSException* e) {
++    sinf = nil;
++  }
++  if (!sinf) {
++    // Not JSON, or JSON of another shape: try the bytes as a bare sinf.
++    sinf = raw;
++  }
++
++  const uint8_t* bytes = (const uint8_t*)[sinf bytes];
++  const size_t length = (size_t)[sinf length];
++  if (!bytes || length < 32) {
++    return false;
++  }
++  // A bounded scan for the tenc box rather than a full ISO walk. The
++  // structure is 89 bytes with three boxes in it; the size field
++  // immediately before the type is checked so a coincidental "tenc" in
++  // payload bytes cannot be mistaken for the box.
++  for (size_t at = 4; at + 4 <= length; ++at) {
++    if (memcmp(bytes + at, "tenc", 4) != 0) {
++      continue;
++    }
++    const uint32_t boxSize = (uint32_t(bytes[at - 4]) << 24) |
++                             (uint32_t(bytes[at - 3]) << 16) |
++                             (uint32_t(bytes[at - 2]) << 8) |
++                             uint32_t(bytes[at - 1]);
++    if (boxSize < 32 || (at - 4) + boxSize > length) {
++      continue;
++    }
++    // tenc body: version(1) flags(3) reserved(1)
++    //            crypt/skip or reserved(1) isProtected(1) ivSize(1)
++    //            KID(16). Version 0 and version 1 agree on the offset;
++    //            they differ only in what the sixth byte means.
++    const size_t body = at + 4;
++    if (body + 24 > length) {
++      continue;
++    }
++    if (bytes[body + 6] != 1) {
++      // isProtected is 0 - an unencrypted track described by a sinf,
++      // whose KID is meaningless.
++      continue;
++    }
++    aKeyIdOut.Clear();
++    aKeyIdOut.AppendElements(bytes + body + 8, 16);
++    return true;
++  }
++  return false;
++}
++
 +void FairPlayCDMProxy::CreateSession(uint32_t aCreateSessionToken,
 +                                     dom::MediaKeySessionType aSessionType,
 +                                     PromiseId aPromiseId,
@@ -546,6 +625,27 @@ index 000000000000..e859b69f6239
 +  nsAutoCString sessionId(sessionIdUTF8);
 +
 +  nsCString initDataType = NS_ConvertUTF16toUTF8(aInitDataType);
++
++  // sinf only, and deliberately. cenc is Apple TV's route and it appends
++  // today on the session-id-as-key-id behaviour below; changing a path
++  // that works to repair one that does not is how the last two
++  // regressions on this route happened.
++  if (initDataType.EqualsLiteral("sinf")) {
++    nsTArray<uint8_t> parsedKeyId;
++    if (ReynardKeyIdFromSinf(aInitData, parsedKeyId)) {
++      nsAutoCString hex;
++      for (size_t i = 0; i < parsedKeyId.Length(); ++i) {
++        hex.AppendPrintf("%02x", parsedKeyId[i]);
++      }
++      printf_stderr("avPlayer: FairPlay key id from sinf: %s\n", hex.get());
++      mKeyIdBySession.InsertOrUpdate(sessionId, std::move(parsedKeyId));
++    } else {
++      printf_stderr(
++          "avPlayer: FairPlay key id from sinf: none (%zu bytes of init "
++          "data)\n",
++          (size_t)aInitData.Length());
++    }
++  }
 +
 +  // The identifier FairPlay expects differs by container. HLS carries an
 +  // skd:// URI, which must be passed as a string; fragmented MP4 carries
@@ -795,6 +895,26 @@ index 000000000000..e859b69f6239
 +    status.Construct(dom::MediaKeyStatus::Usable);
 +    auto caps = mCapabilites.Lock();
 +    caps->SetKeyStatus(keyId, nsString(aSessionId), status);
++
++    // And under the REAL key id, when the init data carried one.
++    //
++    // The entry above is kept rather than replaced: pages that iterate
++    // keyStatuses - Apple TV among them - are served by it today, and
++    // this is additive so that route cannot regress. Pages that hold a
++    // cenc key id and ask for it by name are served by this one. HBO
++    // Max is the second kind: it took three licences and appended
++    // nothing, waiting on a lookup that could not hit.
++    NS_ConvertUTF16toUTF8 sessionKey(aSessionId);
++    if (auto real = mKeyIdBySession.Lookup(sessionKey)) {
++      CencKeyId realKeyId;
++      realKeyId.AppendElements(real->Elements(), real->Length());
++      nsAutoCString hex;
++      for (size_t i = 0; i < realKeyId.Length(); ++i) {
++        hex.AppendPrintf("%02x", realKeyId[i]);
++      }
++      printf_stderr("avPlayer: FairPlay key %s -> usable\n", hex.get());
++      caps->SetKeyStatus(realKeyId, nsString(aSessionId), status);
++    }
 +  }
 +  OnKeyStatusesChange(aSessionId);
 +

@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6fb7f0dd6c7d
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,235 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -209,6 +209,15 @@ index 000000000000..6fb7f0dd6c7d
 +  // as soon as the playlist reaches EXT-X-KEY, and everything the page
 +  // does is a reply to the 'encrypted' event that produced.
 +  nsTHashMap<nsCStringHashKey, nsTArray<uint8_t>> mRemotePendingSpc;
++  // The real cenc key id, per session, when the init data carried one.
++  //
++  // UpdateSession otherwise files keyStatuses under the session id - a
++  // 36-byte ASCII UUID - which suits an opaque skd identifier and suits
++  // nothing else. HBO Max hands sinf init data with a genuine 16-byte
++  // KID in its tenc box, takes its licence, and then waits on a
++  // keyStatuses lookup that can never hit. Parsed in CreateSession,
++  // used in UpdateSession, empty whenever there was nothing to parse.
++  nsTHashMap<nsCStringHashKey, nsTArray<uint8_t>> mKeyIdBySession;
 +
 +  // A generateRequest that arrived before AVPlayerDecoder::SetCDMProxy
 +  // named the player, so there was no id to address it to. Flushed by
