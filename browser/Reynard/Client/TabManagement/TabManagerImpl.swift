@@ -2229,6 +2229,25 @@ extension TabManagerImplementation: NavigationDelegate {
         if !isOutgoingPageNoise {
             tab.state.displayState = .committed
         }
+        // A cross-document commit retires the outgoing page's reported
+        // background color along with its pixels. The color cache is
+        // per-session and nothing else clears it on navigation, so the
+        // strip under the toolbar (pillUnderlayView) and the backing
+        // behind the engine view kept wearing the OLD page's color for
+        // the entire load of the new one - a not-black band under the
+        // toolbar until the incoming page's own style flush reports
+        // its color, which under a slow hydration is seconds away.
+        // Reset to the theme default the rest of this pipeline already
+        // uses; the incoming page's real color overwrites it at its
+        // first style flush, which is strictly after this commit. A
+        // same-document change keeps its color - the document did not
+        // change, so its color did not either.
+        if !isSameDocument {
+            sessionManager.setPageBackgroundColor(.systemBackground, for: session)
+            if location.mode == selectedTabMode {
+                delegate?.tabManager(self, didUpdateTabAt: location.index, reason: .pageBackgroundColor)
+            }
+        }
         tab.favicon = nil
 
         notifyUpdate(at: location.index, mode: location.mode, reason: .location)
