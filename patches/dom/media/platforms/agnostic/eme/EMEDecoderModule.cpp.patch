@@ -1,8 +1,9 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -16,15 +16,109 @@
+@@ -16,15 +16,192 @@
  #include "MP4Decoder.h"
++#include "ImageContainer.h"  // layers::Image::SetIsDRM
 +#include "MediaData.h"
  #include "MediaInfo.h"
  #include "PDMFactory.h"
@@ -18,6 +19,88 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
  namespace mozilla {
  
  using DecryptPromiseRequestHolder = MozPromiseRequestHolder<DecryptPromise>;
++
++// Marks the placeholder video frame as protected on its way past.
++//
++// The blank decoder below still makes the frame; this only sets the DRM
++// bit on its image. That bit becomes TextureFlags::DRM_SOURCE and then
++// NativeLayerCA::mIsDRM, whose branch builds a video layer at the
++// element's position instead of compositing the surface - which is both
++// how the picture gets somewhere correct and why the unfilled green
++// bytes stop being drawn.
++class ReynardProtectedFrameDecoder final : public MediaDataDecoder {
++ public:
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ReynardProtectedFrameDecoder, final);
++
++  explicit ReynardProtectedFrameDecoder(
++      already_AddRefed<MediaDataDecoder> aInner)
++      : mInner(aInner) {}
++
++  RefPtr<InitPromise> Init() override { return mInner->Init(); }
++
++  RefPtr<DecodePromise> Decode(MediaRawData* aSample) override {
++    RefPtr<ReynardProtectedFrameDecoder> self = this;
++    return mInner->Decode(aSample)->Then(
++        GetCurrentSerialEventTarget(), __func__,
++        [self](DecodedData&& aResults) {
++          self->MarkProtected(aResults);
++          return DecodePromise::CreateAndResolve(std::move(aResults),
++                                                 __func__);
++        },
++        [](const MediaResult& aError) {
++          return DecodePromise::CreateAndReject(aError, __func__);
++        });
++  }
++
++  RefPtr<DecodePromise> Drain() override {
++    RefPtr<ReynardProtectedFrameDecoder> self = this;
++    return mInner->Drain()->Then(
++        GetCurrentSerialEventTarget(), __func__,
++        [self](DecodedData&& aResults) {
++          self->MarkProtected(aResults);
++          return DecodePromise::CreateAndResolve(std::move(aResults),
++                                                 __func__);
++        },
++        [](const MediaResult& aError) {
++          return DecodePromise::CreateAndReject(aError, __func__);
++        });
++  }
++
++  RefPtr<FlushPromise> Flush() override { return mInner->Flush(); }
++
++  RefPtr<ShutdownPromise> Shutdown() override { return mInner->Shutdown(); }
++
++  nsCString GetDescriptionName() const override {
++    return "reynard protected placeholder"_ns;
++  }
++
++  nsCString GetCodecName() const override { return "reynard-protected"_ns; }
++
++ private:
++  ~ReynardProtectedFrameDecoder() = default;
++
++  void MarkProtected(DecodedData& aResults) {
++    for (const RefPtr<MediaData>& data : aResults) {
++      if (!data || data->mType != VideoData::sType) {
++        continue;
++      }
++      VideoData* video = static_cast<VideoData*>(data.get());
++      if (!video->mImage) {
++        continue;
++      }
++      video->mImage->SetIsDRM(true);
++      if (!mReported) {
++        mReported = true;
++        printf_stderr(
++            "mseDecoderRoute: placeholder frame marked DRM - expect "
++            "NativeLayerCA: mIsDRM -> 1\n");
++      }
++    }
++  }
++
++  const RefPtr<MediaDataDecoder> mInner;
++  bool mReported = false;
++};
 +
 +// Silence for a protected MSE audio track.
 +//
@@ -111,7 +194,7 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +  const uint32_t mRate;
 +};
  
-@@ -402,13 +402,48 @@ EMEDecoderModule::CreateVideoDecoder(
+@@ -402,13 +402,53 @@ EMEDecoderModule::CreateVideoDecoder(
    }
  
    if (aParams.mConfig.IsVideo()) {
@@ -155,7 +238,13 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +      // PublishPlaceholderFrame supplies a real image separately, and
 +      // the MSE route has no such publisher. Do not "tidy" this again.
        RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
-       RefPtr<MediaDataDecoder> decoder = m->CreateVideoDecoder(aParams);
+-      RefPtr<MediaDataDecoder> decoder = m->CreateVideoDecoder(aParams);
++      RefPtr<MediaDataDecoder> inner = m->CreateVideoDecoder(aParams);
++      // Marked protected on the way past, so the compositor builds a
++      // video layer where the element is instead of drawing the blank
++      // surface - which is also why the green rectangle stops appearing.
++      RefPtr<MediaDataDecoder> decoder =
++          new ReynardProtectedFrameDecoder(inner.forget());
        return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                        __func__);
      }
