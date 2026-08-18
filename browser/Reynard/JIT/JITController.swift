@@ -1487,6 +1487,65 @@ final class JITController {
         let action = pendingFailureAction
         pendingFailureAction = nil
         action?()
+        retryJITAfterTunnelRecoveryIfNeeded()
+    }
+
+    /// One probe at a time; each is user-gesture-bounded (one per
+    /// foregrounding), the cadence this codebase prefers over polling.
+    private var isTunnelRecoveryProbeInFlight = false
+
+    // ADDED - see fix_jitless_recovers_when_tunnel_returns.py's
+    // docstring. JIT-less mode is documented to the user as
+    // "temporarily until the next launch", but nothing ever re-checked
+    // the condition that forced it: once latched, every content
+    // process for the rest of the session ran interpreted, even if the
+    // pairing endpoint came back minutes later. Observed on device as
+    // a full day of twitch.tv hydrating black -> skeleton -> content
+    // over 6-9 seconds, reloads included, each reload's fresh process
+    // rejected by guard 1.
+    //
+    // Each return to foreground while latched runs one silent tunnel
+    // probe (the same getProvider call prewarm uses - ~16ms against a
+    // refusing endpoint, per the captured log). Only a probe that
+    // SUCCEEDS changes anything: both latches clear, so the NEXT
+    // content process attaches normally. Processes already running
+    // stay interpreted - reloading a tab replaces its process, which
+    // is recovery enough, and reattaching live processes is exactly
+    // what this file's history warns against. A failed probe leaves
+    // the latch exactly as it was: no failure sheet, no nag.
+    //
+    // Gated off for the conditions a tunnel cannot fix - missing DDI,
+    // ptrace mode unavailable - with the same guard start() uses.
+    private func retryJITAfterTunnelRecoveryIfNeeded() {
+        guard isJITLessModeActive || hasHandledFailure else {
+            return
+        }
+        guard usePtraceJIT() || !isDDIMissing() else {
+            return
+        }
+        guard !isTunnelRecoveryProbeInFlight else {
+            return
+        }
+        isTunnelRecoveryProbeInFlight = true
+        logger("jitRecovery: JIT-less or a latched failure at foreground - probing the tunnel")
+        JITEnabler.shared.probeSharedTunnel { available in
+            self.isTunnelRecoveryProbeInFlight = false
+            guard available else {
+                logger("jitRecovery: tunnel still unavailable - staying latched")
+                return
+            }
+            logger("jitRecovery: tunnel is back - clearing the JIT-less latch, new content processes will attach")
+            self.hasHandledFailure = false
+            self.isJITLessModeActive = false
+            // The probe's success is the same evidence recordAttachOutcome
+            // treats as "tunnel is back"; reset the health counters on
+            // their own queue like it does.
+            self.attachQueue.async {
+                self.consecutiveAttachFailures = 0
+                self.isTunnelUnavailable = false
+            }
+            NotificationCenter.default.post(name: .jitlessModeDidDeactivate, object: nil)
+        }
     }
     
     /// A debug loop saw its target exit. Delivered on that loop's own

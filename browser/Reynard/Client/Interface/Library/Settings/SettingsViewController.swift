@@ -216,6 +216,12 @@ final class SettingsViewController: SettingsTableViewController {
             name: .jitlessModeDidActivate,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(syncJITModeBanner(_:)),
+            name: .jitlessModeDidDeactivate,
+            object: nil
+        )
     }
     
     @objc private func syncJITModeBanner(_ notification: Notification) {

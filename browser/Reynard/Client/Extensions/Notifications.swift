@@ -28,4 +28,8 @@ extension Notification.Name {
     /// See fix_forget_child_on_target_exit.py.
     static let jitTargetDidExit = Notification.Name("Reynard.JITTargetDidExit")
     static let jitlessModeDidActivate = Notification.Name("JITless.ModeDidActivate")
+    /// Posted when a foreground tunnel probe finds the pairing endpoint
+    /// back and clears the JIT-less latch, so new content processes
+    /// attach again. See fix_jitless_recovers_when_tunnel_returns.py.
+    static let jitlessModeDidDeactivate = Notification.Name("JITless.ModeDidDeactivate")
 }

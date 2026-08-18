@@ -985,6 +985,32 @@ static BOOL applicationForegroundFromAnyQueue(void) {
     });
 }
 
+// The recovery counterpart to prewarm: same build attempt, same
+// utility queue, same left-the-foreground guard - but the caller
+// learns the outcome, which prewarm's fire-and-forget shape cannot
+// provide. JITController's JIT-less recovery probe is the intended
+// caller: it needs "did a provider come back" as a fact it can
+// un-latch on. See fix_jitless_recovers_when_tunnel_returns.py.
+- (void)probeSharedTunnelWithCompletion:(void (^)(BOOL available))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!applicationForegroundFromAnyQueue()) {
+            logger(@"tunnelProbe: app left the foreground while this was queued - reporting unavailable");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(NO);
+            });
+            return;
+        }
+        NSError *probeError = nil;
+        DeviceProvider *provider = [self getProviderForPID:0 error:&probeError];
+        logger([NSString stringWithFormat:@"tunnelProbe: %@%@",
+                provider ? @"tunnel available" : @"tunnel unavailable",
+                provider ? @"" : [NSString stringWithFormat:@" - %@", probeError.localizedDescription ?: @"(no error set)"]]);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(provider != NULL);
+        });
+    });
+}
+
 - (void)dealloc {
     resetJITEndpointMonitor();
     // ADDED - see fix_retired_provider_freed.py. Unreachable in

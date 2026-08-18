@@ -146,6 +146,17 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// foreground in the meantime. See fix_prewarm_checks_foreground.py.
 - (void)prewarmSharedTunnel NS_SWIFT_NAME(prewarmSharedTunnel());
 
+/// The recovery counterpart to prewarmSharedTunnel: attempts the same
+/// build (or reuse) of the shared tunnel, and reports whether a
+/// provider is available. The heavy work happens off the calling
+/// thread; the completion is delivered on the main queue. A probe
+/// queued while the app is leaving the foreground reports NO rather
+/// than skipping silently (the check runs when the block starts), so
+/// a probe that never ran can never un-latch anything. Added for
+/// JITController's JIT-less recovery - see
+/// fix_jitless_recovers_when_tunnel_returns.py.
+- (void)probeSharedTunnelWithCompletion:(void (^)(BOOL available))completion NS_SWIFT_NAME(probeSharedTunnel(completion:));
+
 /// Mirrors JITController's own application-active flag into this file,
 /// which cannot see it: JITEnabler.m compiles into the Reynard Helper
 /// target as well, and Reynard-Swift.h is the app target's private
