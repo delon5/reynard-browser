@@ -2254,6 +2254,30 @@ extension TabManagerImplementation: NavigationDelegate {
         scheduleFaviconUpdate(forTabAt: location.index, mode: location.mode)
         persistState()
 
+        // Every cross-document commit on the selected tab restarts the
+        // paint clock - not only the typed loads that armed it via
+        // browse(). The captured gap: a site's own re-navigation
+        // (youtube.com's hop to m.youtube.com) swapped content
+        // processes after a successful first paint, the replacement
+        // never painted its document, and no watchdog of any kind was
+        // armed for it - the escalation that heals exactly this for
+        // typed loads never engaged. For a browse()-armed load this
+        // re-arm merely moves the 8s deadline from submit time to
+        // commit time. Same-document changes and noise are excluded
+        // above; background tabs and non-web URLs are excluded here -
+        // the escalation's own guards would discard them at fire time
+        // anyway, so arming them buys only log noise.
+        if !isSameDocument, !isOutgoingPageNoise,
+           tab === selectedTab,
+           let committedURL = url,
+           remoteURL(from: committedURL) != nil {
+            armPaintWatch(
+                for: tab.id,
+                url: loggableURL(committedURL, isPrivate: tab.isPrivate),
+                retryURL: committedURL
+            )
+        }
+
         // Re-detect on location change, not only at PageStop. Facebook,
         // YouTube and Reddit are single-page apps: moving from the feed
         // to messages swaps the whole bottom of the page - adding or
