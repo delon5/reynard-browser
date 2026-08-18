@@ -220,46 +220,81 @@ final class BottomToolbar: UIView {
     
     private weak var attachedAddressBar: AddressBar?
     
-    /// Cuts the address bar capsule out of the OLED overlay, so the
-    /// capsule's glass samples the toolbar's real glass instead of an
-    /// opaque black fill. The overlay is pure black exactly when OLED
-    /// mode is on in dark mode; when it resolves .clear the mask is
-    /// invisible and harmless.
+    /// When true the capsule is also cut out of the toolbar's GLASS
+    /// (backgroundView), so the capsule's own glass sits directly
+    /// over the page pixels composited behind the toolbar - the
+    /// floating pill's exact optical situation, page visible through
+    /// it. Flip to false if iOS ever renders the masked glass
+    /// incorrectly: the overlay-only cutout (toolbar frost behind
+    /// the capsule) returns.
+    private static let cutsGlassBehindCapsule = true
+    
+    private lazy var glassCutoutMaskView: UIView = {
+        let view = UIView()
+        view.backgroundColor = .clear
+        let shape = CAShapeLayer()
+        shape.fillRule = .evenOdd
+        shape.fillColor = UIColor.white.cgColor
+        view.layer.addSublayer(shape)
+        return view
+    }()
+    
+    /// Cuts the address bar capsule out of the OLED overlay AND (see
+    /// cutsGlassBehindCapsule) the toolbar's glass, so the capsule's
+    /// glass samples the page composited behind the toolbar instead
+    /// of an opaque black fill or the toolbar's own frost. All
+    /// geometry is sized from backgroundView.bounds, which IS final
+    /// during this view's layoutSubviews - the overlay's own bounds
+    /// are not (they settle in the effect view's later pass), and a
+    /// mask sized from them can freeze short whenever the toolbar
+    /// has just grown, leaving a bare-glass strip under the button
+    /// row that shows whenever the page composited behind it is
+    /// bright.
     private func updateOledCutout() {
         guard let addressBar = attachedAddressBar,
               addressBar.superview === contentView else {
             oledOverlayView.layer.mask = nil
+            backgroundView.mask = nil
             return
         }
-        // The overlay lives two levels down (inside the effect view's
-        // contentView) and the capsule deeper still (inside the
-        // address bar). Their frames are applied by layout passes
-        // that run AFTER this view's layoutSubviews, so measuring
-        // them here would read LAST pass's geometry - a mask frozen
-        // against a stale, shorter overlay misplaces the cutout (the
-        // capsule stays on opaque black) and stops short of the
-        // toolbar's bottom (a strip of bare glass under the button
-        // row) whenever the toolbar just grew, e.g. the address bar
-        // re-attaching after a search dismiss. Force both subtrees
-        // current before measuring; both are no-ops when clean.
+        // The capsule lives inside the address bar inside
+        // contentView, whose subtrees lay out after this view's
+        // layoutSubviews - force them current before measuring.
         backgroundView.layoutIfNeeded()
         contentView.layoutIfNeeded()
-        guard oledOverlayView.bounds.width > 0 else {
+        let bounds = backgroundView.bounds
+        let capsule = addressBar.capsuleFrame(in: backgroundView)
+        guard bounds.width > 0, capsule.width > 0, bounds.intersects(capsule) else {
             oledOverlayView.layer.mask = nil
+            backgroundView.mask = nil
             return
         }
-        let capsule = addressBar.capsuleFrame(in: oledOverlayView)
-        guard capsule.width > 0, oledOverlayView.bounds.intersects(capsule) else {
-            oledOverlayView.layer.mask = nil
-            return
-        }
-        let path = UIBezierPath(rect: oledOverlayView.bounds)
+        let path = UIBezierPath(rect: bounds)
         path.append(UIBezierPath(roundedRect: capsule, cornerRadius: AddressBar.capsuleCornerRadius))
+        // Overlay mask. The overlay's final frame fills the effect
+        // view's contentView, i.e. equals backgroundView.bounds with
+        // a zero origin, so this geometry applies verbatim - and
+        // stays correct even while the overlay's own layout lags a
+        // pass behind.
         let mask = (oledOverlayView.layer.mask as? CAShapeLayer) ?? CAShapeLayer()
         mask.fillRule = .evenOdd
-        mask.frame = oledOverlayView.bounds
+        mask.frame = bounds
         mask.path = path.cgPath
         oledOverlayView.layer.mask = mask
+        // Glass mask: a UIView mask (UIKit's supported way to mask a
+        // UIVisualEffectView) with the same hole. Kept separate from
+        // the overlay mask so either can fail or be disabled without
+        // taking the other down.
+        if Self.cutsGlassBehindCapsule {
+            glassCutoutMaskView.frame = bounds
+            if let shape = glassCutoutMaskView.layer.sublayers?.first as? CAShapeLayer {
+                shape.frame = glassCutoutMaskView.bounds
+                shape.path = path.cgPath
+            }
+            backgroundView.mask = glassCutoutMaskView
+        } else {
+            backgroundView.mask = nil
+        }
     }
     
     func apply(state: LayoutState, hidesButtons: Bool) {
