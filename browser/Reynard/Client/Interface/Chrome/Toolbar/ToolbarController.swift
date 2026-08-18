@@ -199,8 +199,11 @@ final class ToolbarController {
     private func toolbarOffsetLimits(
         for chromeMode: BrowserChromeMode
     ) -> (total: CGFloat, top: CGFloat) {
-        let topToolbarHeight = browserChrome.topToolbarTransitionFrame(in: rootView).height
-        let bottomToolbarHeight = browserChrome.bottomToolbarTransitionFrame(in: rootView).height
+        // Resting heights, not the transition frames: these values
+        // reach the engine as the dynamic-toolbar max, and the
+        // transition frames honour the condense scale transform.
+        let topToolbarHeight = browserChrome.topToolbarRestingHeight()
+        let bottomToolbarHeight = browserChrome.bottomToolbarRestingHeight()
         switch chromeMode {
         case .phone:
             return (bottomToolbarHeight, 0)
@@ -219,8 +222,8 @@ final class ToolbarController {
             return
         }
         toolbarOffset = clampedToolbarOffset
-        let topToolbarHeight = browserChrome.topToolbarTransitionFrame(in: rootView).height
-        let bottomToolbarHeight = browserChrome.bottomToolbarTransitionFrame(in: rootView).height
+        let topToolbarHeight = browserChrome.topToolbarRestingHeight()
+        let bottomToolbarHeight = browserChrome.bottomToolbarRestingHeight()
         let topToolbarOffset: CGFloat
         let topContentOffset: CGFloat
         let topToolbarContentAlpha: CGFloat

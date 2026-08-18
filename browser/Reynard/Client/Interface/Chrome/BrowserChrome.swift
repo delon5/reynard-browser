@@ -721,6 +721,24 @@ final class BrowserChrome: UIView {
         return topToolbar.convert(topToolbar.bounds, to: view)
     }
     
+    /// The toolbars' laid-out heights, independent of any transform.
+    /// The transitionFrame variants go through convert(), which
+    /// honours the condense scale (0.92): a layout pass landing in
+    /// the expand window - the condensed flag already false, the
+    /// transform not yet reset - measured ~130.6pt for a 142pt
+    /// toolbar, which went to the engine as a wrong dynamic-toolbar
+    /// max (an extra ICB reflow at the wrong size) and tripped
+    /// updateLayout's drift guard into reset(animated: false), twice
+    /// per transition. bounds are what layout produced and
+    /// transforms never touch them.
+    func topToolbarRestingHeight() -> CGFloat {
+        return topToolbar.bounds.height
+    }
+    
+    func bottomToolbarRestingHeight() -> CGFloat {
+        return bottomToolbar.bounds.height
+    }
+    
     func setToolbarTransition(
         topOffset: CGFloat,
         bottomOffset: CGFloat,
