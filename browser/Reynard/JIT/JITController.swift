@@ -384,6 +384,63 @@ final class JITController {
     ///
     /// Called from MainThreadHangWatchdog's background queue - never
     /// the main thread, which is the one that is stuck.
+    /// The reattach pass for the hang recovery, WITHOUT the
+    /// active-state gate. reattachOrphanedProcesses skips its whole
+    /// pass while the app is not active - correct for every normal
+    /// caller, because vAttach stops its target and a stopped
+    /// extension cannot answer lifecycle XPC. But on this path the
+    /// gate is closed BY the hang itself: didBecomeActive is
+    /// delivered on the main thread after the foreground cascade
+    /// completes, and the hang is the cascade failing to complete, so
+    /// the cached flag is stale-inactive for as long as the recovery
+    /// is needed. Observed on device: the recovery ran, the census
+    /// named the stopped child, the teardown request was lifted - and
+    /// the gated pass skipped itself with 9 seconds of watchdog
+    /// budget left. 0x8BADF00D followed. See
+    /// fix_hang_recovery_bypasses_active_gate.py.
+    ///
+    /// The gate's own reasoning does not apply here: the child this
+    /// pass exists to reach is already STOPPED, and the fresh
+    /// session's first action resumes it. Healthy orphans re-attached
+    /// alongside are stopped ~1s and continued - transient, against
+    /// the certain kill this races. The pass cannot run in a settled
+    /// background because the hang watchdog pauses itself there.
+    ///
+    /// Same pipeline and dedup semantics as reattachOrphanedProcesses;
+    /// only the gate is gone.
+    private func reattachOrphansForHangRecovery() {
+        attachQueue.async {
+            dispatchPrecondition(condition: .onQueue(self.attachQueue))
+
+            let attached = self.ledger.attachedSnapshot()
+            let alive = attached.filter { Self.pidIsAlive($0) }
+            let orphaned = alive.filter { pid in
+                guard !self.ledger.isAttachInFlight(pid) else {
+                    return false
+                }
+                return !JITEnabler.hasActiveDebugSession(forPID: pid)
+            }
+
+            logger(String(format: "hangRecovery: forced reattach pass - %d attached, %d alive, %d in flight, %d orphaned", attached.count, alive.count, self.ledger.attachInFlightCount(), orphaned.count))
+
+            guard !orphaned.isEmpty else {
+                return
+            }
+
+            for pid in orphaned {
+                self.ledger.markAttachInFlight(pid)
+                self.attachWorkQueue.async {
+                    self.attachSlots.wait()
+                    defer {
+                        self.attachSlots.signal()
+                        self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
+                    }
+                    self.attachToProcess(pid: pid)
+                }
+            }
+        }
+    }
+
     func recoverStoppedChildrenAfterForegroundHang() {
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
@@ -408,14 +465,20 @@ final class JITController {
 
             logger("hangRecovery: main thread parked - re-attaching orphaned children from the watchdog path")
 
-            // The same census + reattach pair the main-queue recovery
-            // runs, dispatched from a queue that is actually alive.
-            // Idempotent against the main-queue copy running later,
-            // once the hang clears: a pid with a live session is not
-            // an orphan, and boundedEnableJIT's per-pid in-flight
-            // guard covers the overlap window.
+            // The same census the main-queue recovery runs, then a
+            // FORCED reattach pass: reattachOrphanedProcesses gates
+            // itself on the app being active, and during this hang
+            // the app is provably not yet active - didBecomeActive is
+            // parked behind the very hang being recovered from - so
+            // the normal pass skipped itself entirely, two seconds
+            // before the kill it existed to prevent. Observed exactly
+            // that way on device. Idempotence against the main-queue
+            // copy running later is unchanged: a pid with a live
+            // session is not an orphan, and boundedEnableJIT's
+            // per-pid in-flight guard covers the overlap window. See
+            // fix_hang_recovery_bypasses_active_gate.py.
             self.dumpChildCensus(labelled: "childCensus at hangRecovery")
-            self.reattachOrphanedProcesses()
+            self.reattachOrphansForHangRecovery()
         }
     }
 
