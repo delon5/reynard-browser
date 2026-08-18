@@ -1,13 +1,16 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -19,4 +19,5 @@
+@@ -16,5 +16,8 @@
+ #include "MP4Decoder.h"
+ #include "MediaInfo.h"
+ #include "PDMFactory.h"
++// For the image-less timing decoder - see CreateVideoDecoder below.
++#include "ReynardAVPlayerDecoderModule.h"
  #include "mozilla/CDMProxy.h"
 +#include "mozilla/Debug.h"  // printf_stderr
  #include "mozilla/EMEUtils.h"
- #include "mozilla/RemoteCDMProxy.h"
- #include "mozilla/StaticPrefs_media.h"
-@@ -402,13 +403,43 @@ EMEDecoderModule::CreateVideoDecoder(
+@@ -402,13 +405,51 @@ EMEDecoderModule::CreateVideoDecoder(
    }
  
    if (aParams.mConfig.IsVideo()) {
@@ -18,8 +21,8 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    // SamplesWaitingForKey. A FairPlay proxy never returns a decrypted
 +    // sample - on this platform decryption happens INSIDE the decoder,
 +    // which is what the qavc sample subtype means - so that wait never
-+    // ends. HBO Max appends about eight seconds, reaches HAVE_METADATA
-+    // at 768x322, and stops with a clock that never starts.
++    // ends, and the element sits at HAVE_METADATA with a clock that
++    // never starts.
 +    //
 +    // The condition mirrors FairPlayCDMProxy's own disjunction rather
 +    // than testing one half of it. That proxy permits the MSE route when
@@ -31,11 +34,11 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +        !StaticPrefs::media_reynard_fairplay_hls_only_initdata();
 +    const bool reynardBlank =
 +        StaticPrefs::media_eme_video_blank() || reynardMSERoute;
-+    // BEFORE the branch, deliberately. The previous version printed
-+    // inside it and so reported only its own success - leaving "no line"
-+    // to mean not-built or pref-off or never-called, which cost three
-+    // captures. This fires on every encrypted video decoder creation, so
-+    // silence now means exactly one thing: the code is not in the build.
++    // BEFORE the branch, deliberately. An earlier version printed inside
++    // it and so reported only its own success - leaving "no line" to mean
++    // not-built or pref-off or never-called, which cost three captures.
++    // This fires on every encrypted video decoder creation, so silence
++    // now means exactly one thing: the code is not in the build.
 +    printf_stderr(
 +        "mseDecoderRoute: video decoder - mseRoute=%d hlsOnly=%d "
 +        "blankPref=%d -> blank=%d\n",
@@ -45,30 +48,38 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    if (reynardBlank) {
        EME_LOG(
            "EMEDecoderModule::CreateVideoDecoder() creating a blank decoder.");
-       RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
+-      RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
++      // IMAGE-LESS, not blank. BlankDecoderModule publishes real blank
++      // pictures - zeroed NV12 in BT.709 video range, which is the
++      // saturated green rectangle that appeared over the page. This
++      // module's decoder returns VideoData carrying timing and no image,
++      // and its header states the property that matters: the video sink
++      // skips image-less frames when publishing to the compositor but
++      // still advances the media clock over them. So the clock keeps
++      // running and the element's box stops painting over the overlay.
++      RefPtr<PlatformDecoderModule> m(ReynardAVPlayerDecoderModule::Create());
        RefPtr<MediaDataDecoder> decoder = m->CreateVideoDecoder(aParams);
        return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                        __func__);
      }
  
      const bool gmpSupported =
-@@ -470,6 +501,34 @@ EMEDecoderModule::CreateAudioDecoder(
+@@ -470,6 +511,33 @@ EMEDecoderModule::CreateAudioDecoder(
      return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                      __func__);
    }
  
 +  // Reynard: protected MSE audio must not reach EMEDecryptor either.
 +  //
-+  // Fix 33 freed video and readyState stayed at 1, because readyState
-+  // belongs to the ELEMENT: HAVE_CURRENT_DATA needs data for every
-+  // selected track, so one audio decoder waiting on SamplesWaitingForKey
-+  // pins the element at HAVE_METADATA however well video is doing.
++  // Freeing video alone left readyState at 1, because readyState belongs
++  // to the ELEMENT: HAVE_CURRENT_DATA needs data for every selected
++  // track, so one audio decoder waiting on SamplesWaitingForKey pinned
++  // the element however well video was doing.
 +  //
-+  // Inserted after the pref branch rather than widening its condition,
-+  // so the pref keeps its own meaning and this catches only what it let
-+  // through. The same disjunction as the video side - the proxy permits
-+  // the MSE route when mse_parser_route is set OR hls_only_initdata is
-+  // clear.
++  // BlankDecoderModule here and not the image-less one. Silent audio
++  // frames are exactly what is wanted, and image-less has no audio
++  // meaning - the idea exists only because a video sink can skip a frame
++  // with no picture.
 +  const bool reynardMSERoute =
 +      StaticPrefs::media_reynard_fairplay_mse_parser_route() ||
 +      !StaticPrefs::media_reynard_fairplay_hls_only_initdata();
