@@ -2,7 +2,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 index 94efd9b6c370..9039890c772e 100644
 --- a/gfx/layers/NativeLayerCA.mm
 +++ b/gfx/layers/NativeLayerCA.mm
-@@ -39,6 +39,19 @@
+@@ -39,6 +39,24 @@
  @end
  
  namespace mozilla {
@@ -19,10 +19,15 @@ index 94efd9b6c370..9039890c772e 100644
 +// include path for one function, and both halves live in libxul.
 +void ReynardAVPlayerAttachLayer(void* aLayer);
 +
++// The same, for the other protected route. Defined in the same file, and
++// hands the layer to FairPlayStreamParser instead of to an AVPlayer,
++// because MSE has no player to hand it to.
++void ReynardMSEAttachLayer(void* aLayer);
++
  namespace layers {
  
  using gfx::DataSourceSurface;
-@@ -167,6 +180,7 @@
+@@ -167,6 +185,7 @@
  
    [mOnscreenRootCALayer release];
    [mOffscreenRootCALayer release];
@@ -30,7 +35,7 @@ index 94efd9b6c370..9039890c772e 100644
  }
  
  already_AddRefed<NativeLayer> NativeLayerRootCA::CreateLayer(
-@@ -320,6 +334,11 @@
+@@ -320,6 +339,11 @@
      EmitTelemetryForVideoLowPower(videoLowPower);
    }
  
@@ -42,7 +47,7 @@ index 94efd9b6c370..9039890c772e 100644
    return true;
  }
  
-@@ -924,6 +943,10 @@
+@@ -924,6 +948,10 @@
    if (!IsVideo(aProofOfLock)) {
      // Only videos are eligible.
      return false;
@@ -53,7 +58,7 @@ index 94efd9b6c370..9039890c772e 100644
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1315,17 @@
+@@ -1292,6 +1320,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -71,7 +76,7 @@ index 94efd9b6c370..9039890c772e 100644
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1469,7 +1503,8 @@
+@@ -1469,7 +1508,8 @@
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
@@ -81,7 +86,7 @@ index 94efd9b6c370..9039890c772e 100644
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-@@ -1521,12 +1556,25 @@
+@@ -1521,12 +1561,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -94,7 +99,20 @@ index 94efd9b6c370..9039890c772e 100644
 +  // Returning true rather than false deliberately: false latches a
 +  // PiP failure and sets mMutatedSpecializeVideo to force a rebuild,
 +  // which would rebuild the AVPlayerLayer on every frame forever.
-+  if ([mContentCALayer isKindOfClass:[AVPlayerLayer class]]) {
++  //
++  // The MSE sink wants the same refusal for a different reason. It IS an
++  // AVSampleBufferDisplayLayer and every selector below is fine on it -
++  // but FairPlayStreamParser is already feeding it real decoded frames,
++  // and enqueueing placeholder surfaces into the same queue would
++  // interleave a flat grey rectangle with the picture at frame rate.
++  //
++  // It cannot be told apart by class, so it is marked by name at
++  // construction. CALayer.name is a public property this file uses for
++  // nothing else, and a name lives and dies with the layer - unlike a
++  // member, which would have to be cleared on every rebuild, where one
++  // missed reset is a silent wrong answer.
++  if ([mContentCALayer isKindOfClass:[AVPlayerLayer class]] ||
++      [mContentCALayer.name isEqualToString:@"org.reynard.mse.sink"]) {
 +    return true;
 +  }
    MOZ_ASSERT(
@@ -108,7 +126,7 @@ index 94efd9b6c370..9039890c772e 100644
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +1688,11 @@
+@@ -1640,6 +1706,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -120,7 +138,7 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +1733,11 @@
+@@ -1680,7 +1751,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -133,7 +151,7 @@ index 94efd9b6c370..9039890c772e 100644
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +1751,14 @@
+@@ -1694,13 +1769,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -149,7 +167,7 @@ index 94efd9b6c370..9039890c772e 100644
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +1775,14 @@
+@@ -1717,7 +1793,14 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -165,7 +183,7 @@ index 94efd9b6c370..9039890c772e 100644
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +1826,7 @@
+@@ -1761,7 +1844,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -174,7 +192,7 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +1835,32 @@
+@@ -1770,6 +1853,84 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -187,27 +205,79 @@ index 94efd9b6c370..9039890c772e 100644
 +        // AVPlayerDecoder::PublishPlaceholderFrame exists precisely so
 +        // a layer of the right geometry is here to be replaced.
 +        if (aIsDRM) {
-+          mContentCALayer = [[AVPlayerLayer layer] retain];
-+          ((AVPlayerLayer*)mContentCALayer).videoGravity =
-+              AVLayerVideoGravityResizeAspect;
-+          // A player draws into one layer at a time, and binding a second
-+          // layer silently unbinds the first. Every NativeLayerCA carries
-+          // two representations, so both would build a layer here and the
-+          // one that ran last would take the player - leaving the visible
-+          // layer empty whenever that was the offscreen one. The offscreen
-+          // representation exists for capture, which protected video must
-+          // not feed anyway, so it gets a layer but never the player.
-+          if (aIsOnscreen) {
-+            ReynardAVPlayerAttachLayer(mContentCALayer);
++          // Two protected routes arrive here as the same single bit, and
++          // they want different layers.
++          //
++          // Native HLS is driven by an AVPlayer and needs an
++          // AVPlayerLayer. MSE has no player at all - FairPlayStreamParser
++          // holds an AVStreamDataParser and hands over decoded sample
++          // buffers itself - and giving that route an AVPlayerLayer
++          // produces exactly what the last capture showed: a correctly
++          // placed rectangle with nothing in it, and "no player 0 for
++          // this layer - stashed until a licence names one" in the log,
++          // because no licence will ever name one.
++          //
++          // Told apart by the frame rather than by asking anything.
++          // ReynardProtectedPlaceholderDecoder stamps its IOSurface, so
++          // the answer arrives with the picture and has no race with the
++          // order the parser and the decoder start in. An untagged DRM
++          // surface is HLS, which is what every build before this one
++          // assumed, so that route is unchanged by construction.
++          bool isMSE = false;
++          if (IOSurfaceRef tagged = aFrontSurface.get()) {
++            CFTypeRef mark =
++                IOSurfaceCopyValue(tagged, CFSTR("ReynardProtectedMSE"));
++            isMSE = mark && CFEqual(mark, kCFBooleanTrue);
++            if (mark) {
++              CFRelease(mark);
++            }
++          }
++          printf_stderr("NativeLayerCA: DRM layer - mse=%d onscreen=%d\n",
++                        isMSE ? 1 : 0, aIsOnscreen ? 1 : 0);
++          if (isMSE) {
++            mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
++            ((AVSampleBufferDisplayLayer*)mContentCALayer).videoGravity =
++                AVLayerVideoGravityResizeAspect;
++            // Marked so EnqueueSurface keeps its hands off it: this layer
++            // is fed by the parser, and the compositor's placeholder
++            // surfaces must not be interleaved with real frames.
++            mContentCALayer.name = @"org.reynard.mse.sink";
++            // No control timebase here. The parser gives it one seeded
++            // from the clock it was already running, so the handover does
++            // not jump - and the audio renderer anchored to that clock
++            // stays anchored.
++            if (aIsOnscreen) {
++              ReynardMSEAttachLayer(mContentCALayer);
++            } else {
++              // Same rule as the player route: the offscreen
++              // representation exists for capture, which protected video
++              // must not feed.
++              printf_stderr("%s\n",
++                            "NativeLayerCA: offscreen MSE layer, not fed");
++            }
 +          } else {
-+            printf_stderr("%s\n",
-+                          "NativeLayerCA: offscreen DRM layer, not attached");
++            mContentCALayer = [[AVPlayerLayer layer] retain];
++            ((AVPlayerLayer*)mContentCALayer).videoGravity =
++                AVLayerVideoGravityResizeAspect;
++            // A player draws into one layer at a time, and binding a
++            // second layer silently unbinds the first. Every
++            // NativeLayerCA carries two representations, so both would
++            // build a layer here and the one that ran last would take the
++            // player - leaving the visible layer empty whenever that was
++            // the offscreen one.
++            if (aIsOnscreen) {
++              ReynardAVPlayerAttachLayer(mContentCALayer);
++            } else {
++              printf_stderr(
++                  "%s\n",
++                  "NativeLayerCA: offscreen DRM layer, not attached");
++            }
 +          }
 +        } else {
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +1874,7 @@
+@@ -1783,6 +1944,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -215,7 +285,7 @@ index 94efd9b6c370..9039890c772e 100644
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +1902,12 @@
+@@ -1810,8 +1972,12 @@
      }
    }
  
@@ -230,7 +300,7 @@ index 94efd9b6c370..9039890c772e 100644
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2092,7 @@
+@@ -1996,7 +2162,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -239,7 +309,7 @@ index 94efd9b6c370..9039890c772e 100644
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2108,7 @@
+@@ -2012,6 +2178,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;

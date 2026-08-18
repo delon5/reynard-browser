@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2687 @@
+@@ -0,0 +0,2732 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -882,6 +882,51 @@ index 000000000000..b56efaa8479c
 +        // strong reference is in place before it returns, so ownership
 +        // is continuous. A second retain here would leak one layer per
 +        // title - nothing tells this side when the stash is drained.
++        [retained release];
++      }));
++}
++
++// The MSE counterpart of ReynardAVPlayerAttachLayer.
++//
++// Called by NativeLayerCA when the DRM-marked surface carries the tag
++// ReynardProtectedPlaceholderDecoder puts on it. There is no player on
++// this route and nothing for AVPlayerHost to bind: the picture is
++// produced by FairPlayStreamParser, which has been feeding an
++// AVSampleBufferDisplayLayer of its own in a hardcoded rectangle over
++// the page. This hands it the layer the compositor placed at the
++// element's own position instead.
++//
++// Reached by class name rather than through GeckoAVPlayerHost. The
++// parser is an @objc class in the same framework the host lives in and
++// is certainly loaded by the time a protected frame exists - it produced
++// the samples that made one - so one entry point costs a selector check
++// instead of a protocol, a header and an IPDL change. Failures are
++// reported rather than trapped, which is this route's rule everywhere
++// else it resolves something by name.
++//
++// Hops to main for the reason the player version does: a CALayer's tree
++// belongs there and the compositor thread is where this is called from.
++// The layer is retained across the hop.
++void ReynardMSEAttachLayer(void* aLayer) {
++  if (!aLayer) {
++    return;
++  }
++  id retained = [(id)aLayer retain];
++  NS_DispatchToMainThread(
++      NS_NewRunnableFunction("ReynardMSEAttachLayer", [retained]() {
++        id parser = (id)NSClassFromString(@"ReynardFairPlayStreamParser");
++        SEL selector = NSSelectorFromString(@"adoptCompositorLayer:");
++        bool takes = parser && [parser respondsToSelector:selector];
++        if (!takes) {
++          printf_stderr(
++              "mseLayer: cannot hand over the layer - class=%d selector=%d\n",
++              parser ? 1 : 0, takes ? 1 : 0);
++          [retained release];
++          return;
++        }
++        [parser performSelector:selector withObject:retained];
++        printf_stderr(
++            "mseLayer: handed the compositor's layer to the stream parser\n");
 +        [retained release];
 +      }));
 +}

@@ -2,7 +2,7 @@ diff --git a/dom/media/ReynardAVPlayerDecoderModule.cpp b/dom/media/ReynardAVPla
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/ReynardAVPlayerDecoderModule.cpp
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,287 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,6 +16,12 @@ new file mode 100644
 +#include "mozilla/StaticPrefs_media.h"
 +#include "MacIOSurfaceImage.h"
 +#include "mozilla/gfx/MacIOSurface.h"
++
++// For the route tag on the placeholder surface - see ProtectedImage.
++// MacIOSurface.h almost certainly drags both of these in already; naming
++// them costs nothing and does not depend on that staying true.
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOSurface/IOSurfaceRef.h>
 +
 +#include <cstring>  // memset
 +
@@ -204,6 +210,29 @@ new file mode 100644
 +      // reads as saturated green - so a green rectangle on screen means
 +      // exactly this line fired.
 +      printf_stderr("mseDecoderRoute: placeholder Lock() failed\n");
++    }
++    // WHICH protected route this frame belongs to, written where the
++    // compositor can read it.
++    //
++    // NativeLayerCA is handed one bit - aIsDRM - and has to choose
++    // between an AVPlayerLayer for native HLS, which an AVPlayer drives,
++    // and an AVSampleBufferDisplayLayer for MSE, which
++    // FairPlayStreamParser feeds by hand. Asking at that moment is a
++    // race: this decoder and the parser are both started by the same
++    // appendBuffer and either can be first. A value on the surface has
++    // no such problem, because it arrives with the frame that caused the
++    // decision.
++    //
++    // The key is spelled again in NativeLayerCA.mm rather than shared.
++    // A header for one string would be a new build-system entry to hold
++    // a constant, and the two ends are already coupled by the fact that
++    // one reads what the other writes.
++    if (IOSurfaceRef ref = surface->GetIOSurfaceRef().get()) {
++      IOSurfaceSetValue(ref, CFSTR("ReynardProtectedMSE"), kCFBooleanTrue);
++    } else {
++      printf_stderr(
++          "mseDecoderRoute: placeholder has no IOSurfaceRef - the "
++          "compositor will read this frame as HLS\n");
 +    }
 +    RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(surface);
 +    image->SetIsDRM(true);

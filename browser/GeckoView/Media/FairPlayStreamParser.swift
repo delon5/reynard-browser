@@ -1066,6 +1066,14 @@ public final class FairPlayStreamParser: NSObject {
         /// readiness - it either shows the image or it does not.
         var proofLayer: CALayer?
         var proofFrames = 0
+        /// The layer the compositor's replaced, held until the new one
+        /// has actually taken a sample.
+        ///
+        /// Removing the overlay at handover would trade a working
+        /// picture in the wrong place for a blank screen if the new
+        /// layer refuses, and there is no way to know which it will be
+        /// before feeding it one.
+        var retiringOverlay: AVSampleBufferDisplayLayer?
 
         /// The audio half. Everything below mirrors the video state
         /// above, because the renderer takes samples through the same
@@ -1534,6 +1542,31 @@ public final class FairPlayStreamParser: NSObject {
                 guard let slot = streamParsers[streamKey] else { return 0 }
                 slot.enqueued += 1
                 return slot.enqueued
+            }
+
+            // A sample went into the compositor's layer, so the overlay
+            // has done its job and can go. This is the only place that
+            // retires it: it is the only place that knows the new sink
+            // accepted anything.
+            let retiring = withState { () -> AVSampleBufferDisplayLayer? in
+                guard let slot = streamParsers[streamKey],
+                      let overlay = slot.retiringOverlay else { return nil }
+                slot.retiringOverlay = nil
+                return overlay
+            }
+            if let retiring {
+                let sessionId =
+                    String(streamKey.split(separator: "|").first ?? "")
+                if let keySession = liveSession(sessionId),
+                   let recipient = (retiring as AnyObject)
+                       as? AVContentKeyRecipient {
+                    keySession.removeContentKeyRecipient(recipient)
+                }
+                DispatchQueue.main.async {
+                    retiring.removeFromSuperlayer()
+                    Self.log("stream \(streamKey) retired the overlay - the "
+                             + "picture is now in the page's own box")
+                }
             }
 
             // Reported on change, plus the first one. status 2 is .failed
@@ -2114,6 +2147,141 @@ public final class FairPlayStreamParser: NSObject {
                      + "other line here will report as success")
         }
 #endif
+    }
+
+    // ==================================================================
+    // THE HANDOVER
+    // ==================================================================
+
+    /// The compositor built a layer at the element's position, and is
+    /// offering it.
+    ///
+    /// Called from ReynardMSEAttachLayer in dom/media/AVPlayerDecoder.mm,
+    /// on the main thread, once NativeLayerCA has seen a DRM surface
+    /// carrying this route's tag. Until now that layer was an
+    /// AVPlayerLayer and went to AVPlayerHost, which correctly reported
+    /// that no player owns it - because on this route none does.
+    ///
+    /// A class entry point, because the compositor has no way to name a
+    /// session or a stream: it knows one bit about the frame and nothing
+    /// about who produced it.
+    @objc public static func adoptCompositorLayer(_ layer: CALayer) {
+        guard let sink = layer as? AVSampleBufferDisplayLayer else {
+            log("the compositor offered a \(type(of: layer)) - not an "
+                + "AVSampleBufferDisplayLayer, so it is not ours to take")
+            return
+        }
+        shared.adopt(sink)
+    }
+
+    /// Move the feed onto the offered layer.
+    ///
+    /// This is a migration, not a construction, and it happens more than
+    /// once: the last capture built three compositor layers because an
+    /// ABR resize from 768x322 to 1024x428 rebuilds them. Everything here
+    /// has to be safe to do again.
+    private func adopt(_ sink: AVSampleBufferDisplayLayer) {
+        // Which stream? The one with a picture. There is normally exactly
+        // one - a page plays one video at a time - and where there are
+        // more, the busiest is the best guess available, since the
+        // compositor cannot say which element its layer belongs to.
+        let chosen = withState { () -> String? in
+            var bestKey: String?
+            var bestSeen = -1
+            for (key, slot) in streamParsers where slot.displayLayer != nil {
+                if slot.videoSeen > bestSeen {
+                    bestSeen = slot.videoSeen
+                    bestKey = key
+                }
+            }
+            return bestKey
+        }
+        guard let streamKey = chosen else {
+            Self.log("the compositor offered a layer before any stream had "
+                     + "a picture - ignored. A resize offers another one.")
+            return
+        }
+        if withState({ streamParsers[streamKey]?.displayLayer === sink }) {
+            Self.log("stream \(streamKey) is already using this layer")
+            return
+        }
+
+        // Seeded from the clock that is already running, so the handover
+        // does not move the timeline. Fix 41's audio renderer is anchored
+        // to that same clock and would have to be re-anchored otherwise.
+        let previous = withState { streamParsers[streamKey]?.displayLayer }
+        var anchor = CMTime(seconds: 0, preferredTimescale: 90_000)
+        if let old = previous?.controlTimebase,
+           CMTimebaseGetRate(old) != 0 {
+            anchor = CMTimebaseGetTime(old)
+        } else {
+            let last = withState {
+                streamParsers[streamKey]?.lastIntakePTS ?? 0 }
+            anchor = CMTime(seconds: last.isFinite ? last : 0,
+                            preferredTimescale: 90_000)
+        }
+        var timebase: CMTimebase?
+        if CMTimebaseCreateWithSourceClock(
+               allocator: kCFAllocatorDefault,
+               sourceClock: CMClockGetHostTimeClock(),
+               timebaseOut: &timebase) == noErr,
+           let timebase {
+            CMTimebaseSetTime(timebase, time: anchor)
+            // At rate 1 immediately, unlike fix 26's construction case.
+            // There the layer had nowhere to render for another sixty log
+            // lines; this one is already placed, on screen and sized by
+            // the compositor before it is ever offered.
+            CMTimebaseSetRate(timebase, rate: 1.0)
+            sink.controlTimebase = timebase
+        } else {
+            Self.log("stream \(streamKey) could not build a timebase for "
+                     + "the compositor's layer - it will present as fast as "
+                     + "it decodes")
+        }
+        sink.videoGravity = .resizeAspect
+
+        let handover = withState {
+            () -> (old: AVSampleBufferDisplayLayer?, observer: NSObjectProtocol?,
+                   queue: DispatchQueue?, abandoned: Int)? in
+            guard let slot = streamParsers[streamKey] else { return nil }
+            let old = slot.displayLayer
+            let observer = slot.failObserver
+            let abandoned = slot.pending.count
+            slot.displayLayer = sink
+            slot.failObserver = nil
+            slot.pending.removeAll()
+            slot.drainArmed = false
+            // A fresh layer has no reference frame, so nothing is fed
+            // until the next keyframe. Fix 27's rule, for fix 27's
+            // reason - a mid-GOP frame decodes to garbage.
+            slot.needsSyncSample = true
+            slot.layerAttached = true
+            slot.retiringOverlay = old
+            return (old, observer, slot.drainQueue, abandoned)
+        }
+        guard let handover else { return }
+
+        // Before it is fed, in that order: qavc handed to a sink that is
+        // not a content key recipient is 360 x "FAILED TO DECODE".
+        joinKeySession(sink, streamKey: streamKey)
+        if let observer = handover.observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        Self.observeDecodeFailures(sink, label: streamKey)
+
+        // The old layer's requestMediaDataWhenReady block outlives the
+        // handover and would keep pulling from a queue that is no longer
+        // its own. On the drain queue, because that is where its enqueues
+        // happen.
+        if let queue = handover.queue, let old = handover.old {
+            queue.async { old.stopRequestingMediaData() }
+        }
+
+        Self.log("stream \(streamKey) adopted the compositor's layer at "
+                 + "\(anchor.seconds) - \(handover.abandoned) held samples "
+                 + "abandoned, feeding restarts at the next sync sample. "
+                 + "The overlay stays until this layer takes one.")
+        armDrainIfNeeded(streamKey: streamKey)
     }
 
     /// Can the decoder start here?
