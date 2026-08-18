@@ -2223,19 +2223,24 @@ public final class FairPlayStreamParser: NSObject {
     private func videoClock(sessionId: String) -> CMTime? {
         let cutoff = Self.hostNow() - Self.livenessWindow
         let layer = withState { () -> AVSampleBufferDisplayLayer? in
-            // LIVE streams only. The first attached layer in the table
-            // used to win, and in a session that had already played once
-            // that was a corpse whose timebase had been running for
-            // twenty-five seconds - which is what a new audio renderer
-            // was then anchored to.
+            // LIVE streams only, and the most recently fed of them.
+            //
+            // The first attached layer in the table used to win, and in a
+            // session that had already played once that was a corpse
+            // whose timebase had been running for twenty-five seconds -
+            // which is what a new audio renderer was then anchored to.
+            // Dictionary order is not ordered by anything, so "first"
+            // was never a choice, only an accident.
+            var newest: (layer: AVSampleBufferDisplayLayer, fedAt: Double)?
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") {
-                if slot.layerAttached, slot.lastSampleAt > cutoff,
-                   let found = slot.displayLayer {
-                    return found
+                guard slot.layerAttached, slot.lastSampleAt > cutoff,
+                      let found = slot.displayLayer else { continue }
+                if newest == nil || slot.lastSampleAt > newest!.fedAt {
+                    newest = (found, slot.lastSampleAt)
                 }
             }
-            return nil
+            return newest?.layer
         }
         guard let layer, let timebase = layer.controlTimebase,
               CMTimebaseGetRate(timebase) != 0 else {
@@ -2587,29 +2592,58 @@ public final class FairPlayStreamParser: NSObject {
         // The fallback is kept deliberately. A layer offered during a
         // momentary gap in the feed would otherwise land nowhere, and
         // landing on the busiest stream is what this did before.
+        // MOST RECENTLY FED WINS, and the sample count is only a
+        // tie-break.
+        //
+        // This used to take the busiest stream that had a display layer,
+        // over the whole table, with no session filter - and a stream
+        // that has played a film has a sample count in the thousands
+        // while one that started a second ago has fifty. So on the second
+        // HBO visit in the last capture, four compositor layers built for
+        // HBO's element were handed to child-17|sb-4746391072 - the Apple
+        // TV session, silent for nine and a half thousand log lines - and
+        // fed The Martian's frames from eleven seconds in, while HBO's
+        // own stream sat beside it with a layer nobody adopted.
+        //
+        // "Which stream is playing right now" is the question the
+        // compositor's layer is actually asking, and the last sample's
+        // arrival time answers it. Live streams are preferred; the
+        // fallback is the most recently fed overall rather than the
+        // busiest, because the busiest is precisely what chose a corpse.
         let cutoff = Self.hostNow() - Self.livenessWindow
-        let chosen = withState { () -> String? in
-            var bestKey: String?
-            var bestSeen = -1
-            var anyKey: String?
-            var anySeen = -1
+        let chosen = withState { () -> (key: String, fedAt: Double)? in
+            var best: (key: String, fedAt: Double, seen: Int)?
+            var any: (key: String, fedAt: Double, seen: Int)?
             for (key, slot) in streamParsers where slot.displayLayer != nil {
-                if slot.videoSeen > anySeen {
-                    anySeen = slot.videoSeen
-                    anyKey = key
+                let candidate = (key: key, fedAt: slot.lastSampleAt,
+                                 seen: slot.videoSeen)
+                if any == nil || candidate.fedAt > any!.fedAt
+                    || (candidate.fedAt == any!.fedAt
+                        && candidate.seen > any!.seen) {
+                    any = candidate
                 }
-                if slot.lastSampleAt > cutoff, slot.videoSeen > bestSeen {
-                    bestSeen = slot.videoSeen
-                    bestKey = key
+                guard slot.lastSampleAt > cutoff else { continue }
+                if best == nil || candidate.fedAt > best!.fedAt
+                    || (candidate.fedAt == best!.fedAt
+                        && candidate.seen > best!.seen) {
+                    best = candidate
                 }
             }
-            return bestKey ?? anyKey
+            guard let picked = best ?? any else { return nil }
+            return (picked.key, picked.fedAt)
         }
-        guard let streamKey = chosen else {
+        guard let chosen else {
             Self.log("the compositor offered a layer before any stream had "
                      + "a picture - ignored. A resize offers another one.")
             return
         }
+        let streamKey = chosen.key
+        // The evidence for the choice, because the choice is a guess -
+        // the compositor hands over a bare layer and knows only that the
+        // frame was DRM. A staleness above a second or two on a page that
+        // is playing means the guess is wrong.
+        Self.log("the compositor's layer goes to \(streamKey), last fed "
+                 + "\(Self.hostNow() - chosen.fedAt)s ago")
         if withState({ streamParsers[streamKey]?.displayLayer === sink }) {
             Self.log("stream \(streamKey) is already using this layer")
             return
