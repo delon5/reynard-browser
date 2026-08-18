@@ -1,0 +1,29 @@
+diff --git a/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
+--- a/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
++++ b/mobile/shared/modules/geckoview/GeckoViewProgress.sys.mjs
+@@ -584,6 +584,25 @@ export class GeckoViewProgress extends GeckoViewModule {
+       case "DOMContentLoaded": // fall-through
+       case "MozAfterPaint": // fall-through
+       case "pageshow": {
++        if (
++          aMsg.name === "MozAfterPaint" &&
++          this._progressTracker?._eventReceived &&
++          !this._progressTracker._eventReceived.has(aMsg.name) &&
++          this._progressTracker._data.uri &&
++          this._progressTracker._data.uri === aMsg.data?.uri
++        ) {
++          // The embedder-visible first-paint signal. Android delivers
++          // onFirstContentfulPaint through its Java compositor bridge,
++          // which this port does not have, so the session's paint
++          // signal is derived from the same once-per-load
++          // MozAfterPaint the progress tracker already consumes. The
++          // guards mirror ProgressTracker.handleEvent exactly: only
++          // while a load is tracked, only for the tracked document,
++          // and only for that load's first paint.
++          this.eventDispatcher.sendRequest("GeckoView:FirstContentfulPaint", {
++            uri: aMsg.data?.uri,
++          });
++        }
+         this._progressTracker?.handleEvent(aMsg);
+         if (aMsg.name === "pageshow") {
+           const nav = this.moduleManager._applinkNavigation;
