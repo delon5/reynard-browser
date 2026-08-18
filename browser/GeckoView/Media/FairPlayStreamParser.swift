@@ -321,7 +321,100 @@ public final class FairPlayStreamParser: NSObject {
             return
         }
         entry.keySession.removeContentKeyRecipient(entry.recipient)
+
+        // The per-stream half, which used to be left behind entirely.
+        //
+        // Stream parsers, display layers, audio renderers, their
+        // key-session registrations, their notification observers and the
+        // overlay all outlived the session that owned them - and adopt()
+        // finds its target by searching for the busiest stream with a
+        // picture, so orphans from a dead session were candidates for the
+        // next playback's compositor layer.
+        let orphans = withState { () -> [(String, StreamParser)] in
+            // The key list is snapshotted before anything is removed.
+            // streamParsers.keys is a view over the dictionary, and
+            // mutating it while iterating that view is not something
+            // Swift defines.
+            let doomed = Array(streamParsers.keys)
+                .filter { $0.hasPrefix(sessionId + "|") }
+            var out: [(String, StreamParser)] = []
+            for key in doomed {
+                if let slot = streamParsers.removeValue(forKey: key) {
+                    out.append((key, slot))
+                }
+            }
+            return out
+        }
+        for (key, slot) in orphans {
+            entry.keySession.removeContentKeyRecipient(slot.recipient)
+            if let layer = slot.displayLayer,
+               let recipient = (layer as AnyObject) as? AVContentKeyRecipient {
+                entry.keySession.removeContentKeyRecipient(recipient)
+            }
+            if let renderer = slot.audioRenderer {
+                if let recipient = (renderer as AnyObject)
+                    as? AVContentKeyRecipient {
+                    entry.keySession.removeContentKeyRecipient(recipient)
+                }
+                renderer.stopRequestingMediaData()
+                renderer.flush()
+            }
+            slot.audioSynchronizer?.rate = 0
+            slot.displayLayer?.stopRequestingMediaData()
+            if let observer = slot.failObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            if let observer = slot.audioFlushObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            // Only layers this parser built. A compositor layer lives in
+            // NativeLayerCA's tree and is not ours to remove.
+            let owned = slot.ownsDisplayLayer ? slot.displayLayer : nil
+            let overlay = slot.retiringOverlay
+            let proof = slot.proofLayer
+            DispatchQueue.main.async {
+                owned?.removeFromSuperlayer()
+                overlay?.removeFromSuperlayer()
+                proof?.removeFromSuperlayer()
+            }
+            Self.log("stream \(key) torn down with its session")
+        }
         Self.log("session \(sessionId) destroyed")
+    }
+
+    /// Rebuild a session that has stopped raising key requests, and ask
+    /// again.
+    ///
+    /// See the watchdog in requestKey for why this exists: an
+    /// AVContentKeySession that already holds the key raises no request
+    /// for it, which is correct and leaves the content process waiting
+    /// for a licence forever. A rebuilt session holds nothing.
+    ///
+    /// The certificate is carried across. Without it the new delegate
+    /// would hold the request rather than produce an SPC, and the page
+    /// only sends a certificate while handling an 'encrypted' event -
+    /// which this is trying to answer.
+    fileprivate func recycleSession(_ sessionId: String, contentId: String,
+                                    initData: Data) {
+        let certificate = withState { entries[sessionId]?.keyDelegate }?
+            .certificate
+        Self.log("session \(sessionId) is deaf - rebuilding it and asking "
+                 + "again. A key session raises no request for a key it "
+                 + "already holds, and this one served an earlier "
+                 + "playback in the same content process.")
+        destroySession(sessionId)
+        guard createSession(sessionId) else {
+            Self.log("session \(sessionId) could not be rebuilt - this "
+                     + "playback has no route")
+            return
+        }
+        if let certificate {
+            setCertificate(sessionId, certificate: certificate)
+        } else {
+            Self.log("session \(sessionId) rebuilt with NO certificate - "
+                     + "the request will be held until one arrives")
+        }
+        requestKey(sessionId, contentId: contentId, initData: initData)
     }
 
     // MARK: - Init data in
@@ -460,15 +553,45 @@ public final class FairPlayStreamParser: NSObject {
         let sentShape = payload == nil ? "init data as it arrived"
                                        : "the PSSH payload"
         let namedKey = keyId != nil
+        // The COUNT before the call, not the flag afterwards. sawRequest
+        // latches on the first request this delegate ever sees, and a
+        // second playback in the same content process reuses the
+        // delegate - so on the run that failed to reload, this watchdog
+        // was already satisfied by two exchanges from the previous
+        // playthrough and never said a word.
+        let seenBefore = delegate.requestsSeen
+        let askedFor = contentId
         Self.keyDelegateQueue.asyncAfter(deadline: .now() + 5) {
-            guard !delegate.sawRequest else {
+            guard delegate.requestsSeen == seenBefore else {
                 return
             }
             Self.log("session \(sessionId) raised NO key request from "
                      + "\(sentCount) bytes sent as \(sentShape) with "
                      + (namedKey ? "a named key id" : "no identifier")
                      + " - AVFoundation did not recognise it, and said "
-                     + "nothing about it")
+                     + "nothing about it. Requests seen before this one: "
+                     + "\(seenBefore)")
+
+            // A SESSION THAT HAS ANSWERED BEFORE AND HAS GONE QUIET IS
+            // NOT REFUSING THE SHAPE - IT ALREADY HAS THE KEY.
+            //
+            // AVContentKeySession raises no request for a key it holds.
+            // The page reloaded inside the same content process, the
+            // session id is that process, so the entry was reused - and
+            // HBO asked for the identical key id the first playthrough
+            // had already licensed. Correct behaviour, and fatal, because
+            // the content process is waiting for a licence that only a
+            // request could produce.
+            //
+            // Rebuilding gives a session with no keys, which raises the
+            // request the old one would not. It cannot loop: a fresh
+            // delegate has seen nothing, so seenBefore is 0 next time and
+            // this branch is not taken.
+            if seenBefore > 0 {
+                FairPlayStreamParser.shared.recycleSession(
+                    sessionId, contentId: askedFor, initData: initData)
+                return
+            }
 
             // The second experiment, sequential and labelled: the same
             // key id with the shape that was not sent. Two shapes and
@@ -1072,6 +1195,18 @@ public final class FairPlayStreamParser: NSObject {
         /// was dts 15.588 -> 10.000. No high-water mark is needed here
         /// because this value only ever goes forwards.
         var lastIntakeDTS = Double.nan
+        /// The newest PTS ever handed to the display layer.
+        ///
+        /// The clock being past THIS is the fatal condition: no sample
+        /// the layer holds can be due, so nothing it decodes will be
+        /// presented, and it reports that state as status 1 with no
+        /// error. Compared against a high-water mark rather than the
+        /// sample in hand because presentation stamps reorder.
+        var maxEnqueuedPTS = Double.nan
+        var clockCorrections = 0
+        /// The same, for the audio renderer's own clock.
+        var maxAudioPTS = Double.nan
+        var audioClockCorrections = 0
         /// The samples taken in since the last sync sample.
         ///
         /// Kept so that a new sink can be started without waiting for
@@ -1662,16 +1797,67 @@ public final class FairPlayStreamParser: NSObject {
             if changed || count == 1 {
                 Self.log("stream \(streamKey) enqueued \(count) - " + report)
             }
-            // Drift is the failure this fix is about, so it is measured
-            // rather than assumed. A timebase far ahead of the samples
-            // means everything is late and nothing paints; far behind
-            // means nothing is due yet.
-            if count % 30 == 0, let timebase = layer.controlTimebase {
+            // A CLOCK AHEAD OF THE MEDIA IS FATAL, AND SILENT.
+            //
+            // Drift has been printed here for several rounds and never
+            // acted on. It should have been: the run that stopped went
+            //
+            //     at 540 - timebase 3773.856 vs pts 3775.313, drift  -1.458
+            //     at 570 - timebase 3783.124 vs pts 3772.560, drift +10.563
+            //
+            // across a pause the element took and this clock did not.
+            // The timebase runs at rate 1.0 on the host clock from
+            // wherever it was anchored; the page's clock stops when the
+            // page stops, and nothing tells this side. It came back ten
+            // and a half seconds ahead, and from then on every sample
+            // was late - decoded, not presented, status 1, error nil,
+            // needsFlush 0, and nothing on screen.
+            //
+            // The page's real position cannot be read from here, so the
+            // condition is measured where it bites: if the clock is past
+            // the NEWEST sample this layer has ever been given, nothing
+            // it holds can ever be due. A whole second of slack, because
+            // this compares against a high-water mark and a
+            // hierarchical-B reorder is up to 0.68s.
+            //
+            // Audio moves with it. This is a correction to OUR clock,
+            // not a stream discontinuity - the two are different, and
+            // dragging audio is right for one and wrong for the other.
+            if let timebase = layer.controlTimebase {
                 let now = CMTimebaseGetTime(timebase).seconds
                 let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-                Self.log("stream \(streamKey) at \(count) - timebase "
-                         + "\(now) vs sample pts \(pts), drift "
-                         + "\(now - pts)")
+                let ranAhead = withState { () -> (late: Double, nth: Int)? in
+                    guard let slot = streamParsers[streamKey] else { return nil }
+                    if pts.isFinite {
+                        slot.maxEnqueuedPTS = slot.maxEnqueuedPTS.isFinite
+                            ? max(slot.maxEnqueuedPTS, pts) : pts
+                    }
+                    guard now.isFinite, pts.isFinite,
+                          slot.maxEnqueuedPTS.isFinite,
+                          now - slot.maxEnqueuedPTS > 1.0 else { return nil }
+                    let late = now - slot.maxEnqueuedPTS
+                    slot.clockCorrections += 1
+                    slot.maxEnqueuedPTS = pts
+                    return (late, slot.clockCorrections)
+                }
+                if let ranAhead {
+                    let to = CMTime(seconds: pts, preferredTimescale: 90_000)
+                    CMTimebaseSetTime(timebase, time: to)
+                    realignAudioClock(
+                        sessionId: String(
+                            streamKey.split(separator: "|").first ?? ""),
+                        to: to)
+                    Self.log("stream \(streamKey) CLOCK RAN AHEAD by "
+                             + "\(ranAhead.late)s - every sample was late "
+                             + "and none could be presented. Put back on "
+                             + "the media at \(pts). "
+                             + "Correction \(ranAhead.nth).")
+                }
+                if count % 30 == 0 {
+                    Self.log("stream \(streamKey) at \(count) - timebase "
+                             + "\(now) vs sample pts \(pts), drift "
+                             + "\(now - pts)")
+                }
             }
         }
     }
@@ -2107,15 +2293,45 @@ public final class FairPlayStreamParser: NSObject {
                 Self.log("stream \(streamKey) audio enqueued \(count) - "
                          + report)
             }
-            if count % 100 == 0,
-               let sync = withState({
+            // The same correction, for the same reason - see the video
+            // half. An audio renderer discards late samples silently
+            // too, and the synchronizer's clock is exposed to every
+            // pause the page takes.
+            //
+            // Through setRate rather than CMTimebaseSetTime: a
+            // synchronizer owns its timebase and that is the supported
+            // way to move it.
+            if let sync = withState({
                    streamParsers[streamKey]?.audioSynchronizer }) {
                 let now = CMTimebaseGetTime(sync.timebase).seconds
                 let pts =
                     CMSampleBufferGetPresentationTimeStamp(sample).seconds
-                Self.log("stream \(streamKey) audio at \(count) - clock "
-                         + "\(now) vs sample pts \(pts), drift "
-                         + "\(now - pts)")
+                let ranAhead = withState { () -> (late: Double, nth: Int)? in
+                    guard let slot = streamParsers[streamKey] else { return nil }
+                    if pts.isFinite {
+                        slot.maxAudioPTS = slot.maxAudioPTS.isFinite
+                            ? max(slot.maxAudioPTS, pts) : pts
+                    }
+                    guard now.isFinite, pts.isFinite,
+                          slot.maxAudioPTS.isFinite,
+                          now - slot.maxAudioPTS > 1.0 else { return nil }
+                    let late = now - slot.maxAudioPTS
+                    slot.audioClockCorrections += 1
+                    slot.maxAudioPTS = pts
+                    return (late, slot.audioClockCorrections)
+                }
+                if let ranAhead {
+                    sync.setRate(1.0, time: CMTime(seconds: pts,
+                                                   preferredTimescale: 90_000))
+                    Self.log("stream \(streamKey) AUDIO CLOCK RAN AHEAD by "
+                             + "\(ranAhead.late)s - put back on the media "
+                             + "at \(pts). Correction \(ranAhead.nth).")
+                }
+                if count % 100 == 0 {
+                    Self.log("stream \(streamKey) audio at \(count) - clock "
+                             + "\(now) vs sample pts \(pts), drift "
+                             + "\(now - pts)")
+                }
             }
         }
     }
@@ -2286,6 +2502,29 @@ public final class FairPlayStreamParser: NSObject {
             anchor = CMTime(seconds: last.isFinite ? last : 0,
                             preferredTimescale: 90_000)
         }
+        // The old clock can already be ahead of the media it was meant
+        // to be showing: if the page pauses, ours keeps running. At the
+        // fourth adoption in the last capture it read 3783.117 while the
+        // samples about to be fed were at 3772.560 - ten and a half
+        // seconds late, so every one of them was decoded and discarded.
+        // Copying that reading into the new layer carries the fault
+        // across, so the anchor is clamped to the oldest sample this
+        // layer is actually going to be given.
+        let oldestHeld = withState { () -> Double? in
+            guard let slot = streamParsers[streamKey] else { return nil }
+            return [slot.currentGOP.first, slot.pending.first]
+                .compactMap { $0 }
+                .map { CMSampleBufferGetPresentationTimeStamp($0).seconds }
+                .filter { $0.isFinite }
+                .min()
+        }
+        if let oldestHeld, anchor.seconds > oldestHeld {
+            Self.log("stream \(streamKey) the old clock read "
+                     + "\(anchor.seconds) with the media it is handing "
+                     + "over at \(oldestHeld) - anchoring to the media")
+            anchor = CMTime(seconds: oldestHeld, preferredTimescale: 90_000)
+        }
+
         var timebase: CMTimebase?
         if CMTimebaseCreateWithSourceClock(
                allocator: kCFAllocatorDefault,
@@ -3161,8 +3400,14 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     private var outstanding: [String: AVContentKeyRequest] = [:]
     /// Whether any key request has ever arrived for this session.
     private var requestArrived = false
+    /// How many have. The watchdog needs the COUNT, not the flag: a
+    /// second playback in the same content process reuses this delegate,
+    /// so the flag was already true and the silence that mattered went
+    /// unreported.
+    private var requestCount = 0
 
     var sawRequest: Bool { withLock { requestArrived } }
+    var requestsSeen: Int { withLock { requestCount } }
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -3260,6 +3505,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         }
         let ready = withLock { () -> Bool in
             requestArrived = true
+            requestCount += 1
             originations[ObjectIdentifier(keyRequest)] = origination
             if storedCertificate == nil {
                 heldRequests.append(keyRequest)
