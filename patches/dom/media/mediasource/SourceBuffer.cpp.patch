@@ -2,7 +2,7 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,138 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +568,157 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -54,50 +54,69 @@ index d79526afbbfa..cb10fad683d0 100644
 +    // Declared here rather than included: this file does not pull in
 +    // ContentChild.h and does not need to for one call.
 +    //
-+    // AND ONE MEDIA FRAGMENT, ONCE. The rule above was right while the
-+    // parser had no key: moof carries nothing it could use, and the
-+    // capture's 7.1 MB append is a real cost. It is exactly wrong now.
-+    // The licence loop closed, the parser holds real keys, and media
-+    // fragments are the only bytes that can answer whether it will hand
-+    // back a DECRYPTED sample - the question everything downstream
-+    // depends on and the one thing the render probe could never ask.
++    // AND EVERY MEDIA FRAGMENT.
 +    //
-+    // One, per process, then never again: this is a measurement, not a
-+    // pipeline. If samples come back the pipeline is worth building and
-+    // this goes away; if they do not, nothing more gets built.
-+    // A bounded RUN, not a single fragment. One answered whether a
-+    // sample can exist at all; nothing can be built on one - a decoder
-+    // needs a sequence, and the next question either way is whether they
-+    // keep coming, in order, with sane timestamps.
++    // This used to forward eight and then stop for the life of the
++    // process, and the eight were the whole of it:
 +    //
-+    // Still a measurement, so it still stops on its own: eight
-+    // fragments or 32 MB, whichever comes first, and it says so when it
-+    // does rather than going quiet and looking like a bug.
++    //     mseAppend: forwarding media fragment 8/8, 1061772 bytes
++    //                (2525780 total)
++    //     mseAppend: fragment budget spent - no more will be forwarded
++    //                this process
++    //
++    // followed by thirteen more appends the parser never saw. The
++    // display layer drained what it already held, reached sample 428 and
++    // ran out, which is the fifteen seconds of picture that capture got.
++    // Nothing else in it was unhealthy - drift never went positive, no
++    // discontinuity, no decode failure, no refusal.
++    //
++    // The budget was right when it was written, and said so: "this is a
++    // measurement, not a pipeline. If samples come back the pipeline is
++    // worth building and this goes away". Samples come back. They
++    // decode, they go into a layer the compositor places at the
++    // element's position, and there is sound. The condition it set for
++    // its own removal has been met.
++    //
++    // Six of those eight also went to audio: a page appends audio and
++    // video to separate SourceBuffers and these counters are static per
++    // PROCESS, so small audio fragments spent three quarters of the
++    // budget and exactly two video fragments were forwarded. Two is not
++    // a sequence, which is the skipping as well as the stop.
++    //
++    // What stays is the per-append cap. That is a sanity limit on a
++    // single buffer crossing IPC rather than a total, and nothing
++    // legitimate approaches it - the largest fragment in any capture so
++    // far is 1.2 MB. A fragment that DOES exceed it is now said out
++    // loud: on its own it would be a hole in the middle of a stream with
++    // nothing to explain it, and under the old budget that case was
++    // indistinguishable from the budget itself.
++    //
++    // The counters stay too, and now only report. Eight lines at the
++    // start and one every fiftieth after that: this is a per-segment
++    // event on a route that runs for the length of a film, and the point
++    // of the line is to show it is still running.
 +    static unsigned sForwardedFragments = 0;
 +    static size_t sForwardedBytes = 0;
-+    constexpr unsigned kMaxFragments = 8;
-+    constexpr size_t kMaxTotalBytes = 32 * 1024 * 1024;
-+    const bool sForwardedOneFragment =
-+        sForwardedFragments >= kMaxFragments ||
-+        sForwardedBytes >= kMaxTotalBytes;
++    constexpr size_t kMaxFragmentBytes = 16 * 1024 * 1024;
 +    const bool mseIsInit = memcmp(mseBox, "ftyp", 4) == 0 ||
 +                           memcmp(mseBox, "moov", 4) == 0;
 +    const bool mseIsMedia = memcmp(mseBox, "moof", 4) == 0;
-+    const bool mseForwardMedia = mseIsMedia && !sForwardedOneFragment &&
-+                                 mseLength <= (16 * 1024 * 1024);
++    const bool mseForwardMedia = mseIsMedia && mseLength <= kMaxFragmentBytes;
 +    if (mseForwardMedia) {
 +      sForwardedFragments++;
 +      sForwardedBytes += mseLength;
-+      printf_stderr(
-+          "mseAppend: forwarding media fragment %u/%u, %zu bytes (%zu "
-+          "total) - building a sequence to decode\n",
-+          sForwardedFragments, kMaxFragments, mseLength, sForwardedBytes);
-+      if (sForwardedFragments >= kMaxFragments ||
-+          sForwardedBytes >= kMaxTotalBytes) {
++      if (sForwardedFragments <= 8 || sForwardedFragments % 50 == 0) {
 +        printf_stderr(
-+            "mseAppend: fragment budget spent - no more will be "
-+            "forwarded this process\n");
++            "mseAppend: forwarding media fragment %u, %zu bytes (%zu "
++            "total)\n",
++            sForwardedFragments, mseLength, sForwardedBytes);
 +      }
++    } else if (mseIsMedia) {
++      printf_stderr(
++          "mseAppend: media fragment of %zu bytes is over the per-append "
++          "cap and was NOT forwarded - the parser will have a hole "
++          "here\n",
++          mseLength);
 +    }
 +    if (mseLength >= 8 &&
 +        ((mseIsInit && mseLength <= (256 * 1024)) || mseForwardMedia)) {
