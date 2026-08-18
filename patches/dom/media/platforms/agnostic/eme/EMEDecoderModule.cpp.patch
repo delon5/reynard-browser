@@ -1,13 +1,117 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -19,4 +19,5 @@
+@@ -16,15 +16,109 @@
+ #include "MP4Decoder.h"
++#include "MediaData.h"
+ #include "MediaInfo.h"
+ #include "PDMFactory.h"
  #include "mozilla/CDMProxy.h"
 +#include "mozilla/Debug.h"  // printf_stderr
  #include "mozilla/EMEUtils.h"
  #include "mozilla/RemoteCDMProxy.h"
  #include "mozilla/StaticPrefs_media.h"
-@@ -402,13 +403,50 @@ EMEDecoderModule::CreateVideoDecoder(
+ #include "mozilla/UniquePtr.h"
+ #include "nsClassHashtable.h"
+ #include "nsServiceManagerUtils.h"
+ 
+ namespace mozilla {
+ 
+ using DecryptPromiseRequestHolder = MozPromiseRequestHolder<DecryptPromise>;
++
++// Silence for a protected MSE audio track.
++//
++// The audio branch below cannot let these samples reach EMEDecryptor -
++// a FairPlay proxy never returns a decrypted sample, so the wait never
++// ends and readyState stays at HAVE_METADATA. It used
++// BlankDecoderModule instead, which unblocked the element and turned
++// out to emit a SINE TONE rather than silence. Audible, and wrong.
++//
++// This returns the same shape of data with the samples zeroed. Frame
++// count comes from the sample's own duration so the timeline is the one
++// the demuxer described, and the clock behaves exactly as it does with
++// the tone.
++//
++// Nothing here renders. Real MSE audio belongs in an
++// AVSampleBufferAudioRenderer beside the display layer that already
++// paints the video; until that exists this makes the element correct
++// and quiet.
++class ReynardSilentAudioDecoder final : public MediaDataDecoder {
++ public:
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ReynardSilentAudioDecoder, final);
++
++  explicit ReynardSilentAudioDecoder(const AudioInfo& aInfo)
++      : mChannels(aInfo.mChannels), mRate(aInfo.mRate) {}
++
++  RefPtr<InitPromise> Init() override {
++    printf_stderr("mseDecoderRoute: silent audio decoder %u ch @ %u Hz\n",
++                  mChannels, mRate);
++    return InitPromise::CreateAndResolve(TrackInfo::kAudioTrack, __func__);
++  }
++
++  RefPtr<DecodePromise> Decode(MediaRawData* aSample) override {
++    // Shaped after BlankAudioDataCreator::Create, which is the code this
++    // replaces: same frame arithmetic, same guards, same AudioData
++    // construction. Only the fill differs - it writes a 440 Hz sine,
++    // this writes zeroes.
++    //
++    // The +1 microsecond is its rounding guard, kept so the frame counts
++    // match what the element was already being given.
++    if (!mChannels || !mRate) {
++      return DecodePromise::CreateAndReject(
++          MediaResult(NS_ERROR_FAILURE, __func__), __func__);
++    }
++    const int64_t usecs = aSample->mDuration.ToMicroseconds() + 1;
++    const int64_t frames = (usecs * static_cast<int64_t>(mRate)) / 1000000;
++    if (frames < 0 || frames > (UINT32_MAX / mChannels)) {
++      return DecodePromise::CreateAndReject(
++          MediaResult(NS_ERROR_FAILURE, __func__), __func__);
++    }
++    AlignedAudioBuffer samples(frames * mChannels);
++    if (!samples) {
++      return DecodePromise::CreateAndReject(
++          MediaResult(NS_ERROR_OUT_OF_MEMORY, __func__), __func__);
++    }
++    for (int64_t i = 0; i < frames; i++) {
++      for (uint32_t c = 0; c < mChannels; c++) {
++        samples[i * mChannels + c] = AudioDataValue(0);
++      }
++    }
++    RefPtr<AudioData> data(new AudioData(aSample->mOffset, aSample->mTime,
++                                         std::move(samples), mChannels,
++                                         mRate));
++    DecodedData results;
++    results.AppendElement(std::move(data));
++    return DecodePromise::CreateAndResolve(std::move(results), __func__);
++  }
++
++  RefPtr<DecodePromise> Drain() override {
++    // Stateless: every sample was answered as it arrived.
++    return DecodePromise::CreateAndResolve(DecodedData(), __func__);
++  }
++
++  RefPtr<FlushPromise> Flush() override {
++    return FlushPromise::CreateAndResolve(true, __func__);
++  }
++
++  RefPtr<ShutdownPromise> Shutdown() override {
++    return ShutdownPromise::CreateAndResolve(true, __func__);
++  }
++
++  nsCString GetDescriptionName() const override {
++    return "reynard silent audio decoder"_ns;
++  }
++
++  nsCString GetCodecName() const override { return "reynard-silence"_ns; }
++
++ private:
++  ~ReynardSilentAudioDecoder() = default;
++
++  const uint32_t mChannels;
++  const uint32_t mRate;
++};
+ 
+@@ -402,13 +402,48 @@ EMEDecoderModule::CreateVideoDecoder(
    }
  
    if (aParams.mConfig.IsVideo()) {
@@ -34,8 +138,6 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    // BEFORE the branch, deliberately. An earlier version printed inside
 +    // it and so reported only its own success - leaving "no line" to mean
 +    // not-built or pref-off or never-called, which cost three captures.
-+    // This fires on every encrypted video decoder creation, so silence
-+    // now means exactly one thing: the code is not in the build.
 +    printf_stderr(
 +        "mseDecoderRoute: video decoder - mseRoute=%d hlsOnly=%d "
 +        "blankPref=%d -> blank=%d\n",
@@ -59,7 +161,7 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
      }
  
      const bool gmpSupported =
-@@ -470,6 +508,33 @@ EMEDecoderModule::CreateAudioDecoder(
+@@ -470,6 +470,30 @@ EMEDecoderModule::CreateAudioDecoder(
      return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                      __func__);
    }
@@ -71,24 +173,21 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +  // track, so one audio decoder waiting on SamplesWaitingForKey pinned
 +  // the element however well video was doing.
 +  //
-+  // BlankDecoderModule here and not the image-less one. Silent audio
-+  // frames are exactly what is wanted, and image-less has no audio
-+  // meaning - the idea exists only because a video sink can skip a frame
-+  // with no picture.
++  // SILENT, not blank. BlankDecoderModule unblocks the element and emits
++  // a sine tone while doing it, which is audible on the device.
 +  const bool reynardMSERoute =
 +      StaticPrefs::media_reynard_fairplay_mse_parser_route() ||
 +      !StaticPrefs::media_reynard_fairplay_hls_only_initdata();
 +  printf_stderr(
-+      "mseDecoderRoute: audio decoder - mseRoute=%d hlsOnly=%d -> blank=%d\n",
++      "mseDecoderRoute: audio decoder - mseRoute=%d hlsOnly=%d -> silent=%d\n",
 +      StaticPrefs::media_reynard_fairplay_mse_parser_route() ? 1 : 0,
 +      StaticPrefs::media_reynard_fairplay_hls_only_initdata() ? 1 : 0,
 +      reynardMSERoute ? 1 : 0);
 +  if (reynardMSERoute) {
-+    RefPtr<PlatformDecoderModule> blankModule(BlankDecoderModule::Create());
-+    RefPtr<MediaDataDecoder> blankDecoder =
-+        blankModule->CreateAudioDecoder(aParams);
-+    return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(
-+        blankDecoder, __func__);
++    RefPtr<MediaDataDecoder> silent =
++        new ReynardSilentAudioDecoder(aParams.AudioConfig());
++    return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(silent,
++                                                                    __func__);
 +  }
 +
    UniquePtr<ADTSSampleConverter> converter = nullptr;
