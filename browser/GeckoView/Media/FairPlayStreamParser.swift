@@ -1049,7 +1049,47 @@ public final class FairPlayStreamParser: NSObject {
         /// So the "these are protected, the probe cannot help" note is
         /// made once rather than 360 times.
         var probeSkippedLogged = false
-        /// Highest PTS taken IN so far, for discontinuity detection.
+        /// The last DECODE stamp taken in, which is what discontinuity
+        /// detection actually uses.
+        ///
+        /// Presentation stamps reorder and decode stamps do not - that
+        /// is what a decode stamp is for. A seventeen-frame
+        /// hierarchical-B mini-GOP arrives as
+        ///
+        ///     pts 12.28  dts 12.24
+        ///     pts 13.00  dts 12.28
+        ///     pts 12.64  dts 12.32
+        ///     pts 12.36  dts 12.36
+        ///
+        /// and against a presentation high-water mark the fourth line
+        /// reads as a 0.64s regression. Fix 27 set the threshold at half
+        /// a second on content that reordered by 0.042s; this content
+        /// reorders by 0.68s, so the threshold sat inside the ordinary
+        /// case and flushed 234 samples for nothing.
+        ///
+        /// The decode stamp cannot do that, and a real timeline change
+        /// moves it too - the one genuine discontinuity in that capture
+        /// was dts 15.588 -> 10.000. No high-water mark is needed here
+        /// because this value only ever goes forwards.
+        var lastIntakeDTS = Double.nan
+        /// The samples taken in since the last sync sample.
+        ///
+        /// Kept so that a new sink can be started without waiting for
+        /// the next keyframe: these are exactly the samples it needs to
+        /// decode the picture that is on screen right now, and they have
+        /// already been handed to the layer being replaced. Cleared on
+        /// every sync sample, so it holds one GOP and no more.
+        var currentGOP: [CMSampleBuffer] = []
+        /// Did this parser build the layer it is feeding?
+        ///
+        /// True for the hardcoded overlay it makes itself, false once the
+        /// compositor's has been adopted. Only an owned layer may be
+        /// removed from its superlayer - a compositor layer lives in
+        /// NativeLayerCA's own tree, and retiring one would tear it out.
+        var ownsDisplayLayer = true
+        /// Highest PTS taken IN so far, kept for the handover's fallback
+        /// anchor. No longer the discontinuity signal - see
+        /// lastIntakeDTS.
         ///
         /// Intake order is the order the layer will see, so a jump shows
         /// up here before it can strand anything. NaN until the first
@@ -1374,20 +1414,32 @@ public final class FairPlayStreamParser: NSObject {
         // a seek strands the queue the same way in the other direction.
         let intakePTS =
             CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        // In DECODE order. A presentation high-water mark cannot tell a
+        // hierarchical-B reorder from a seek, and on content with a
+        // seventeen-frame mini-GOP it called three reorders
+        // discontinuities and flushed 234 samples for them. A decode
+        // stamp only ever goes forwards, so anything that goes backwards
+        // in it is a real timeline change.
+        //
+        // Falls back to the presentation stamp when a sample carries no
+        // decode stamp at all, which for H.264 in MP4 means the two are
+        // equal anyway.
+        let stamped = CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
+        let intakeDTS = stamped.isValid ? stamped.seconds : intakePTS
         let jump = withState { () -> Double? in
             slot.videoSeen += 1
-            guard slot.lastIntakePTS.isFinite, intakePTS.isFinite else {
-                slot.lastIntakePTS = intakePTS
+            slot.lastIntakePTS = max(slot.lastIntakePTS.isFinite
+                                     ? slot.lastIntakePTS : intakePTS,
+                                     intakePTS)
+            guard slot.lastIntakeDTS.isFinite, intakeDTS.isFinite else {
+                slot.lastIntakeDTS = intakeDTS
                 return nil
             }
-            let delta = intakePTS - slot.lastIntakePTS
+            let delta = intakeDTS - slot.lastIntakeDTS
+            slot.lastIntakeDTS = intakeDTS
             guard delta < -0.5 || delta > 2.0 else {
-                slot.lastIntakePTS = max(slot.lastIntakePTS, intakePTS)
                 return nil
             }
-            // The new timeline starts here, so the high-water mark from
-            // the old one is discarded rather than carried forward.
-            slot.lastIntakePTS = intakePTS
             return delta
         }
         if let jump {
@@ -1423,6 +1475,7 @@ public final class FairPlayStreamParser: NSObject {
         // 900 frames of compressed video is roughly 20MB at the sizes in
         // that capture, which is real memory, and acceptable only because
         // this whole path is behind a marker file.
+        let isSync = Self.isSyncSample(sampleBuffer)
         let queued = withState { () -> Int in
             guard slot.pending.count < 900 else {
                 slot.overflowed += 1
@@ -1431,6 +1484,23 @@ public final class FairPlayStreamParser: NSObject {
                 // resuming mid-picture.
                 slot.needsSyncSample = true
                 return -1
+            }
+            // The current GOP, kept so a new sink can be handed the
+            // samples it needs to decode the picture on screen instead
+            // of waiting for the next keyframe. Reset on every sync
+            // sample, so this holds one GOP.
+            //
+            // Cleared outright rather than trimmed past 300, because a
+            // GOP that long - twelve seconds at 25fps - means the reset
+            // is not happening, and half of one is worth nothing: the
+            // whole value of this is that it starts at a keyframe.
+            if isSync {
+                slot.currentGOP.removeAll()
+            }
+            if slot.currentGOP.count >= 300 {
+                slot.currentGOP.removeAll()
+            } else {
+                slot.currentGOP.append(sampleBuffer)
             }
             slot.pending.append(sampleBuffer)
             return slot.pending.count
@@ -1555,13 +1625,9 @@ public final class FairPlayStreamParser: NSObject {
                 return overlay
             }
             if let retiring {
-                let sessionId =
-                    String(streamKey.split(separator: "|").first ?? "")
-                if let keySession = liveSession(sessionId),
-                   let recipient = (retiring as AnyObject)
-                       as? AVContentKeyRecipient {
-                    keySession.removeContentKeyRecipient(recipient)
-                }
+                // Deregistration moved to the handover, which every
+                // superseded layer goes through - this path is only ever
+                // reached by the overlay.
                 DispatchQueue.main.async {
                     retiring.removeFromSuperlayer()
                     Self.log("stream \(streamKey) retired the overlay - the "
@@ -2242,22 +2308,61 @@ public final class FairPlayStreamParser: NSObject {
 
         let handover = withState {
             () -> (old: AVSampleBufferDisplayLayer?, observer: NSObjectProtocol?,
-                   queue: DispatchQueue?, abandoned: Int)? in
+                   queue: DispatchQueue?, carried: Int, held: Int,
+                   waiting: Bool)? in
             guard let slot = streamParsers[streamKey] else { return nil }
             let old = slot.displayLayer
             let observer = slot.failObserver
-            let abandoned = slot.pending.count
             slot.displayLayer = sink
             slot.failObserver = nil
-            slot.pending.removeAll()
             slot.drainArmed = false
-            // A fresh layer has no reference frame, so nothing is fed
-            // until the next keyframe. Fix 27's rule, for fix 27's
-            // reason - a mid-GOP frame decodes to garbage.
-            slot.needsSyncSample = true
             slot.layerAttached = true
-            slot.retiringOverlay = old
-            return (old, observer, slot.drainQueue, abandoned)
+            // Only a layer this parser built may be removed from its
+            // superlayer. From the second adoption onwards the one being
+            // replaced is a layer NativeLayerCA built and owns, sitting
+            // in the compositor's own tree, and retiring one would tear
+            // it out of it.
+            slot.retiringOverlay = slot.ownsDisplayLayer ? old : nil
+            slot.ownsDisplayLayer = false
+
+            // A fresh layer has no reference frame - true, and the reason
+            // the queue used to be deleted here. It does not follow that
+            // the queue has to go: these are compressed samples that
+            // have not been fed to anything yet, and the frames the new
+            // layer needs to decode the picture currently on screen were
+            // handed to the OLD layer moments ago and are still held in
+            // currentGOP.
+            //
+            // So the samples since the last keyframe are put back in
+            // front of whatever was still waiting. Their presentation
+            // times have passed, which is fine and is what happens after
+            // any seek: a display layer decodes them for reference and
+            // skips presenting them.
+            //
+            // currentGOP and pending overlap - pending is the tail of the
+            // GOP that has not been drained yet - so only the part
+            // already fed to the old layer is prepended.
+            let alreadyFed = max(0, slot.currentGOP.count
+                                    - slot.pending.count)
+            let carried = Array(slot.currentGOP.prefix(alreadyFed))
+            let held = slot.pending.count
+            if !carried.isEmpty {
+                slot.pending = carried + slot.pending
+                slot.needsSyncSample = false
+            } else if let at = slot.pending.firstIndex(
+                          where: { Self.isSyncSample($0) }) {
+                // Nothing to carry, but the queue already contains a
+                // keyframe: start there rather than waiting for the next
+                // one to arrive from the source.
+                slot.pending.removeFirst(at)
+                slot.needsSyncSample = false
+            } else {
+                // The one case where the old behaviour was right.
+                slot.pending.removeAll()
+                slot.needsSyncSample = true
+            }
+            return (old, observer, slot.drainQueue, carried.count, held,
+                    slot.needsSyncSample)
         }
         guard let handover else { return }
 
@@ -2277,10 +2382,25 @@ public final class FairPlayStreamParser: NSObject {
             queue.async { old.stopRequestingMediaData() }
         }
 
+        // Deregistered here rather than at retirement, which only ever
+        // runs for the overlay - so superseded compositor layers stayed
+        // registered and the recipient count climbed with every
+        // adoption.
+        if let old = handover.old,
+           let keySession = liveSession(
+               String(streamKey.split(separator: "|").first ?? "")),
+           let recipient = (old as AnyObject) as? AVContentKeyRecipient {
+            keySession.removeContentKeyRecipient(recipient)
+        }
+
+        let resumption = handover.waiting
+            ? "waiting for a sync sample"
+            : "resuming from the current GOP"
         Self.log("stream \(streamKey) adopted the compositor's layer at "
-                 + "\(anchor.seconds) - \(handover.abandoned) held samples "
-                 + "abandoned, feeding restarts at the next sync sample. "
-                 + "The overlay stays until this layer takes one.")
+                 + "\(anchor.seconds) - carrying \(handover.carried) "
+                 + "samples in front of \(handover.held) held, "
+                 + resumption + ". The overlay stays until this layer "
+                 + "takes one.")
         armDrainIfNeeded(streamKey: streamKey)
     }
 
