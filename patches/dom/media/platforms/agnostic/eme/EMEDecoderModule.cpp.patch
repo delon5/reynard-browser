@@ -1,16 +1,13 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -16,5 +16,8 @@
- #include "MP4Decoder.h"
- #include "MediaInfo.h"
- #include "PDMFactory.h"
-+// For the image-less timing decoder - see CreateVideoDecoder below.
-+#include "ReynardAVPlayerDecoderModule.h"
+@@ -19,4 +19,5 @@
  #include "mozilla/CDMProxy.h"
 +#include "mozilla/Debug.h"  // printf_stderr
  #include "mozilla/EMEUtils.h"
-@@ -402,13 +405,51 @@ EMEDecoderModule::CreateVideoDecoder(
+ #include "mozilla/RemoteCDMProxy.h"
+ #include "mozilla/StaticPrefs_media.h"
+@@ -402,13 +403,50 @@ EMEDecoderModule::CreateVideoDecoder(
    }
  
    if (aParams.mConfig.IsVideo()) {
@@ -48,23 +45,21 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    if (reynardBlank) {
        EME_LOG(
            "EMEDecoderModule::CreateVideoDecoder() creating a blank decoder.");
--      RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
-+      // IMAGE-LESS, not blank. BlankDecoderModule publishes real blank
-+      // pictures - zeroed NV12 in BT.709 video range, which is the
-+      // saturated green rectangle that appeared over the page. This
-+      // module's decoder returns VideoData carrying timing and no image,
-+      // and its header states the property that matters: the video sink
-+      // skips image-less frames when publishing to the compositor but
-+      // still advances the media clock over them. So the clock keeps
-+      // running and the element's box stops painting over the overlay.
-+      RefPtr<PlatformDecoderModule> m(ReynardAVPlayerDecoderModule::Create());
++      // A BLANK IMAGE, not an image-less frame, and that is load
++      // bearing. Swapping this for the image-less timing decoder took
++      // readyState back to 1: HAVE_CURRENT_DATA means the element HAS a
++      // current frame, and a frame with no image is not one. The
++      // AVPlayer route survives image-less frames only because
++      // PublishPlaceholderFrame supplies a real image separately, and
++      // the MSE route has no such publisher. Do not "tidy" this again.
+       RefPtr<PlatformDecoderModule> m(BlankDecoderModule::Create());
        RefPtr<MediaDataDecoder> decoder = m->CreateVideoDecoder(aParams);
        return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                        __func__);
      }
  
      const bool gmpSupported =
-@@ -470,6 +511,33 @@ EMEDecoderModule::CreateAudioDecoder(
+@@ -470,6 +508,33 @@ EMEDecoderModule::CreateAudioDecoder(
      return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                      __func__);
    }
