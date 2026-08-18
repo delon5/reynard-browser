@@ -2,7 +2,7 @@ diff --git a/dom/media/ReynardAVPlayerDecoderModule.h b/dom/media/ReynardAVPlaye
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/ReynardAVPlayerDecoderModule.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,60 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -51,6 +51,13 @@ new file mode 100644
 +
 +  already_AddRefed<MediaDataDecoder> CreateAudioDecoder(
 +      const CreateDecoderParams& aParams) override;
++
++  // A frame whose image is an IOSurface, filled black and marked
++  // protected. Only MacIOSurfaceImage turns Image::IsDRM into
++  // TextureFlags::DRM_SOURCE, so a planar blank frame cannot carry the
++  // mark however it is set - see MacIOSurfaceImage::GetTextureClient.
++  static already_AddRefed<MediaDataDecoder> CreateProtectedPlaceholderDecoder(
++      const CreateDecoderParams& aParams);
 +};
 +
 +}  // namespace mozilla

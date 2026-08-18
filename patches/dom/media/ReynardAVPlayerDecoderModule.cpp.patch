@@ -2,7 +2,7 @@ diff --git a/dom/media/ReynardAVPlayerDecoderModule.cpp b/dom/media/ReynardAVPla
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/ReynardAVPlayerDecoderModule.cpp
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,258 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +14,10 @@ new file mode 100644
 +#include "MediaInfo.h"
 +#include "mozilla/Debug.h"  // printf_stderr
 +#include "mozilla/StaticPrefs_media.h"
++#include "MacIOSurfaceImage.h"
++#include "mozilla/gfx/MacIOSurface.h"
++
++#include <cstring>  // memset
 +
 +namespace mozilla {
 +
@@ -84,6 +88,137 @@ new file mode 100644
 +  const gfx::IntSize mDisplay;
 +};
 +
++// A black, DRM-marked placeholder frame for protected MSE video.
++//
++// The route needs the element to HAVE a current frame - an image-less one
++// leaves readyState at HAVE_METADATA, which was measured - and it needs
++// that frame to carry the DRM mark so NativeLayerCA builds a video layer
++// where the element is rather than compositing the surface.
++//
++// Both require a MacIOSurfaceImage specifically. MacIOSurfaceImage::
++// GetTextureClient is the only place TextureFlags::DRM_SOURCE is set:
++//
++//     TextureFlags flags =
++//         IsDRM() ? TextureFlags::DRM_SOURCE : TextureFlags::DEFAULT;
++//
++// so marking a PlanarYCbCrImage - which is what BlankDecoderModule makes -
++// sets a bit nothing ever reads. That is why an earlier attempt to mark
++// the blank decoder's frames changed nothing on screen.
++//
++// The surface is built and filled exactly as
++// AVPlayerDecoder::PublishPlaceholderFrame does, including the fill
++// values: a fresh IOSurface is zeroed, and zeroed NV12 in BT.709 limited
++// range decodes to saturated GREEN, not black. Y=0x10 with CbCr=0x80 is
++// black.
++class ReynardProtectedPlaceholderDecoder final : public MediaDataDecoder {
++ public:
++  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ReynardProtectedPlaceholderDecoder,
++                                        final);
++
++  explicit ReynardProtectedPlaceholderDecoder(const VideoInfo& aInfo)
++      : mDisplay(aInfo.mDisplay) {}
++
++  RefPtr<InitPromise> Init() override {
++    printf_stderr("mseDecoderRoute: protected placeholder decoder %dx%d\n",
++                  mDisplay.width, mDisplay.height);
++    return InitPromise::CreateAndResolve(TrackInfo::kVideoTrack, __func__);
++  }
++
++  RefPtr<DecodePromise> Decode(MediaRawData* aSample) override {
++    // The image is already marked by the time it gets here, and that
++    // matters: GetTextureClient caches its TextureClient behind
++    // "if (!mTextureClient)", so a mark applied later would be ignored.
++    RefPtr<layers::Image> image = ProtectedImage();
++    if (!image) {
++      return DecodePromise::CreateAndReject(
++          MediaResult(NS_ERROR_OUT_OF_MEMORY, __func__), __func__);
++    }
++    RefPtr<VideoData> frame = VideoData::CreateFromImage(
++        mDisplay, aSample->mOffset, aSample->mTime, aSample->mDuration, image,
++        aSample->mKeyframe, aSample->mTimecode);
++    if (!frame) {
++      return DecodePromise::CreateAndReject(
++          MediaResult(NS_ERROR_OUT_OF_MEMORY, __func__), __func__);
++    }
++    DecodedData results;
++    results.AppendElement(std::move(frame));
++    return DecodePromise::CreateAndResolve(std::move(results), __func__);
++  }
++
++  RefPtr<DecodePromise> Drain() override {
++    // Stateless: every sample was answered as it arrived.
++    return DecodePromise::CreateAndResolve(DecodedData(), __func__);
++  }
++
++  RefPtr<FlushPromise> Flush() override {
++    return FlushPromise::CreateAndResolve(true, __func__);
++  }
++
++  RefPtr<ShutdownPromise> Shutdown() override {
++    return ShutdownPromise::CreateAndResolve(true, __func__);
++  }
++
++  nsCString GetDescriptionName() const override {
++    return "reynard protected placeholder"_ns;
++  }
++
++  nsCString GetCodecName() const override {
++    return "reynard-protected-placeholder"_ns;
++  }
++
++ private:
++  ~ReynardProtectedPlaceholderDecoder() = default;
++
++  // One surface for the life of the decoder. A fresh IOSurface per frame
++  // at 24fps is real cost for a picture that never changes, and nothing
++  // writes to it after the first fill.
++  RefPtr<layers::Image> ProtectedImage() {
++    if (mImage) {
++      return mImage;
++    }
++    const gfx::IntSize chromaSize((mDisplay.width + 1) / 2,
++                                  (mDisplay.height + 1) / 2);
++    RefPtr<MacIOSurface> surface = MacIOSurface::CreateBiPlanarSurface(
++        mDisplay, chromaSize, gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT,
++        gfx::YUVColorSpace::BT709, gfx::TransferFunction::BT709,
++        gfx::ColorRange::LIMITED, gfx::ColorDepth::COLOR_8,
++        MacIOSurface::AllowAlpha::No);
++    if (!surface) {
++      printf_stderr(
++          "mseDecoderRoute: CreateBiPlanarSurface failed for %dx%d\n",
++          mDisplay.width, mDisplay.height);
++      return nullptr;
++    }
++    if (surface->Lock(/* aReadOnly */ false)) {
++      if (void* yPlane = surface->GetBaseAddressOfPlane(0)) {
++        memset(yPlane, 0x10,
++               surface->GetBytesPerRow(0) * surface->GetDevicePixelHeight(0));
++      }
++      if (void* cbcrPlane = surface->GetBaseAddressOfPlane(1)) {
++        memset(cbcrPlane, 0x80,
++               surface->GetBytesPerRow(1) * surface->GetDevicePixelHeight(1));
++      }
++      surface->Unlock(/* aReadOnly */ false);
++    } else {
++      // Not fatal, but an unfilled surface is zeroed, and zeroed NV12
++      // reads as saturated green - so a green rectangle on screen means
++      // exactly this line fired.
++      printf_stderr("mseDecoderRoute: placeholder Lock() failed\n");
++    }
++    RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(surface);
++    image->SetIsDRM(true);
++    printf_stderr(
++        "mseDecoderRoute: protected placeholder image built %dx%d - expect "
++        "NativeLayerCA: mIsDRM -> 1\n",
++        mDisplay.width, mDisplay.height);
++    mImage = image;
++    return mImage;
++  }
++
++  const gfx::IntSize mDisplay;
++  RefPtr<layers::Image> mImage;
++};
++
 +}  // namespace
 +
 +/* static */
@@ -115,6 +250,14 @@ new file mode 100644
 +  // The synthetic track is video-only by construction; AVPlayer owns
 +  // the audio end to end.
 +  return nullptr;
++}
++
++/* static */
++already_AddRefed<MediaDataDecoder>
++ReynardAVPlayerDecoderModule::CreateProtectedPlaceholderDecoder(
++    const CreateDecoderParams& aParams) {
++  return MakeAndAddRef<ReynardProtectedPlaceholderDecoder>(
++      aParams.VideoConfig());
 +}
 +
 +}  // namespace mozilla
