@@ -2406,6 +2406,33 @@ extension TabManagerImplementation: NavigationDelegate {
     private static let seedVersion = 4
     private static let seedVersionKey = "Reynard.SafeArea.SeedVersion"
 
+    /// The user's pill-clearance list (Settings > General >
+    /// Compatibility > Toolbar > Pill Clearance Sites): hosts pinned
+    /// to .needsViewportShrink by hand, for sites whose bottom UI the
+    /// automatic detector cannot classify correctly. Unlike the seeds
+    /// above this is a PIN: read live so Settings edits apply on the
+    /// next load, consulted before the persisted store, and never
+    /// overwritten by live detection - a pin is a decision, not a
+    /// guess. Matches a listed host and its subdomains.
+    static func pinnedShrinkVerdict(forHost host: String) -> GeckoSession.BottomReservation? {
+        let needle = host.lowercased()
+        for entry in Prefs.CompatibilitySettings.pillClearanceSites.split(separator: ",") {
+            var trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let schemeRange = trimmed.range(of: "://") {
+                trimmed = String(trimmed[schemeRange.upperBound...])
+            }
+            trimmed = String(trimmed.split(separator: "/").first ?? "")
+            trimmed = String(trimmed.split(separator: ":").first ?? "")
+            guard !trimmed.isEmpty else {
+                continue
+            }
+            if needle == trimmed || needle.hasSuffix("." + trimmed) {
+                return .needsViewportShrink
+            }
+        }
+        return nil
+    }
+
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
         let defaults = UserDefaults.standard
         let applySeedsOverPersisted = defaults.integer(forKey: seedVersionKey) < seedVersion
@@ -2464,7 +2491,7 @@ extension TabManagerImplementation: NavigationDelegate {
     @discardableResult
     private func applyRememberedReservation(to tab: Tab, url: String?) -> Bool {
         guard let host = url.flatMap({ URL(string: $0)?.host }),
-              let remembered = Self.reservationByHost[host],
+              let remembered = Self.pinnedShrinkVerdict(forHost: host) ?? Self.reservationByHost[host],
               tab.state.bottomReservation != remembered else {
             return false
         }
@@ -2487,7 +2514,19 @@ extension TabManagerImplementation: NavigationDelegate {
             // try? and nil is treated as "no answer". That made a
             // missing actor case indistinguishable from a page that
             // simply does not use safe-area CSS.
-            if let reservation = await session.bottomReservation() {
+            if var reservation = await session.bottomReservation() {
+                // A user pin outranks live detection: the pin exists
+                // exactly because the automatic detector cannot
+                // classify this site (Settings > Compatibility >
+                // Toolbar > Pill Clearance Sites). The store still
+                // receives the detector's RAW verdict below, so
+                // removing the pin restores automatic behavior with
+                // nothing stale left behind.
+                let rawReservation = reservation
+                if let host = tab.url.flatMap({ URL(string: $0)?.host }),
+                   let pinned = Self.pinnedShrinkVerdict(forHost: host) {
+                    reservation = pinned
+                }
                 let changed = tab.state.bottomReservation != reservation
                 logger(String(format: "safeArea: tab %@ reservation=%@ (%@%@)",
                               tab.id.uuidString,
@@ -2512,8 +2551,8 @@ extension TabManagerImplementation: NavigationDelegate {
                 let isPrivate = self.privateTabs.contains { $0 === tab }
                 if !isPrivate,
                    let host = tab.url.flatMap({ URL(string: $0)?.host }),
-                   Self.reservationByHost[host] != reservation {
-                    Self.reservationByHost[host] = reservation
+                   Self.reservationByHost[host] != rawReservation {
+                    Self.reservationByHost[host] = rawReservation
                     Self.persistReservations()
                 }
 

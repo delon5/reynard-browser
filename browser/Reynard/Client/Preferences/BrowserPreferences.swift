@@ -96,6 +96,7 @@ final class BrowserPreferences {
             key("CompatibilitySettings", "fairPlaySPCProtocolVersion"): 1,
             key("CompatibilitySettings", "fairPlaySPCUseFullKeyURI"): false,
             key("CompatibilitySettings", "webKitShimExtraHosts"): "",
+            key("CompatibilitySettings", "pillClearanceSites"): "",
             
             // Browsing
             key("BrowsingSettings", "requestDesktopWebsite"): UIDevice.current.userInterfaceIdiom == .pad,
@@ -1066,6 +1067,24 @@ final class BrowserPreferences {
                 prefs.set(newValue, forSetting: "CompatibilitySettings",
                           key: "webKitShimExtraHosts")
                 MediaCompatibilityPolicyController.applyWebKitShimExtraHosts()
+            }
+        }
+
+        /// Sites pinned to the viewport-shrink pill treatment, comma
+        /// separated - the user-editable version of the tv.apple.com /
+        /// twitch seeds, for sites whose bottom UI does not respect
+        /// the floating pill. Each entry matches that host and its
+        /// subdomains. Read live by TabManagerImpl on every verdict
+        /// decision, so edits apply on the next page load - nothing to
+        /// push and no relaunch.
+        static var pillClearanceSites: String {
+            get {
+                prefs.string(forSetting: "CompatibilitySettings",
+                             key: "pillClearanceSites") ?? ""
+            }
+            set {
+                prefs.set(newValue, forSetting: "CompatibilitySettings",
+                          key: "pillClearanceSites")
             }
         }
 

@@ -12,6 +12,7 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         case userAgent
         case perSiteOverrides
         case media
+        case toolbar
         
         var text: SettingsSectionText {
             switch self {
@@ -23,6 +24,10 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
                         "Set a specific user agent for individual websites. A site's own override, when enabled, takes priority over the settings above.",
                         comment: ""
                     )
+                )
+            case .toolbar:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Toolbar", comment: "")
                 )
             case .media:
                 return SettingsSectionText(
@@ -54,6 +59,10 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
         case fairPlaySPCVersion
         case fairPlaySPCFullKeyURI
         case webKitShimHosts
+    }
+    
+    private enum ToolbarRow: CaseIterable {
+        case pillClearanceSites
     }
     
     private let androidUserAgentSwitch = UISwitch()
@@ -121,6 +130,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             return displayedPerSiteOverridesRows.count
         case .media:
             return MediaRow.allCases.count
+        case .toolbar:
+            return ToolbarRow.allCases.count
         }
     }
     
@@ -136,6 +147,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             return perSiteOverridesCell(at: indexPath.row, in: tableView)
         case .media:
             return mediaCell(at: indexPath.row, in: tableView)
+        case .toolbar:
+            return toolbarCell(at: indexPath.row, in: tableView)
         }
     }
     
@@ -186,6 +199,24 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
             cell.textLabel?.text = NSLocalizedString("Manage Websites", comment: "")
             cell.accessoryType = .disclosureIndicator
+            return cell
+        }
+    }
+    
+    private func toolbarCell(at row: Int, in tableView: UITableView) -> UITableViewCell {
+        guard ToolbarRow.allCases.indices.contains(row) else {
+            return UITableViewCell()
+        }
+        
+        switch ToolbarRow.allCases[row] {
+        case .pillClearanceSites:
+            let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+            cell.textLabel?.text = NSLocalizedString("Pill Clearance Sites", comment: "")
+            cell.accessoryType = .disclosureIndicator
+            let hosts = Prefs.CompatibilitySettings.pillClearanceSites
+            cell.detailTextLabel?.text = hosts.isEmpty
+                ? NSLocalizedString("None", comment: "")
+                : hosts
             return cell
         }
     }
@@ -276,6 +307,15 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             default:
                 return
             }
+        case .toolbar:
+            guard ToolbarRow.allCases.indices.contains(indexPath.row) else {
+                return
+            }
+            switch ToolbarRow.allCases[indexPath.row] {
+            case .pillClearanceSites:
+                navigationController?.pushViewController(
+                    PillClearanceSitesPreferencesViewController(), animated: true)
+            }
         }
     }
     
@@ -299,6 +339,8 @@ final class CompatibilityPreferencesViewController: SettingsTableViewController 
             return Section.perSiteOverrides.text
         case .media:
             return Section.media.text
+        case .toolbar:
+            return Section.toolbar.text
         }
     }
     
