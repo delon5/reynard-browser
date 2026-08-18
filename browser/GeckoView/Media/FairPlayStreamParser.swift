@@ -141,6 +141,9 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     private var entries: [String: Entry] = [:]
+    /// Has the process's audio session been made playback-capable? Once
+    /// per process - see prepareAudioSession.
+    private var audioSessionPrepared = false
     /// Stream parsers by "<sessionId>|<stream>". See append(_:stream:).
     fileprivate var streamParsers: [String: StreamParser] = [:]
     private let lock = NSLock()
@@ -1064,6 +1067,36 @@ public final class FairPlayStreamParser: NSObject {
         var proofLayer: CALayer?
         var proofFrames = 0
 
+        /// The audio half. Everything below mirrors the video state
+        /// above, because the renderer takes samples through the same
+        /// protocol the display layer does and there is no reason for
+        /// the two to be shaped differently.
+        ///
+        /// Separate from the video state rather than shared with it: fix
+        /// 19 gave every SourceBuffer its own parser, so a StreamParser
+        /// is either the video stream or the audio stream and never
+        /// both. These fields are simply the ones that get used when it
+        /// is the audio one.
+        var audioRenderer: AVSampleBufferAudioRenderer?
+        /// An audio renderer has no controlTimebase of its own - this is
+        /// what clocks it.
+        var audioSynchronizer: AVSampleBufferRenderSynchronizer?
+        var audioQueue: DispatchQueue?
+        var audioPending: [CMSampleBuffer] = []
+        var audioOverflowed = 0
+        var audioDrainArmed = false
+        var audioEnqueued = 0
+        var audioSeen = 0
+        var audioFlushes = 0
+        var audioLastReport = ""
+        /// Has the synchronizer been given a rate? Nothing is fed before
+        /// it has, for fix 26's reason: a renderer clocked at a time the
+        /// samples have already passed discards all of them and reports
+        /// no error.
+        var audioStarted = false
+        var lastAudioIntakePTS = Double.nan
+        var audioFlushObserver: NSObjectProtocol?
+
         init(parser: NSObject, recipient: AVContentKeyRecipient,
              delegate: ParserDelegate) {
             self.parser = parser
@@ -1232,9 +1265,26 @@ public final class FairPlayStreamParser: NSObject {
     fileprivate func enqueueForDisplay(streamKey: String,
                                        sampleBuffer: CMSampleBuffer,
                                        mediaType: String) {
-        // Video only. Audio has no display layer to go to, and the
-        // question is about pixels.
-        guard mediaType == "vide" else {
+        // Audio now has somewhere to go.
+        //
+        // This used to be "Video only. Audio has no display layer to go
+        // to, and the question is about pixels" followed by a return, and
+        // that is where every qaac sample HBO Max produced ended up. The
+        // comment was true for fix 21's question - does a display layer
+        // ACCEPT protected samples - and has not been true for several
+        // rounds since.
+        //
+        // "soun" is what AVFoundation calls an audio track and is
+        // AVMediaType.audio's raw value; both spellings are tested
+        // because this string arrives from an SPI delegate and costs
+        // nothing to check twice. Anything that is neither video nor
+        // audio - a subtitle or timed metadata track - still returns,
+        // and should.
+        if mediaType != "vide" {
+            if mediaType == "soun" || mediaType == AVMediaType.audio.rawValue {
+                enqueueForPlayback(streamKey: streamKey,
+                                   sampleBuffer: sampleBuffer)
+            }
             return
         }
         guard let slot = withState({ streamParsers[streamKey] }) else {
@@ -1421,6 +1471,14 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("stream \(streamKey) released the timebase at "
                      + "\(CMTimebaseGetTime(timebase).seconds) - layer "
                      + "attached, feeding starts now")
+            // The master clock just started. Any audio renderer in this
+            // session that started before it was anchored to its own
+            // first sample instead, which is the wrong reference by
+            // however long placement took - so it is re-anchored here,
+            // to the one clock that matters.
+            realignAudioClock(
+                sessionId: String(streamKey.split(separator: "|").first ?? ""),
+                to: CMTimebaseGetTime(timebase))
         }
         armDrainIfNeeded(streamKey: streamKey)
     }
@@ -1684,6 +1742,378 @@ public final class FairPlayStreamParser: NSObject {
                                                preferredTimescale: 90_000))
             }
         }
+    }
+
+    // ==================================================================
+    // AUDIO
+    //
+    // The picture arrives through a display layer with its own control
+    // timebase. Sound cannot: AVSampleBufferAudioRenderer has no
+    // timebase property, and is clocked by an
+    // AVSampleBufferRenderSynchronizer instead. Everything else - the
+    // bounded queue, requestMediaDataWhenReady, the content key
+    // recipient registration, the discontinuity handling - is the same
+    // shape as the video half, because the sample flow is the same.
+    // ==================================================================
+
+    /// Take one audio sample, and build the sink on the first one.
+    fileprivate func enqueueForPlayback(streamKey: String,
+                                        sampleBuffer: CMSampleBuffer) {
+        guard let slot = withState({ streamParsers[streamKey] }) else {
+            return
+        }
+
+        if withState({ slot.audioRenderer == nil }) {
+            let renderer = AVSampleBufferAudioRenderer()
+            let synchronizer = AVSampleBufferRenderSynchronizer()
+            synchronizer.addRenderer(renderer)
+            withState {
+                slot.audioRenderer = renderer
+                slot.audioSynchronizer = synchronizer
+                slot.audioQueue = DispatchQueue(
+                    label: "org.reynard.fps.audio")
+            }
+            // Before anything is enqueued: a renderer attached to a
+            // session that cannot play is silent and reports nothing.
+            prepareAudioSession()
+            joinKeySession(audio: renderer, streamKey: streamKey)
+            Self.observeAudioFlushes(renderer, label: streamKey)
+            startAudioClock(
+                streamKey: streamKey,
+                fallback: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            Self.log("stream \(streamKey) built an audio renderer - "
+                     + "status \(renderer.status.rawValue) "
+                     + "volume \(renderer.volume) "
+                     + "muted \(renderer.isMuted)")
+        }
+
+        // Fix 27's discontinuity test, on this stream's own intake.
+        //
+        // Same thresholds, and for the same reason: half a second is
+        // clear of any legitimate reordering and well under a real
+        // timeline change. Unlike video there is no sync-sample gate
+        // afterwards - every AAC frame decodes on its own, so a gap in
+        // the audio queue is a gap in the sound rather than a picture
+        // full of garbage, and waiting for a keyframe that does not
+        // exist would stop the sound permanently.
+        let intakePTS =
+            CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        let jump = withState { () -> Double? in
+            slot.audioSeen += 1
+            guard slot.lastAudioIntakePTS.isFinite, intakePTS.isFinite else {
+                slot.lastAudioIntakePTS = intakePTS
+                return nil
+            }
+            let delta = intakePTS - slot.lastAudioIntakePTS
+            guard delta < -0.5 || delta > 2.0 else {
+                slot.lastAudioIntakePTS = max(slot.lastAudioIntakePTS,
+                                              intakePTS)
+                return nil
+            }
+            slot.lastAudioIntakePTS = intakePTS
+            return delta
+        }
+        if let jump {
+            resynchroniseAudio(streamKey: streamKey, to: intakePTS,
+                               jump: jump)
+        }
+
+        let queued = withState { () -> Int in
+            guard slot.audioPending.count < 900 else {
+                slot.audioOverflowed += 1
+                return -1
+            }
+            slot.audioPending.append(sampleBuffer)
+            return slot.audioPending.count
+        }
+        if queued < 0 {
+            let dropped = withState { slot.audioOverflowed }
+            if dropped == 1 || dropped % 100 == 0 {
+                Self.log("stream \(streamKey) audio pending queue FULL - "
+                         + "\(dropped) samples dropped. The renderer is "
+                         + "not draining.")
+            }
+            return
+        }
+        armAudioDrainIfNeeded(streamKey: streamKey)
+    }
+
+    /// Give the synchronizer a rate, anchored to the video if there is
+    /// one.
+    ///
+    /// The video timebase is the master. If it is already running, the
+    /// audio clock starts at whatever media time it currently reads, so
+    /// the two agree from the first sample. If it is not - audio can
+    /// easily arrive first - the first audio PTS is used and
+    /// markLayerAttached re-anchors as soon as the picture starts.
+    private func startAudioClock(streamKey: String, fallback: CMTime) {
+        let sessionId = String(streamKey.split(separator: "|").first ?? "")
+        let master = videoClock(sessionId: sessionId)
+        let anchor = master ?? fallback
+        guard let synchronizer = withState({
+            streamParsers[streamKey]?.audioSynchronizer
+        }) else { return }
+        synchronizer.setRate(1.0, time: anchor)
+        withState { streamParsers[streamKey]?.audioStarted = true }
+        let origin = master != nil ? "from the video timebase"
+                                   : "from the first audio sample"
+        Self.log("stream \(streamKey) audio clock started at "
+                 + "\(anchor.seconds) (\(origin))")
+        armAudioDrainIfNeeded(streamKey: streamKey)
+    }
+
+    /// Where the picture's clock is now, if it is running.
+    ///
+    /// nil rather than zero when it is not: a stopped timebase reads a
+    /// real time and anchoring to it would be worse than not anchoring
+    /// at all.
+    private func videoClock(sessionId: String) -> CMTime? {
+        let layer = withState { () -> AVSampleBufferDisplayLayer? in
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") {
+                if slot.layerAttached, let found = slot.displayLayer {
+                    return found
+                }
+            }
+            return nil
+        }
+        guard let layer, let timebase = layer.controlTimebase,
+              CMTimebaseGetRate(timebase) != 0 else {
+            return nil
+        }
+        return CMTimebaseGetTime(timebase)
+    }
+
+    /// Move every started audio clock in this session onto the picture's.
+    fileprivate func realignAudioClock(sessionId: String, to time: CMTime) {
+        let started = withState {
+            () -> [(String, AVSampleBufferRenderSynchronizer)] in
+            var out: [(String, AVSampleBufferRenderSynchronizer)] = []
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") {
+                if slot.audioStarted, let sync = slot.audioSynchronizer {
+                    out.append((key, sync))
+                }
+            }
+            return out
+        }
+        for (key, synchronizer) in started {
+            synchronizer.setRate(1.0, time: time)
+            Self.log("stream \(key) audio clock re-anchored to "
+                     + "\(time.seconds) - following the video timebase")
+        }
+    }
+
+    /// A new audio timeline started: drop what was held and re-anchor.
+    ///
+    /// The video timebase is NOT touched here, and that is deliberate.
+    /// Fix 27's discontinuity was a video-only ABR re-append; dragging
+    /// the picture back because the sound moved, or the sound back
+    /// because the picture moved, produces a repeat the stream never
+    /// asked for. Each side follows its own intake, and they meet again
+    /// at the next markLayerAttached.
+    private func resynchroniseAudio(streamKey: String, to pts: Double,
+                                    jump: Double) {
+        let work = withState { () -> (renderer: AVSampleBufferAudioRenderer,
+                                      sync: AVSampleBufferRenderSynchronizer,
+                                      queue: DispatchQueue, abandoned: Int,
+                                      count: Int, at: Int)? in
+            guard let slot = streamParsers[streamKey],
+                  let renderer = slot.audioRenderer,
+                  let sync = slot.audioSynchronizer,
+                  let queue = slot.audioQueue else { return nil }
+            let abandoned = slot.audioPending.count
+            slot.audioPending.removeAll()
+            slot.audioFlushes += 1
+            return (renderer, sync, queue, abandoned, slot.audioFlushes,
+                    slot.audioSeen)
+        }
+        guard let work else { return }
+        Self.log("stream \(streamKey) AUDIO DISCONTINUITY \(jump)s at "
+                 + "sample \(work.at) - flushing (\(work.abandoned) held "
+                 + "samples abandoned), re-anchoring to \(pts). "
+                 + "Flush \(work.count).")
+        // On the drain queue, for the same collision flush() and
+        // enqueue() can have on the video side.
+        work.queue.async {
+            work.renderer.flush()
+            work.sync.setRate(1.0, time: CMTime(seconds: pts,
+                                                preferredTimescale: 90_000))
+        }
+    }
+
+    /// Ask the renderer to come and get them, if it is not already
+    /// asking.
+    private func armAudioDrainIfNeeded(streamKey: String) {
+        let work = withState { () -> (renderer: AVSampleBufferAudioRenderer,
+                                      queue: DispatchQueue)? in
+            guard let slot = streamParsers[streamKey],
+                  slot.audioStarted, !slot.audioDrainArmed,
+                  !slot.audioPending.isEmpty,
+                  let renderer = slot.audioRenderer,
+                  let queue = slot.audioQueue else { return nil }
+            slot.audioDrainArmed = true
+            return (renderer, queue)
+        }
+        guard let work else { return }
+        work.renderer.requestMediaDataWhenReady(on: work.queue) {
+            [weak renderer = work.renderer] in
+            guard let renderer else { return }
+            FairPlayStreamParser.shared.drainAudioPending(
+                streamKey: streamKey, renderer: renderer)
+        }
+    }
+
+    /// Feed the renderer while it is hungry, and stop asking when it is
+    /// not.
+    fileprivate func drainAudioPending(
+        streamKey: String, renderer: AVSampleBufferAudioRenderer) {
+        while renderer.isReadyForMoreMediaData {
+            let next = withState { () -> CMSampleBuffer? in
+                guard let slot = streamParsers[streamKey],
+                      !slot.audioPending.isEmpty else { return nil }
+                return slot.audioPending.removeFirst()
+            }
+            guard let sample = next else {
+                renderer.stopRequestingMediaData()
+                withState { streamParsers[streamKey]?.audioDrainArmed = false }
+                return
+            }
+            // Guarded exactly as the video enqueue is: these renderers
+            // raise on a sample they dislike rather than returning an
+            // error, and this route has already taken the process down
+            // once through an AVFoundation SPI.
+            if let failure = GeckoRuntimeBridge.catchException(from: {
+                renderer.enqueue(sample)
+            }) {
+                Self.log("stream \(streamKey) audio renderer REFUSED the "
+                         + "sample: \(failure)")
+                return
+            }
+            let count = withState { () -> Int in
+                guard let slot = streamParsers[streamKey] else { return 0 }
+                slot.audioEnqueued += 1
+                return slot.audioEnqueued
+            }
+            let report = "status=\(renderer.status.rawValue) "
+                + "ready=\(renderer.isReadyForMoreMediaData) "
+                + "error=\(renderer.error.map { String(describing: $0) } ?? "nil")"
+            let changed = withState { () -> Bool in
+                guard let slot = streamParsers[streamKey],
+                      slot.audioLastReport != report else { return false }
+                slot.audioLastReport = report
+                return true
+            }
+            if changed || count == 1 {
+                Self.log("stream \(streamKey) audio enqueued \(count) - "
+                         + report)
+            }
+            if count % 100 == 0,
+               let sync = withState({
+                   streamParsers[streamKey]?.audioSynchronizer }) {
+                let now = CMTimebaseGetTime(sync.timebase).seconds
+                let pts =
+                    CMSampleBufferGetPresentationTimeStamp(sample).seconds
+                Self.log("stream \(streamKey) audio at \(count) - clock "
+                         + "\(now) vs sample pts \(pts), drift "
+                         + "\(now - pts)")
+            }
+        }
+    }
+
+    /// Register the audio renderer with the stream's content key session.
+    ///
+    /// The same shape as the display layer's registration, and for the
+    /// same reason: HBO's audio is qaac, protected AAC whose decrypt is
+    /// deferred to the decoder. A renderer that is not a recipient is
+    /// handed ciphertext with no key.
+    ///
+    /// Conformance tested at runtime rather than declared, matching
+    /// joinKeySession(_:streamKey:) above. If a future OS stops vending
+    /// it, this says so in the log instead of failing a build.
+    private func joinKeySession(audio renderer: AVSampleBufferAudioRenderer,
+                                streamKey: String) {
+        let sessionId = String(streamKey.split(separator: "|").first ?? "")
+        guard !sessionId.isEmpty, let keySession = liveSession(sessionId) else {
+            Self.log("stream \(streamKey) has no live key session for the "
+                     + "audio renderer - protected audio will not decode")
+            return
+        }
+        guard let recipient = (renderer as AnyObject) as? AVContentKeyRecipient
+        else {
+            Self.log("stream \(streamKey) AVSampleBufferAudioRenderer is "
+                     + "NOT an AVContentKeyRecipient here - protected audio "
+                     + "cannot decode in it and the sink has to change")
+            return
+        }
+        keySession.addContentKeyRecipient(recipient)
+        Self.log("stream \(streamKey) audio renderer added as a content key "
+                 + "recipient - recipients now "
+                 + "\(keySession.contentKeyRecipients.count)")
+    }
+
+    /// The renderer flushed itself.
+    ///
+    /// AVFoundation does this on a route change or a format change, and
+    /// it is silent otherwise - the sound simply stops and the counters
+    /// keep climbing. Worth one line.
+    private static func observeAudioFlushes(
+        _ renderer: AVSampleBufferAudioRenderer, label: String) {
+        let name = NSNotification.Name(
+            rawValue:
+                "AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification")
+        let observer = NotificationCenter.default.addObserver(
+            forName: name, object: renderer, queue: nil) { note in
+            log("stream \(label) audio renderer FLUSHED AUTOMATICALLY: "
+                + String(describing: note.userInfo))
+        }
+        shared.withState {
+            shared.streamParsers[label]?.audioFlushObserver = observer
+        }
+    }
+
+    /// Make sure this process can make a sound at all.
+    ///
+    /// AVPlayer configures an audio session implicitly, which is why the
+    /// HLS route has never needed this. An AVSampleBufferAudioRenderer
+    /// does not: on a default .soloAmbient session it runs, reports
+    /// status 0 and no error, and is inaudible with the ring switch
+    /// silent. That failure looks identical to success in every counter
+    /// this file prints, so it is closed here rather than diagnosed
+    /// later.
+    ///
+    /// A session that is ALREADY playback-capable is left completely
+    /// alone. If the app has chosen .playback or .playAndRecord it did so
+    /// for a reason, and stamping on a working configuration to fix a
+    /// hypothetical one is how a media route breaks two things at once.
+    private func prepareAudioSession() {
+#if canImport(UIKit)
+        let first = withState { () -> Bool in
+            guard !audioSessionPrepared else { return false }
+            audioSessionPrepared = true
+            return true
+        }
+        guard first else { return }
+        let session = AVAudioSession.sharedInstance()
+        Self.log("audio session on entry - category "
+                 + "\(session.category.rawValue) mode "
+                 + "\(session.mode.rawValue)")
+        guard session.category != .playback,
+              session.category != .playAndRecord else {
+            Self.log("audio session is already playback-capable - left alone")
+            return
+        }
+        do {
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+            Self.log("audio session set to playback/moviePlayback and "
+                     + "activated")
+        } catch {
+            Self.log("audio session could NOT be configured: \(error) - the "
+                     + "renderer will run and make no sound, which every "
+                     + "other line here will report as success")
+        }
+#endif
     }
 
     /// Can the decoder start here?
