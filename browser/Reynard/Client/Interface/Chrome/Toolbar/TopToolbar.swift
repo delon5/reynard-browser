@@ -214,8 +214,24 @@ final class TopToolbar: UIView {
     /// invisible and harmless.
     private func updateOledCutout() {
         guard let addressBar = attachedAddressBar,
-              addressBar.superview === contentView,
-              oledOverlayView.bounds.width > 0 else {
+              addressBar.superview === contentView else {
+            oledOverlayView.layer.mask = nil
+            return
+        }
+        // The overlay lives two levels down (inside the effect view's
+        // contentView) and the capsule deeper still (inside the
+        // address bar). Their frames are applied by layout passes
+        // that run AFTER this view's layoutSubviews, so measuring
+        // them here would read LAST pass's geometry - a mask frozen
+        // against a stale, shorter overlay misplaces the cutout (the
+        // capsule stays on opaque black) and stops short of the
+        // toolbar's bottom (a strip of bare glass under the button
+        // row) whenever the toolbar just grew, e.g. the address bar
+        // re-attaching after a search dismiss. Force both subtrees
+        // current before measuring; both are no-ops when clean.
+        backgroundView.layoutIfNeeded()
+        contentView.layoutIfNeeded()
+        guard oledOverlayView.bounds.width > 0 else {
             oledOverlayView.layer.mask = nil
             return
         }
