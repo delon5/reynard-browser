@@ -142,7 +142,10 @@ final class AddressBar: UIView {
         return view
     }()
     
-    private let addressBarGlassBackground = ToolbarGlassBackgroundView()
+    // Clear-style glass, so the capsule reads as glass against the
+    // toolbar's own regular-glass backdrop instead of stacking two
+    // frosted layers into a solid-looking fill.
+    private let addressBarGlassBackground = ToolbarGlassBackgroundView(prefersClearGlass: true)
     
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)

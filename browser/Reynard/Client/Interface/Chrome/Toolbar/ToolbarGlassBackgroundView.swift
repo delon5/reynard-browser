@@ -18,6 +18,12 @@ import UIKit
 /// buttons/content should be added as normal sibling subviews on top of it.
 final class ToolbarGlassBackgroundView: UIView {
     private var effectView: UIVisualEffectView?
+    /// Clear-style glass is maximally transparent - the backdrop pops
+    /// through - where regular glass is adaptive and frosted. Used by
+    /// the address bar capsule, whose backdrop is the toolbar's own
+    /// regular glass: stacking two frosted layers reads as a solid
+    /// fill, one clear layer over one frosted layer reads as glass.
+    private var prefersClearGlass = false
     private var reduceTransparencyObserver: NSObjectProtocol?
     
     override init(frame: CGRect) {
@@ -33,6 +39,12 @@ final class ToolbarGlassBackgroundView: UIView {
         ) { [weak self] _ in
             self?.configureEffect()
         }
+    }
+    
+    convenience init(prefersClearGlass: Bool) {
+        self.init(frame: .zero)
+        self.prefersClearGlass = prefersClearGlass
+        configureEffect()
     }
     
     required init?(coder: NSCoder) {
@@ -75,12 +87,16 @@ final class ToolbarGlassBackgroundView: UIView {
         
         let newEffectView: UIVisualEffectView
         if #available(iOS 26.0, *) {
-            let glass = UIGlassEffect()
+            let glass = prefersClearGlass ? UIGlassEffect(style: .clear) : UIGlassEffect()
             newEffectView = UIVisualEffectView(effect: glass)
-            NSLog("[ToolbarGlass] iOS 26 available — using real UIGlassEffect")
+            NSLog("[ToolbarGlass] iOS 26 available — using real UIGlassEffect (%@)",
+                  prefersClearGlass ? "clear" : "regular")
         } else {
-            newEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
-            NSLog("[ToolbarGlass] iOS 26 NOT available — using UIBlurEffect(.systemMaterial) fallback")
+            newEffectView = UIVisualEffectView(
+                effect: UIBlurEffect(style: prefersClearGlass ? .systemUltraThinMaterial : .systemMaterial)
+            )
+            NSLog("[ToolbarGlass] iOS 26 NOT available — using UIBlurEffect fallback (%@)",
+                  prefersClearGlass ? "ultraThin" : "systemMaterial")
         }
         
         newEffectView.translatesAutoresizingMaskIntoConstraints = false
