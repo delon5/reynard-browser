@@ -1207,6 +1207,27 @@ public final class FairPlayStreamParser: NSObject {
         /// The same, for the audio renderer's own clock.
         var maxAudioPTS = Double.nan
         var audioClockCorrections = 0
+        /// Host time of the last sample taken in, on either half.
+        ///
+        /// The only liveness signal this file has. Streams from a
+        /// finished playback are never removed - destroySession tears
+        /// them down, but a page that reloads inside the same content
+        /// process does not destroy the session - so the table keeps
+        /// corpses, and a corpse's timebase carries on running. One of
+        /// them anchored a new audio renderer twenty-five seconds into a
+        /// future its media never reached.
+        ///
+        /// Zero until the first sample, which reads as "not live" and is
+        /// correct: a stream that has never been fed cannot be the one
+        /// currently playing.
+        var lastSampleAt: Double = 0
+        /// Host time of the last clock correction, so a correction that
+        /// achieves nothing reports a handful of times instead of once
+        /// per sample.
+        var lastCorrectionAt: Double = 0
+        var lastAudioCorrectionAt: Double = 0
+        /// Said once, not thirty-two times.
+        var reportedUnmovedClock = false
         /// The samples taken in since the last sync sample.
         ///
         /// Kept so that a new sink can be started without waiting for
@@ -1561,8 +1582,10 @@ public final class FairPlayStreamParser: NSObject {
         // equal anyway.
         let stamped = CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
         let intakeDTS = stamped.isValid ? stamped.seconds : intakePTS
+        let arrivedAt = Self.hostNow()
         let jump = withState { () -> Double? in
             slot.videoSeen += 1
+            slot.lastSampleAt = arrivedAt
             slot.lastIntakePTS = max(slot.lastIntakePTS.isFinite
                                      ? slot.lastIntakePTS : intakePTS,
                                      intakePTS)
@@ -1832,9 +1855,17 @@ public final class FairPlayStreamParser: NSObject {
                         slot.maxEnqueuedPTS = slot.maxEnqueuedPTS.isFinite
                             ? max(slot.maxEnqueuedPTS, pts) : pts
                     }
+                    let checkedAt = Self.hostNow()
                     guard now.isFinite, pts.isFinite,
                           slot.maxEnqueuedPTS.isFinite,
-                          now - slot.maxEnqueuedPTS > 1.0 else { return nil }
+                          now - slot.maxEnqueuedPTS > 1.0,
+                          // At most one a second. A correction that does
+                          // not take would otherwise fire on every
+                          // sample, and thirty-two identical lines say
+                          // no more than three do.
+                          checkedAt - slot.lastCorrectionAt > 1.0
+                    else { return nil }
+                    slot.lastCorrectionAt = checkedAt
                     let late = now - slot.maxEnqueuedPTS
                     slot.clockCorrections += 1
                     slot.maxEnqueuedPTS = pts
@@ -2083,8 +2114,10 @@ public final class FairPlayStreamParser: NSObject {
         // exist would stop the sound permanently.
         let intakePTS =
             CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        let audioArrivedAt = Self.hostNow()
         let jump = withState { () -> Double? in
             slot.audioSeen += 1
+            slot.lastSampleAt = audioArrivedAt
             guard slot.lastAudioIntakePTS.isFinite, intakePTS.isFinite else {
                 slot.lastAudioIntakePTS = intakePTS
                 return nil
@@ -2133,7 +2166,26 @@ public final class FairPlayStreamParser: NSObject {
     /// markLayerAttached re-anchors as soon as the picture starts.
     private func startAudioClock(streamKey: String, fallback: CMTime) {
         let sessionId = String(streamKey.split(separator: "|").first ?? "")
-        let master = videoClock(sessionId: sessionId)
+        var master = videoClock(sessionId: sessionId)
+        // A video anchor a long way from the first audio sample is the
+        // wrong stream, not drift. The two clocks describe one timeline
+        // and start within a fraction of a second of each other; the
+        // capture that prompted this had a gap of twenty-five, taken
+        // from a previous playback's timebase.
+        //
+        // Checked even though the liveness test above should already
+        // have excluded that stream. This guard does not depend on the
+        // heuristic being right, and the failure it prevents is total -
+        // an audio renderer anchored into a future its media never
+        // reaches produces no sound at all.
+        if let candidate = master, fallback.seconds.isFinite,
+           abs(candidate.seconds - fallback.seconds) > 5.0 {
+            Self.log("stream \(streamKey) REFUSED a video anchor at "
+                     + "\(candidate.seconds) - the first audio sample is "
+                     + "at \(fallback.seconds), and a gap that size is the "
+                     + "wrong stream rather than drift")
+            master = nil
+        }
         let anchor = master ?? fallback
         guard let synchronizer = withState({
             streamParsers[streamKey]?.audioSynchronizer
@@ -2152,11 +2204,34 @@ public final class FairPlayStreamParser: NSObject {
     /// nil rather than zero when it is not: a stopped timebase reads a
     /// real time and anchoring to it would be worse than not anchoring
     /// at all.
+    /// The host clock, for liveness only.
+    ///
+    /// Not the media timeline - this answers "how long since anything
+    /// happened", which is a question about wall time.
+    fileprivate static func hostNow() -> Double {
+        return CMClockGetTime(CMClockGetHostTimeClock()).seconds
+    }
+
+    /// How long a stream may be silent and still count as playing.
+    ///
+    /// Generous on purpose. A stream is fed in bursts as segments are
+    /// appended, so gaps of a second are ordinary; a stream from a
+    /// previous playback has been silent for minutes. Nothing meaningful
+    /// lives in between.
+    fileprivate static let livenessWindow: Double = 2.0
+
     private func videoClock(sessionId: String) -> CMTime? {
+        let cutoff = Self.hostNow() - Self.livenessWindow
         let layer = withState { () -> AVSampleBufferDisplayLayer? in
+            // LIVE streams only. The first attached layer in the table
+            // used to win, and in a session that had already played once
+            // that was a corpse whose timebase had been running for
+            // twenty-five seconds - which is what a new audio renderer
+            // was then anchored to.
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") {
-                if slot.layerAttached, let found = slot.displayLayer {
+                if slot.layerAttached, slot.lastSampleAt > cutoff,
+                   let found = slot.displayLayer {
                     return found
                 }
             }
@@ -2171,12 +2246,18 @@ public final class FairPlayStreamParser: NSObject {
 
     /// Move every started audio clock in this session onto the picture's.
     fileprivate func realignAudioClock(sessionId: String, to time: CMTime) {
+        let cutoff = Self.hostNow() - Self.livenessWindow
         let started = withState {
             () -> [(String, AVSampleBufferRenderSynchronizer)] in
             var out: [(String, AVSampleBufferRenderSynchronizer)] = []
+            // Live renderers only. The previous playback's renderer was
+            // still in this table and was being re-anchored by every
+            // realign, which moved a clock nothing was listening to and
+            // said so in the log as if it mattered.
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") {
-                if slot.audioStarted, let sync = slot.audioSynchronizer {
+                if slot.audioStarted, slot.lastSampleAt > cutoff,
+                   let sync = slot.audioSynchronizer {
                     out.append((key, sync))
                 }
             }
@@ -2312,9 +2393,13 @@ public final class FairPlayStreamParser: NSObject {
                         slot.maxAudioPTS = slot.maxAudioPTS.isFinite
                             ? max(slot.maxAudioPTS, pts) : pts
                     }
+                    let checkedAt = Self.hostNow()
                     guard now.isFinite, pts.isFinite,
                           slot.maxAudioPTS.isFinite,
-                          now - slot.maxAudioPTS > 1.0 else { return nil }
+                          now - slot.maxAudioPTS > 1.0,
+                          checkedAt - slot.lastAudioCorrectionAt > 1.0
+                    else { return nil }
+                    slot.lastAudioCorrectionAt = checkedAt
                     let late = now - slot.maxAudioPTS
                     slot.audioClockCorrections += 1
                     slot.maxAudioPTS = pts
@@ -2326,6 +2411,30 @@ public final class FairPlayStreamParser: NSObject {
                     Self.log("stream \(streamKey) AUDIO CLOCK RAN AHEAD by "
                              + "\(ranAhead.late)s - put back on the media "
                              + "at \(pts). Correction \(ranAhead.nth).")
+                    // READ IT BACK. The last capture corrected
+                    // thirty-two times and the clock reported 35.3555 on
+                    // every one of them - so either setRate did nothing
+                    // or something moved it back, and arithmetic on a log
+                    // is a poor way to find out which. Said once.
+                    let after = CMTimebaseGetTime(sync.timebase).seconds
+                    if abs(after - pts) > 1.0 {
+                        let first = withState { () -> Bool in
+                            guard let slot = streamParsers[streamKey],
+                                  !slot.reportedUnmovedClock else { return false }
+                            slot.reportedUnmovedClock = true
+                            return true
+                        }
+                        if first {
+                            Self.log("stream \(streamKey) the "
+                                     + "synchronizer's clock did NOT move - "
+                                     + "asked for \(pts), it reads "
+                                     + "\(after). "
+                                     + "AVSampleBufferRenderSynchronizer."
+                                     + "setRate did not do what it was "
+                                     + "asked, and the audio clock needs a "
+                                     + "different mechanism.")
+                        }
+                    }
                 }
                 if count % 100 == 0 {
                     Self.log("stream \(streamKey) audio at \(count) - clock "
@@ -2467,16 +2576,34 @@ public final class FairPlayStreamParser: NSObject {
         // one - a page plays one video at a time - and where there are
         // more, the busiest is the best guess available, since the
         // compositor cannot say which element its layer belongs to.
+        // Busiest LIVE stream, falling back to busiest overall.
+        //
+        // "Busiest" on its own favours a corpse: a stream that played for
+        // two minutes before the page reloaded has a far higher sample
+        // count than the one that just started, and it is still in the
+        // table because a reload inside one content process does not
+        // destroy the session.
+        //
+        // The fallback is kept deliberately. A layer offered during a
+        // momentary gap in the feed would otherwise land nowhere, and
+        // landing on the busiest stream is what this did before.
+        let cutoff = Self.hostNow() - Self.livenessWindow
         let chosen = withState { () -> String? in
             var bestKey: String?
             var bestSeen = -1
+            var anyKey: String?
+            var anySeen = -1
             for (key, slot) in streamParsers where slot.displayLayer != nil {
-                if slot.videoSeen > bestSeen {
+                if slot.videoSeen > anySeen {
+                    anySeen = slot.videoSeen
+                    anyKey = key
+                }
+                if slot.lastSampleAt > cutoff, slot.videoSeen > bestSeen {
                     bestSeen = slot.videoSeen
                     bestKey = key
                 }
             }
-            return bestKey
+            return bestKey ?? anyKey
         }
         guard let streamKey = chosen else {
             Self.log("the compositor offered a layer before any stream had "
