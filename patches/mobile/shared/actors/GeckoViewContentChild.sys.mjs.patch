@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,1975 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2165 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -1956,6 +1956,196 @@ index 9ca6e15..18d37f0 100644
 +    debug("installed the element census and the MSE/EME trace");
 +  } catch (e) {}
 +
++  // ---- who asked the trailer to play -----------------------------------
++  //
++  // The host cannot have started it: every entry.player.play() in
++  // AVPlayerHost is behind wantsPlayback, and only HOST play(id) sets
++  // that. And Gecko's own line lands before the player exists -
++  //
++  //   avPlayer: Load done - CreateAndInitStateMachine rv=0x00000000
++  //   avPlayer: decoder Play() player=1
++  //   avPlayer: created 1 for ...playlist.m3u8...
++  //
++  // which is FinishDecoderSetup's "if (!mPaused) mDecoder->Play()". So
++  // the element was already unpaused when its decoder was built, and
++  // the two things that do that need opposite fixes: an explicit
++  // play() from page script, which no autoplay policy can stop, or the
++  // autoplay attribute licensed by the sticky activation the user's own
++  // tap on Play granted.
++  //
++  // Fix 58's census cannot separate them. It reports n=1 for the whole
++  // Apple TV session - the MSE element only - so the trailer element is
++  // detached or inside a shadow root, and querySelectorAll reaches
++  // neither. Everything here hooks the prototype instead, which catches
++  // an element wherever it lives. That also settles, from the page
++  // side, whether that element is muted: nothing has ever reported it.
++  try {
++    var reynardWhoIsPlaying = true;
++    var reynardElementSeq = 0;
++    var reynardStacksLeft = 60;
++    var reynardSeenWrites = {};
++
++    var reynardElementTag = function (element) {
++      if (!element.reynardElementTag) {
++        element.reynardElementTag = "el#" + ++reynardElementSeq;
++      }
++      return element.reynardElementTag;
++    };
++
++    // Identity at the instant something happens, not a second later on
++    // a poll: autoplayAttr, muted and defaultMuted are the three that
++    // decide which fix applies, and all three can be changed after the
++    // fact.
++    var reynardWho = function (element) {
++      try {
++        var parent = element.parentNode;
++        var where = "none";
++        if (parent) {
++          where = parent.host
++            ? "shadow/" + parent.host.localName
++            : parent.localName || parent.nodeName;
++        }
++        return (
++          reynardElementTag(element) +
++          " <" + element.localName + ">" +
++          " src=" +
++            String(element.currentSrc || element.src || "none").slice(0, 56) +
++          " autoplayAttr=" + (element.hasAttribute("autoplay") ? 1 : 0) +
++          " muted=" + (element.muted ? 1 : 0) +
++          " defaultMuted=" + (element.defaultMuted ? 1 : 0) +
++          " vol=" + element.volume.toFixed(2) +
++          " inDoc=" + (element.isConnected ? 1 : 0) +
++          " parent=" + where +
++          " rs=" + element.readyState +
++          " dur=" + reynardNum(element.duration)
++        );
++      } catch (e) {
++        return "el?";
++      }
++    };
++
++    // The caller, minus this shim's own frame. Capped, because a page
++    // that plays per gesture would otherwise write a stack a second.
++    var reynardCaller = function () {
++      if (reynardStacksLeft <= 0) {
++        return "(stack cap reached)";
++      }
++      reynardStacksLeft--;
++      try {
++        var frames = String(new Error().stack || "").split("\n");
++        var out = [];
++        for (var i = 1; i < frames.length && out.length < 5; i++) {
++          if (frames[i]) {
++            out.push(frames[i].slice(0, 110));
++          }
++        }
++        return out.join(" | ");
++      } catch (e) {
++        return "?";
++      }
++    };
++
++    // play fires whether a script called play() or autoplay unpaused the
++    // element, so the marker below is the whole point: a play event with
++    // no play() in front of it is autoplay and nothing else.
++    var reynardArm = function (element) {
++      if (element.reynardArmed) {
++        return element;
++      }
++      element.reynardArmed = true;
++      ["play", "playing", "pause", "ratechange"].forEach(function (name) {
++        element.addEventListener(name, function () {
++          try {
++            debug(
++              "EVT " + name + " " + reynardWho(element) +
++              (name === "play" && !element.reynardPlayCalled
++                ? "  <- NO play() call: autoplay"
++                : "")
++            );
++          } catch (e) {}
++        });
++      });
++      return element;
++    };
++
++    if (window.HTMLMediaElement) {
++      var reynardNativePlay = window.HTMLMediaElement.prototype.play;
++      window.HTMLMediaElement.prototype.play = function () {
++        try {
++          reynardArm(this);
++          this.reynardPlayCalled = true;
++          debug("PLAY() " + reynardWho(this) + " by " + reynardCaller());
++        } catch (e) {}
++        return reynardNativePlay.apply(this, arguments);
++      };
++
++      var reynardNativeLoad = window.HTMLMediaElement.prototype.load;
++      window.HTMLMediaElement.prototype.load = function () {
++        try {
++          reynardArm(this);
++          debug("LOAD() " + reynardWho(this) + " by " + reynardCaller());
++        } catch (e) {}
++        return reynardNativeLoad.apply(this, arguments);
++      };
++
++      // src, muted and volume are reflected properties, so the setter
++      // lives on the prototype and can be wrapped the same way. muted
++      // and volume answer the question the census could not.
++      ["src", "muted", "volume"].forEach(function (name) {
++        var descriptor = Object.getOwnPropertyDescriptor(
++          window.HTMLMediaElement.prototype,
++          name
++        );
++        if (!descriptor || !descriptor.set) {
++          return;
++        }
++        Object.defineProperty(window.HTMLMediaElement.prototype, name, {
++          configurable: true,
++          enumerable: descriptor.enumerable,
++          get: descriptor.get,
++          set: function (value) {
++            try {
++              reynardArm(this);
++              var shown = String(value).slice(0, 56);
++              var once = reynardElementTag(this) + " " + name + "=" + shown;
++              if (!reynardSeenWrites[once]) {
++                reynardSeenWrites[once] = true;
++                debug(
++                  "SET " + name + "=" + shown + " on " +
++                  reynardElementTag(this) + " by " + reynardCaller()
++                );
++              }
++            } catch (e) {}
++            return descriptor.set.call(this, value);
++          },
++        });
++      });
++    }
++
++    // First touch for an element built in script, which is how a
++    // capability probe makes one. An element built by innerHTML is
++    // caught at its first src write or play() instead.
++    if (window.Document && window.Document.prototype.createElement) {
++      var reynardNativeCreate = window.Document.prototype.createElement;
++      window.Document.prototype.createElement = function (name) {
++        var element = reynardNativeCreate.apply(this, arguments);
++        try {
++          var lower = String(name).toLowerCase();
++          if (lower === "video" || lower === "audio") {
++            debug(
++              "CREATE <" + lower + "> " + reynardElementTag(element) +
++              " by " + reynardCaller()
++            );
++            reynardArm(element);
++          }
++        } catch (e) {}
++        return element;
++      };
++    }
++
++    debug("installed the play-caller trace");
++  } catch (e) {}
++
 +  window.WebKitMediaKeys = WebKitMediaKeys;
 +  window.WebKitMediaKeySession = WebKitMediaKeySession;
 +  debug("installed over standard EME");
@@ -1978,7 +2168,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2036,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2226,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -2474,7 +2664,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +2642,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +2832,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -2496,7 +2686,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +2672,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +2862,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
