@@ -1,7 +1,50 @@
 diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 --- a/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
 +++ b/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
-@@ -546,15 +546,25 @@
+@@ -129,17 +129,42 @@
+ void MediaDecoder::Pause() {
+   MOZ_ASSERT(NS_IsMainThread());
+   MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
+   LOG("Pause");
++  // Reynard: tell the FairPlay MSE route that the element stopped.
++  //
++  // That route paints and plays through AVFoundation objects of its
++  // own - an AVSampleBufferDisplayLayer and an
++  // AVSampleBufferAudioRenderer, each on a clock at rate 1.0 - and
++  // nothing has ever told them about the element. So a paused element
++  // kept playing, and "Block Audio and Video" was defeated entirely:
++  // Gecko withholds the play, the page buffers anyway, and the side
++  // channel plays what Gecko is holding back.
++  //
++  // Declared at block scope, which is how SourceBuffer.cpp already
++  // reaches ReynardMSEForwardInitSegment, so a core file gains no
++  // include for one call. A block-scope declaration names the
++  // ENCLOSING namespace, and this one is mozilla rather than
++  // mozilla::dom.
++  extern void ReynardMSEPlayState(bool aPlaying);
++  ReynardMSEPlayState(false);
+   if (mPlayState == PLAY_STATE_LOADING || IsEnded()) {
+     mNextState = PLAY_STATE_PAUSED;
+     return;
+   }
+   ChangeState(PLAY_STATE_PAUSED);
+ }
+ 
+ void MediaDecoder::SetVolume(double aVolume) {
+   MOZ_ASSERT(NS_IsMainThread());
+   mVolume = aVolume;
++  // And the volume, for the same route and the other half of the
++  // setting. "Block Audio Only" is Gecko's Allowed_muted: the play is
++  // permitted precisely because the element is believed inaudible, and
++  // an audio renderer that never heard about the volume made that
++  // belief false. This is the MSE twin of AVPlayerDecoder::SetVolume,
++  // which exists for the identical reason on the native HLS route.
++  extern void ReynardMSEVolume(double aVolume);
++  ReynardMSEVolume(aVolume);
+ }
+ 
+ RefPtr<GenericPromise> MediaDecoder::SetSink(AudioDeviceInfo* aSinkDevice) {
+@@ -546,15 +571,25 @@
    SetStateMachine(CreateStateMachine(aDisableExternalEngine));
  
    NS_ENSURE_TRUE(GetStateMachine(), NS_ERROR_FAILURE);
@@ -27,7 +70,29 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
  
    return NS_OK;
  }
-@@ -916,18 +926,26 @@
+@@ -623,10 +658,21 @@
+ void MediaDecoder::Play() {
+   MOZ_ASSERT(NS_IsMainThread());
+ 
+   NS_ASSERTION(mDecoderStateMachine != nullptr, "Should have state machine.");
+   LOG("Play");
++  // Reynard: see MediaDecoder::Pause.
++  //
++  // At the top rather than beside ChangeState, so the ordinary autoplay
++  // path is covered: a play() taken during PLAY_STATE_LOADING sets
++  // mNextState and returns here, and the element does then play. The
++  // one case this reports wrongly is playbackRate 0, where Play()
++  // returns without playing and no Pause() follows - named rather than
++  // chased, because a page that calls play() at rate zero is not a
++  // thing that has ever been seen on this route.
++  extern void ReynardMSEPlayState(bool aPlaying);
++  ReynardMSEPlayState(true);
+   if (mPlaybackRate == 0) {
+     return;
+   }
+ 
+   if (IsEnded()) {
+@@ -916,18 +962,26 @@
  void MediaDecoder::PlaybackEnded() {
    MOZ_ASSERT(NS_IsMainThread());
    MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());

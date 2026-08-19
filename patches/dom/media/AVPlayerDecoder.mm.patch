@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2732 @@
+@@ -0,0 +0,2767 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1091,6 +1091,41 @@ index 000000000000..b56efaa8479c
 +                             segment:[NSData
 +                                         dataWithBytes:aInitData.Elements()
 +                                                length:aInitData.Length()]];
++      return;
++    }
++    // The element's play state, and its volume. Neither is key
++    // material; they ride this message because it is already routed
++    // per child and adding an IPDL message for two scalars would be a
++    // protocol change and a wide rebuild for nothing.
++    if (aInitDataType.EqualsLiteral("playstate")) {
++      SEL setPlaying = @selector(parserSetPlaying:playing:);
++      if (!host || ![host respondsToSelector:setPlaying]) {
++        printf_stderr(
++            "avPlayer: MSE play state route unavailable for child %llu\n",
++            (unsigned long long)(aKey >> 32));
++        return;
++      }
++      const bool playing = aContentId.EqualsLiteral("playing");
++      printf_stderr("avPlayer: MSE play state child=%llu -> %s\n",
++                    (unsigned long long)(aKey >> 32),
++                    playing ? "playing" : "paused");
++      [host parserSetPlaying:static_cast<NSUInteger>(aKey >> 32)
++                     playing:playing];
++      return;
++    }
++    if (aInitDataType.EqualsLiteral("volume")) {
++      SEL setVolume = @selector(parserSetVolume:volume:);
++      if (!host || ![host respondsToSelector:setVolume]) {
++        printf_stderr(
++            "avPlayer: MSE volume route unavailable for child %llu\n",
++            (unsigned long long)(aKey >> 32));
++        return;
++      }
++      const double volume = strtod(aContentId.get(), nullptr);
++      printf_stderr("avPlayer: MSE volume child=%llu -> %.3f\n",
++                    (unsigned long long)(aKey >> 32), volume);
++      [host parserSetVolume:static_cast<NSUInteger>(aKey >> 32)
++                     volume:volume];
 +      return;
 +    }
 +    SEL parserAppend = @selector(parserAppendInitData:contentId:initData:);

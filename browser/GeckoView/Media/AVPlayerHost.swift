@@ -388,6 +388,27 @@ public final class AVPlayerHost: NSObject {
         }
     }
 
+    /// The element's play state, for this child's parser session.
+    ///
+    /// Straight through: the parser holds this per session and applies
+    /// it to whatever streams exist, because play() can arrive before
+    /// the certificate that builds a session at all. No session is
+    /// created here for the same reason - a play state on its own is
+    /// not a reason to build a parser.
+    @objc public func parserSetPlaying(_ childId: UInt, playing: Bool) {
+        avLog("play state for child \(childId) -> "
+              + (playing ? "playing" : "paused"))
+        FairPlayStreamParser.shared.setSessionPlaying("child-\(childId)",
+                                                      playing: playing)
+    }
+
+    /// The element's volume, for this child's parser session.
+    @objc public func parserSetVolume(_ childId: UInt, volume: Double) {
+        avLog("volume for child \(childId) -> \(volume)")
+        FairPlayStreamParser.shared.setSessionVolume("child-\(childId)",
+                                                     volume: volume)
+    }
+
     @objc public func parserSetCertificate(_ childId: UInt,
                                            certificate: Data) {
         withState { parserCertificates[childId] = certificate }

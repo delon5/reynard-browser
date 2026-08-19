@@ -141,6 +141,19 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     private var entries: [String: Entry] = [:]
+    /// Is the element behind this session playing, and how loud?
+    ///
+    /// Held per SESSION and OUTSIDE Entry, because the order is not
+    /// ours to choose: a page can call play() before it sets media
+    /// keys, and a state dropped because no Entry existed yet is the
+    /// state that decides whether anything plays at all.
+    ///
+    /// Absent means NOT PLAYING. That is the only safe default for a
+    /// setting whose purpose is to withhold playback, and it is the
+    /// direction that fails visibly - see the HELD line in
+    /// markLayerAttached.
+    private var sessionPlaying: [String: Bool] = [:]
+    private var sessionVolume: [String: Double] = [:]
     /// Has the process's audio session been made playback-capable? Once
     /// per process - see prepareAudioSession.
     private var audioSessionPrepared = false
@@ -1703,10 +1716,18 @@ public final class FairPlayStreamParser: NSObject {
                     timebase,
                     time: CMSampleBufferGetPresentationTimeStamp(head))
             }
-            CMTimebaseSetRate(timebase, rate: 1.0)
+            // The element decides, not this file. An element that is
+            // paused - or that autoplay never let start - gets a layer
+            // that is attached, fed and held at rate 0.
+            let rate = gatedRate(streamKey)
+            CMTimebaseSetRate(timebase, rate: rate)
             Self.log("stream \(streamKey) released the timebase at "
                      + "\(CMTimebaseGetTime(timebase).seconds) - layer "
-                     + "attached, feeding starts now")
+                     + "attached, "
+                     + (rate > 0
+                        ? "feeding starts now"
+                        : "HELD at rate 0 - no play state for this "
+                          + "session yet, or the element is paused"))
             // The master clock just started. Any audio renderer in this
             // session that started before it was anchored to its own
             // first sample instead, which is the wrong reference by
@@ -2097,6 +2118,13 @@ public final class FairPlayStreamParser: NSObject {
             startAudioClock(
                 streamKey: streamKey,
                 fallback: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            // The element's volume, applied at construction. A renderer
+            // built after the volume arrived would otherwise start at
+            // 1.0 and stay there until the page next touched the
+            // control, which for a muted trailer is never.
+            let startingVolume = volumeFor(streamKey)
+            renderer.volume = Float(startingVolume)
+            renderer.isMuted = startingVolume <= 0.0
             Self.log("stream \(streamKey) built an audio renderer - "
                      + "status \(renderer.status.rawValue) "
                      + "volume \(renderer.volume) "
@@ -2190,7 +2218,7 @@ public final class FairPlayStreamParser: NSObject {
         guard let synchronizer = withState({
             streamParsers[streamKey]?.audioSynchronizer
         }) else { return }
-        synchronizer.setRate(1.0, time: anchor)
+        synchronizer.setRate(gatedRate(streamKey), time: anchor)
         withState { streamParsers[streamKey]?.audioStarted = true }
         let origin = master != nil ? "from the video timebase"
                                    : "from the first audio sample"
@@ -2269,7 +2297,7 @@ public final class FairPlayStreamParser: NSObject {
             return out
         }
         for (key, synchronizer) in started {
-            synchronizer.setRate(1.0, time: time)
+            synchronizer.setRate(gatedRate(key), time: time)
             Self.log("stream \(key) audio clock re-anchored to "
                      + "\(time.seconds) - following the video timebase")
         }
@@ -2308,8 +2336,9 @@ public final class FairPlayStreamParser: NSObject {
         // enqueue() can have on the video side.
         work.queue.async {
             work.renderer.flush()
-            work.sync.setRate(1.0, time: CMTime(seconds: pts,
-                                                preferredTimescale: 90_000))
+            work.sync.setRate(FairPlayStreamParser.shared.gatedRate(streamKey),
+                              time: CMTime(seconds: pts,
+                                           preferredTimescale: 90_000))
         }
     }
 
@@ -2411,8 +2440,9 @@ public final class FairPlayStreamParser: NSObject {
                     return (late, slot.audioClockCorrections)
                 }
                 if let ranAhead {
-                    sync.setRate(1.0, time: CMTime(seconds: pts,
-                                                   preferredTimescale: 90_000))
+                    sync.setRate(gatedRate(streamKey),
+                                 time: CMTime(seconds: pts,
+                                              preferredTimescale: 90_000))
                     Self.log("stream \(streamKey) AUDIO CLOCK RAN AHEAD by "
                              + "\(ranAhead.late)s - put back on the media "
                              + "at \(pts). Correction \(ranAhead.nth).")
@@ -2697,7 +2727,7 @@ public final class FairPlayStreamParser: NSObject {
             // There the layer had nowhere to render for another sixty log
             // lines; this one is already placed, on screen and sized by
             // the compositor before it is ever offered.
-            CMTimebaseSetRate(timebase, rate: 1.0)
+            CMTimebaseSetRate(timebase, rate: gatedRate(streamKey))
             sink.controlTimebase = timebase
         } else {
             Self.log("stream \(streamKey) could not build a timebase for "
@@ -3019,6 +3049,103 @@ public final class FairPlayStreamParser: NSObject {
     /// anything that is not registered with the content key session.
     fileprivate static let protectedSubtypes: Set<String> =
         ["encv", "enca", "qavc", "qaac"]
+
+    // ==================================================================
+    // THE ELEMENT'S STATE
+    //
+    // Everything below exists so this route obeys the same rules the
+    // element does: the autoplay setting, the per-site override, and
+    // the user's own pause button. It follows the ELEMENT and never
+    // reads the setting, which is what keeps CarPlay working unchanged
+    // - that display plays by giving the document sticky user
+    // activation, so Gecko plays the element and this simply follows.
+    // ==================================================================
+
+    /// What rate a clock for this stream may run at.
+    ///
+    /// Asked at every site that starts a clock rather than assumed,
+    /// because there are six of them and one that assumed 1.0 would be
+    /// a route that quietly un-pauses itself.
+    fileprivate func gatedRate(_ streamKey: String) -> Float {
+        let sessionId = String(streamKey.split(separator: "|").first ?? "")
+        return withState { sessionPlaying[sessionId] ?? false } ? 1.0 : 0.0
+    }
+
+    /// The element started or stopped.
+    @objc public func setSessionPlaying(_ sessionId: String, playing: Bool) {
+        let changed = withState { () -> Bool in
+            let was = sessionPlaying[sessionId]
+            sessionPlaying[sessionId] = playing
+            return was != playing
+        }
+        guard changed else { return }
+        Self.log("session \(sessionId) is now "
+                 + (playing ? "PLAYING" : "PAUSED")
+                 + " - applying it to every stream it owns")
+        let rate: Float = playing ? 1.0 : 0.0
+        // The clocks are read out UNDER the lock and set outside it.
+        // Only a layer that has somewhere to render: starting a clock
+        // for one that has not been attached would undo fix 26, whose
+        // whole point is that a queue must not go stale against a clock
+        // with nothing to present to.
+        let clocks = withState {
+            () -> [(String, CMTimebase?, AVSampleBufferRenderSynchronizer?)] in
+            var out: [(String, CMTimebase?,
+                       AVSampleBufferRenderSynchronizer?)] = []
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") {
+                let timebase = slot.layerAttached
+                    ? slot.displayLayer?.controlTimebase : nil
+                let sync = slot.audioStarted ? slot.audioSynchronizer : nil
+                if timebase != nil || sync != nil {
+                    out.append((key, timebase, sync))
+                }
+            }
+            return out
+        }
+        for (key, timebase, sync) in clocks {
+            if let timebase {
+                CMTimebaseSetRate(timebase, rate: rate)
+            }
+            sync?.rate = rate
+            Self.log("stream \(key) clocks -> rate \(rate)")
+        }
+    }
+
+    /// The element's volume changed.
+    ///
+    /// Muting collapses into this: Gecko passes the effective volume,
+    /// zero when the element is muted, which is also how
+    /// AVPlayerHost.setVolume treats it.
+    @objc public func setSessionVolume(_ sessionId: String, volume: Double) {
+        let clamped = max(0.0, min(1.0, volume.isFinite ? volume : 1.0))
+        withState { sessionVolume[sessionId] = clamped }
+        let renderers = withState { () -> [(String, AVSampleBufferAudioRenderer)] in
+            var out: [(String, AVSampleBufferAudioRenderer)] = []
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") {
+                if let renderer = slot.audioRenderer {
+                    out.append((key, renderer))
+                }
+            }
+            return out
+        }
+        for (key, renderer) in renderers {
+            renderer.volume = Float(clamped)
+            renderer.isMuted = clamped <= 0.0
+            Self.log("stream \(key) volume -> \(clamped)")
+        }
+    }
+
+    /// The volume a renderer should be built with.
+    ///
+    /// A renderer built after the volume arrived would otherwise start
+    /// at 1.0 and stay there until the page next touched the control -
+    /// which for a muted autoplaying trailer is never.
+    fileprivate func volumeFor(_ streamKey: String) -> Double {
+        let sessionId = String(streamKey.split(separator: "|").first ?? "")
+        return withState { sessionVolume[sessionId] ?? 1.0 }
+    }
 
     /// Register the display layer with the stream's content key session.
     ///

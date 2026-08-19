@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,239 @@
+@@ -18,16 +18,252 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -178,6 +178,19 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +- (void)parserProvideKeyResponse:(NSUInteger)childId
 +                       contentId:(NSString*)contentId
 +                        response:(NSData*)response;
++// The element's play state, for a parser session.
++//
++// The MSE route paints and plays through AVFoundation objects of its
++// own, on clocks nothing told about the element - so a paused element
++// kept playing and the "Block Audio and Video" autoplay setting was
++// defeated. Routed by CHILD like everything else on this path; a
++// content process owns no player to route by.
++- (void)parserSetPlaying:(NSUInteger)childId playing:(BOOL)playing;
++// And its volume. "Block Audio Only" is Gecko's Allowed_muted: the
++// play is permitted because the element is believed inaudible, which
++// an audio renderer that never heard the volume made untrue. The twin
++// of setVolume:to: above, which does this for the native HLS route.
++- (void)parserSetVolume:(NSUInteger)childId volume:(double)volume;
 +
 +// The compositor's layer for a protected stream.
 +//
@@ -242,7 +255,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +278,44 @@
+@@ -55,8 +291,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -287,7 +300,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +324,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +337,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

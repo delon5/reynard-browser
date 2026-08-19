@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1490 @@
+@@ -0,0 +1,1566 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1358,6 +1358,82 @@ index 000000000000..e859b69f6239
 +                                     segment);
 +}
 +}  // namespace dom
++
++// The element's play state and volume, for the MSE parser route.
++//
++// In namespace mozilla, NOT mozilla::dom, because MediaDecoder is:
++// these are reached from a block-scope declaration inside
++// MediaDecoder::Pause, and such a declaration names its enclosing
++// namespace. ReynardMSEForwardInitSegment above is in mozilla::dom for
++// exactly the same reason, SourceBuffer being a dom class.
++//
++// The message is the one this route already reuses. Player id 0 marks
++// MSE, the parent composes (childID << 32) | 0 from the actor it
++// received on, so the session is identified without anything being
++// sent - which is also why these need no new IPDL.
++//
++// Sent for EVERY media element in the process, not only protected
++// ones. Gating on an MSE proxy existing would be cheaper and is wrong:
++// a page may call play() before it sets media keys, and the state that
++// would be lost is the one that decides whether anything plays at all.
++// A play or a pause is a user-scale event, and volume is change-gated
++// below, so the traffic is negligible.
++void ReynardMSEPlayState(bool aPlaying) {
++  MOZ_ASSERT(NS_IsMainThread());
++  static int sLastPlaying = -1;
++  const int state = aPlaying ? 1 : 0;
++  if (sLastPlaying == state) {
++    return;
++  }
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  sLastPlaying = state;
++  printf_stderr("avPlayer: MSE element is %s\n",
++                aPlaying ? "playing" : "paused");
++  nsTArray<uint8_t> empty;
++  cc->SendAVPlayerKeyGenerateRequest(
++      0, nsCString(aPlaying ? "playing" : "paused"), nsCString("playstate"),
++      empty);
++}
++
++void ReynardMSEVolume(double aVolume) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Clamped rather than trusted: an element's volume is only guaranteed
++  // finite, and a renderer takes 0...1.
++  //
++  // Spelled with comparisons rather than <cmath>, which this file is
++  // not known to include: !(v >= 0.0) is true for NaN as well as for a
++  // negative, so one test covers both.
++  double volume = aVolume;
++  if (!(volume >= 0.0)) {
++    volume = 0.0;
++  }
++  if (volume > 1.0) {
++    volume = 1.0;
++  }
++  // A fading volume control produces one of these per animation frame.
++  static double sLastVolume = -1.0;
++  double moved = sLastVolume - volume;
++  if (moved < 0.0) {
++    moved = -moved;
++  }
++  if (sLastVolume >= 0.0 && moved < 0.001) {
++    return;
++  }
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  sLastVolume = volume;
++  printf_stderr("avPlayer: MSE element volume -> %.3f\n", volume);
++  nsTArray<uint8_t> empty;
++  cc->SendAVPlayerKeyGenerateRequest(
++      0, nsPrintfCString("%.6f", volume), nsCString("volume"), empty);
++}
 +
 +void FairPlayCDMProxy::SendRemoteKeyRequest(
 +    const RemoteKeyRequest& aRequest) {
