@@ -4131,6 +4131,75 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         }
     }
 
+    // ---- the callbacks nothing was listening on ------------------------
+    //
+    // This delegate implemented exactly one method. Every other callback
+    // in AVContentKeySessionDelegate is optional and was absent,
+    // including the only one that reports a REFUSED licence.
+    //
+    // processContentKeyResponse does not throw and returns nothing. It
+    // hands the CKC over and the verdict arrives here, later. So
+    // "licence applied to the request" has never meant "licence
+    // accepted" - it means the bytes were passed - and every capture
+    // that showed a licence applied and then -11800 "no content key
+    // present" was consistent with a rejection nobody heard.
+    //
+    // All of these print and return. Nothing is routed, retried or
+    // answered, so behaviour is exactly what it is today with the
+    // methods absent.
+
+    func contentKeySession(_ session: AVContentKeySession,
+                           contentKeyRequest keyRequest: AVContentKeyRequest,
+                           didFailWithError err: Error) {
+        FairPlayStreamParser.log(
+            "session \(sessionId) key request FAILED - status="
+            + "\(keyRequest.status.rawValue) identifier="
+            + "\(String(describing: keyRequest.identifier)) error=\(err)")
+    }
+
+    func contentKeySession(
+        _ session: AVContentKeySession,
+        shouldRetryContentKeyRequest keyRequest: AVContentKeyRequest,
+        reason retryReason: AVContentKeyRequest.RetryReason) -> Bool {
+        FairPlayStreamParser.log(
+            "session \(sessionId) asked whether to retry a key request - "
+            + "reason \(retryReason.rawValue), status "
+            + "\(keyRequest.status.rawValue) - declining, which is what "
+            + "happens today with this method absent")
+        return false
+    }
+
+    func contentKeySession(
+        _ session: AVContentKeySession,
+        didProvideRenewingContentKeyRequest keyRequest: AVContentKeyRequest) {
+        // Logged, NOT routed. Sending a renewal through the ordinary
+        // path would answer one EME exchange twice; this is here to find
+        // out whether renewals happen at all.
+        FairPlayStreamParser.log(
+            "session \(sessionId) RENEWING key request offered - identifier "
+            + "\(String(describing: keyRequest.identifier)) - not routed")
+    }
+
+    func contentKeySessionContentProtectionSessionIdentifierDidChange(
+        _ session: AVContentKeySession) {
+        let identifier = session.contentProtectionSessionIdentifier
+        FairPlayStreamParser.log(
+            "session \(sessionId) content protection session identifier "
+            + "changed to \(identifier?.count ?? -1) bytes")
+    }
+
+    func contentKeySession(_ session: AVContentKeySession,
+                           externalProtectionStatusDidChangeFor
+                           contentKeySpecifier: AVContentKeySpecifier,
+                           hasAvailableKey: Bool) {
+        // A display-security refusal looks exactly like a missing key
+        // from the sink's side, and it is not something a licence can
+        // fix. Worth being able to tell the two apart.
+        FairPlayStreamParser.log(
+            "session \(sessionId) external protection status changed - "
+            + "hasAvailableKey=\(hasAvailableKey)")
+    }
+
     func contentKeySession(_ session: AVContentKeySession,
                            didProvide keyRequest: AVContentKeyRequest) {
         // Pin this request to the origination it answers, BEFORE
