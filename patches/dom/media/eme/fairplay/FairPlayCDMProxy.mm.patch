@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1635 @@
+@@ -0,0 +1,1691 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1604,6 +1604,62 @@ index 000000000000..e859b69f6239
 +    // - it is still handling the 'encrypted' event the SAME key
 +    // request produced. Held until CreateSession claims it, which is
 +    // the ordinary order rather than an edge case.
++    // An SPC the PARSER raised, addressed by key id because no
++    // origination was waiting for it.
++    //
++    // These are the ones worth having: the parser's specifier is the
++    // only object that names the media's real constant IV, and
++    // canonicalSinf's is sixteen zero bytes. Until now such an SPC
++    // arrived with an empty content id and parked forever, so the page
++    // never saw the message and no licence ever came back - which is
++    // every -11800 "no content key present" in the capture.
++    //
++    // The key id in the name is the fkri out of the page's own pssh,
++    // which CreateSession files in mKeyIdBySession, so the session that
++    // asked for this key can simply be looked up.
++    if (contentId.Length() > 14 &&
++        Substring(contentId, 0, 14).EqualsLiteral("reynard-keyid:")) {
++      nsTArray<uint8_t> wanted;
++      const nsDependentCSubstring hex = Substring(contentId, 14);
++      auto nibble = [](char c) -> int {
++        if (c >= '0' && c <= '9') return c - '0';
++        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++        return -1;
++      };
++      for (uint32_t i = 0; i + 1 < hex.Length(); i += 2) {
++        const int hi = nibble(hex.CharAt(i));
++        const int lo = nibble(hex.CharAt(i + 1));
++        if (hi < 0 || lo < 0) {
++          wanted.Clear();
++          break;
++        }
++        wanted.AppendElement(static_cast<uint8_t>((hi << 4) | lo));
++      }
++      nsCString owner;
++      if (!wanted.IsEmpty()) {
++        for (auto iter = mKeyIdBySession.Iter(); !iter.Done(); iter.Next()) {
++          if (iter.Data() == wanted) {
++            owner = iter.Key();
++            break;
++          }
++        }
++      }
++      if (!owner.IsEmpty()) {
++        printf_stderr(
++            "avPlayer: FairPlay SPC for key %s delivered to session %s "
++            "(%zu bytes)\n",
++            PromiseFlatCString(hex).get(), owner.get(),
++            (size_t)aSpc.Length());
++        OnSessionMessage(NS_ConvertUTF8toUTF16(owner),
++                         dom::MediaKeyMessageType::License_request, aSpc);
++        return;
++      }
++      printf_stderr(
++          "avPlayer: FairPlay SPC for key %s - no session holds that key "
++          "id, parking (%zu bytes)\n",
++          PromiseFlatCString(hex).get(), (size_t)aSpc.Length());
++    }
 +    printf_stderr("avPlayer: FairPlay SPC parked for %s (%zu bytes)\n",
 +                  contentId.get(), (size_t)aSpc.Length());
 +    mRemotePendingSpc.InsertOrUpdate(contentId, std::move(aSpc));

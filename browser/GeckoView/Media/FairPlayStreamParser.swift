@@ -4081,8 +4081,33 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         // needs. An empty origination simply contributes no fallback
         // bytes, and report(spc:) still declines to route a session that
         // has no content process behind it.
+        // An unclaimed request still has an identity, and discarding it
+        // is what parks the SPC.
+        //
+        // The empty content id here travelled all the way to
+        // FairPlayCDMProxy's parking branch, which is keyed by content
+        // id: "SPC PRODUCED ... id : 8776 bytes" and then "SPC parked
+        // for  (8776 bytes)". The bytes were right - they came from the
+        // parser's own specifier, the only object that names the real
+        // constant IV - and nothing could address them.
+        //
+        // The request is not anonymous. It arrives carrying the fkri key
+        // id out of the page's own pssh, which fix 59 also files per EME
+        // session, so naming the SPC by that id is enough for the far
+        // side to find the session that asked.
+        var unclaimedContentId = ""
+        if claimed == nil,
+           let identifier = keyRequest.identifier as? Data,
+           identifier.count == 16 {
+            let hex = identifier.map { String(format: "%02x", $0) }.joined()
+            unclaimedContentId = "reynard-keyid:" + hex
+            FairPlayStreamParser.log(
+                "session \(sessionId) no origination claimed - addressing "
+                + "this SPC by the request's own key id \(hex)")
+        }
         let origination = claimed
-            ?? FairPlayOrigination(contentId: "", initData: Data())
+            ?? FairPlayOrigination(contentId: unclaimedContentId,
+                                   initData: Data())
         if claimed == nil {
             FairPlayStreamParser.log(
                 "session \(sessionId) has no origination to claim - "
