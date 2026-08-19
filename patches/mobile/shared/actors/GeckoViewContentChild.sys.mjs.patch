@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,1631 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,1975 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -1612,6 +1612,350 @@ index 9ca6e15..18d37f0 100644
 +    );
 +  });
 +
++  // ---- which element is which, and what the page waits for -------------
++  //
++  // The engine sees SourceBuffers and bytes. It cannot see which video
++  // element the page put them in, what mime type it declared, what it
++  // asked the key statuses for, or what it did when the pre-roll ran
++  // out - and the poll above reports only document.querySelector,
++  // which is one element on a page that has two.
++  //
++  // On tv.apple.com the trailer plays through AVPlayer (173.59s, no
++  // licence exchange at all, so unencrypted) while the feature is an
++  // MSE element whose MediaSource duration is 8554.1s. Four FairPlay
++  // licences arrive for the feature and not one encrypted sample ever
++  // does. Everything below is about finding out why the page stopped.
++  //
++  // Diagnostic only. Every wrapper calls through, every listener is
++  // inside a try/catch, and the keyStatuses trace is capped so a page
++  // that polls it per frame cannot flood a capture.
++  try {
++    var reynardHex = function (buf) {
++      try {
++        if (!buf) {
++          return "none";
++        }
++        var view = buf.buffer
++          ? new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
++          : new Uint8Array(buf);
++        var out = "";
++        var limit = view.length < 24 ? view.length : 24;
++        for (var i = 0; i < limit; i++) {
++          out += (view[i] < 16 ? "0" : "") + view[i].toString(16);
++        }
++        return view.length > limit ? out + "..(" + view.length + ")" : out;
++      } catch (e) {
++        return "?";
++      }
++    };
++
++    var reynardRanges = function (ranges) {
++      try {
++        var parts = [];
++        for (var i = 0; i < ranges.length; i++) {
++          parts.push(ranges.start(i).toFixed(2) + "-" + ranges.end(i).toFixed(2));
++        }
++        return "[" + parts.join(" ") + "]";
++      } catch (e) {
++        return "[?]";
++      }
++    };
++
++    var reynardNum = function (value) {
++      return typeof value === "number" && isFinite(value)
++        ? value.toFixed(1)
++        : String(value);
++    };
++
++    // ---- 1. every media element, not just the first ------------------
++    //
++    // Reported only when the string changes, and currentTime is
++    // deliberately not in the string: with it the line would change
++    // every second of playback and bury everything else.
++    var reynardLastCensus = "";
++    var reynardMediaCensus = function () {
++      var elements = document.querySelectorAll("video, audio");
++      var parts = [];
++      for (var i = 0; i < elements.length; i++) {
++        var el = elements[i];
++        parts.push(
++          "#" + i +
++          " dur=" + reynardNum(el.duration) +
++          " rs=" + el.readyState +
++          " net=" + el.networkState +
++          " paused=" + (el.paused ? 1 : 0) +
++          " muted=" + (el.muted ? 1 : 0) +
++          " vol=" + el.volume.toFixed(2) +
++          " " + (el.videoWidth || 0) + "x" + (el.videoHeight || 0) +
++          " src=" + String(el.currentSrc || el.src || "none").slice(0, 44)
++        );
++      }
++      var line = "n=" + elements.length + " " + parts.join(" | ");
++      if (line !== reynardLastCensus) {
++        reynardLastCensus = line;
++        debug("MEDIA", line);
++      }
++      return elements;
++    };
++
++    // ---- 2. standard EME, which nothing here has ever wrapped --------
++    var reynardSessionSeq = 0;
++    var reynardDumpStatuses = function (tag, session) {
++      try {
++        var parts = [];
++        session.keyStatuses.forEach(function (status, keyId) {
++          parts.push(reynardHex(keyId) + "=" + status);
++        });
++        debug(
++          "EME " + tag + " keyStatuses n=" + session.keyStatuses.size +
++          " [" + parts.join(" ") + "]"
++        );
++      } catch (e) {
++        debug("EME " + tag + " keyStatuses unreadable:", describe(e));
++      }
++    };
++
++    if (window.MediaKeys && window.MediaKeys.prototype.createSession) {
++      var reynardNativeCreateSession = window.MediaKeys.prototype.createSession;
++      window.MediaKeys.prototype.createSession = function (type) {
++        var session = reynardNativeCreateSession.apply(this, arguments);
++        try {
++          var tag = "session#" + ++reynardSessionSeq;
++          session.reynardTag = tag;
++          debug("EME " + tag + " createSession(" + (type || "temporary") + ")");
++          session.addEventListener("keystatuseschange", function () {
++            reynardDumpStatuses(tag, session);
++          });
++          session.addEventListener("message", function (e) {
++            debug(
++              "EME " + tag + " message type=" + e.messageType + " " +
++              (e.message ? e.message.byteLength : 0) + " bytes"
++            );
++          });
++        } catch (e) {}
++        return session;
++      };
++    }
++
++    if (window.MediaKeySession) {
++      var reynardNativeGenerate = window.MediaKeySession.prototype.generateRequest;
++      window.MediaKeySession.prototype.generateRequest = function (type, data) {
++        var tag = this.reynardTag || "session?";
++        var self = this;
++        debug(
++          "EME " + tag + " generateRequest(" + type + ", " +
++          (data ? data.byteLength : 0) + " bytes) " + reynardHex(data)
++        );
++        return reynardNativeGenerate.apply(this, arguments).then(
++          function (value) {
++            debug("EME " + tag + " generateRequest OK id=" + self.sessionId);
++            return value;
++          },
++          function (err) {
++            debug("EME " + tag + " generateRequest REJECTED:", describe(err));
++            throw err;
++          }
++        );
++      };
++
++      var reynardNativeUpdate = window.MediaKeySession.prototype.update;
++      window.MediaKeySession.prototype.update = function (response) {
++        var tag = this.reynardTag || "session?";
++        var self = this;
++        debug(
++          "EME " + tag + " update(" +
++          (response ? response.byteLength : 0) + " bytes)"
++        );
++        return reynardNativeUpdate.apply(this, arguments).then(
++          function (value) {
++            debug("EME " + tag + " update resolved");
++            reynardDumpStatuses(tag, self);
++            return value;
++          },
++          function (err) {
++            debug("EME " + tag + " update REJECTED:", describe(err));
++            throw err;
++          }
++        );
++      };
++    }
++
++    // The lookup itself. FairPlayCDMProxy keys the status map by the
++    // SESSION ID, on the stated assumption that pages iterate rather
++    // than look up. If Apple's player looks up, it gets undefined for
++    // every key it asked for, and a player that believes it has no
++    // usable key will not append the encrypted stream - which is
++    // exactly the shape of this stall.
++    if (window.MediaKeyStatusMap) {
++      var reynardLookups = 0;
++      var reynardSeenLookups = {};
++      var reynardTraceLookup = function (name, keyId, answer) {
++        try {
++          var line = name + "(" + reynardHex(keyId) + ") -> " + String(answer);
++          if (reynardSeenLookups[line]) {
++            return;
++          }
++          reynardSeenLookups[line] = true;
++          if (++reynardLookups > 40) {
++            return;
++          }
++          debug("EME keyStatuses." + line);
++        } catch (e) {}
++      };
++      var reynardNativeGet = window.MediaKeyStatusMap.prototype.get;
++      window.MediaKeyStatusMap.prototype.get = function (keyId) {
++        var answer = reynardNativeGet.apply(this, arguments);
++        reynardTraceLookup("get", keyId, answer);
++        return answer;
++      };
++      var reynardNativeHas = window.MediaKeyStatusMap.prototype.has;
++      window.MediaKeyStatusMap.prototype.has = function (keyId) {
++        var answer = reynardNativeHas.apply(this, arguments);
++        reynardTraceLookup("has", keyId, answer);
++        return answer;
++      };
++    }
++
++    // ---- 3. what the page declares, and what it does with it ---------
++    var reynardBufferSeq = 0;
++    if (window.MediaSource) {
++      var reynardNativeAddSB = window.MediaSource.prototype.addSourceBuffer;
++      window.MediaSource.prototype.addSourceBuffer = function (type) {
++        var buffer = reynardNativeAddSB.apply(this, arguments);
++        try {
++          var tag = "sb#" + ++reynardBufferSeq;
++          buffer.reynardTag = tag;
++          debug("MSE " + tag + " addSourceBuffer(" + type + ")");
++          var lastRanges = "";
++          buffer.addEventListener("updateend", function () {
++            try {
++              var ranges = reynardRanges(buffer.buffered);
++              if (ranges === lastRanges) {
++                return;
++              }
++              lastRanges = ranges;
++              debug(
++                "MSE " + tag + " buffered " + ranges +
++                " offset=" + buffer.timestampOffset.toFixed(2)
++              );
++            } catch (e) {}
++          });
++          buffer.addEventListener("error", function () {
++            debug("MSE " + tag + " ERROR event");
++          });
++        } catch (e) {}
++        return buffer;
++      };
++
++      var reynardNativeEOS = window.MediaSource.prototype.endOfStream;
++      window.MediaSource.prototype.endOfStream = function (reason) {
++        debug("MSE endOfStream(" + (reason || "") + ")");
++        return reynardNativeEOS.apply(this, arguments);
++      };
++    }
++
++    if (window.SourceBuffer) {
++      if (window.SourceBuffer.prototype.changeType) {
++        var reynardNativeChangeType = window.SourceBuffer.prototype.changeType;
++        window.SourceBuffer.prototype.changeType = function (type) {
++          debug("MSE " + (this.reynardTag || "sb?") + " changeType(" + type + ")");
++          return reynardNativeChangeType.apply(this, arguments);
++        };
++      }
++      var reynardNativeAbort = window.SourceBuffer.prototype.abort;
++      window.SourceBuffer.prototype.abort = function () {
++        debug("MSE " + (this.reynardTag || "sb?") + " abort()");
++        return reynardNativeAbort.apply(this, arguments);
++      };
++      var reynardNativeRemove = window.SourceBuffer.prototype.remove;
++      window.SourceBuffer.prototype.remove = function (start, end) {
++        debug(
++          "MSE " + (this.reynardTag || "sb?") + " remove(" +
++          reynardNum(start) + ", " + reynardNum(end) + ")"
++        );
++        return reynardNativeRemove.apply(this, arguments);
++      };
++    }
++
++    // ---- 4. the elements themselves ----------------------------------
++    var reynardEvents = [
++      "waiting",
++      "stalled",
++      "error",
++      "ended",
++      "emptied",
++      "loadedmetadata",
++      "seeking",
++    ];
++    var reynardWatch = function (element, index) {
++      if (element.reynardWatched) {
++        return;
++      }
++      element.reynardWatched = true;
++      reynardEvents.forEach(function (name) {
++        element.addEventListener(name, function () {
++          try {
++            debug(
++              "MEDIA #" + index + " " + name +
++              " t=" + reynardNum(element.currentTime) +
++              " rs=" + element.readyState +
++              " buffered=" + reynardRanges(element.buffered) +
++              (element.error
++                ? " err=" + element.error.code + " " + element.error.message
++                : "")
++            );
++          } catch (e) {}
++        });
++      });
++      element.addEventListener("encrypted", function (e) {
++        try {
++          debug(
++            "MEDIA #" + index + " encrypted type=" + e.initDataType + " " +
++            (e.initData ? e.initData.byteLength : 0) + " bytes " +
++            reynardHex(e.initData)
++          );
++        } catch (e2) {}
++      });
++    };
++
++    // One timer, not one per probe. Everything above is event-driven;
++    // this exists to notice a clock that has stopped, which no event
++    // reports once "waiting" has already fired.
++    setInterval(function () {
++      try {
++        var elements = reynardMediaCensus();
++        for (var i = 0; i < elements.length; i++) {
++          var element = elements[i];
++          reynardWatch(element, i);
++          if (element.paused) {
++            element.reynardStuck = 0;
++            element.reynardLastTime = element.currentTime;
++            continue;
++          }
++          if (element.reynardLastTime === element.currentTime) {
++            element.reynardStuck = (element.reynardStuck || 0) + 1;
++            if (element.reynardStuck === 3 || element.reynardStuck % 15 === 0) {
++              debug(
++                "MEDIA STALL #" + i +
++                " t=" + reynardNum(element.currentTime) +
++                " for " + element.reynardStuck + "s" +
++                " rs=" + element.readyState +
++                " net=" + element.networkState +
++                " dur=" + reynardNum(element.duration) +
++                " buffered=" + reynardRanges(element.buffered)
++              );
++            }
++          } else {
++            element.reynardStuck = 0;
++          }
++          element.reynardLastTime = element.currentTime;
++        }
++      } catch (e) {}
++    }, 1000);
++
++    debug("installed the element census and the MSE/EME trace");
++  } catch (e) {}
++
 +  window.WebKitMediaKeys = WebKitMediaKeys;
 +  window.WebKitMediaKeySession = WebKitMediaKeySession;
 +  debug("installed over standard EME");
@@ -1634,7 +1978,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +1692,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2036,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -2130,7 +2474,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +2298,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +2642,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -2152,7 +2496,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +2328,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +2672,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
