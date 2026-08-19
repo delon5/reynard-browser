@@ -2466,11 +2466,6 @@ extension TabManagerImplementation: NavigationDelegate {
     private static let seedVersion = 4
     private static let seedVersionKey = "Reynard.SafeArea.SeedVersion"
 
-    /// Bumped whenever the DETECTOR's verdict semantics change, as
-    /// distinct from the seed list above. See loadReservations.
-    private static let classifierVersion = 2
-    private static let classifierVersionKey = "Reynard.SafeArea.ClassifierVersion"
-
     /// The user's pill-clearance list (Settings > General >
     /// Compatibility > Toolbar > Pill Clearance Sites): hosts pinned
     /// to .needsViewportShrink by hand, for sites whose bottom UI the
@@ -2503,24 +2498,6 @@ extension TabManagerImplementation: NavigationDelegate {
         let applySeedsOverPersisted = defaults.integer(forKey: seedVersionKey) < seedVersion
         if applySeedsOverPersisted {
             defaults.set(seedVersion, forKey: seedVersionKey)
-        }
-        // The learned store was populated by an older detector whose
-        // semantics no longer hold, so it would keep steering pages
-        // wrongly until each host happened to be re-visited and
-        // re-detected - most visibly, env-reading hosts learned as
-        // readsSafeAreaInset whose bottom bars the compositor margin
-        // lifts fine. Dropped back to the seeds exactly once per
-        // semantics change; live detection repopulates with the new
-        // meaning, and the pill-clearance pins are unaffected (they
-        // are read live from the preference, not from this store).
-        //
-        // 2: env() became a fallback rather than a verdict - the
-        //    liftable-bar cutout
-        //    (fix_pill_cutout_for_liftable_bottom_bars.py).
-        if defaults.integer(forKey: classifierVersionKey) < classifierVersion {
-            defaults.set(classifierVersion, forKey: classifierVersionKey)
-            defaults.removeObject(forKey: reservationStoreKey)
-            return seededReservations
         }
         guard let raw = defaults.dictionary(forKey: reservationStoreKey) as? [String: String] else {
             return seededReservations

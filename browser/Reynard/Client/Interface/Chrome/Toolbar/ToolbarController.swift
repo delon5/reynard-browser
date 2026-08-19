@@ -118,13 +118,8 @@ final class ToolbarController {
         //     on the sites in this class.
         //
         //   readsSafeAreaInset - env(safe-area-inset-bottom) carries
-        //     the clearance; the page positions its own controls and
-        //     its background bleeds behind the pill. Since the
-        //     liftable-bar cutout, only env-readers whose pinned
-        //     bottom UI the margin cannot fully lift land here -
-        //     env-readers with ordinary fixed bars (YouTube) take the
-        //     margin below, which lifts the bar whole and leaves real
-        //     page content behind the pill's glass.
+        //     the clearance; the page positions its own controls
+        //     (YouTube) and its background bleeds behind the pill.
         //
         //   everything else - the compositor fixed-layer margin lifts
         //     root-document fixed/sticky bars with no page
