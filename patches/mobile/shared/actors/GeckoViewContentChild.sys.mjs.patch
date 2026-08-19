@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2313 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2347 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2184,9 +2184,43 @@ index 9ca6e15..18d37f0 100644
 +  // that does not is left alone - which covers tv.apple.com, HBO Max,
 +  // Prime Video and Disney+, all of which UserAgentPolicy hands the
 +  // Safari iPhone string.
++  //
++  // HOST-GATED, and that is not belt and braces. HBO Max carries the
++  // same Macintosh override as Netflix - a per-site override outranks
++  // UserAgentPolicy's domain list - and HBO Max is the one site on this
++  // route that works end to end today: 147 enqueues at status=1,
++  // rendering, with sound. Deriving an identity is a hypothesis, and a
++  // hypothesis does not get to run on the control.
++  //
++  // The list is whatever --hosts named when this was applied;
++  // subdomains are covered, so one entry reaches play.hbomax.com too.
 +  try {
++    var reynardIdentityHosts = ["netflix.com", "hbomax.com"];
++    var reynardIdentityHost = String(location.hostname || "");
++    var reynardIdentityWanted = reynardIdentityHosts.some(function (domain) {
++      return (
++        reynardIdentityHost === domain ||
++        reynardIdentityHost.slice(-(domain.length + 1)) === "." + domain
++      );
++    });
 +    var reynardIdentityUA = String(navigator.userAgent || "");
 +    var reynardIdentity = null;
++    if (!reynardIdentityWanted) {
++      // Declined, but still reported - and with the values, because
++      // this is the only place that ever prints what navigator natively
++      // says on this device. It is what answers "does the iPhone UA
++      // spoof anything beyond the string" for tv.apple.com and HBO Max
++      // without touching either of them.
++      debug(
++        "identity not applied on " + reynardIdentityHost +
++        " - not in the follow-the-UA list. native platform=" +
++        navigator.platform + " oscpu=" + navigator.oscpu +
++        " vendor=" + navigator.vendor +
++        " maxTouchPoints=" + navigator.maxTouchPoints +
++        " safari=" + (window.safari ? "yes" : "no") +
++        " ua=" + reynardIdentityUA.slice(0, 60)
++      );
++    } else
 +    if (reynardIdentityUA.indexOf("Macintosh") !== -1) {
 +      reynardIdentity = {
 +        name: "Macintosh",
@@ -2316,7 +2350,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2374,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2408,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -2812,7 +2846,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +2980,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3014,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -2834,7 +2868,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3010,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3044,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
