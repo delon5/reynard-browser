@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1566 @@
+@@ -0,0 +1,1635 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -565,6 +565,51 @@ index 000000000000..e859b69f6239
 +  return false;
 +}
 +
++// The cenc key id inside FairPlay pssh init data, if there is one.
++//
++// Apple's cenc init data is an ordinary pssh box wrapping an Apple
++// payload: fpsd > { fpsi, fpsk > { fkri, fkvl } }. fkri is a full box -
++// four bytes of version and flags - followed by the 16-byte key id, and
++// that id is exactly what the page hands keyStatuses.get() later:
++//
++//   fpsParser:   fkri key id 00000000000000000000000000000001
++//   webkitEME: EME keyStatuses.get(00000000000000000000000000000001)
++//
++// Built like ReynardKeyIdFromSinf above: a bounded scan for the box
++// rather than a nested ISO walk, with the size field immediately in
++// front of the type checked, so a coincidental "fkri" in payload bytes
++// cannot be mistaken for the box. The first one wins - Apple mints one
++// session per key and each session's init data carries its own.
++static bool ReynardKeyIdFromFairPlayPssh(const nsTArray<uint8_t>& aInitData,
++                                         nsTArray<uint8_t>& aKeyIdOut) {
++  const uint8_t* bytes = aInitData.Elements();
++  const size_t length = aInitData.Length();
++  if (!bytes || length < 32) {
++    return false;
++  }
++  for (size_t at = 4; at + 4 <= length; ++at) {
++    if (memcmp(bytes + at, "fkri", 4) != 0) {
++      continue;
++    }
++    const uint32_t boxSize = (uint32_t(bytes[at - 4]) << 24) |
++                             (uint32_t(bytes[at - 3]) << 16) |
++                             (uint32_t(bytes[at - 2]) << 8) |
++                             uint32_t(bytes[at - 1]);
++    // size(4) type(4) version and flags(4) key id(16) = 28.
++    if (boxSize < 28 || (at - 4) + boxSize > length) {
++      continue;
++    }
++    const size_t keyId = at + 8;
++    if (keyId + 16 > length) {
++      continue;
++    }
++    aKeyIdOut.Clear();
++    aKeyIdOut.AppendElements(bytes + keyId, 16);
++    return true;
++  }
++  return false;
++}
++
 +void FairPlayCDMProxy::CreateSession(uint32_t aCreateSessionToken,
 +                                     dom::MediaKeySessionType aSessionType,
 +                                     PromiseId aPromiseId,
@@ -626,24 +671,48 @@ index 000000000000..e859b69f6239
 +
 +  nsCString initDataType = NS_ConvertUTF16toUTF8(aInitDataType);
 +
-+  // sinf only, and deliberately. cenc is Apple TV's route and it appends
-+  // today on the session-id-as-key-id behaviour below; changing a path
-+  // that works to repair one that does not is how the last two
-+  // regressions on this route happened.
-+  if (initDataType.EqualsLiteral("sinf")) {
++  // sinf and cenc both. The note that used to stand here said cenc was
++  // Apple TV's route and that it appended today on the
++  // session-id-as-key-id behaviour below. It does not, and fix 58's
++  // trace is what settles it - the page asks by key id and is told
++  // nothing:
++  //
++  //   EME keyStatuses.get(00000000000000000000000000000001) -> undefined
++  //   EME session#1 keyStatuses n=1 [33364144333435432d..(36)=usable]
++  //
++  // 33 36 41 44 33 34 35 43 2d is the ASCII of "36AD345C-", the session
++  // id this proxy minted. The page then plays 45 seconds of clear
++  // pre-roll, stalls at the end of it, mints two more sessions, takes
++  // two more licences, and appends nothing.
++  //
++  // The rest of that note still holds, which is why this remains
++  // additive rather than a replacement: the session-id entry in
++  // UpdateSession is untouched, so a page that iterates keyStatuses is
++  // served exactly as it is today and gains one more usable entry.
++  {
 +    nsTArray<uint8_t> parsedKeyId;
-+    if (ReynardKeyIdFromSinf(aInitData, parsedKeyId)) {
++    const char* shape = nullptr;
++    bool parsed = false;
++    if (initDataType.EqualsLiteral("sinf")) {
++      shape = "sinf";
++      parsed = ReynardKeyIdFromSinf(aInitData, parsedKeyId);
++    } else if (initDataType.EqualsLiteral("cenc")) {
++      shape = "cenc";
++      parsed = ReynardKeyIdFromFairPlayPssh(aInitData, parsedKeyId);
++    }
++    if (shape && parsed) {
 +      nsAutoCString hex;
 +      for (size_t i = 0; i < parsedKeyId.Length(); ++i) {
 +        hex.AppendPrintf("%02x", parsedKeyId[i]);
 +      }
-+      printf_stderr("avPlayer: FairPlay key id from sinf: %s\n", hex.get());
++      printf_stderr("avPlayer: FairPlay key id from %s: %s\n", shape,
++                    hex.get());
 +      mKeyIdBySession.InsertOrUpdate(sessionId, std::move(parsedKeyId));
-+    } else {
++    } else if (shape) {
 +      printf_stderr(
-+          "avPlayer: FairPlay key id from sinf: none (%zu bytes of init "
++          "avPlayer: FairPlay key id from %s: none (%zu bytes of init "
 +          "data)\n",
-+          (size_t)aInitData.Length());
++          shape, (size_t)aInitData.Length());
 +    }
 +  }
 +
