@@ -95,6 +95,20 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// process then emitted nothing at all for the 22 seconds until the
     /// tab was abandoned - two log lines for the tab's entire life.
     private var paintWaits: [UUID: (startedAt: CFAbsoluteTime, url: String, retryURL: String, workItem: DispatchWorkItem, attempt: Int)] = [:]
+    /// The last URL the paint watchdog re-dispatched for a tab.
+    ///
+    /// armPaintWatch's comment says "re-dispatch plus one rebuild per
+    /// user action, never more", and without this the code does not do
+    /// that: the escalation calls loadURL, the commit fires a location
+    /// change, and the location change arms a fresh watch at attempt 0.
+    /// A page that never paints is therefore reloaded every eight
+    /// seconds for as long as the user looks at it - which is what
+    /// Netflix's player page does, and why no capture of it has ever
+    /// run long enough to be read.
+    ///
+    /// Cleared when the tab goes somewhere else, so a genuine second
+    /// attempt after real navigation is still allowed.
+    private var lastEscalatedURL: [UUID: String] = [:]
     /// Whether this process has EVER received a first-contentful-paint
     /// event from the engine. The paint watchdog's committed-page
     /// escalation rests entirely on "no paint signal since arming"
@@ -611,6 +625,13 @@ final class TabManagerImplementation: NSObject, TabManager {
     // MARK: - Navigation State
     
     private func loadURL(_ url: String, in tab: Tab) {
+        // A load somewhere else clears the escalation memory, so the one
+        // automated retry is per destination rather than once per tab
+        // for its whole life. The escalation sets this immediately
+        // before calling here, so its own load does not clear it.
+        if lastEscalatedURL[tab.id] != url {
+            lastEscalatedURL.removeValue(forKey: tab.id)
+        }
         tab.state.showsStartupHomepage = false
         tab.state.loadingState = .loading(progress: 0)
         // A slept tab has had its session closed by
@@ -1521,6 +1542,31 @@ final class TabManagerImplementation: NSObject, TabManager {
                     NSLog("[PaintWatch] tab %@ not escalating - no paint signal has ever arrived from this engine", tabID.uuidString)
                     return
                 }
+                // AND IT MUST STILL BE LOADING.
+                //
+                // The guard above is per PROCESS - "has EVER received"
+                // - so it stops protecting anything the moment one page
+                // paints, and four paints arrive in the capture that
+                // prompted this. After that, every committed page is
+                // escalatable on the absence of a paint.
+                //
+                // Absence of a first CONTENTFUL paint is not absence of
+                // a load. Netflix's player page is a black rectangle
+                // with a video element and controls that appear on
+                // touch; there may be nothing contentful to paint, ever,
+                // on a page that loaded perfectly. It was being
+                // re-dispatched every eight seconds, four times over,
+                // which is what "Netflix does not work" looked like from
+                // the outside.
+                //
+                // A load that has finished has loaded. Only one that is
+                // still going and still has not painted is a candidate,
+                // and pending loads never reach this branch at all -
+                // their evidence is the missing COMMIT, which is real.
+                guard tab.state.loadingState.isLoading else {
+                    NSLog("[PaintWatch] tab %@ not escalating - committed and no longer loading, so it loaded and simply did not paint", tabID.uuidString)
+                    return
+                }
                 guard let currentHost = DomainMatcher.host(from: tab.url ?? ""),
                       let watchedHost = DomainMatcher.host(from: wait.retryURL),
                       !currentHost.isEmpty,
@@ -1535,6 +1581,20 @@ final class TabManagerImplementation: NSObject, TabManager {
             // load. The captured trace shows an identical second
             // LoadUri forcing the engine to rebuild and commit within
             // ~1.5 seconds - this is that second Go press, automated.
+            // Once per URL, which is what the comment at the top of this
+            // function already promises. "One escalation, ever, per
+            // armed watch" is true and does not deliver it, because the
+            // escalation's own load commits, the commit fires a location
+            // change, and the location change arms another watch.
+            //
+            // Cleared by any load to a different URL - see loadURL - so
+            // a real second attempt after real navigation still gets its
+            // one automated Go press.
+            if self.lastEscalatedURL[tabID] == wait.retryURL {
+                NSLog("[PaintWatch] tab %@ not escalating - already re-dispatched this URL once", tabID.uuidString)
+                return
+            }
+            self.lastEscalatedURL[tabID] = wait.retryURL
             NSLog("[PaintWatch] tab %@ escalating - re-dispatching %@", tabID.uuidString, wait.url)
             self.loadURL(wait.retryURL, in: tab)
         }
