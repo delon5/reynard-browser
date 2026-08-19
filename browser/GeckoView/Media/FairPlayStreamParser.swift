@@ -4159,7 +4159,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
 
     func contentKeySession(
         _ session: AVContentKeySession,
-        shouldRetryContentKeyRequest keyRequest: AVContentKeyRequest,
+        shouldRetry keyRequest: AVContentKeyRequest,
         reason retryReason: AVContentKeyRequest.RetryReason) -> Bool {
         FairPlayStreamParser.log(
             "session \(sessionId) asked whether to retry a key request - "
@@ -4188,6 +4188,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             + "changed to \(identifier?.count ?? -1) bytes")
     }
 
+    @available(iOS 14.5, *)
     func contentKeySession(_ session: AVContentKeySession,
                            externalProtectionStatusDidChangeFor
                            contentKeySpecifier: AVContentKeySpecifier,
