@@ -144,6 +144,23 @@ public final class FairPlayStreamParser: NSObject {
         /// is swapped for the one being asked about, so one template
         /// serves every key in the presentation.
         var templateSinf: Data?
+        /// The parser's own specifier for each key, by the tenc KID its
+        /// sinf names.
+        ///
+        /// A template is a reconstruction and templateSinf holds only
+        /// one of them, harvested from whichever stream appended first.
+        /// Each track has its own constant IV, so reusing one track's
+        /// sinf for another track's key asks for the wrong thing - the
+        /// video key went out carrying the audio track's IV, and both
+        /// sinks refused every sample with -11800 "no content key
+        /// present".
+        ///
+        /// These are not reconstructions. They are the bytes
+        /// AVStreamDataParser produced from the real init segment, in
+        /// the document shape processContentKeyRequest takes, one per
+        /// key - the same thing HBO Max's page hands over directly and
+        /// the reason that site works.
+        var specifierByKeyId: [String: Data] = [:]
         /// Track ids the parsed asset reported.
         ///
         /// Separate from trackIDs, which only ever holds tracks a KEY
@@ -234,6 +251,29 @@ public final class FairPlayStreamParser: NSObject {
         guard identifier != nil || initializationData != nil else {
             Self.log("specifier carries neither identifier nor initialisation data")
             return
+        }
+        // File this specifier under the key its own sinf names.
+        //
+        // Whatever else happens to it below - it may be stood down as a
+        // second request for a key already asked about - these bytes are
+        // worth keeping. They carry the KID and the constant IV
+        // together, for THIS track, already serialised the way
+        // processContentKeyRequest wants them.
+        if let initializationData,
+           let sinf = Self.sinfFromSpecifierJSON(initializationData),
+           let named = Self.keyIdentifier(inTenc: sinf) {
+            let hex = Self.hexBytes(named)
+            let isNew = withState { () -> Bool in
+                guard entry.specifierByKeyId[hex] == nil else {
+                    return false
+                }
+                entry.specifierByKeyId[hex] = initializationData
+                return true
+            }
+            if isNew {
+                Self.log("session \(sessionId) filed the parser's specifier "
+                         + "for key \(hex), \(initializationData.count) bytes")
+            }
         }
         // Stand down when the direct route drives this session.
         //
@@ -596,10 +636,34 @@ public final class FairPlayStreamParser: NSObject {
         // this request is about to be built from a fabricated tenc, and
         // the parser's own specifier is then the only one that can name
         // the key these samples actually use.
-        withState { entry.directRouteSynthesised = (template == nil) }
-        let forSession = Self.sinfInitialisationJSON(
-            keyId: keyId, template: template, sessionId: sessionId)
-            ?? (payload ?? initData)
+        // The parser's own specifier for THIS key, if one has been seen.
+        //
+        // Preferred over everything below, because it is not a
+        // reconstruction: it names this track's KID and this track's
+        // constant IV, which no template shared between two tracks can
+        // do. HBO Max's page hands over exactly this shape and that site
+        // renders; Apple TV hands over a pssh, and every sinf built from
+        // one has been refused.
+        let exactSpecifier: Data? = keyId.flatMap { id -> Data? in
+            let hex = Self.hexBytes(id)
+            return withState { () -> Data? in entry.specifierByKeyId[hex] }
+        }
+        withState {
+            entry.directRouteSynthesised = (exactSpecifier == nil
+                                            && template == nil)
+        }
+        let forSession: Data
+        if let exactSpecifier {
+            Self.log("session \(sessionId) asking with the parser's own "
+                     + "specifier for key "
+                     + (keyId.map { Self.hexBytes($0) } ?? "?")
+                     + ", \(exactSpecifier.count) bytes")
+            forSession = exactSpecifier
+        } else {
+            forSession = Self.sinfInitialisationJSON(
+                keyId: keyId, template: template, sessionId: sessionId)
+                ?? (payload ?? initData)
+        }
         Self.log("session \(sessionId) raising a key request from "
                  + "\(forSession.count) bytes - key id "
                  + (keyId.map { "\($0.count) bytes" } ?? "not found"))
@@ -874,6 +938,20 @@ public final class FairPlayStreamParser: NSObject {
             typeAt += 1
         }
         return nil
+    }
+
+    /// The sinf inside a specifier's initialisation data.
+    ///
+    /// The parser hands back {"sinf":["<base64>"]} - the same document
+    /// sinfInitialisationJSON builds - so this is the read half of it.
+    static func sinfFromSpecifierJSON(_ data: Data) -> Data? {
+        guard let json = try? JSONSerialization.jsonObject(with: data),
+              let object = json as? [String: Any],
+              let list = object["sinf"] as? [Any],
+              let first = list.first as? String else {
+            return nil
+        }
+        return Data(base64Encoded: first)
     }
 
     /// Bytes as hex, the way every other log line in this file spells
