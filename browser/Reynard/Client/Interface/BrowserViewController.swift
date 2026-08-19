@@ -373,6 +373,11 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     private func applyGeckoPreferences() {
         // HTTPS-only mode
         HTTPSOnlyModePolicyController.applyHTTPSOnlyMode()
+        // Autoplay. Never applied before this: media.autoplay.default
+        // was not written anywhere in the tree, so the Site Settings
+        // choice reached the engine only through a permission request no
+        // capture has ever shown Gecko making.
+        AutoplayPolicyController.applyAutoplayPolicy()
         MediaCompatibilityPolicyController.applyMediaSourceVisibility()
         // The other half of the same decision, and applied here for the
         // same reason: without it the switch only takes effect when

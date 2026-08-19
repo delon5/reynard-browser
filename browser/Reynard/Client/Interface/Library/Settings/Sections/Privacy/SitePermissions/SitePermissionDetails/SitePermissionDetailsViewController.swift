@@ -119,6 +119,13 @@ final class SitePermissionDetailsViewController: SettingsTableViewController {
         }
         
         SiteSettingsUtils.setDefaultAction(defaultActionOptions[indexPath.row].action, for: permission)
+        // The engine has to be told too, and only Autoplay has a pref
+        // behind it. Without this the choice takes effect at the next
+        // launch, which for a setting the user just changed reads as it
+        // not working.
+        if permission == .autoplay {
+            AutoplayPolicyController.applyAutoplayPolicy()
+        }
         reloadSiteEntries()
         tableView.reloadData()
     }

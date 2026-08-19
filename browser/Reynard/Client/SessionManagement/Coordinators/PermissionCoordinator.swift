@@ -84,6 +84,14 @@ final class PermissionCoordinator: NSObject, PermissionEmbedderDelegate {
         
         let action = resolvedAction(for: sitePermission, host: host, session: session)
         if sitePermission == .autoplay {
+            // Said out loud, because whether this is reached at all is
+            // an open question. media.geckoview.autoplay.request is set,
+            // which should make Gecko ask - and no capture has ever
+            // contained one line of permission traffic. If this never
+            // prints, the per-site half of the Autoplay setting is
+            // decorative and the default pref is doing all the work.
+            print("[Reynard] autoplay: Gecko asked for \(host) - "
+                  + "answering \(action) (value \(action.autoplayValue))")
             applyPermission(action, to: sitePermission, permission: permission)
             return ContentPermission.Value(rawValue: action.autoplayValue) ?? .deny
         }
