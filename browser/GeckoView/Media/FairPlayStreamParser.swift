@@ -3991,6 +3991,15 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     /// Requests whose SPC has gone out, by EME content id, waiting for a
     /// licence addressed to that id.
     private var outstanding: [String: AVContentKeyRequest] = [:]
+    /// Licences already applied, by the key id they were applied for.
+    ///
+    /// The page answers one message per session and no more. When the
+    /// parser later raises its own request for a key the direct route
+    /// already licensed, there is nobody left to ask - so the licence is
+    /// kept and replayed into it. Keyed by the request's own 16-byte
+    /// identifier, which both routes carry and which is the only thing
+    /// the two have in common.
+    private var licenceByKeyId: [String: Data] = [:]
     /// Whether any key request has ever arrived for this session.
     private var requestArrived = false
     /// How many have. The watchdog needs the COUNT, not the flag: a
@@ -4184,6 +4193,44 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             self.withLock {
                 self.outstanding[origination.contentId] = keyRequest
             }
+            // A licence we already hold beats a message nobody answers.
+            //
+            // Only for the requests fix 66 addressed by key id - the
+            // ones the parser raised, which the page did not ask for and
+            // will not answer. Everything the page originated still gets
+            // the page's own licence; replaying one into a genuine
+            // renewal would be a stale key answering a fresh question.
+            //
+            // The SPC is made either way, because a request has to be
+            // loaded before a response can be processed. It simply is
+            // not sent.
+            let replayed: Bool = { () -> Bool in
+                guard origination.contentId.hasPrefix("reynard-keyid:"),
+                      let identifier = keyRequest.identifier as? Data,
+                      identifier.count == 16 else {
+                    return false
+                }
+                let hex = identifier.map { String(format: "%02x", $0) }.joined()
+                let held: Data? = self.withLock { () -> Data? in
+                    self.licenceByKeyId[hex]
+                }
+                guard let held else {
+                    FairPlayStreamParser.log(
+                        "session \(self.sessionId) no licence held for key "
+                        + "\(hex) - asking the page")
+                    return false
+                }
+                FairPlayStreamParser.log(
+                    "session \(self.sessionId) replaying the licence already "
+                    + "held for key \(hex) (\(held.count) bytes) instead of "
+                    + "asking again")
+                _ = self.provide(response: held,
+                                 contentId: origination.contentId)
+                return true
+            }()
+            if replayed {
+                return
+            }
             self.report(spc: spc, contentId: origination.contentId)
         }
     }
@@ -4242,6 +4289,18 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         FairPlayStreamParser.log(
             "session \(sessionId) licence applied to the request for id "
             + "\(contentId), \(ckc.count) bytes")
+        // Kept, for a request that has not been raised yet.
+        //
+        // Apple's player answers one message per session. The parser's
+        // own specifier arrives afterwards, asks for the same key, and
+        // is met with silence - both of its SPCs reached the page in the
+        // last capture and neither was ever answered. This is what the
+        // replay below serves.
+        if let identifier = request.identifier as? Data,
+           identifier.count == 16 {
+            let hex = identifier.map { String(format: "%02x", $0) }.joined()
+            withLock { () -> Void in licenceByKeyId[hex] = ckc }
+        }
         // THE RENDER QUESTION, asked for the first time with a real key.
         //
         // Everything up to here is settled: the page's licence is inside
