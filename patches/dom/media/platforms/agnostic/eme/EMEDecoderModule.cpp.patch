@@ -1,7 +1,7 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -16,15 +16,157 @@
+@@ -16,15 +16,179 @@
  #include "MP4Decoder.h"
 +#include "MediaData.h"
 +#include "ReynardAVPlayerDecoderModule.h"  // the protected placeholder
@@ -103,9 +103,31 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    // non-zero only when the type does not truncate.
 +    const bool reynardFloatSamples =
 +        (AudioDataValue(0.5) != AudioDataValue(0));
++    // LOUDER, because -90 dBFS was under the threshold.
++    //
++    // The corpus settles this. Every capture built with Gecko's blank
++    // audio decoder activated the media session on HBO Max - "ACTIVATED
++    // Don't Worry Darling" - and every build since fixes 37 and 38
++    // replaced it has not, including the one running the 1/32768 floor.
++    // Gecko's blank audio decoder emits an A4 SINE TONE at full scale,
++    // which is why fix 37 removed it; that tone is what media control
++    // was hearing.
++    //
++    // So audibility is the gate and the floor is simply too quiet.
++    // -40 dBFS instead of -90, which clears any plausible silence
++    // threshold with room to spare and is still nowhere near full
++    // scale.
++    //
++    // Inaudible for a better reason than being quiet: this is a
++    // constant DC offset, not an oscillation. It has no alternating
++    // component, so it moves no air at any amplitude - the 440 Hz tone
++    // does not come back at a lower volume, it does not come back at
++    // all.
++    const double reynardFloorLevel = 1.0 / 100.0;
 +    const AudioDataValue reynardFloor =
-+        reynardFloatSamples ? AudioDataValue(1.0 / 32768.0)
-+                            : AudioDataValue(1);
++        reynardFloatSamples
++            ? AudioDataValue(reynardFloorLevel)
++            : AudioDataValue(reynardFloorLevel * 32768.0);
 +    // Once per process, because a change with no line of its own cannot
 +    // be told apart in a capture from a build that never had it - which
 +    // is exactly what happened to the first HBO capture after fix 56,
@@ -116,9 +138,9 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +      reynardFloorAnnounced = true;
 +      printf_stderr(
 +          "mseDecoderRoute: silent audio floor ACTIVE - %s samples, "
-+          "%lld frames x %u ch @ %u Hz\n",
-+          reynardFloatSamples ? "float" : "integer", (long long)frames,
-+          mChannels, mRate);
++          "value %f, %lld frames x %u ch @ %u Hz\n",
++          reynardFloatSamples ? "float" : "integer",
++          (double)reynardFloor, (long long)frames, mChannels, mRate);
 +    }
 +    for (int64_t i = 0; i < frames; i++) {
 +      for (uint32_t c = 0; c < mChannels; c++) {
