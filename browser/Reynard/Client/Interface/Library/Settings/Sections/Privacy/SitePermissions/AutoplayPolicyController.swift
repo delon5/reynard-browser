@@ -31,8 +31,17 @@ import GeckoView
 enum AutoplayPolicyController {
     static func applyAutoplayPolicy() {
         let action = SiteSettingsUtils.defaultAction(for: .autoplay)
+        let value = action.geckoAutoplayDefault
+        // Said out loud, and that is not decoration. Without it a
+        // capture cannot show whether this fix is in the build - the
+        // only other evidence is the autoplay= verdict on the VIDEO
+        // line, and that reads "allowed" both when the pref is absent
+        // and when it is set but overridden by user activation. One
+        // line separates them.
+        print("[Reynard] autoplay: media.autoplay.default = \(value) "
+              + "(\(action)) - 0 allows, 1 allows muted, 5 blocks both")
         GeckoRuntime.setDefaultPrefs([
-            "media.autoplay.default": action.geckoAutoplayDefault,
+            "media.autoplay.default": value,
         ])
     }
 }

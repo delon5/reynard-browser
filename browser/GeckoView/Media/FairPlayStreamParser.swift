@@ -1208,6 +1208,9 @@ public final class FairPlayStreamParser: NSObject {
         /// was dts 15.588 -> 10.000. No high-water mark is needed here
         /// because this value only ever goes forwards.
         var lastIntakeDTS = Double.nan
+        /// Has this stream already said it is not ours to render? See
+        /// standDown.
+        var standDownLogged = false
         /// The newest PTS ever handed to the display layer.
         ///
         /// The clock being past THIS is the fatal condition: no sample
@@ -1505,6 +1508,25 @@ public final class FairPlayStreamParser: NSObject {
             return
         }
         guard let slot = withState({ streamParsers[streamKey] }) else {
+            return
+        }
+
+        // ONLY SAMPLES NOTHING ELSE CAN RENDER.
+        //
+        // If the parser hands back a CLEAR sample then Gecko has the
+        // same bytes and is already decoding them - DoCreateDecoder
+        // reports encrypted=0 for exactly these tracks - so putting them
+        // in a display layer paints a second picture over the first.
+        // tv.apple.com does this, and 242 video samples went into a
+        // layer for a video that was already on screen.
+        //
+        // It was bounded before and therefore invisible: AppendData
+        // forwarded eight fragments per process and stopped. Fix 45
+        // removed that budget because it was starving HBO, and the
+        // duplicate became the whole film. This is that fix's other
+        // half.
+        guard Self.isProtectedSample(sampleBuffer) else {
+            standDown(streamKey: streamKey, half: "video")
             return
         }
 
@@ -2118,6 +2140,16 @@ public final class FairPlayStreamParser: NSObject {
     fileprivate func enqueueForPlayback(streamKey: String,
                                         sampleBuffer: CMSampleBuffer) {
         guard let slot = withState({ streamParsers[streamKey] }) else {
+            return
+        }
+
+        // The same rule, and the audible half of it - see
+        // enqueueForDisplay. A clear sample is already going through
+        // Gecko's own audio sink, and a second copy through an
+        // AVSampleBufferAudioRenderer is the doubled sound on
+        // tv.apple.com.
+        guard Self.isProtectedSample(sampleBuffer) else {
+            standDown(streamKey: streamKey, half: "audio")
             return
         }
 
@@ -3116,6 +3148,53 @@ public final class FairPlayStreamParser: NSObject {
     /// anything that is not registered with the content key session.
     fileprivate static let protectedSubtypes: Set<String> =
         ["encv", "enca", "qavc", "qaac"]
+
+    /// Is this sample one only this route can render?
+    ///
+    /// encv and enca were not decrypted at all; qavc and qaac were
+    /// decrypted only in name, their bytes still ciphertext until a
+    /// decoder registered with the content key session touches them.
+    /// Anything else is clear, and clear samples are Gecko's - it has
+    /// the same bytes, it reports the track as encrypted=0, and it is
+    /// already decoding them.
+    ///
+    /// A sample with no format description at all counts as NOT
+    /// protected. It cannot be identified, and the failure that matters
+    /// is playing something twice rather than not playing a sample this
+    /// route was never going to be able to decode anyway.
+    fileprivate static func isProtectedSample(_ sampleBuffer: CMSampleBuffer)
+        -> Bool {
+        guard let description =
+                CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return false
+        }
+        let code = CMFormatDescriptionGetMediaSubType(description)
+        let fourCC = String([24, 16, 8, 0].map { shift -> Character in
+            let byte = UInt8((code >> UInt32(shift)) & 0xff)
+            return (byte >= 0x20 && byte <= 0x7e)
+                ? Character(UnicodeScalar(byte)) : "."
+        })
+        return protectedSubtypes.contains(fourCC)
+    }
+
+    /// Say once that this stream is not ours to render.
+    ///
+    /// Once, because it is true for every sample of a clear stream and
+    /// four hundred identical lines would bury the one that matters. It
+    /// is worth saying at all because the alternative reading of silence
+    /// - that no samples arrived - is a completely different problem.
+    private func standDown(streamKey: String, half: String) {
+        let first = withState { () -> Bool in
+            guard let slot = streamParsers[streamKey],
+                  !slot.standDownLogged else { return false }
+            slot.standDownLogged = true
+            return true
+        }
+        guard first else { return }
+        Self.log("stream \(streamKey) standing down - these samples are "
+                 + "CLEAR, so Gecko is already decoding and playing them "
+                 + "and a \(half) sink here would be a second copy")
+    }
 
     // ==================================================================
     // THE ELEMENT'S STATE
