@@ -1,0 +1,90 @@
+diff --git a/dom/ipc/VsyncParent.cpp b/dom/ipc/VsyncParent.cpp
+index de3d508..e2c7dfb 100644
+--- a/dom/ipc/VsyncParent.cpp
++++ b/dom/ipc/VsyncParent.cpp
+@@ -4,10 +4,21 @@
+
+ #include "VsyncParent.h"
+
++#include "nsDebug.h"
+ #include "nsThreadUtils.h"
+
+ namespace mozilla::dom {
+
++// vsyncTrace (diagnostic for the committed-never-painted investigation):
++// the pid of the content process this actor serves, for correlating
++// these lines with the JIT attach and processExitTrace logs. -1 while
++// the actor is not yet linked to its channel (actor creation) or after
++// teardown.
++static int VsyncTracePeerPid(VsyncParent* aActor) {
++  mozilla::ipc::IToplevelProtocol* top = aActor->ToplevelProtocol();
++  return top ? static_cast<int>(top->OtherPidMaybeInvalid()) : -1;
++}
++
+ VsyncParent::VsyncParent()
+     : mObservingVsync(false),
+       mDestroyed(false),
+@@ -19,6 +30,15 @@ void VsyncParent::UpdateVsyncDispatcher(
+     return;
+   }
+
++  // In practice one line per actor, at its birth: the only caller is
++  // AllocPVsyncParent, which hands every new actor the global
++  // dispatcher at creation - before the IPC link exists, hence no pid
++  // here; the observe line carries it. A null NEW dispatcher would
++  // mean this child's vsync is wired to nothing.
++  printf_stderr("vsyncTrace: parent actor %p dispatcher %p -> %p\n",
++                static_cast<void*>(this),
++                static_cast<void*>(mVsyncDispatcher.get()),
++                static_cast<void*>(aVsyncDispatcher.get()));
+   if (mObservingVsync && mVsyncDispatcher) {
+     mVsyncDispatcher->RemoveVsyncObserver(this);
+   }
+@@ -51,6 +71,16 @@ void VsyncParent::DispatchVsyncEvent(const VsyncEvent& aVsync) {
+   // NotifyVsync(). We use mObservingVsync and mDestroyed flags to skip this
+   // notification.
+   if (mObservingVsync && !mDestroyed) {
++    if (!mLoggedTickAfterObserve) {
++      // Once per observe cycle, never at frame rate: this line proves
++      // the hardware (or software) vsync source behind the global
++      // dispatcher is actually ticking and this child is being told.
++      // Its absence after an observe line is the dead-display-link
++      // signature.
++      mLoggedTickAfterObserve = true;
++      printf_stderr("vsyncTrace: parent actor %p first tick -> pid=%d\n",
++                    static_cast<void*>(this), VsyncTracePeerPid(this));
++    }
+     TimeDuration vsyncRate = mVsyncDispatcher->GetVsyncRate();
+     (void)SendNotify(aVsync, vsyncRate.ToMilliseconds());
+   }
+@@ -59,6 +89,11 @@ void VsyncParent::DispatchVsyncEvent(const VsyncEvent& aVsync) {
+ mozilla::ipc::IPCResult VsyncParent::RecvObserve() {
+   AssertIsOnInitialThread();
+   if (!mObservingVsync) {
++    printf_stderr(
++        "vsyncTrace: parent actor %p observe from pid=%d dispatcher=%p\n",
++        static_cast<void*>(this), VsyncTracePeerPid(this),
++        static_cast<void*>(mVsyncDispatcher.get()));
++    mLoggedTickAfterObserve = false;
+     if (mVsyncDispatcher) {
+       mVsyncDispatcher->AddVsyncObserver(this);
+     }
+@@ -71,6 +106,8 @@ mozilla::ipc::IPCResult VsyncParent::RecvObserve() {
+ mozilla::ipc::IPCResult VsyncParent::RecvUnobserve() {
+   AssertIsOnInitialThread();
+   if (mObservingVsync) {
++    printf_stderr("vsyncTrace: parent actor %p unobserve from pid=%d\n",
++                  static_cast<void*>(this), VsyncTracePeerPid(this));
+     if (mVsyncDispatcher) {
+       mVsyncDispatcher->RemoveVsyncObserver(this);
+     }
+@@ -83,6 +120,9 @@ mozilla::ipc::IPCResult VsyncParent::RecvUnobserve() {
+ void VsyncParent::ActorDestroy(ActorDestroyReason aActorDestroyReason) {
+   MOZ_ASSERT(!mDestroyed);
+   AssertIsOnInitialThread();
++  printf_stderr("vsyncTrace: parent actor %p destroyed pid=%d observing=%d\n",
++                static_cast<void*>(this), VsyncTracePeerPid(this),
++                mObservingVsync ? 1 : 0);
+   if (mObservingVsync && mVsyncDispatcher) {
+     mVsyncDispatcher->RemoveVsyncObserver(this);
+   }

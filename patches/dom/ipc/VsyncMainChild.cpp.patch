@@ -1,0 +1,70 @@
+diff --git a/dom/ipc/VsyncMainChild.cpp b/dom/ipc/VsyncMainChild.cpp
+index 2182a8f..4c45d1a 100644
+--- a/dom/ipc/VsyncMainChild.cpp
++++ b/dom/ipc/VsyncMainChild.cpp
+@@ -4,8 +4,11 @@
+
+ #include "VsyncMainChild.h"
+
++#include <unistd.h>
++
+ #include "mozilla/SchedulerGroup.h"
+ #include "mozilla/VsyncDispatcher.h"
++#include "nsDebug.h"
+ #include "nsThreadUtils.h"
+
+ namespace mozilla::dom {
+@@ -26,6 +29,14 @@ void VsyncMainChild::AddChildRefreshTimer(VsyncObserver* aVsyncObserver) {
+   }
+
+   if (mObservers.IsEmpty()) {
++    // vsyncTrace (diagnostic for the committed-never-painted
++    // investigation): the first refresh driver of this subscription
++    // cycle just asked for vsync - fires on every empty-to-non-empty
++    // observer transition, so a process that never logs it is running
++    // no vsync-driven refresh driver at all.
++    printf_stderr("vsyncTrace: child pid=%d sending observe\n",
++                  static_cast<int>(getpid()));
++    mLoggedTickAfterObserve = false;
+     (void)PVsyncChild::SendObserve();
+   }
+   mObservers.AppendElement(std::move(aVsyncObserver));
+@@ -38,6 +49,8 @@ void VsyncMainChild::RemoveChildRefreshTimer(VsyncObserver* aVsyncObserver) {
+   }
+
+   if (mObservers.RemoveElement(aVsyncObserver) && mObservers.IsEmpty()) {
++    printf_stderr("vsyncTrace: child pid=%d sending unobserve\n",
++                  static_cast<int>(getpid()));
+     (void)PVsyncChild::SendUnobserve();
+   }
+ }
+@@ -47,6 +60,12 @@ void VsyncMainChild::ActorDestroy(ActorDestroyReason aActorDestroyReason) {
+   MOZ_ASSERT(!mIsShutdown);
+   mIsShutdown = true;
+
++  // vsyncTrace: this channel dying while refresh drivers are still
++  // registered (observers>0) strands them tickless - itself a
++  // never-paints signature.
++  printf_stderr("vsyncTrace: child pid=%d vsync actor destroyed observers=%u\n",
++                static_cast<int>(getpid()),
++                static_cast<unsigned>(mObservers.Length()));
+   if (!mObservers.IsEmpty()) {
+     (void)PVsyncChild::SendUnobserve();
+   }
+@@ -58,6 +77,16 @@ mozilla::ipc::IPCResult VsyncMainChild::RecvNotify(const VsyncEvent& aVsync,
+   MOZ_ASSERT(NS_IsMainThread());
+   MOZ_ASSERT(!mIsShutdown);
+
++  if (!mLoggedTickAfterObserve) {
++    // Once per observe cycle, never at frame rate: this line proves a
++    // vsync tick crossed the IPC boundary into this process. Between
++    // it and the parent-side first-tick line, a lost tick can be
++    // pinned to exactly one side of the channel.
++    mLoggedTickAfterObserve = true;
++    printf_stderr(
++        "vsyncTrace: child pid=%d first tick received observers=%u\n",
++        static_cast<int>(getpid()), static_cast<unsigned>(mObservers.Length()));
++  }
+   mVsyncRate = TimeDuration::FromMilliseconds(aVsyncRate);
+
+   for (RefPtr<VsyncObserver> observer : mObservers.ForwardRange()) {

@@ -1,0 +1,16 @@
+diff --git a/dom/ipc/VsyncMainChild.h b/dom/ipc/VsyncMainChild.h
+index db81672..c47eccd 100644
+--- a/dom/ipc/VsyncMainChild.h
++++ b/dom/ipc/VsyncMainChild.h
+@@ -39,6 +39,11 @@ class VsyncMainChild final : public VsyncChild {
+   void ActorDestroy(ActorDestroyReason aActorDestroyReason) override;
+
+   bool mIsShutdown;
++  // vsyncTrace diagnostic only: cleared each time this process
++  // (re)subscribes to parent vsync, set when the first tick of that
++  // subscription arrives, so RecvNotify can log once per subscription
++  // instead of at frame rate.
++  bool mLoggedTickAfterObserve = false;
+   TimeDuration mVsyncRate;
+   nsTObserverArray<VsyncObserver*> mObservers;
+ };
