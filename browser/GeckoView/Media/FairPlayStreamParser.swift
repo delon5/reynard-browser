@@ -110,6 +110,32 @@ public final class FairPlayStreamParser: NSObject {
         /// A flag, not a count: a session with three exchanges queued
         /// still wants three requests. This says which route makes them.
         var directRouteOwnsSession = false
+        /// Whether that direct-route request was built from an INVENTED
+        /// sinf.
+        ///
+        /// canonicalSinf fabricates a tenc when no real init segment has
+        /// been seen yet, and a key minted against it cannot serve the
+        /// samples - tv.apple.com's sinks refuse every one of them with
+        /// -11800 "no content key present" while four such licences sit
+        /// applied. So this decides whether the parser's own specifier,
+        /// which IS derived from the real init segment, is still worth
+        /// raising.
+        ///
+        /// Captured at the request rather than read later: fix 63's
+        /// harvest can fill templateSinf after the fact, and the
+        /// question is what the request that already went out was built
+        /// from.
+        var directRouteSynthesised = false
+        /// Specifiers already let through, by their initialisation
+        /// data.
+        ///
+        /// The callback fires per append, not once - eight times in the
+        /// capture this was written against - and eight key requests for
+        /// one track is a storm, not a fix. Keyed by the bytes rather
+        /// than by a track id because processSpecifier is not given one:
+        /// two tracks carry two different specifiers, and one track
+        /// re-appended carries the same one.
+        var specifierRaisedFor: Set<Data> = []
         /// A sinf box lifted from an init segment the page appended.
         ///
         /// Used as the TEMPLATE for the JSON handed to
@@ -219,11 +245,49 @@ public final class FairPlayStreamParser: NSObject {
         // The render probe is unaffected: it never calls requestKey, so
         // this callback remains its only way to raise a key request, and
         // it is the path the 6480-byte SPC came back through.
-        if withState({ entry.directRouteOwnsSession }) {
+        //
+        // NARROWED. Standing down is right when the direct route's
+        // request was a good one. It is wrong when that request was
+        // built from an invented sinf: such a key cannot serve these
+        // samples however well the licence exchange goes, so suppressing
+        // the only request that could is pure loss. tv.apple.com spent a
+        // whole capture that way - four licences applied, eight
+        // specifiers discarded, and both sinks refusing every protected
+        // sample with -11800 "no content key present".
+        //
+        // Once per specifier, because this callback fires per append -
+        // eight times in one capture - and eight key requests for one
+        // track is a storm, not a fix.
+        let standDown = withState { () -> Bool in
+            entry.directRouteOwnsSession && !entry.directRouteSynthesised
+        }
+        if standDown {
             Self.log("session \(sessionId) parser raised a specifier, but the "
                      + "direct route already asked for this key - not raising "
                      + "a second request")
             return
+        }
+        if withState({ entry.directRouteOwnsSession }) {
+            let alreadyRaised = withState { () -> Bool in
+                guard let initializationData else {
+                    return false
+                }
+                guard !entry.specifierRaisedFor.contains(initializationData)
+                else {
+                    return true
+                }
+                entry.specifierRaisedFor.insert(initializationData)
+                return false
+            }
+            if alreadyRaised {
+                Self.log("session \(sessionId) this specifier has already "
+                         + "been raised - not asking again")
+                return
+            }
+            Self.log("session \(sessionId) the direct route asked with a "
+                     + "SYNTHESISED sinf, so its key cannot serve these "
+                     + "samples - letting the parser's own specifier through, "
+                     + "\(initializationData?.count ?? 0) bytes")
         }
         Self.log("handing the specifier to the key session - id "
                  + "\(identifier.map { String(describing: $0) } ?? "nil"), "
@@ -528,6 +592,11 @@ public final class FairPlayStreamParser: NSObject {
         // difference. psshPayload stays only for the log line below.
         let payload = Self.psshPayload(in: initData)
         let template = withState { entry.templateSinf }
+        // Recorded here, where the answer is knowable: with no template
+        // this request is about to be built from a fabricated tenc, and
+        // the parser's own specifier is then the only one that can name
+        // the key these samples actually use.
+        withState { entry.directRouteSynthesised = (template == nil) }
         let forSession = Self.sinfInitialisationJSON(
             keyId: keyId, template: template, sessionId: sessionId)
             ?? (payload ?? initData)

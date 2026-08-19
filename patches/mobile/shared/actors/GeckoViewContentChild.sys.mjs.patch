@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2180 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2313 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2161,6 +2161,139 @@ index 9ca6e15..18d37f0 100644
 +    debug("installed the play-caller trace");
 +  } catch (e) {}
 +
++  // ---- make navigator agree with the user agent ------------------------
++  //
++  // A per-site UA override changes one header and navigator.userAgent.
++  // It changes nothing else, so a script reads userAgent and sees
++  // Macintosh, then reads platform and sees the iOS value. Netflix
++  // derives the client identity its licence server keys on from
++  // exactly this class of property, and its failure has the matching
++  // shape: MKSA granted, five sessions, five license-request messages,
++  // and update() never called once.
++  //
++  // Derived rather than configured. The values come from the UA the
++  // site is already given, so setting a Mac UA is the whole
++  // configuration and appVersion follows the Safari version by
++  // construction. general.platform.override and friends would do the
++  // first four, but they are browser-global - there is no per-host form
++  // - and they cannot reach maxTouchPoints or window.safari at all.
++  //
++  // Gated on the disguise itself: this acts only when the UA claims a
++  // DESKTOP operating system. An iPhone cannot natively report
++  // Macintosh, so a UA that says so is necessarily an override, and one
++  // that does not is left alone - which covers tv.apple.com, HBO Max,
++  // Prime Video and Disney+, all of which UserAgentPolicy hands the
++  // Safari iPhone string.
++  try {
++    var reynardIdentityUA = String(navigator.userAgent || "");
++    var reynardIdentity = null;
++    if (reynardIdentityUA.indexOf("Macintosh") !== -1) {
++      reynardIdentity = {
++        name: "Macintosh",
++        platform: "MacIntel",
++        oscpu: "Intel Mac OS X 10.15",
++        vendor: "Apple Computer, Inc.",
++        vendorSub: "",
++        maxTouchPoints: 0,
++        safari: true,
++      };
++    } else if (reynardIdentityUA.indexOf("Windows NT") !== -1) {
++      reynardIdentity = {
++        name: "Windows",
++        platform: "Win32",
++        oscpu: "Windows NT 10.0; Win64; x64",
++        vendor: "",
++        vendorSub: "",
++        maxTouchPoints: 0,
++        safari: false,
++      };
++    } else if (reynardIdentityUA.indexOf("X11") !== -1) {
++      reynardIdentity = {
++        name: "X11",
++        platform: "Linux x86_64",
++        oscpu: "Linux x86_64",
++        vendor: "",
++        vendorSub: "",
++        maxTouchPoints: 0,
++        safari: false,
++      };
++    }
++
++    if (reynardIdentity) {
++      // appVersion is the user agent without its leading Mozilla/ - the
++      // definition every browser follows. Taken from the string rather
++      // than written down, so it moves when the override does.
++      var reynardAppVersion =
++        reynardIdentityUA.indexOf("Mozilla/") === 0
++          ? reynardIdentityUA.slice(8)
++          : reynardIdentityUA;
++
++      debug(
++        "identity UA claims " + reynardIdentity.name +
++        " - was platform=" + navigator.platform +
++        " oscpu=" + navigator.oscpu +
++        " vendor=" + navigator.vendor +
++        " maxTouchPoints=" + navigator.maxTouchPoints
++      );
++
++      // On the instance first, which shadows the prototype getter, and
++      // on the prototype if the instance refuses. Neither is guaranteed
++      // for a WebIDL attribute, which is why every value is read back
++      // below instead of being assumed.
++      var reynardDefine = function (name, value) {
++        var descriptor = {
++          configurable: true,
++          enumerable: true,
++          get: function () {
++            return value;
++          },
++        };
++        try {
++          Object.defineProperty(navigator, name, descriptor);
++          return;
++        } catch (e) {}
++        try {
++          Object.defineProperty(
++            window.Navigator.prototype, name, descriptor);
++        } catch (e) {}
++      };
++
++      reynardDefine("platform", reynardIdentity.platform);
++      reynardDefine("oscpu", reynardIdentity.oscpu);
++      reynardDefine("appVersion", reynardAppVersion);
++      reynardDefine("vendor", reynardIdentity.vendor);
++      reynardDefine("vendorSub", reynardIdentity.vendorSub);
++      reynardDefine("maxTouchPoints", reynardIdentity.maxTouchPoints);
++
++      // window.safari is Safari-only and some players test for it by
++      // name. The shape is the one detection actually reads: Safari
++      // exposes a pushNotification whose toString names the class.
++      if (reynardIdentity.safari && !window.safari) {
++        try {
++          window.safari = {
++            pushNotification: {
++              toString: function () {
++                return "[object SafariRemoteNotification]";
++              },
++            },
++          };
++        } catch (e) {}
++      }
++
++      // Read back, not asserted. A property that refused to be
++      // redefined prints its old value here, which is the difference
++      // between "this worked" and "this was attempted".
++      debug(
++        "identity now platform=" + navigator.platform +
++        " oscpu=" + navigator.oscpu +
++        " appVersion=" + String(navigator.appVersion).slice(0, 60) +
++        " vendor=" + navigator.vendor +
++        " maxTouchPoints=" + navigator.maxTouchPoints +
++        " safari=" + (window.safari ? "yes" : "no")
++      );
++    }
++  } catch (e) {}
++
 +  window.WebKitMediaKeys = WebKitMediaKeys;
 +  window.WebKitMediaKeySession = WebKitMediaKeySession;
 +  debug("installed over standard EME");
@@ -2183,7 +2316,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2241,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2374,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -2679,7 +2812,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +2847,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +2980,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -2701,7 +2834,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +2877,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3010,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
