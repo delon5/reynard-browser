@@ -667,7 +667,28 @@ public final class FairPlayStreamParser: NSObject {
             return nil
         }
         let sinf: Data
-        if let template, let rekeyed = replacingKeyId(in: template, with: keyId) {
+        // A real template names the media's own key. Do not overwrite it.
+        //
+        // Rekeying is right when the key id came from the page - HBO
+        // Max's init data IS a sinf, so its keyId and its template's
+        // tenc agree and the rewrite is a no-op. It is wrong when the
+        // key id came from a cenc pssh's fkri box, which counts 0, 1,
+        // 2, 3 across sessions: that is an index, and writing it over
+        // the media's default_KID is what left AVFoundation holding a
+        // key no sample ever asks for.
+        let templateKeyId = template.flatMap { keyIdentifier(inTenc: $0) }
+        let templateNamesItsOwn = templateKeyId.map { candidate in
+            candidate.count == 16
+                && candidate.contains(where: { $0 != 0 })
+                && candidate != keyId
+        } ?? false
+        if let template, templateNamesItsOwn {
+            sinf = template
+            log("session \(sessionId) template names KID "
+                + hexBytes(templateKeyId ?? Data()) + ", the pssh names "
+                + hexBytes(keyId) + " - the media's own KID wins")
+        } else if let template,
+                  let rekeyed = replacingKeyId(in: template, with: keyId) {
             sinf = rekeyed
             log("session \(sessionId) using the page's own sinf as the "
                 + "template, \(sinf.count) bytes")
@@ -762,6 +783,34 @@ public final class FairPlayStreamParser: NSObject {
             typeAt += 1
         }
         return nil
+    }
+
+    /// The default_KID a sinf's tenc names, if it has one.
+    ///
+    /// The read half of replacingKeyId below, walked the same way and
+    /// with the same layout assumption: past the type, the version and
+    /// flags, and the four bytes before the KID.
+    static func keyIdentifier(inTenc sinf: Data) -> Data? {
+        let bytes = [UInt8](sinf)
+        let marker: [UInt8] = [0x74, 0x65, 0x6e, 0x63]  // "tenc"
+        var typeAt = 0
+        while typeAt + 4 <= bytes.count {
+            if Array(bytes[typeAt..<(typeAt + 4)]) == marker {
+                let kidAt = typeAt + 12
+                guard kidAt + 16 <= bytes.count else {
+                    return nil
+                }
+                return Data(bytes[kidAt..<(kidAt + 16)])
+            }
+            typeAt += 1
+        }
+        return nil
+    }
+
+    /// Bytes as hex, the way every other log line in this file spells
+    /// them.
+    static func hexBytes(_ data: Data) -> String {
+        return data.map { String(format: "%02x", $0) }.joined()
     }
 
     /// The same sinf, naming a different key.
@@ -1362,6 +1411,29 @@ public final class FairPlayStreamParser: NSObject {
             return false
         }
         slot.parser.perform(append, with: segment)
+        // Keep the sinf the page's OWN init segment carries.
+        //
+        // The other harvest, in append(_:initSegment:), is on the
+        // SESSION entry point, and that one only ever receives EME
+        // initialisation data. For tv.apple.com that is a cenc pssh,
+        // which has no sinf in it, so every key request went out
+        // against canonicalSinf's fabricated tenc carrying the fkri
+        // index - and the qavc samples, which name the media's real
+        // default_KID, were then refused at both sinks with -11800
+        // "no content key present". Real init segments arrive here.
+        //
+        // Bounded twice over: only while no template is held, and only
+        // for segments small enough to BE an init segment. The media
+        // segments on this route run to 8 MB and a byte scan of every
+        // one of them would cost more than this is worth.
+        if withState({ entry.templateSinf == nil }), segment.count <= 65536,
+           let sinf = Self.sinfBox(in: segment) {
+            let harvested = Self.keyIdentifier(inTenc: sinf)
+            withState { entry.templateSinf = sinf }
+            Self.log("stream \(stream) kept a \(sinf.count)-byte sinf as the "
+                     + "key request template - tenc KID "
+                     + (harvested.map { Self.hexBytes($0) } ?? "absent"))
+        }
         Self.log("stream \(stream) appended \(segment.count) bytes")
         // Asked for again after EVERY append, not once when the licence
         // landed. setShouldProvideMediaData is armed per track and
