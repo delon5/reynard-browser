@@ -508,7 +508,8 @@ public class GeckoSession {
         return ratio
     }
     
-    /// Whether this page's CSS uses env(safe-area-inset-bottom),
+    /// How this page reserves space at the bottom edge - not
+    /// merely whether its CSS mentions env(safe-area-inset-bottom),
     /// asked directly of the content process. Mirrors
     /// focusedInputBottomRatio above - see
     /// fix_native_safe_area_detection.py for why this replaces the
@@ -523,14 +524,20 @@ public class GeckoSession {
     public enum BottomReservation: Equatable {
         /// Nothing pinned at the bottom - the pill floats over the page.
         case none
-        /// The page reads env(safe-area-inset-bottom), so reporting a
-        /// larger inset moves its own content.
+        /// The page reads env(safe-area-inset-bottom) AND nothing at
+        /// its bottom edge offers the compositor margin a better deal:
+        /// reporting a larger inset moves the page's own content, and
+        /// its background bleeds behind the pill. Since the
+        /// liftable-bar cutout, env-readers whose pinned bottom UI is
+        /// entirely liftable land on hasBottomBar instead.
         case readsSafeAreaInset
-        /// The page has a bar pinned to the bottom edge but is not known
-        /// to read env() - reporting an inset does nothing for it, so the
-        /// layout viewport has to be shortened instead. Observed on
-        /// device: Facebook's composer stayed behind the pill even once
-        /// the inset was reported correctly.
+        /// The page's bottom edge is a bar the compositor fixed-layer
+        /// margin can lift - whether or not the page also reads env().
+        /// The margin moves the bar whole, its background stops above
+        /// the pill, and page content keeps painting behind the glass.
+        /// Observed on device for the env-blind case: Facebook's
+        /// composer stayed behind the pill even once the inset was
+        /// reported correctly, because it never reads the variable.
         case hasBottomBar
         /// The page's bottom UI can be lifted by NO overlay mechanism:
         /// an absolute-positioned app-shell sheet (m.twitch.tv - measured
@@ -567,6 +574,19 @@ public class GeckoSession {
             return .needsViewportShrink
         }
         if values["usesSafeAreaInset"] as? Bool == true {
+            // The liftable-bar cutout: reading env() does not make env
+            // the best mechanism. When everything the probes found
+            // pinned at the bottom is liftable - and nothing unliftable
+            // was seen - the compositor margin gives the better result:
+            // the bar is lifted WHOLE, its background stops above the
+            // pill instead of padding itself down behind it, and what
+            // shows through the pill's glass is the page's own content.
+            // Absent keys (an engine predating the liftability probe)
+            // keep the env behaviour.
+            if values["hasLiftableBar"] as? Bool == true,
+               values["hasUnliftablePinned"] as? Bool != true {
+                return .hasBottomBar
+            }
             return .readsSafeAreaInset
         }
         if values["hasBottomBar"] as? Bool == true {

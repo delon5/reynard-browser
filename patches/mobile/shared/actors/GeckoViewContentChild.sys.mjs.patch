@@ -1,12 +1,11 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15..799455c 100644
+index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -17,7 +17,1455 @@
- 
+@@ -18,6 +18,1454 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
-+
+
 +// Reynard: Apple's legacy prefixed EME (WebKitMediaKeys), implemented
 +// over standard EME, for the Safari-targeted players that use it.
 +//
@@ -1328,7 +1327,7 @@ index 9ca6e15..799455c 100644
 +      debug("installed webkit fullscreen shim on HTMLVideoElement");
 +    }
 +  } catch (e) {}
- 
++
 +  // ---- controls for a video that went fullscreen on its own ---------
 +  //
 +  // On iOS, webkitEnterFullscreen hands the video to the system player,
@@ -1456,14 +1455,12 @@ index 9ca6e15..799455c 100644
 +];
 +
  const lazy = {};
- 
+
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -65,8 +1513,411 @@
-       return windowUtils.SCROLL_MODE_INSTANT;
-     }
+@@ -67,6 +1515,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
-+  }
-+
+   }
+
 +  isFocusedEditableElement(element) {
 +    if (!element) {
 +      return false;
@@ -1549,8 +1546,8 @@ index 9ca6e15..799455c 100644
 +      // indistinguishable from a script that ran and did nothing.
 +      return { ok: false, error: String(e) };
 +    }
-   }
- 
++  }
++
 +  getSafeAreaInsetUsage() {
 +    const { contentWindow } = this;
 +    const document = contentWindow?.document;
@@ -1643,19 +1640,14 @@ index 9ca6e15..799455c 100644
 +      }
 +    }
 +
-+    // Second signal: a bottom-edge hit test. The stylesheet scan above
-+    // can only read same-origin sheets - cross-origin ones throw
-+    // SecurityError on .cssRules - so a page whose safe-area CSS lives
-+    // entirely on a CDN (Facebook serves everything from
-+    // static.xx.fbcdn.net) is invisible to it and was wrongly treated
-+    // as not reserving space, leaving its composer behind the pill.
-+    //
-+    // The question the pill actually cares about is not "does the CSS
-+    // mention safe-area" but "is anything of the page's own pinned to the
-+    // bottom edge, where the chrome would cover it". Probe three points
-+    // along the bottom edge and walk up for a position:fixed/sticky
-+    // ancestor anchored to that edge. O(3) hit tests regardless of DOM
-+    // size.
++    // Second signal: a bottom-edge hit test. Runs for every page: the
++    // stylesheet scan cannot see still-loading sheets (reported via
++    // incomplete above) and, more fundamentally, reading env()
++    // somewhere says nothing about what actually sits at the bottom
++    // edge. Probe five points along the bottom edge - and, when an env
++    // inset is currently applied, along a second line above it (see
++    // below) - walking up for a position:fixed/sticky ancestor
++    // anchored to that edge. O(10) hit tests regardless of DOM size.
 +    //
 +    // Deliberately NOT requiring a full-width bar. An earlier revision
 +    // did, to keep a corner floating button - Reddit's jump-to-top FAB,
@@ -1672,79 +1664,170 @@ index 9ca6e15..799455c 100644
 +    // articles, search results - still return neither signal and keep the
 +    // pill floating over them, preserving
 +    // fix_safe_area_scan_requires_matching_rule.py's Google case.
++    //
++    // Each pinned find is CLASSIFIED, not just counted (the
++    // liftable-bar cutout, fix_pill_cutout_for_liftable_bottom_bars.py):
++    // a full-viewport overlay (reaches the top edge too - the margin
++    // can never lift a screen-filling, top-anchored layer); a LIFTABLE
++    // bar (a true fixed/sticky layer of the root document, which the
++    // compositor margin lifts whole - background included - so real
++    // page content shows behind the pill's glass); or a pinned element
++    // the margin cannot lift (a transformed/filtered ancestor
++    // re-parents "fixed" onto itself - the shape that makes a page
++    // ignore the margin, hbomax-style). The classification is what
++    // lets an env-reading page with an ordinary fixed bar take the
++    // margin instead of padding its own bar down behind the pill.
++    let hasLiftableBar = false;
++    let hasUnliftablePinned = false;
++    let hasFullViewportOverlay = false;
++    let hasBottomBar = false;
 +    const width = contentWindow.innerWidth;
 +    const height = contentWindow.innerHeight;
 +    if (width > 0 && height > 0) {
 +      // Anchored to the bottom edge is the whole test; a sticky header
 +      // fails it, a bottom bar and a corner button both pass.
 +      const bottomBand = 8;
-+      for (const fraction of [0.15, 0.5, 0.85]) {
-+        let element = document.elementFromPoint(width * fraction, height - 2);
-+        while (
-+          element &&
-+          element !== document.documentElement &&
-+          element !== document.body
-+        ) {
-+          const { position } = contentWindow.getComputedStyle(element);
-+          // An ABSOLUTE element pinned to the viewport bottom - an
-+          // app-shell bottom sheet - can be lifted by NO overlay
-+          // mechanism: the compositor margin moves only fixed/sticky
-+          // layers, and env() only moves elements that read it (the
-+          // Twitch sheet measurably does not). Only shrinking the
-+          // layout viewport moves it. rect.top must clear the band so
-+          // a full-height absolute backdrop does not count.
-+          if (position === "absolute" && !hasAbsoluteBottomElement) {
-+            const rect = element.getBoundingClientRect();
-+            if (rect.bottom >= height - bottomBand && rect.top > bottomBand) {
-+              hasAbsoluteBottomElement = true;
++      const classifyPinnedAlong = (probeY, bandFloor, detectAbsolute) => {
++        for (const fraction of [0.06, 0.15, 0.5, 0.85, 0.94]) {
++          let element = document.elementFromPoint(width * fraction, probeY);
++          while (
++            element &&
++            element !== document.documentElement &&
++            element !== document.body
++          ) {
++            const { position } = contentWindow.getComputedStyle(element);
++            // An ABSOLUTE element pinned to the viewport bottom - an
++            // app-shell bottom sheet - can be lifted by NO overlay
++            // mechanism: the compositor margin moves only fixed/sticky
++            // layers, and env() only moves elements that read it (the
++            // Twitch sheet measurably does not). Only shrinking the
++            // layout viewport moves it. rect.top must clear the band so
++            // a full-height absolute backdrop does not count. Checked
++            // only along the TRUE bottom edge: absolute elements scroll
++            // with the page, so on the raised second line an ordinary
++            // absolutely-positioned piece of content passing by would
++            // read as an app-shell sheet - and an absolute sheet that
++            // DOES read env() has moved up with it, meaning env is
++            // working for it and no shrink is called for.
++            if (
++              detectAbsolute &&
++              position === "absolute" &&
++              !hasAbsoluteBottomElement
++            ) {
++              const rect = element.getBoundingClientRect();
++              if (rect.bottom >= bandFloor && rect.top > bottomBand) {
++                hasAbsoluteBottomElement = true;
++              }
 +            }
-+          }
-+          if (position === "fixed" || position === "sticky") {
-+            const rect = element.getBoundingClientRect();
-+            if (rect.bottom >= height - bottomBand) {
-+              // A bar is present, but nothing in the readable CSS says
-+              // the page consumes env(safe-area-inset-bottom). Reported
-+              // separately: on device, Facebook's composer did not move
-+              // at all when the inset was reported correctly, because it
-+              // never reads the variable. Cross-origin sheets mean this
-+              // cannot distinguish "does not use env()" from "uses it
-+              // where we cannot see it".
-+              //
-+              // Also report WHAT KIND of fixed thing was found. A
-+              // full-viewport overlay (a web video player, a modal
-+              // lightbox - tv.apple.com's player) reaches the TOP edge
-+              // as well as the bottom. The compositor fixed-layer margin
-+              // can never lift such a layer: it is top-anchored, and a
-+              // screen-filling element cannot move up by the pill's
-+              // height. For these pages env() is the only mechanism with
-+              // any chance of clearing the chrome - it costs nothing
-+              // when the page never reads it, which is exactly what the
-+              // margin was achieving.
-+              return {
-+                usesSafeAreaInset: foundSafeAreaUsage,
-+                hasBottomBar: true,
-+                hasFullViewportOverlay: rect.top <= bottomBand,
-+                incomplete: unreadableSheets > 0,
-+                envProbePx,
-+                hasAbsoluteBottomElement,
-+              };
++            if (position === "fixed" || position === "sticky") {
++              const rect = element.getBoundingClientRect();
++              if (rect.bottom >= bandFloor) {
++                hasBottomBar = true;
++                if (rect.top <= bottomBand) {
++                  hasFullViewportOverlay = true;
++                } else if (this.isPinnedElementLiftable(element, position)) {
++                  hasLiftableBar = true;
++                } else {
++                  hasUnliftablePinned = true;
++                }
++                break;
++              }
++              // Fixed but not a bottom bar - keep climbing in case this
++              // is a child inside a wider fixed bar, then fall through
++              // to the next probe point.
 +            }
-+            // Fixed but not a bottom bar - keep climbing in case this is
-+            // a child inside a wider fixed bar, then fall through to the
-+            // next probe point.
++            element = element.parentElement;
 +          }
-+          element = element.parentElement;
 +        }
++      };
++      classifyPinnedAlong(height - 2, height - bottomBand, true);
++
++      // The probes above measure a layout that the CURRENTLY APPLIED
++      // mechanism has already moved. Under env, an element positioned
++      // with bottom: env(safe-area-inset-bottom) sits the chrome's
++      // height ABOVE the bottom edge, so a probe along the edge misses
++      // it - and an ask that misses every margin-defeater would talk
++      // the page out of env mode, strand that element, and cache the
++      // wrong verdict per host. envProbePx is what env resolves to in
++      // this document RIGHT NOW, so a second line above the shift
++      // finds a pinned element wherever the active mechanism put it.
++      // When no inset is applied the second line collapses into the
++      // first and is skipped.
++      if (envProbePx > bottomBand) {
++        classifyPinnedAlong(
++          height - 2 - envProbePx,
++          height - envProbePx - bottomBand,
++          false
++        );
 +      }
 +    }
 +
++    // On the pinned-bar comment that used to sit at the return: a bar
++    // being present while nothing in the READABLE CSS consumes env()
++    // is still reported as the pair (hasBottomBar, usesSafeAreaInset) -
++    // on device, Facebook's composer did not move when the inset was
++    // reported correctly, because it never reads the variable, and
++    // cross-origin sheets mean the scan cannot distinguish "does not
++    // use env()" from "uses it where we cannot see it".
 +    return {
 +      usesSafeAreaInset: foundSafeAreaUsage,
-+      hasBottomBar: false,
++      hasBottomBar,
++      hasFullViewportOverlay,
++      hasLiftableBar,
++      hasUnliftablePinned,
 +      incomplete: unreadableSheets > 0,
 +      envProbePx,
 +      hasAbsoluteBottomElement,
 +    };
++  }
++
++  // Whether the compositor fixed-layer margin can lift this pinned
++  // element: it must composite as a fixed/sticky layer of the ROOT
++  // content document. A containing-block-creating ancestor - transform
++  // (or the individual translate/rotate/scale properties), perspective,
++  // filter, backdrop-filter, offset-path, content-visibility,
++  // will-change or contain of those - re-parents a "fixed" element
++  // onto that ancestor instead, and the margin never reaches it. A
++  // sticky element must additionally stick to the root scroller: an
++  // intermediate scroll container keeps it. Every check errs toward
++  // "not liftable", which keeps the page on env() - the pre-cutout
++  // behaviour - rather than stranding a bar the margin cannot actually
++  // move. (Known coarse case, accepted: an overflow-x:hidden body
++  // flags every sticky bar, which merely keeps such pages where they
++  // were.)
++  isPinnedElementLiftable(element, position) {
++    const { contentWindow } = this;
++    for (
++      let ancestor = element.parentElement;
++      ancestor;
++      ancestor = ancestor.parentElement
++    ) {
++      const style = contentWindow.getComputedStyle(ancestor);
++      if (
++        style.transform !== "none" ||
++        (style.translate && style.translate !== "none") ||
++        (style.rotate && style.rotate !== "none") ||
++        (style.scale && style.scale !== "none") ||
++        style.perspective !== "none" ||
++        style.filter !== "none" ||
++        (style.backdropFilter && style.backdropFilter !== "none") ||
++        (style.offsetPath && style.offsetPath !== "none") ||
++        (style.contentVisibility && style.contentVisibility !== "visible") ||
++        /transform|translate|rotate|scale|perspective|filter|offset-path|contain/.test(
++          style.willChange
++        ) ||
++        /paint|layout|strict|content/.test(style.contain)
++      ) {
++        return false;
++      }
++      if (
++        position === "sticky" &&
++        (style.overflowX !== "visible" || style.overflowY !== "visible")
++      ) {
++        return false;
++      }
++    }
++    return true;
 +  }
 +
 +  async getFocusedInputMetrics() {
@@ -1870,7 +1953,7 @@ index 9ca6e15..799455c 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +2035,21 @@
+@@ -184,6 +2121,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -1890,12 +1973,12 @@ index 9ca6e15..799455c 100644
 +        return this.getVisualViewportMetrics();
 +      }
      }
- 
+
      return null;
-@@ -199,11 +2065,193 @@
+@@ -199,11 +2151,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
- 
+
 +  // Reynard: give this document sticky user activation.
 +  //
 +  // For the CarPlay display, which cannot be tapped: without a gesture
@@ -2072,7 +2155,7 @@ index 9ca6e15..799455c 100644
    // eslint-disable-next-line complexity
    handleEvent(aEvent) {
      debug`handleEvent: ${aEvent.type}`;
- 
+
      switch (aEvent.type) {
 +      case "DOMWindowCreated": {
 +        // Before the shim, not after: if the shim's own installation
