@@ -1,7 +1,7 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -16,15 +16,110 @@
+@@ -16,15 +16,157 @@
  #include "MP4Decoder.h"
 +#include "MediaData.h"
 +#include "ReynardAVPlayerDecoderModule.h"  // the protected placeholder
@@ -73,9 +73,56 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +      return DecodePromise::CreateAndReject(
 +          MediaResult(NS_ERROR_OUT_OF_MEMORY, __func__), __func__);
 +    }
++    // NOT ZERO, and that is the whole of this change.
++    //
++    // Gecko decides whether an element is audible by looking at the
++    // samples: AudioData::IsAudible walks the buffer and returns true
++    // on the first non-zero value. An all-zero buffer is inaudible by
++    // definition, an inaudible element does not engage media control,
++    // and without media control there is no media session - so no
++    // lock-screen card, no Picture in Picture, and an app that on
++    // backgrounding takes the "no playback" branch, releases the audio
++    // session and sleeps the tab. HBO never once produced a
++    // "mediaSession: ACTIVATED" line in any capture; every site whose
++    // audio Gecko really decodes produces one.
++    //
++    // The element IS making sound - through the
++    // AVSampleBufferAudioRenderer FairPlayStreamParser drives - and
++    // there is no other way to tell Gecko so.
++    //
++    // The smallest non-zero value the sample type can hold: 1 on an
++    // integer build, which is -90 dBFS and below the format's own
++    // dither floor, and the same level as a fraction on a float one.
++    // Silence to a listener, non-zero to IsAudible. The 440 Hz tone fix
++    // 38 removed does not come back - this is a DC offset far below the
++    // quietest representable sound, not an oscillation.
++    //
++    // Which one the build needs is decided without <limits>, which is
++    // not known to be included here and which an unverified include has
++    // already cost this route a build over. AudioDataValue(0.5) is
++    // non-zero only when the type does not truncate.
++    const bool reynardFloatSamples =
++        (AudioDataValue(0.5) != AudioDataValue(0));
++    const AudioDataValue reynardFloor =
++        reynardFloatSamples ? AudioDataValue(1.0 / 32768.0)
++                            : AudioDataValue(1);
++    // Once per process, because a change with no line of its own cannot
++    // be told apart in a capture from a build that never had it - which
++    // is exactly what happened to the first HBO capture after fix 56,
++    // and to fix 51 before that. The race on this flag is benign: the
++    // worst it can print is the line twice.
++    static bool reynardFloorAnnounced = false;
++    if (!reynardFloorAnnounced) {
++      reynardFloorAnnounced = true;
++      printf_stderr(
++          "mseDecoderRoute: silent audio floor ACTIVE - %s samples, "
++          "%lld frames x %u ch @ %u Hz\n",
++          reynardFloatSamples ? "float" : "integer", (long long)frames,
++          mChannels, mRate);
++    }
 +    for (int64_t i = 0; i < frames; i++) {
 +      for (uint32_t c = 0; c < mChannels; c++) {
-+        samples[i * mChannels + c] = AudioDataValue(0);
++        samples[i * mChannels + c] = reynardFloor;
 +      }
 +    }
 +    RefPtr<AudioData> data(new AudioData(aSample->mOffset, aSample->mTime,
