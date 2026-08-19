@@ -1720,7 +1720,7 @@ public final class FairPlayStreamParser: NSObject {
             // paused - or that autoplay never let start - gets a layer
             // that is attached, fed and held at rate 0.
             let rate = gatedRate(streamKey)
-            CMTimebaseSetRate(timebase, rate: rate)
+            CMTimebaseSetRate(timebase, rate: Float64(rate))
             Self.log("stream \(streamKey) released the timebase at "
                      + "\(CMTimebaseGetTime(timebase).seconds) - layer "
                      + "attached, "
@@ -2727,7 +2727,7 @@ public final class FairPlayStreamParser: NSObject {
             // There the layer had nowhere to render for another sixty log
             // lines; this one is already placed, on screen and sized by
             // the compositor before it is ever offered.
-            CMTimebaseSetRate(timebase, rate: gatedRate(streamKey))
+            CMTimebaseSetRate(timebase, rate: Float64(gatedRate(streamKey)))
             sink.controlTimebase = timebase
         } else {
             Self.log("stream \(streamKey) could not build a timebase for "
@@ -3105,7 +3105,7 @@ public final class FairPlayStreamParser: NSObject {
         }
         for (key, timebase, sync) in clocks {
             if let timebase {
-                CMTimebaseSetRate(timebase, rate: rate)
+                CMTimebaseSetRate(timebase, rate: Float64(rate))
             }
             sync?.rate = rate
             Self.log("stream \(key) clocks -> rate \(rate)")
