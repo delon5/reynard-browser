@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2385 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2483 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2366,6 +2366,104 @@ index 9ca6e15..18d37f0 100644
 +    }
 +  } catch (e) {}
 +
++  // ---- what crosses the Worker boundary -------------------------------
++  //
++  // Netflix asks for a licence and never applies one. Three
++  // license-request messages in one capture - 8448, 7392, 7552 bytes -
++  // and not one update(). Everything before that step works: the
++  // identity applies, the session mints, the SourceBuffers fill from
++  // 132.61s. Only the licence never comes back.
++  //
++  // The step nobody can see is what happens to those bytes. This shim
++  // wraps window.fetch and XMLHttpRequest on the MAIN THREAD, and
++  // Netflix's MSL stack runs in a Worker, so its POST is invisible -
++  // while HBO Max's, which is on the main thread, appears in every
++  // capture. "Refused" and "never sent" therefore look identical, and
++  // they need different fixes.
++  //
++  // Observed from OUT HERE on purpose. Nothing runs inside the worker
++  // and nothing about it is rewritten: postMessage is wrapped and calls
++  // through, and the incoming direction is a listener of our own, which
++  // does not disturb the page's. It is also the only side that can
++  // speak - debug() writes through __reynardEmeLog, which the actor
++  // exports into this sandbox and a worker has no access to.
++  try {
++    var reynardWorkerSeq = 0;
++    var reynardWorkerLogged = 0;
++    var reynardNativeWorker = window.Worker;
++
++    var reynardShape = function (data) {
++      try {
++        if (data === null || data === undefined) {
++          return String(data);
++        }
++        if (typeof data === "string") {
++          return "text(" + data.length + ") " + data.slice(0, 48);
++        }
++        if (data.byteLength !== undefined) {
++          return data.byteLength + " bytes " +
++            (data.constructor ? data.constructor.name : "buffer");
++        }
++        if (typeof data === "object") {
++          var keys = [];
++          for (var k in data) {
++            keys.push(k);
++            if (keys.length > 6) {
++              break;
++            }
++          }
++          return "object{" + keys.join(",") + "}";
++        }
++        return typeof data;
++      } catch (e) {
++        return "?";
++      }
++    };
++
++    var reynardWorkerSay = function (tag, direction, data) {
++      if (reynardWorkerLogged > 120) {
++        return;
++      }
++      reynardWorkerLogged++;
++      if (reynardWorkerLogged === 121) {
++        debug("WORKER log cap reached - no further traffic reported");
++        return;
++      }
++      debug("WORKER " + tag + " " + direction + " " + reynardShape(data));
++    };
++
++    if (reynardNativeWorker) {
++      var reynardWorkerCtor = function (scriptURL, options) {
++        var worker = new reynardNativeWorker(scriptURL, options);
++        try {
++          var tag = "worker#" + ++reynardWorkerSeq;
++          debug(
++            "WORKER " + tag + " created " + String(scriptURL).slice(0, 72)
++          );
++          var nativePost = worker.postMessage;
++          worker.postMessage = function (message) {
++            reynardWorkerSay(tag, "->", message);
++            return nativePost.apply(this, arguments);
++          };
++          worker.addEventListener("message", function (event) {
++            reynardWorkerSay(tag, "<-", event.data);
++          });
++          worker.addEventListener("error", function (event) {
++            debug(
++              "WORKER " + tag + " ERROR " +
++              String(event.message || "").slice(0, 80) + " at " +
++              String(event.filename || "").slice(0, 60) + ":" + event.lineno
++            );
++          });
++        } catch (e) {}
++        return worker;
++      };
++      reynardWorkerCtor.prototype = reynardNativeWorker.prototype;
++      window.Worker = reynardWorkerCtor;
++      debug("installed the worker trace");
++    }
++  } catch (e) {}
++
 +  window.WebKitMediaKeys = WebKitMediaKeys;
 +  window.WebKitMediaKeySession = WebKitMediaKeySession;
 +  debug("installed over standard EME");
@@ -2388,7 +2486,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2446,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2544,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -2884,7 +2982,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3052,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3150,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -2906,7 +3004,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3082,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3180,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
