@@ -1906,9 +1906,17 @@ public final class FairPlayStreamParser: NSObject {
                              + "Correction \(ranAhead.nth).")
                 }
                 if count % 30 == 0 {
+                    // With the offset between the two clocks, so "out of
+                    // sync" is a column rather than a judgement. Anything
+                    // beyond a few milliseconds is a bug in this file,
+                    // and the sign says which half moved.
+                    let session =
+                        String(streamKey.split(separator: "|").first ?? "")
+                    let av = audioClock(sessionId: session).map { now - $0 }
                     Self.log("stream \(streamKey) at \(count) - timebase "
                              + "\(now) vs sample pts \(pts), drift "
-                             + "\(now - pts)")
+                             + "\(now - pts), av "
+                             + (av.map { String($0) } ?? "no audio clock"))
                 }
             }
         }
@@ -2071,14 +2079,27 @@ public final class FairPlayStreamParser: NSObject {
         // On the drain queue, because that is where enqueue happens.
         // flush() racing an enqueue is the one collision these two calls
         // can have, and a serial queue is the cheapest way to not have it.
+        let onto = CMTime(seconds: pts, preferredTimescale: 90_000)
         work.queue.async {
             work.layer.flush()
             if let timebase = work.layer.controlTimebase {
-                CMTimebaseSetTime(timebase,
-                                  time: CMTime(seconds: pts,
-                                               preferredTimescale: 90_000))
+                CMTimebaseSetTime(timebase, time: onto)
             }
         }
+        // AND THE SOUND WITH IT.
+        //
+        // Fix 41 declined this, on the grounds that fix 27's
+        // discontinuity was a video-only ABR re-append and dragging
+        // audio back eight seconds would repeat it audibly. That is
+        // still the cost, and it is still real. But the case in the
+        // capture that prompted this is a seek - both halves jumped
+        // within thirty-one lines - and letting each re-anchor to its
+        // own first sample is what produced a permanent 0.767s offset.
+        // A repeated second of sound is recoverable; an offset that
+        // lasts the rest of the film is not.
+        realignAudioClock(
+            sessionId: String(streamKey.split(separator: "|").first ?? ""),
+            to: onto)
     }
 
     // ==================================================================
@@ -2270,11 +2291,42 @@ public final class FairPlayStreamParser: NSObject {
             }
             return newest?.layer
         }
-        guard let layer, let timebase = layer.controlTimebase,
-              CMTimebaseGetRate(timebase) != 0 else {
+        // NO RATE TEST. It used to require CMTimebaseGetRate != 0, which
+        // was right when a stopped clock meant a dead one and wrong the
+        // moment fix 48 started holding the video timebase at rate 0
+        // until Gecko says the element is playing. That hold is exactly
+        // the window the first audio sample arrives in, so audio asked
+        // for an anchor, was told there was none, and started 0.767s
+        // away from the picture - which is a fixed offset for the rest
+        // of the film, because both clocks run on the same host clock
+        // and cannot drift.
+        //
+        // A held clock is not a dead one: its TIME is the anchor audio
+        // needs and only its rate is zero. Corpses are excluded by the
+        // liveness test above, which asks when the stream was last fed
+        // rather than whether someone happened to have started it.
+        guard let layer, let timebase = layer.controlTimebase else {
             return nil
         }
         return CMTimebaseGetTime(timebase)
+    }
+
+    /// Where the sound's clock is now, for the same session.
+    ///
+    /// Only used to report the offset between the two. Nothing anchors
+    /// to it - the video timebase is the timeline, and audio follows.
+    fileprivate func audioClock(sessionId: String) -> Double? {
+        let sync = withState { () -> AVSampleBufferRenderSynchronizer? in
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") {
+                if slot.audioStarted, let found = slot.audioSynchronizer {
+                    return found
+                }
+            }
+            return nil
+        }
+        guard let sync else { return nil }
+        return CMTimebaseGetTime(sync.timebase).seconds
     }
 
     /// Move every started audio clock in this session onto the picture's.
@@ -2336,9 +2388,19 @@ public final class FairPlayStreamParser: NSObject {
         // enqueue() can have on the video side.
         work.queue.async {
             work.renderer.flush()
-            work.sync.setRate(FairPlayStreamParser.shared.gatedRate(streamKey),
-                              time: CMTime(seconds: pts,
-                                           preferredTimescale: 90_000))
+            // ONTO THE VIDEO CLOCK, not onto this stream's own PTS.
+            //
+            // Audio and video segments legitimately start at different
+            // times - 0.767s apart in the stream that produced this fix
+            // - so anchoring each half to its own first sample after an
+            // event bakes that difference into a permanent A/V offset.
+            // The video timebase is the timeline; audio follows it, and
+            // uses its own PTS only when there is no video clock at all.
+            let parser = FairPlayStreamParser.shared
+            let session = String(streamKey.split(separator: "|").first ?? "")
+            let onto = parser.videoClock(sessionId: session)
+                ?? CMTime(seconds: pts, preferredTimescale: 90_000)
+            work.sync.setRate(parser.gatedRate(streamKey), time: onto)
         }
     }
 
@@ -2440,9 +2502,14 @@ public final class FairPlayStreamParser: NSObject {
                     return (late, slot.audioClockCorrections)
                 }
                 if let ranAhead {
-                    sync.setRate(gatedRate(streamKey),
-                                 time: CMTime(seconds: pts,
-                                              preferredTimescale: 90_000))
+                    // Onto the video clock where there is one - see
+                    // resynchroniseAudio for why the audio PTS is the
+                    // wrong reference.
+                    let session =
+                        String(streamKey.split(separator: "|").first ?? "")
+                    let onto = videoClock(sessionId: session)
+                        ?? CMTime(seconds: pts, preferredTimescale: 90_000)
+                    sync.setRate(gatedRate(streamKey), time: onto)
                     Self.log("stream \(streamKey) AUDIO CLOCK RAN AHEAD by "
                              + "\(ranAhead.late)s - put back on the media "
                              + "at \(pts). Correction \(ranAhead.nth).")
@@ -3103,12 +3170,30 @@ public final class FairPlayStreamParser: NSObject {
             }
             return out
         }
+        // Released together AND aligned together. Setting two rates
+        // leaves any gap between the two clocks exactly as it was, so a
+        // pause and resume preserved a desync rather than healing it.
+        //
+        // Done here rather than through realignAudioClock because that
+        // one filters by liveness, and a stream the page stopped feeding
+        // while it was paused is exactly the stream being resumed.
+        //
+        // Only on resume: moving a stopped clock achieves nothing, and
+        // its renderer will be told a time again the moment it starts.
+        let onto = playing ? videoClock(sessionId: sessionId) : nil
         for (key, timebase, sync) in clocks {
             if let timebase {
                 CMTimebaseSetRate(timebase, rate: Float64(rate))
             }
-            sync?.rate = rate
-            Self.log("stream \(key) clocks -> rate \(rate)")
+            if let sync {
+                if let onto {
+                    sync.setRate(rate, time: onto)
+                } else {
+                    sync.rate = rate
+                }
+            }
+            Self.log("stream \(key) clocks -> rate \(rate)"
+                     + (onto.map { " aligned to \($0.seconds)" } ?? ""))
         }
     }
 
