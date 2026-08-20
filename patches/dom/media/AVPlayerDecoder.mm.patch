@@ -1477,7 +1477,7 @@ index 000000000000..b56efaa8479c
 +  // to any other change. mLastVolumeSent starts negative, so this first
 +  // one is never gated away.
 +  printf_stderr("avPlayer: initial volume for player %llu -> %.3f\n",
-+                (unsigned long long)mPlayerId, mVolume);
++                (unsigned long long)mPlayerId, mVolume.Ref());
 +  SetVolume(mVolume);
 +
 +  // The page can set mediaKeys before the element has a src, so the
