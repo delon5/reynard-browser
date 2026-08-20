@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2656 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2768 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -1700,6 +1700,9 @@ index 9ca6e15..18d37f0 100644
 +
 +    // ---- 2. standard EME, which nothing here has ever wrapped --------
 +    var reynardSessionSeq = 0;
++    // Raised only while createSession installs this shim's own
++    // listeners - see the addEventListener wrapper below.
++    var reynardInstallingOwn = false;
 +    var reynardDumpStatuses = function (tag, session) {
 +      try {
 +        var parts = [];
@@ -1723,15 +1726,31 @@ index 9ca6e15..18d37f0 100644
 +          var tag = "session#" + ++reynardSessionSeq;
 +          session.reynardTag = tag;
 +          debug("EME " + tag + " createSession(" + (type || "temporary") + ")");
-+          session.addEventListener("keystatuseschange", function () {
-+            reynardDumpStatuses(tag, session);
-+          });
-+          session.addEventListener("message", function (e) {
-+            debug(
-+              "EME " + tag + " message type=" + e.messageType + " " +
-+              (e.message ? e.message.byteLength : 0) + " bytes"
-+            );
-+          });
++          session.reynardListeners = 0;
++          session.reynardAsked = 0;
++          // Raised while THIS shim installs its own two listeners, so
++          // the wrapper below counts the page's and not ours. Lowered
++          // in a finally, because a throw between these two lines would
++          // otherwise silence every page listener for the rest of the
++          // document.
++          try {
++            reynardInstallingOwn = true;
++            session.addEventListener("keystatuseschange", function () {
++              reynardDumpStatuses(tag, session);
++            });
++            session.addEventListener("message", function (e) {
++              var waited = session.reynardAsked
++                ? Date.now() - session.reynardAsked : -1;
++              debug(
++                "EME " + tag + " message type=" + e.messageType + " " +
++                (e.message ? e.message.byteLength : 0) + " bytes, " +
++                (session.reynardListeners || 0) + " page listener(s), " +
++                waited + "ms after generateRequest"
++              );
++            });
++          } finally {
++            reynardInstallingOwn = false;
++          }
 +        } catch (e) {}
 +        return session;
 +      };
@@ -1742,6 +1761,11 @@ index 9ca6e15..18d37f0 100644
 +      window.MediaKeySession.prototype.generateRequest = function (type, data) {
 +        var tag = this.reynardTag || "session?";
 +        var self = this;
++        // When the page asked, so the message line can say how long it
++        // waited. A player that gives the CDM a deadline discards a
++        // message that arrives after it, and that looks exactly like a
++        // player that is not listening.
++        this.reynardAsked = Date.now();
 +        debug(
 +          "EME " + tag + " generateRequest(" + type + ", " +
 +          (data ? data.byteLength : 0) + " bytes) " + reynardHex(data)
@@ -1757,6 +1781,94 @@ index 9ca6e15..18d37f0 100644
 +          }
 +        );
 +      };
++
++      // Is anyone listening?
++      //
++      // Every capture so far reads "message type=license-request N
++      // bytes" and is taken to mean the page has it. It does not mean
++      // that: the listener printing it is the one createSession
++      // attached above, and it fires whether or not the page attached
++      // one of its own.
++      //
++      // Netflix receives that message on both of its sessions and never
++      // calls update(). "The player looked at it and refused it" and
++      // "the player was never wired up" are different bugs in different
++      // halves of the stack, and nothing in this shim can currently
++      // tell them apart.
++      var reynardNativeAdd =
++        window.MediaKeySession.prototype.addEventListener;
++      if (typeof reynardNativeAdd === "function") {
++        window.MediaKeySession.prototype.addEventListener = function (type) {
++          try {
++            if (!reynardInstallingOwn &&
++                (type === "message" || type === "keystatuseschange")) {
++              this.reynardListeners = (this.reynardListeners || 0) + 1;
++              debug(
++                "EME " + (this.reynardTag || "session?") +
++                " page attached a " + type + " listener (" +
++                this.reynardListeners + " now) by " + reynardCaller()
++              );
++            }
++          } catch (e) {}
++          return reynardNativeAdd.apply(this, arguments);
++        };
++      }
++
++      // A page that assigns session.onmessage never calls
++      // addEventListener at all, and would read as nobody listening.
++      try {
++        var reynardOnMessage = Object.getOwnPropertyDescriptor(
++          window.MediaKeySession.prototype, "onmessage");
++        if (reynardOnMessage && typeof reynardOnMessage.set === "function") {
++          Object.defineProperty(
++            window.MediaKeySession.prototype, "onmessage", {
++              configurable: true,
++              enumerable: reynardOnMessage.enumerable,
++              get: function () {
++                return typeof reynardOnMessage.get === "function"
++                  ? reynardOnMessage.get.call(this) : undefined;
++              },
++              set: function (handler) {
++                try {
++                  if (handler) {
++                    this.reynardListeners =
++                      (this.reynardListeners || 0) + 1;
++                    debug(
++                      "EME " + (this.reynardTag || "session?") +
++                      " page set onmessage (" + this.reynardListeners +
++                      " now) by " + reynardCaller()
++                    );
++                  }
++                } catch (e) {}
++                return reynardOnMessage.set.call(this, handler);
++              },
++            });
++        }
++      } catch (e) {
++        debug("EME could not wrap onmessage:", describe(e));
++      }
++
++      // Ending a session is a decision. A player that closes on
++      // receiving the message inspected it and refused it, which is not
++      // the same as one that ignores it - and the stack names the code
++      // that decided.
++      var reynardWrapEnd = function (name) {
++        var native = window.MediaKeySession.prototype[name];
++        if (typeof native !== "function") {
++          return;
++        }
++        window.MediaKeySession.prototype[name] = function () {
++          try {
++            debug(
++              "EME " + (this.reynardTag || "session?") + " " + name +
++              "() by " + reynardCaller()
++            );
++          } catch (e) {}
++          return native.apply(this, arguments);
++        };
++      };
++      reynardWrapEnd("close");
++      reynardWrapEnd("remove");
 +
 +      var reynardNativeUpdate = window.MediaKeySession.prototype.update;
 +      window.MediaKeySession.prototype.update = function (response) {
@@ -2659,7 +2771,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2717,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2829,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3155,7 +3267,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3323,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3435,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3177,7 +3289,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3353,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3465,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
