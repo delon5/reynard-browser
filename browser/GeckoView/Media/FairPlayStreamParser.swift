@@ -660,8 +660,12 @@ public final class FairPlayStreamParser: NSObject {
                      + ", \(exactSpecifier.count) bytes")
             forSession = exactSpecifier
         } else {
+            // The scheme the page declares, not the one that happened
+            // to work for the first site on this route.
+            let scheme = Self.schemeType(inPSSH: initData) ?? "cbcs"
             forSession = Self.sinfInitialisationJSON(
-                keyId: keyId, template: template, sessionId: sessionId)
+                keyId: keyId, template: template, scheme: scheme,
+                sessionId: sessionId)
                 ?? (payload ?? initData)
         }
         Self.log("session \(sessionId) raising a key request from "
@@ -793,7 +797,12 @@ public final class FairPlayStreamParser: NSObject {
     ///
     /// Nil when there is no key id to name, since a sinf without a KID
     /// describes nothing.
+    ///
+    /// `scheme` is what the page's own PSSH declares in fpsi, and is
+    /// used only when there is no template to copy - a real template
+    /// carries its own schm and is never rewritten.
     static func sinfInitialisationJSON(keyId: Data?, template: Data?,
+                                       scheme: String,
                                        sessionId: String) -> Data? {
         guard let keyId, keyId.count == 16 else {
             log("session \(sessionId) has no key id - cannot build a sinf")
@@ -826,9 +835,10 @@ public final class FairPlayStreamParser: NSObject {
             log("session \(sessionId) using the page's own sinf as the "
                 + "template, \(sinf.count) bytes")
         } else {
-            sinf = canonicalSinf(keyId: keyId)
+            sinf = canonicalSinf(keyId: keyId, scheme: scheme)
             log("session \(sessionId) no sinf template yet - synthesising "
-                + "\(sinf.count) bytes with a zero constant IV")
+                + "\(sinf.count) bytes for scheme \(scheme) "
+                + "(the page's own fpsi)")
         }
         let base64 = sinf.base64EncodedString()
         // Serialised the way Foundation serialises it, because that
@@ -869,7 +879,15 @@ public final class FairPlayStreamParser: NSObject {
     /// part in NAMING a key - the request comes back identified by the
     /// KID, which is what the probe showed - so a placeholder is honest
     /// here in a way it would not be for decryption.
-    static func canonicalSinf(keyId: Data) -> Data {
+    ///
+    /// CHANGED - see mse_fix_77_the_scheme_the_page_declares.py's
+    /// docstring. The scheme was hardcoded cbcs, which is what
+    /// tv.apple.com's fpsi declares and is NOT what netflix.com's
+    /// declares. A cenc track described as cbcs is described wrongly in
+    /// the two fields that only pattern encryption has - the pattern
+    /// byte and the constant IV - and that description is what the SPC
+    /// is built from.
+    static func canonicalSinf(keyId: Data, scheme: String) -> Data {
         func box(_ type: String, _ body: [UInt8]) -> [UInt8] {
             let total = 8 + body.count
             var out: [UInt8] = []
@@ -880,18 +898,37 @@ public final class FairPlayStreamParser: NSObject {
             out.append(contentsOf: body)
             return out
         }
+        // Anything that is not four characters is not a scheme type,
+        // and cbcs is the form every site on this route used before
+        // fpsi was read at all.
+        let name = scheme.utf8.count == 4 ? scheme : "cbcs"
         let frma = box("frma", Array("avc1".utf8))
-        // version+flags 0, scheme 'cbcs', scheme version 0x00010000
-        let schm = box("schm", [0, 0, 0, 0] + Array("cbcs".utf8)
+        // version+flags 0, the scheme, scheme version 0x00010000
+        let schm = box("schm", [0, 0, 0, 0] + Array(name.utf8)
                                + [0x00, 0x01, 0x00, 0x00])
-        var tencBody: [UInt8] = [0x01, 0x00, 0x00, 0x00]  // version 1
-        tencBody.append(0x00)        // reserved
-        tencBody.append(0x19)        // crypt 1, skip 9 - cbcs
-        tencBody.append(0x01)        // default_isProtected
-        tencBody.append(0x00)        // per-sample IV size: none
-        tencBody.append(contentsOf: [UInt8](keyId))
-        tencBody.append(0x10)        // constant IV size
-        tencBody.append(contentsOf: [UInt8](repeating: 0, count: 16))
+        var tencBody: [UInt8]
+        if name == "cenc" || name == "cens" {
+            // Full-sample AES-CTR. Version 0, because the pattern byte
+            // and the constant IV are version 1's and neither exists
+            // here: the IV is per sample and eight bytes is the size
+            // every cenc packager in practice writes.
+            tencBody = [0x00, 0x00, 0x00, 0x00]   // version 0
+            tencBody.append(0x00)    // reserved
+            tencBody.append(0x00)    // reserved - no pattern in v0
+            tencBody.append(0x01)    // default_isProtected
+            tencBody.append(0x08)    // per-sample IV size
+            tencBody.append(contentsOf: [UInt8](keyId))
+        } else {
+            // Pattern encryption, exactly the bytes this built before.
+            tencBody = [0x01, 0x00, 0x00, 0x00]   // version 1
+            tencBody.append(0x00)    // reserved
+            tencBody.append(0x19)    // crypt 1, skip 9 - cbcs
+            tencBody.append(0x01)    // default_isProtected
+            tencBody.append(0x00)    // per-sample IV size: none
+            tencBody.append(contentsOf: [UInt8](keyId))
+            tencBody.append(0x10)    // constant IV size
+            tencBody.append(contentsOf: [UInt8](repeating: 0, count: 16))
+        }
         let schi = box("schi", box("tenc", tencBody))
         return Data(frma + schm + schi)
     }
@@ -1223,27 +1260,18 @@ public final class FairPlayStreamParser: NSObject {
                     let guess = Data(bytes[cursor..<(cursor + 16)])
                     let hex = guess.map { String(format: "%02x", $0) }
                                    .joined()
-                    // A key id is sixteen bytes of key material and
-                    // looks like it. What this returned for Netflix's
-                    // 344-byte box was 0000000004c37d40 followed by
-                    // eight zeroes - three non-zero bytes in the middle,
-                    // which is a length field and part of whatever
-                    // follows it. Passing that on named a key nothing
-                    // holds, and -19152 came back naming that same
-                    // value.
-                    //
-                    // This narrows a fallback the comment above already
-                    // calls a guess: nothing is substituted, a value
-                    // that cannot be a key id stops being returned as
-                    // one. Everything downstream handles nil already -
-                    // HBO Max runs that way on every request it makes.
-                    if guess.filter({ $0 != 0 }).count >= 8 {
-                        Self.log("  no fkri - taking the payload's first "
-                                 + "16 bytes, " + hex)
-                        return guess
-                    }
-                    Self.log("  no fkri, and the payload's first 16 bytes "
-                             + "are not a key id (" + hex + ") - no key id")
+                    // REVERTED - fix 76 refused a candidate with fewer
+                    // than eight non-zero bytes, on the reading that
+                    // Netflix's 0000000004c37d40... was a length field
+                    // rather than an identifier. The box tree settled
+                    // it the other way: the sibling fkai box holds
+                    // those same sixteen bytes, and tv.apple.com's ids
+                    // are literally 0, 1, 2 and 3. Sparse is what these
+                    // ids look like, so the guard would have refused
+                    // real ones.
+                    Self.log("  no fkri - taking the payload's first "
+                             + "16 bytes, " + hex)
+                    return guess
                 }
             }
             boxAt += size
@@ -1256,6 +1284,65 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("no key id in this init data")
         }
         return fallback
+    }
+
+    /// The protection scheme the page's own PSSH declares, or nil.
+    ///
+    /// ADDED - see mse_fix_77_the_scheme_the_page_declares.py's
+    /// docstring. fpsi's body is four reserved bytes and a
+    /// four-character scheme type, and it is the one field that differs
+    /// structurally between the two sites on this route:
+    ///
+    ///     tv.apple.com   fpsi = 00000000 63626373   "cbcs"
+    ///     netflix.com    fpsi = 00000000 63656e63   "cenc"
+    ///
+    /// Scanned for within the FairPlay box's payload rather than walked
+    /// through fpsd, for the same reason fkriKeyIdentifier scans: one
+    /// field is wanted and the nesting has already varied between
+    /// packagers.
+    static func schemeType(inPSSH data: Data) -> String? {
+        let bytes = [UInt8](data)
+        func be32(_ at: Int) -> Int {
+            guard at >= 0, at + 4 <= bytes.count else { return -1 }
+            return (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                 | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+        }
+        let pssh = Array("pssh".utf8)
+        let fpsi = Array("fpsi".utf8)
+        var boxAt = 0
+        while boxAt + 8 <= bytes.count {
+            let size = be32(boxAt)
+            guard size >= 8, boxAt + size <= bytes.count else { return nil }
+            guard boxAt + 32 <= bytes.count,
+                  Array(bytes[(boxAt + 4)..<(boxAt + 8)]) == pssh,
+                  Array(bytes[(boxAt + 12)..<(boxAt + 28)])
+                      == Self.fairPlaySystemId else {
+                boxAt += size
+                continue
+            }
+            var cursor = boxAt + 28
+            if bytes[boxAt + 8] >= 1 {
+                cursor += 4 + 16 * max(be32(cursor), 0)
+            }
+            // Past the payload's own length field.
+            cursor += 4
+            let end = boxAt + size
+            var typeAt = max(cursor, 0)
+            while typeAt >= 0, typeAt + 12 <= end {
+                if Array(bytes[typeAt..<(typeAt + 4)]) == fpsi {
+                    let scheme = String(bytes[(typeAt + 8)..<(typeAt + 12)]
+                        .map { byte -> Character in
+                            (byte >= 0x20 && byte <= 0x7e)
+                                ? Character(UnicodeScalar(byte)) : "."
+                        })
+                    Self.log("  fpsi scheme " + scheme)
+                    return scheme
+                }
+                typeAt += 1
+            }
+            return nil
+        }
+        return nil
     }
 
     /// The key id inside a FairPlay PSSH payload's fkri box.
