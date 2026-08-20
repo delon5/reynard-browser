@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2862 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2910 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -1711,6 +1711,38 @@ index 9ca6e15..18d37f0 100644
 +    // the end. Sixteen frames, its own budget of sixteen calls, so the
 +    // general cap cannot spend it and it cannot become the capture.
 +    var reynardDeepStacks = 16;
++    // Reserved for close() and remove(), and for nothing else.
++    //
++    // b04c4ad printed "(deep stack cap reached)" on every line,
++    // including the close - twelve listener registrations and
++    // twenty-three property reads had spent the shared budget before
++    // the one call the probe existed for. A budget shared between
++    // things of very different value is not a budget.
++    var reynardEndStacks = 8;
++    var reynardEndCaller = function () {
++      if (reynardEndStacks <= 0) {
++        return "(end stack cap reached)";
++      }
++      reynardEndStacks--;
++      try {
++        var frames = String(new Error().stack || "")
++            .split(String.fromCharCode(10));
++        var out = [];
++        for (var i = 1; i < frames.length && out.length < 20; i++) {
++          if (frames[i]) {
++            out.push(frames[i].slice(0, 170));
++          }
++        }
++        return out.join(" | ");
++      } catch (e) {
++        return "?";
++      }
++    };
++    // Raised while THIS shim's own message listener runs, so its reads
++    // of e.messageType and e.message are not logged as the page's. The
++    // string test that did this before failed the moment the stack it
++    // tested became "(deep stack cap reached)".
++    var reynardInOwnHandler = false;
 +    var reynardDeepCaller = function () {
 +      if (reynardDeepStacks <= 0) {
 +        return "(deep stack cap reached)";
@@ -1768,13 +1800,18 @@ index 9ca6e15..18d37f0 100644
 +            session.addEventListener("message", function (e) {
 +              var waited = session.reynardAsked
 +                ? Date.now() - session.reynardAsked : -1;
-+              debug(
-+                "EME " + tag + " message type=" + e.messageType + " " +
-+                (e.message ? e.message.byteLength : 0) + " bytes, " +
-+                (session.reynardListeners || 0) + " page listener(s), " +
-+                waited + "ms after generateRequest, head " +
-+                reynardHex(e.message)
-+              );
++              try {
++                reynardInOwnHandler = true;
++                debug(
++                  "EME " + tag + " message type=" + e.messageType + " " +
++                  (e.message ? e.message.byteLength : 0) + " bytes, " +
++                  (session.reynardListeners || 0) + " page listener(s), " +
++                  waited + "ms after generateRequest, head " +
++                  reynardHex(e.message)
++                );
++              } finally {
++                reynardInOwnHandler = false;
++              }
 +            });
 +          } finally {
 +            reynardInstallingOwn = false;
@@ -1834,7 +1871,7 @@ index 9ca6e15..18d37f0 100644
 +              debug(
 +                "EME " + (this.reynardTag || "session?") +
 +                " page attached a " + type + " listener (" +
-+                this.reynardListeners + " now) by " + reynardDeepCaller()
++                this.reynardListeners + " now) by " + reynardCaller()
 +              );
 +            }
 +          } catch (e) {}
@@ -1887,9 +1924,20 @@ index 9ca6e15..18d37f0 100644
 +        }
 +        window.MediaKeySession.prototype[name] = function () {
 +          try {
++            // What the session held at the instant it was ended. A
++            // player closing a session with no key statuses is a
++            // different story from one closing a session with several,
++            // and neither has been visible at this instant before.
++            var held = "?";
++            try {
++              held = String(this.keyStatuses ? this.keyStatuses.size : "?");
++            } catch (e) {}
 +            debug(
 +              "EME " + (this.reynardTag || "session?") + " " + name +
-+              "() by " + reynardDeepCaller()
++              "() keyStatuses=" + held +
++              " expiration=" + String(this.expiration) +
++              " stacksLeft=" + reynardEndStacks +
++              " by " + reynardEndCaller()
 +            );
 +          } catch (e) {}
 +          return native.apply(this, arguments);
@@ -1910,7 +1958,7 @@ index 9ca6e15..18d37f0 100644
 +      // alone: it is hot, and it is already dumped on every change.
 +      var reynardReads = 24;
 +      var reynardTraceRead = function (label, value) {
-+        if (reynardReads <= 0) {
++        if (reynardReads <= 0 || reynardInOwnHandler) {
 +          return;
 +        }
 +        var who = reynardDeepCaller();
@@ -2865,7 +2913,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2923,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2971,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3361,7 +3409,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3529,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3577,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3383,7 +3431,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3559,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3607,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
