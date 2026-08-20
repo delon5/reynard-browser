@@ -29,6 +29,9 @@
 #include <sys/file.h>
 #include <signal.h>
 #include <string.h>
+// ADDED - fix_retry_tunnel_create.py, for the teardown generation
+// counter the tunnel retry loop polls.
+#include <stdatomic.h>
 
 static const uint16_t rppairingPort = 49152;
 
@@ -96,6 +99,26 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void) {
 //
 // Only ever touched on debugSessionStateQueue().
 static BOOL sDebuggerTeardownRequested = NO;
+
+// ADDED - see fix_retry_tunnel_create.py.
+//
+// Bumped once per background teardown, SYNCHRONOUSLY at the top of
+// requestDetachForAllDebugSessions - deliberately not inside its
+// dispatch_async, because debugSessionStateQueue is the busiest queue in
+// the process and a delayed bump is a delayed abort.
+//
+// Read only by the tunnel retry loop, which captures it on entry and
+// gives up if it changes. That is the exact hazard: closeSharedTunnel is
+// dispatch_async onto providerQueue, so a retry still running when the
+// app backgrounds holds the tunnel close past the ~3.6s suspension
+// window fix_close_before_suspension.py exists to fit inside.
+//
+// A generation rather than a boolean on purpose. A call that STARTS
+// during a teardown is harmless - the tunnel is already closed and
+// nothing is queued behind it - and that is the hang-recovery case,
+// which has to be allowed to retry. Only a call that starts and then
+// sees a background is dangerous.
+static atomic_uint sTunnelTeardownGeneration = 0;
 
 // Shared, cross-process JIT session visibility - see this script's
 // docstring for the full reasoning. Small file in the App Group
@@ -1237,6 +1260,11 @@ void clearDebuggerTeardownRequest(void) {
 }
 
 void requestDetachForAllDebugSessions(void) {
+    // ADDED - fix_retry_tunnel_create.py. Before the dispatch_async
+    // below, not inside it: this is what tells an in-progress tunnel
+    // retry to stop so closeSharedTunnel is not held behind it.
+    atomic_fetch_add(&sTunnelTeardownGeneration, 1);
+
     // CHANGED - dispatch_async for the same reason as
     // cancelAllDebugSessionCalls above. Called from
     // sceneDidEnterBackground on the main thread, onto a queue fourteen
@@ -2434,7 +2462,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
     free(session);
 }
 
-DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *targetAddress, NSError **error) {
+// RENAMED from createDeviceProvider - see fix_retry_tunnel_create.py.
+// The body is unchanged; this is now one ATTEMPT, and the wrapper
+// below is what the rest of the process calls.
+static DeviceProvider *createDeviceProviderOnce(NSString *pairingFilePath, NSString *targetAddress, NSError **error) {
     // ADDED - granular, step-by-step logging throughout this entire
     // function - see
     // fix_instrument_create_device_provider_internals.py's docstring.
@@ -2542,6 +2573,115 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     provider->handshake = handshake;
     
     return provider;
+}
+
+// ADDED - see fix_retry_tunnel_create.py's docstring for the measurement.
+//
+// Short version: across the 2026-08-21 capture, six tunnel runs
+// connected and five of them needed one to seven further attempts,
+// 3.0-8.4s after the first. Nothing retried, so those repeats were
+// unrelated callers arriving by chance. The run that killed the app made
+// two attempts 1.2ms apart and stopped, with nine seconds of watchdog
+// budget left and a content process stopped at a trap that only a
+// re-attached debugger could release.
+static const double kTunnelRetryBudgetSeconds = 9.0;
+static const double kTunnelRetrySliceSeconds = 0.1;
+
+// Only the failure actually observed on device. Anything else - pairing
+// file missing, unreadable, bad target address - is permanent, and must
+// keep failing on the first attempt exactly as before.
+static BOOL tunnelFailureIsTransient(NSError *failure) {
+    if (!failure || failure.code != TunnelCreateFailed) {
+        return NO;
+    }
+    NSString *reason = failure.localizedDescription ?: @"";
+    return [reason containsString:@"Connection refused"];
+}
+
+// Sleeps in slices so a teardown is noticed within one slice rather than
+// at the end of a whole backoff. NO means the wait was cut short.
+static BOOL tunnelRetryWait(double seconds, unsigned int generationAtEntry) {
+    double remaining = seconds;
+    while (remaining > 0.0) {
+        if (atomic_load(&sTunnelTeardownGeneration) != generationAtEntry) {
+            return NO;
+        }
+        double slice = remaining < kTunnelRetrySliceSeconds
+            ? remaining : kTunnelRetrySliceSeconds;
+        // NSThread rather than usleep: no cast, no feature-test macro,
+        // and Foundation is already imported here.
+        [NSThread sleepForTimeInterval:slice];
+        remaining -= slice;
+    }
+    return atomic_load(&sTunnelTeardownGeneration) == generationAtEntry;
+}
+
+DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *targetAddress, NSError **error) {
+    static const double backoff[] = { 0.15, 0.30, 0.50, 0.75, 1.00 };
+    static const size_t backoffCount = sizeof(backoff) / sizeof(backoff[0]);
+
+    const unsigned int generationAtEntry =
+        atomic_load(&sTunnelTeardownGeneration);
+    const CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+    const CFAbsoluteTime deadline = started + kTunnelRetryBudgetSeconds;
+    unsigned long attempt = 0;
+
+    for (;;) {
+        NSError *attemptError = nil;
+        DeviceProvider *provider =
+            createDeviceProviderOnce(pairingFilePath, targetAddress, &attemptError);
+        attempt++;
+
+        if (provider) {
+            if (attempt > 1) {
+                logger([NSString stringWithFormat:
+                    @"tunnelRetry: succeeded on attempt %lu after %.1fs",
+                    attempt, CFAbsoluteTimeGetCurrent() - started]);
+            }
+            return provider;
+        }
+
+        if (!tunnelFailureIsTransient(attemptError)) {
+            if (error) *error = attemptError;
+            return NULL;
+        }
+
+        // The app backgrounded while this call was running.
+        // closeSharedTunnel is queued behind us on providerQueue and has
+        // a suspension deadline to meet.
+        if (atomic_load(&sTunnelTeardownGeneration) != generationAtEntry) {
+            logger([NSString stringWithFormat:
+                @"tunnelRetry: aborting after attempt %lu - a background teardown started, and closeSharedTunnel is queued behind this call",
+                attempt]);
+            if (error) *error = attemptError;
+            return NULL;
+        }
+
+        const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now >= deadline) {
+            logger([NSString stringWithFormat:
+                @"tunnelRetry: giving up after %lu attempt(s) over %.1fs - still refused",
+                attempt, now - started]);
+            if (error) *error = attemptError;
+            return NULL;
+        }
+
+        double wait = backoff[attempt - 1 < backoffCount ? attempt - 1 : backoffCount - 1];
+        if (now + wait > deadline) {
+            wait = deadline - now;
+        }
+        logger([NSString stringWithFormat:
+            @"tunnelRetry: attempt %lu refused, retrying in %.0fms (%.1fs of budget left)",
+            attempt, wait * 1000.0, deadline - now]);
+
+        if (!tunnelRetryWait(wait, generationAtEntry)) {
+            logger([NSString stringWithFormat:
+                @"tunnelRetry: aborting mid-backoff after attempt %lu - a background teardown started",
+                attempt]);
+            if (error) *error = attemptError;
+            return NULL;
+        }
+    }
 }
 
 void freeDebugSession(DebugSession *session) {

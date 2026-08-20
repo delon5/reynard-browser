@@ -1723,6 +1723,41 @@ extension JITController {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
+                // ADDED - prewarmSharedTunnel() at willEnterForeground.
+                // See fix_prewarm_at_will_enter_foreground.py.
+                //
+                // The other prewarm is in applicationDidBecomeActive,
+                // which is AFTER willEnterForeground - and
+                // willEnterForeground is where the app dies:
+                // EXConcreteExtension's _hostWillEnterForegroundNote:
+                // makes a synchronous XPC call to every hosted
+                // extension, and a content process left stopped by a
+                // torn-down debug session cannot answer it. The main
+                // thread never leaves the notification post, so
+                // sceneDidBecomeActive never runs and the tunnel is
+                // never rebuilt.
+                //
+                // Reynard20260821083813: no tunnelPrewarm line at the
+                // fatal foreground, one at all nineteen others.
+                //
+                // This closure is itself an observer of that same
+                // notification and its own log line is stamped
+                // 08:38:00.990 - two seconds before the observer that
+                // blocked, inside the same post. So it is the earliest
+                // hook known to run, and prewarmSharedTunnel does its
+                // work on a global utility queue, which keeps going
+                // while the main thread is parked.
+                //
+                // Ahead of the guard below deliberately: that guard is
+                // about the polling timer and returns early whenever the
+                // timer is already running, which says nothing about
+                // whether the tunnel needs rebuilding. No self needed.
+                //
+                // Cheap when unnecessary - getProviderForPID: returns
+                // the cached provider and skips both
+                // createDeviceProvider and the DDI mount.
+                JITEnabler.shared.prewarmSharedTunnel()
+
                 guard let self, self.helperAttachPollingTimer == nil else {
                     return
                 }
