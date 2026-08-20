@@ -3215,6 +3215,11 @@ public final class FairPlayStreamParser: NSObject {
     /// lives in between.
     fileprivate static let livenessWindow: Double = 2.0
 
+    /// The stream videoClock last chose, so a change of mind is visible.
+    ///
+    /// ADDED - see mse_fix_94's docstring.
+    private var lastVideoClockKey: String?
+
     private func videoClock(sessionId: String) -> CMTime? {
         let cutoff = Self.hostNow() - Self.livenessWindow
         let layer = withState { () -> AVSampleBufferDisplayLayer? in
@@ -3236,6 +3241,33 @@ public final class FairPlayStreamParser: NSObject {
                 }
             }
             return newest?.layer
+        }
+        // ADDED - see mse_fix_94's docstring. av is an exact, stable
+        // offset, and this file's own note says both clocks run on the
+        // same host clock and cannot drift - so an offset is an
+        // ANCHORING difference. This picks the most recently fed
+        // stream's timebase while the drift line reads the reporting
+        // stream's own, and in a session with more than one video
+        // stream those are different objects. Said when the choice
+        // changes, which is when an av step would appear.
+        if let layer {
+            let chosen = withState { () -> String? in
+                for (key, slot) in streamParsers
+                where key.hasPrefix(sessionId + "|")
+                        && slot.displayLayer === layer {
+                    return key
+                }
+                return nil
+            }
+            let changed = withState { () -> Bool in
+                guard lastVideoClockKey != chosen else { return false }
+                lastVideoClockKey = chosen
+                return true
+            }
+            if changed {
+                Self.log("video clock for \(sessionId) now follows "
+                         + (chosen ?? "an unnamed stream"))
+            }
         }
         // NO RATE TEST. It used to require CMTimebaseGetRate != 0, which
         // was right when a stopped clock meant a dead one and wrong the
@@ -3489,8 +3521,17 @@ public final class FairPlayStreamParser: NSObject {
                     // every one of them - so either setRate did nothing
                     // or something moved it back, and arithmetic on a log
                     // is a poor way to find out which. Said once.
+                    // CHANGED - see
+                    // mse_fix_94_the_refusal_was_a_false_alarm.py's
+                    // docstring. This compared against pts while the
+                    // write above targets onto, and those differ by
+                    // exactly the gap the correction exists to close -
+                    // so it reported a refusal on every SUCCESSFUL
+                    // correction. The capture reads 480.261 against an
+                    // onto of 480.261: the clock went precisely where it
+                    // was sent.
                     let after = CMTimebaseGetTime(sync.timebase).seconds
-                    if abs(after - pts) > 1.0 {
+                    if abs(after - onto.seconds) > 1.0 {
                         let first = withState { () -> Bool in
                             guard let slot = streamParsers[streamKey],
                                   !slot.reportedUnmovedClock else { return false }
@@ -3500,7 +3541,8 @@ public final class FairPlayStreamParser: NSObject {
                         if first {
                             Self.log("stream \(streamKey) the "
                                      + "synchronizer's clock did NOT move - "
-                                     + "asked for \(pts), it reads "
+                                     + "asked for \(onto.seconds), it "
+                                     + "reads "
                                      + "\(after). "
                                      + "AVSampleBufferRenderSynchronizer."
                                      + "setRate did not do what it was "
@@ -3767,6 +3809,25 @@ public final class FairPlayStreamParser: NSObject {
             // the compositor before it is ever offered.
             CMTimebaseSetRate(timebase, rate: Float64(gatedRate(streamKey)))
             sink.controlTimebase = timebase
+            // ADDED - see mse_fix_94's docstring. The Netflix capture
+            // has this reporting an anchor of 121.281 and the drift line
+            // three lines later reading 99.003 off the same stream. A
+            // control timebase cannot always be replaced on a layer that
+            // has already had buffers enqueued, and the compositor pools
+            // its layers - so the assignment above may be silently
+            // ignored. Read it back and say so.
+            if let installed = sink.controlTimebase {
+                let reads = CMTimebaseGetTime(installed).seconds
+                let took = installed === timebase
+                    && abs(reads - anchor.seconds) <= 0.05
+                Self.log("stream \(streamKey) adopt timebase reads "
+                         + "\(reads) rate \(CMTimebaseGetRate(installed)) "
+                         + "layer \(Unmanaged.passUnretained(sink).toOpaque())"
+                         + (took ? "" : " - THE SET DID NOT TAKE"))
+            } else {
+                Self.log("stream \(streamKey) adopt left the layer with NO "
+                         + "control timebase")
+            }
         } else {
             Self.log("stream \(streamKey) could not build a timebase for "
                      + "the compositor's layer - it will present as fast as "
