@@ -101,9 +101,11 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         logger("carPlayLife: scene DISCONNECTING - session discarded, audio released")
         self.interfaceController = nil
         // Stopped beside the session close below - see
-        // activationHeartbeat.
-        activationHeartbeat?.invalidate()
-        activationHeartbeat = nil
+        // activationHeartbeat. Reached through the window this callback
+        // is handed, because the timer belongs to the browser view
+        // controller and this delegate keeps no typed reference to it.
+        (window.rootViewController as? CarPlayBrowserViewController)?
+            .stopActivationHeartbeat()
         // Close the session BEFORE dropping the references to it.
         // currentSession is weak and GeckoSession has no deinit-side
         // close, so clearing references only ORPHANED the open engine
@@ -289,6 +291,14 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
     /// activation for the life of every document it loads. This
     /// preserves that, and still writes nothing down.
     private var activationHeartbeat: Timer?
+
+    /// Stops the heartbeat - see activationHeartbeat. Called from the
+    /// scene delegate's disconnect, which owns the lifetime this timer
+    /// should not outlive.
+    func stopActivationHeartbeat() {
+        activationHeartbeat?.invalidate()
+        activationHeartbeat = nil
+    }
     weak var interfaceController: CPInterfaceController?
 
     /// Where the car browser starts. Deliberately something simple and
