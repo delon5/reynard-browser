@@ -54,21 +54,6 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     private var interfaceController: CPInterfaceController?
     private var carWindow: CPWindow?
-    /// Keeps the car display's user activation from expiring.
-    ///
-    /// ADDED - see mse_fix_92's docstring. This delegate deliberately
-    /// answers the autoplay permission with .prompt, because .allow and
-    /// .deny are both persisted EXPIRE_NEVER into the same store Site
-    /// Settings reads, and relies on markUserActivated instead. That is
-    /// STICKY activation, granted at page start, first contentful paint
-    /// and page stop - and media.autoplay.blocking_policy 1 stops
-    /// honouring sticky, so each grant would expire five seconds later
-    /// with no touch events on this display to renew it.
-    ///
-    /// Not a widening of what the car may do: it already holds
-    /// activation for the life of every document it loads. This
-    /// preserves that, and still writes nothing down.
-    private var activationHeartbeat: Timer?
     
     /// The THREE-argument form. The two-argument version exists for
     /// template-only apps and never yields a window - implementing only
@@ -289,6 +274,21 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
     private let geckoView = GeckoView(frame: .zero)
     private let websiteModeSettingManager = WebsiteModeSettingManager()
     private var session: GeckoSession?
+    /// Keeps the car display's user activation from expiring.
+    ///
+    /// ADDED - see mse_fix_92's docstring. This delegate deliberately
+    /// answers the autoplay permission with .prompt, because .allow and
+    /// .deny are both persisted EXPIRE_NEVER into the same store Site
+    /// Settings reads, and relies on markUserActivated instead. That is
+    /// STICKY activation, granted at page start, first contentful paint
+    /// and page stop - and media.autoplay.blocking_policy 1 stops
+    /// honouring sticky, so each grant would expire five seconds later
+    /// with no touch events on this display to renew it.
+    ///
+    /// Not a widening of what the car may do: it already holds
+    /// activation for the life of every document it loads. This
+    /// preserves that, and still writes nothing down.
+    private var activationHeartbeat: Timer?
     weak var interfaceController: CPInterfaceController?
 
     /// Where the car browser starts. Deliberately something simple and
