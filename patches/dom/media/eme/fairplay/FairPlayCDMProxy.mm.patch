@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1951 @@
+@@ -0,0 +1,1976 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -397,6 +397,20 @@ index 000000000000..e859b69f6239
 +    if (aSpc.IsEmpty()) {
 +      return false;
 +    }
++    // CHANGED - see mse_fix_84's docstring. A pssh naming several keys
++    // is answered with one challenge per key, and the parser side
++    // builds that array itself because it is the side holding the key
++    // ids. Wrapping an array in another array would give Netflix a
++    // keyID of undefined and a payload of the whole batch.
++    if (aSpc[0] == '[' || aSpc[0] == '{') {
++      printf_stderr(
++          "avPlayer: FairPlay key message is already batched, %zu bytes - "
++          "passing it through\n",
++          (size_t)aSpc.Length());
++      aOut.Clear();
++      aOut.AppendElements(aSpc.Elements(), aSpc.Length());
++      return true;
++    }
 +    NSData* spc = [NSData dataWithBytes:aSpc.Elements() length:aSpc.Length()];
 +    NSString* payload = [spc base64EncodedStringWithOptions:0];
 +    if (!payload) {
@@ -470,6 +484,17 @@ index 000000000000..e859b69f6239
 +    if (!entries || [entries count] == 0) {
 +      printf_stderr(
 +          "avPlayer: FairPlay licence is JSON with no entry array\n");
++      return false;
++    }
++    // CHANGED - see mse_fix_84's docstring. More than one entry is a
++    // batch, and only the parser side knows which challenge each answers
++    // - it is the side that built them and holds the content ids. Passed
++    // through whole, and split there.
++    if ([entries count] > 1) {
++      printf_stderr(
++          "avPlayer: FairPlay licence carries %lu entries - passing the "
++          "batch through for the parser to split\n",
++          (unsigned long)[entries count]);
 +      return false;
 +    }
 +    id entry = [entries objectAtIndex:0];

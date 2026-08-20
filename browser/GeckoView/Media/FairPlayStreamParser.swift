@@ -98,6 +98,18 @@ public final class FairPlayStreamParser: NSObject {
         /// Drained by the delegate, which pins one origination to the
         /// request object that answers it - see claimOrigination.
         var pendingOriginations: [FairPlayOrigination] = []
+        /// The content ids of one batched key exchange, in fkri order.
+        ///
+        /// ADDED - see mse_fix_84_every_key_the_pssh_names.py's
+        /// docstring. A FairPlay pssh may name several keys, and Safari
+        /// answers it with ONE message carrying one challenge per key.
+        /// Empty, or holding a single id, means this session is not
+        /// batched and every SPC is sent the moment it is made.
+        var batchContentIds: [String] = []
+        /// The key ids those content ids stand for, same order.
+        var batchKeyIds: [Data] = []
+        /// SPCs collected so far, by content id.
+        var batchSPCs: [String: Data] = [:]
         /// Whether requestKey drives this session's key requests.
         ///
         /// True for anything parserAppendInitData opened, false for the
@@ -687,6 +699,69 @@ public final class FairPlayStreamParser: NSObject {
                                                   initializationData: forSession,
                                                   options: nil)
 
+        // ADDED - see mse_fix_84's docstring. A pssh may name several
+        // keys and the picture is often not keyed to the first: Netflix
+        // licences 09e2052f above while its video track's tenc names
+        // 09e20534, and the display layer answers "no content key
+        // present" for every frame.
+        //
+        // One request per remaining key, each with a sinf naming it and
+        // an origination of its own, so each produces its own SPC. The
+        // originations are queued in the same order the requests are
+        // made, which is the order the delegate's FIFO claims them in.
+        //
+        // reynard-keyid: is the existing convention for a request this
+        // side raised. Nothing is held for these keys yet, so the replay
+        // branch that convention also drives cannot fire on a fresh
+        // batch.
+        let everyKey = Self.keyIdentifiers(inPSSH: initData)
+        if everyKey.count > 1, let primary = keyId {
+            // CORRECTED while applying fix 84. The script's fan-out read
+            // `scheme` from the binding above, which is declared inside
+            // the else branch that builds the first request's sinf and
+            // is not in scope here - the emitted Swift did not compile.
+            // schemeType is a pure function of initData, so asking it
+            // again is the same answer that branch would have had.
+            let scheme = Self.schemeType(inPSSH: initData) ?? "cbcs"
+            var ids = [contentId]
+            var keys = [primary]
+            for extra in everyKey where Self.hexBytes(extra)
+                    != Self.hexBytes(primary) {
+                let extraId = "reynard-keyid:" + Self.hexBytes(extra)
+                guard let extraSinf = Self.sinfInitialisationJSON(
+                        keyId: extra, template: template, scheme: scheme,
+                        sessionId: sessionId) else {
+                    Self.log("session \(sessionId) could not build a sinf "
+                             + "for key \(Self.hexBytes(extra)) - that key "
+                             + "is not in this batch")
+                    continue
+                }
+                withState {
+                    entry.pendingOriginations.append(
+                        FairPlayOrigination(contentId: extraId,
+                                            initData: initData))
+                }
+                ids.append(extraId)
+                keys.append(extra)
+                Self.log("session \(sessionId) also asking for key "
+                         + Self.hexBytes(extra) + " - the pssh names "
+                         + "\(everyKey.count) and the picture may be on "
+                         + "any of them")
+                entry.keySession.processContentKeyRequest(
+                    withIdentifier: extra, initializationData: extraSinf,
+                    options: nil)
+            }
+            if ids.count > 1 {
+                withState {
+                    entry.batchContentIds = ids
+                    entry.batchKeyIds = keys
+                    entry.batchSPCs = [:]
+                }
+                Self.log("session \(sessionId) batching \(ids.count) "
+                         + "challenges into one key message")
+            }
+        }
+
         // ADDED - see fix_key_request_watchdog.py's docstring. The
         // call above returns void and says nothing when it declines,
         // which is how this path has failed silently twice and how
@@ -1166,6 +1241,186 @@ public final class FairPlayStreamParser: NSObject {
         0x94, 0xCE, 0x86, 0xFB, 0x07, 0xFF, 0x4F, 0x43,
         0xAD, 0xB8, 0x93, 0xD2, 0xFA, 0x96, 0x8C, 0xA2,
     ]
+
+    /// Hold a batched SPC, or hand back what should be sent now.
+    ///
+    /// ADDED - see mse_fix_84's docstring. Returns nil while a batch is
+    /// still incomplete, the batched JSON under the page's own content
+    /// id once the last challenge arrives, and the SPC unchanged for a
+    /// session that is not batched at all.
+    fileprivate func batchedMessage(sessionId: String, contentId: String,
+                                    spc: Data) -> (String, Data)? {
+        let staged = withState { () -> ([String], [Data], [String: Data])? in
+            guard let entry = entries[sessionId],
+                  entry.batchContentIds.count > 1 else {
+                return nil
+            }
+            entry.batchSPCs[contentId] = spc
+            return (entry.batchContentIds, entry.batchKeyIds, entry.batchSPCs)
+        }
+        guard let (ids, keys, held) = staged else {
+            return (contentId, spc)
+        }
+        let missing = ids.filter { held[$0] == nil }
+        guard missing.isEmpty else {
+            Self.log("session \(sessionId) batch holding "
+                     + "\(held.count) of \(ids.count) challenges - "
+                     + "still waiting for \(missing.count)")
+            return nil
+        }
+        var entriesJSON: [[String: String]] = []
+        for (index, id) in ids.enumerated() {
+            guard let payload = held[id], index < keys.count else {
+                continue
+            }
+            entriesJSON.append([
+                "keyID": keys[index].base64EncodedString(),
+                "payload": payload.base64EncodedString(),
+            ])
+        }
+        guard let document = try? JSONSerialization.data(
+                withJSONObject: entriesJSON, options: []) else {
+            Self.log("session \(sessionId) could not serialise the batched "
+                     + "key message - sending the first challenge alone")
+            return (ids[0], held[ids[0]] ?? spc)
+        }
+        withState { entries[sessionId]?.batchSPCs = [:] }
+        Self.log("session \(sessionId) batched \(entriesJSON.count) "
+                 + "challenges into \(document.count) bytes of JSON")
+        return (ids[0], document)
+    }
+
+    /// The licences inside a batched response, in challenge order.
+    ///
+    /// ADDED - see mse_fix_84's docstring. Netflix labels each challenge
+    /// with an index and sorts its RESPONSES by that label, so the label
+    /// is the authority and array order is only the fallback. Nil when
+    /// these bytes are not a batch at all, which is every response this
+    /// path saw before now.
+    fileprivate static func splitLicenceBatch(_ response: Data) -> [Data]? {
+        guard let first = response.first,
+              first == UInt8(ascii: "["), let parsed = try? JSONSerialization
+                .jsonObject(with: response, options: []) else {
+            // An object, which is the shape a server that wraps its
+            // batch uses.
+            guard let first = response.first, first == UInt8(ascii: "{"),
+                  let object = try? JSONSerialization.jsonObject(
+                    with: response, options: []) as? [String: Any] else {
+                return nil
+            }
+            for name in ["RESPONSES", "responses", "CHALLENGES"] {
+                if let list = object[name] as? [[String: Any]] {
+                    return decodeLicenceEntries(list)
+                }
+            }
+            return nil
+        }
+        guard let list = parsed as? [[String: Any]] else {
+            return nil
+        }
+        return decodeLicenceEntries(list)
+    }
+
+    /// One base64 payload per entry, ordered by ID when there is one.
+    private static func decodeLicenceEntries(_ list: [[String: Any]])
+        -> [Data]? {
+        var ordered: [(Int, Data)] = []
+        var byId = true
+        for (index, item) in list.enumerated() {
+            var payload: Data?
+            for name in ["PAYLOAD", "payload", "CKC", "ckc", "DATA", "data"] {
+                if let text = item[name] as? String,
+                   let bytes = Data(base64Encoded: text), !bytes.isEmpty {
+                    payload = bytes
+                    break
+                }
+            }
+            guard let payload else {
+                return nil
+            }
+            var position = index
+            if let label = item["ID"] as? String, let parsed = Int(label) {
+                position = parsed
+            } else if let label = item["id"] as? String,
+                      let parsed = Int(label) {
+                position = parsed
+            } else {
+                byId = false
+            }
+            ordered.append((position, payload))
+        }
+        guard !ordered.isEmpty else {
+            return nil
+        }
+        log("licence batch: \(ordered.count) entries, matched by "
+            + (byId ? "ID" : "array order"))
+        return ordered.sorted { $0.0 < $1.0 }.map { $0.1 }
+    }
+
+    /// EVERY key the FairPlay pssh names, in the order it names them.
+    ///
+    /// ADDED - see mse_fix_84's docstring. Netflix's 200-byte box holds
+    /// two fpsk boxes and its 344-byte box holds four; the picture is
+    /// keyed to one of the ones this file used to skip. The single-key
+    /// reader below is untouched and still answers with the first,
+    /// which is what everything that names one key still wants.
+    ///
+    /// Deduplicated, because a packager repeating a key id would
+    /// otherwise cost an extra request that can never be answered
+    /// separately.
+    static func keyIdentifiers(inPSSH data: Data) -> [Data] {
+        let bytes = [UInt8](data)
+        func be32(_ at: Int) -> Int {
+            guard at >= 0, at + 4 <= bytes.count else { return -1 }
+            return (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                 | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+        }
+        let pssh = Array("pssh".utf8)
+        let fkri = Array("fkri".utf8)
+        var found: [Data] = []
+        var seen = Set<String>()
+        var boxAt = 0
+        while boxAt + 8 <= bytes.count {
+            let size = be32(boxAt)
+            guard size >= 8, boxAt + size <= bytes.count else { break }
+            guard boxAt + 32 <= bytes.count,
+                  Array(bytes[(boxAt + 4)..<(boxAt + 8)]) == pssh,
+                  Array(bytes[(boxAt + 12)..<(boxAt + 28)])
+                      == Self.fairPlaySystemId else {
+                boxAt += size
+                continue
+            }
+            var cursor = boxAt + 28
+            if bytes[boxAt + 8] >= 1 {
+                cursor += 4 + 16 * max(be32(cursor), 0)
+            }
+            // Past the payload's own length field.
+            cursor += 4
+            let end = boxAt + size
+            // The same scan fkriKeyIdentifier does, continued past the
+            // first hit instead of stopping at it. Layout from the type:
+            // type 4, reserved 4, then the key id for 16.
+            var typeAt = max(cursor, 0)
+            while typeAt >= 0, typeAt + 4 <= end {
+                if Array(bytes[typeAt..<(typeAt + 4)]) == fkri {
+                    let kidAt = typeAt + 8
+                    if kidAt + 16 <= end {
+                        let kid = Data(bytes[kidAt..<(kidAt + 16)])
+                        let hex = Self.hexBytes(kid)
+                        if !seen.contains(hex) {
+                            seen.insert(hex)
+                            found.append(kid)
+                        }
+                    }
+                    typeAt += 4
+                    continue
+                }
+                typeAt += 1
+            }
+            boxAt += size
+        }
+        return found
+    }
 
     /// The key id for the FairPlay key this init data names, or nil.
     static func keyIdentifier(inPSSH data: Data) -> Data? {
@@ -4126,6 +4381,29 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("CKC for unknown session \(sessionId)")
             return false
         }
+        // ADDED - see mse_fix_84's docstring. A batched exchange is
+        // answered in kind: one entry per challenge, which the licence
+        // server labels and may return in any order. Each is applied to
+        // its own request through the same provide() a single exchange
+        // uses.
+        if let split = Self.splitLicenceBatch(ckc), split.count > 1 {
+            let ids = withState { entry.batchContentIds }
+            guard ids.count == split.count else {
+                Self.log("session \(sessionId) licence batch has "
+                         + "\(split.count) entries for \(ids.count) "
+                         + "challenges - not applying any of them")
+                return false
+            }
+            var applied = 0
+            for (index, licence) in split.enumerated()
+            where entry.keyDelegate.provide(response: licence,
+                                            contentId: ids[index]) {
+                applied += 1
+            }
+            Self.log("session \(sessionId) licence batch: \(applied) of "
+                     + "\(split.count) applied")
+            return applied > 0
+        }
         if entry.keyDelegate.provide(response: ckc, contentId: contentId) {
             return true
         }
@@ -4801,6 +5079,16 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 + "SPC produced but not routed")
             return
         }
+        // CHANGED - see mse_fix_84's docstring. A batched session sends
+        // nothing until every challenge is made, and then sends all of
+        // them as one message. An unbatched session is handed straight
+        // back its own SPC and behaves exactly as before.
+        guard let outgoing = FairPlayStreamParser.shared.batchedMessage(
+                sessionId: sessionId, contentId: contentId, spc: spc) else {
+            return
+        }
+        let contentId = outgoing.0
+        let spc = outgoing.1
         FairPlayStreamParser.log(
             "session \(sessionId) SPC on its way to child \(childId), "
             + "\(spc.count) bytes under id \(contentId)")
