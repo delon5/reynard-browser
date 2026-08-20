@@ -1297,7 +1297,9 @@ public final class FairPlayStreamParser: NSObject {
     /// is the authority and array order is only the fallback. Nil when
     /// these bytes are not a batch at all, which is every response this
     /// path saw before now.
-    fileprivate static func splitLicenceBatch(_ response: Data) -> [Data]? {
+    fileprivate static func splitLicenceBatch(_ response: Data,
+                                              expecting keyIds: [Data])
+        -> [Data]? {
         guard let first = response.first,
               first == UInt8(ascii: "["), let parsed = try? JSONSerialization
                 .jsonObject(with: response, options: []) else {
@@ -1310,7 +1312,7 @@ public final class FairPlayStreamParser: NSObject {
             }
             for name in ["RESPONSES", "responses", "CHALLENGES"] {
                 if let list = object[name] as? [[String: Any]] {
-                    return decodeLicenceEntries(list)
+                    return decodeLicenceEntries(list, expecting: keyIds)
                 }
             }
             return nil
@@ -1318,14 +1320,42 @@ public final class FairPlayStreamParser: NSObject {
         guard let list = parsed as? [[String: Any]] else {
             return nil
         }
-        return decodeLicenceEntries(list)
+        return decodeLicenceEntries(list, expecting: keyIds)
     }
 
-    /// One base64 payload per entry, ordered by ID when there is one.
-    private static func decodeLicenceEntries(_ list: [[String: Any]])
+    /// One base64 payload per entry, put back in challenge order.
+    ///
+    /// CHANGED - see mse_fix_86_match_the_licence_to_its_key.py's
+    /// docstring. Array order was wrong and both licences were applied
+    /// to each other's requests, which FairPlay reported as -11835
+    /// "This content is not authorised" on BOTH keys at once.
+    ///
+    /// DHB is the authority. Netflix's own getDrmKeyMapping pairs
+    /// responses to keys with
+    ///
+    ///     base64.decode(t.DHB).subarray(4, 12)
+    ///     base64.decode(keyIds[n]).subarray(0, 8)
+    ///
+    /// so bytes 4..12 of DHB are the first eight bytes of the key id -
+    /// and these ids are eight significant bytes followed by eight
+    /// zeroes, so that is all of them. Exact, and immune to whatever
+    /// order the server answers in.
+    private static func decodeLicenceEntries(_ list: [[String: Any]],
+                                             expecting keyIds: [Data])
         -> [Data]? {
-        var ordered: [(Int, Data)] = []
-        var byId = true
+        // What the entries look like, once, because nothing has ever
+        // printed one and the ID labels are still unknown.
+        if let first = list.first {
+            let names = first.keys.sorted().joined(separator: " ")
+            let label = (first["ID"] as? String) ?? (first["id"] as? String)
+            log("licence batch entry 0 keys: " + names
+                + ", ID=" + (label.map { "\"" + $0 + "\"" } ?? "absent"))
+        }
+        var payloads: [Data] = []
+        var positions: [Int] = []
+        var howMatched = "array order"
+        var allByKey = !keyIds.isEmpty
+        var allById = true
         for (index, item) in list.enumerated() {
             var payload: Data?
             for name in ["PAYLOAD", "payload", "CKC", "ckc", "DATA", "data"] {
@@ -1338,23 +1368,56 @@ public final class FairPlayStreamParser: NSObject {
             guard let payload else {
                 return nil
             }
-            var position = index
-            if let label = item["ID"] as? String, let parsed = Int(label) {
-                position = parsed
-            } else if let label = item["id"] as? String,
-                      let parsed = Int(label) {
-                position = parsed
-            } else {
-                byId = false
+            payloads.append(payload)
+
+            // 1. the key this entry answers, out of DHB.
+            var byKey: Int?
+            for name in ["DHB", "dhb"] {
+                guard let text = item[name] as? String,
+                      let raw = Data(base64Encoded: text),
+                      raw.count >= 12 else {
+                    continue
+                }
+                let stamp = Array(raw)[4..<12]
+                for (slot, keyId) in keyIds.enumerated()
+                where keyId.count >= 8
+                        && Array(keyId.prefix(8)) == Array(stamp) {
+                    byKey = slot
+                    break
+                }
+                break
             }
-            ordered.append((position, payload))
+            if byKey == nil {
+                allByKey = false
+            }
+
+            // 2. an ID that is a number.
+            var byId: Int?
+            if let text = (item["ID"] as? String) ?? (item["id"] as? String),
+               let parsed = Int(text) {
+                byId = parsed
+            } else {
+                allById = false
+            }
+
+            positions.append(byKey ?? byId ?? index)
         }
-        guard !ordered.isEmpty else {
+        guard !payloads.isEmpty else {
             return nil
         }
-        log("licence batch: \(ordered.count) entries, matched by "
-            + (byId ? "ID" : "array order"))
-        return ordered.sorted { $0.0 < $1.0 }.map { $0.1 }
+        if allByKey {
+            howMatched = "DHB"
+        } else if allById {
+            howMatched = "ID"
+        } else {
+            // A partial match orders nothing reliably - fall all the way
+            // back rather than half-sort.
+            positions = Array(0..<payloads.count)
+        }
+        log("licence batch: \(payloads.count) entries, matched by "
+            + howMatched)
+        let paired = zip(positions, payloads).sorted { $0.0 < $1.0 }
+        return paired.map { $0.1 }
     }
 
     /// EVERY key the FairPlay pssh names, in the order it names them.
@@ -4386,7 +4449,9 @@ public final class FairPlayStreamParser: NSObject {
         // server labels and may return in any order. Each is applied to
         // its own request through the same provide() a single exchange
         // uses.
-        if let split = Self.splitLicenceBatch(ckc), split.count > 1 {
+        let expectedKeys = withState { entry.batchKeyIds }
+        if let split = Self.splitLicenceBatch(ckc, expecting: expectedKeys),
+           split.count > 1 {
             let ids = withState { entry.batchContentIds }
             guard ids.count == split.count else {
                 Self.log("session \(sessionId) licence batch has "
