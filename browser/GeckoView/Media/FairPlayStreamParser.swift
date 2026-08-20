@@ -1354,6 +1354,9 @@ public final class FairPlayStreamParser: NSObject {
         var payloads: [Data] = []
         var positions: [Int] = []
         var howMatched = "array order"
+        // Which field did the matching, so a capture never has to guess
+        // whether keyID or DHB was the one present.
+        var matchedField = "keyID"
         var allByKey = !keyIds.isEmpty
         var allById = true
         for (index, item) in list.enumerated() {
@@ -1370,22 +1373,54 @@ public final class FairPlayStreamParser: NSObject {
             }
             payloads.append(payload)
 
-            // 1. the key this entry answers, out of DHB.
+            // 1. the key this entry answers.
+            //
+            // CHANGED - see mse_fix_88_the_answer_names_its_own_key.py's
+            // docstring. The capture settled what the response looks
+            // like:
+            //
+            //   licence batch entry 0 keys: keyID payload, ID=absent
+            //
+            // Netflix answers a batch by MIRRORING it - the same keyID
+            // and payload the challenge carried - so the key each
+            // licence belongs to is named outright and needs no
+            // inference at all. Compared as sixteen bytes rather than as
+            // text, because base64 of the same bytes is not guaranteed
+            // to be the same string.
             var byKey: Int?
-            for name in ["DHB", "dhb"] {
+            for name in ["keyID", "keyId", "keyid", "KEYID"] {
                 guard let text = item[name] as? String,
-                      let raw = Data(base64Encoded: text),
-                      raw.count >= 12 else {
+                      let raw = Data(base64Encoded: text), !raw.isEmpty else {
                     continue
                 }
-                let stamp = Array(raw)[4..<12]
                 for (slot, keyId) in keyIds.enumerated()
-                where keyId.count >= 8
-                        && Array(keyId.prefix(8)) == Array(stamp) {
+                where Array(keyId) == Array(raw) {
                     byKey = slot
+                    matchedField = "keyID"
                     break
                 }
                 break
+            }
+            // DHB, for a packaging that names the key that way instead -
+            // which is what getDrmKeyMapping in the same player reads,
+            // bytes 4 through 12 being the key id's first eight.
+            if byKey == nil {
+                for name in ["DHB", "dhb"] {
+                    guard let text = item[name] as? String,
+                          let raw = Data(base64Encoded: text),
+                          raw.count >= 12 else {
+                        continue
+                    }
+                    let stamp = Array(raw)[4..<12]
+                    for (slot, keyId) in keyIds.enumerated()
+                    where keyId.count >= 8
+                            && Array(keyId.prefix(8)) == Array(stamp) {
+                        byKey = slot
+                        matchedField = "DHB"
+                        break
+                    }
+                    break
+                }
             }
             if byKey == nil {
                 allByKey = false
@@ -1406,7 +1441,7 @@ public final class FairPlayStreamParser: NSObject {
             return nil
         }
         if allByKey {
-            howMatched = "DHB"
+            howMatched = matchedField
         } else if allById {
             howMatched = "ID"
         } else {
