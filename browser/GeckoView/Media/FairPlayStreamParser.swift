@@ -3037,10 +3037,30 @@ public final class FairPlayStreamParser: NSObject {
             let startingVolume = volumeFor(streamKey)
             renderer.volume = Float(startingVolume)
             renderer.isMuted = startingVolume <= 0.0
+            // ADDED - see mse_fix_87's docstring. Four renderers were
+            // built on tv.apple.com in one capture and none was ever
+            // recorded stopping. A renderer that is still being fed
+            // after its track was replaced is the old audio language,
+            // still playing, which is exactly what "the switch is not
+            // acknowledged" sounds like.
+            let already = withState { () -> [String] in
+                streamParsers.compactMap { key, other -> String? in
+                    guard key != streamKey,
+                          key.hasPrefix(sessionOf(streamKey) + "|"),
+                          other.audioRenderer != nil else {
+                        return nil
+                    }
+                    return "\(key) fed \(other.audioEnqueued)"
+                }.sorted()
+            }
             Self.log("stream \(streamKey) built an audio renderer - "
                      + "status \(renderer.status.rawValue) "
                      + "volume \(renderer.volume) "
-                     + "muted \(renderer.isMuted)")
+                     + "muted \(renderer.isMuted)"
+                     + (already.isEmpty
+                        ? " - the session has no other"
+                        : " - session already has \(already.count): ["
+                          + already.joined(separator: ", ") + "]"))
         }
 
         // Fix 27's discontinuity test, on this stream's own intake.
@@ -3360,6 +3380,31 @@ public final class FairPlayStreamParser: NSObject {
             if changed || count == 1 {
                 Self.log("stream \(streamKey) audio enqueued \(count) - "
                          + report)
+            }
+            // ADDED - see mse_fix_87's docstring. One line naming every
+            // renderer in this session and how much each has taken. Two
+            // of them climbing together is the old audio language still
+            // being fed; one climbing and one frozen is a leak but not
+            // the cause of anything audible.
+            //
+            // Every two hundred samples, which is a few seconds of
+            // audio, so a long playback costs a handful of lines.
+            if count % 200 == 0 {
+                let session = sessionOf(streamKey)
+                let census = withState { () -> [String] in
+                    streamParsers.compactMap { key, other -> String? in
+                        guard key.hasPrefix(session + "|"),
+                              let renderer = other.audioRenderer else {
+                            return nil
+                        }
+                        return "\(key) fed \(other.audioEnqueued) muted "
+                             + "\(renderer.isMuted)"
+                    }.sorted()
+                }
+                if census.count > 1 {
+                    Self.log("session \(session) audio census: "
+                             + census.joined(separator: ", "))
+                }
             }
             // The same correction, for the same reason - see the video
             // half. An audio renderer discards late samples silently
@@ -4034,6 +4079,15 @@ public final class FairPlayStreamParser: NSObject {
                 ? Character(UnicodeScalar(byte)) : "."
         })
         return protectedSubtypes.contains(fourCC)
+    }
+
+    /// "child-12|sb-4630" -> "child-12".
+    ///
+    /// ADDED - see mse_fix_87's docstring. Stream keys are the session
+    /// and the source buffer joined by a pipe, and the censuses need the
+    /// session half to group by.
+    fileprivate func sessionOf(_ streamKey: String) -> String {
+        return String(streamKey.split(separator: "|").first ?? "")
     }
 
     /// Say once that this stream is not ours to render.

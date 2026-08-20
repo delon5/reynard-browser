@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2910 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3138 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2109,6 +2109,24 @@ index 9ca6e15..18d37f0 100644
 +    }
 +
 +    if (window.SourceBuffer) {
++      // ADDED - see mse_fix_87's docstring. A language switch that
++      // swaps buffers should read as a swap, not as a second buffer
++      // appearing from nowhere.
++      if (window.MediaSource.prototype.removeSourceBuffer) {
++        var reynardNativeRemoveSB =
++          window.MediaSource.prototype.removeSourceBuffer;
++        window.MediaSource.prototype.removeSourceBuffer = function (buffer) {
++          try {
++            debug(
++              "MSE removeSourceBuffer(" +
++              ((buffer && buffer.reynardTag) || "sb?") + ") by " +
++              reynardCaller()
++            );
++          } catch (e) {}
++          return reynardNativeRemoveSB.apply(this, arguments);
++        };
++      }
++
 +      if (window.SourceBuffer.prototype.changeType) {
 +        var reynardNativeChangeType = window.SourceBuffer.prototype.changeType;
 +        window.SourceBuffer.prototype.changeType = function (type) {
@@ -2322,6 +2340,55 @@ index 9ca6e15..18d37f0 100644
 +        return element;
 +      }
 +      element.reynardArmed = true;
++      // ADDED - see mse_fix_87's docstring. What track machinery this
++      // element actually has, and what language the page will read off
++      // the navigator.
++      //
++      // Gecko ships audioTracks and videoTracks behind
++      // media.track.enabled, which is false by default. A page that
++      // switches audio language through the standard API would then be
++      // calling into undefined, and "the switch is not acknowledged" is
++      // precisely what that looks like from outside. One line settles
++      // it, and it is a pref rather than a patch if it is the answer.
++      try {
++        var audio = element.audioTracks;
++        var video = element.videoTracks;
++        var languages = "";
++        try {
++          languages = (window.navigator.languages || []).join(",");
++        } catch (e) {}
++        debug(
++          "TRACKS " + reynardElementTag(element) +
++          " audioTracks=" +
++          (audio ? "n=" + audio.length : "absent") +
++          " videoTracks=" +
++          (video ? "n=" + video.length : "absent") +
++          " textTracks=" +
++          (element.textTracks ? element.textTracks.length : "absent") +
++          " navLang=" + String(window.navigator.language) +
++          " navLangs=" + languages
++        );
++        if (audio && audio.addEventListener) {
++          ["addtrack", "removetrack", "change"].forEach(function (name) {
++            audio.addEventListener(name, function () {
++              try {
++                var listed = [];
++                for (var i = 0; i < audio.length; i++) {
++                  listed.push(
++                    audio[i].language + ":" +
++                    String(audio[i].label).slice(0, 24) + ":" +
++                    (audio[i].enabled ? "on" : "off")
++                  );
++                }
++                debug(
++                  "TRACKS " + name + " " + reynardElementTag(element) +
++                  " [" + listed.join(" | ") + "]"
++                );
++              } catch (e) {}
++            });
++          });
++        }
++      } catch (e) {}
 +      ["play", "playing", "pause", "ratechange"].forEach(function (name) {
 +        element.addEventListener(name, function () {
 +          try {
@@ -2348,6 +2415,18 @@ index 9ca6e15..18d37f0 100644
 +        return reynardNativePlay.apply(this, arguments);
 +      };
 +
++      // ADDED - see mse_fix_87's docstring. play() and load() have
++      // carried a stack since they were wrapped; pause() never has, and
++      // fifteen pauses on tv.apple.com went unattributed because of it.
++      var reynardNativePause = window.HTMLMediaElement.prototype.pause;
++      window.HTMLMediaElement.prototype.pause = function () {
++        try {
++          reynardArm(this);
++          debug("PAUSE() " + reynardWho(this) + " by " + reynardCaller());
++        } catch (e) {}
++        return reynardNativePause.apply(this, arguments);
++      };
++
 +      var reynardNativeLoad = window.HTMLMediaElement.prototype.load;
 +      window.HTMLMediaElement.prototype.load = function () {
 +        try {
@@ -2355,6 +2434,117 @@ index 9ca6e15..18d37f0 100644
 +          debug("LOAD() " + reynardWho(this) + " by " + reynardCaller());
 +        } catch (e) {}
 +        return reynardNativeLoad.apply(this, arguments);
++      };
++
++      // WHEN A PAGE MAY TURN THE SOUND ON.
++      //
++      // ADDED - see mse_fix_85_a_page_may_not_unmute_itself.py's
++      // docstring. tv.apple.com's hero trailer starts muted, plays
++      // muted through eleven playing events, and then the page sets
++      // muted=false on it twelve seconds in. Nothing was ignored - the
++      // mute was honoured until the page removed it.
++      //
++      // The autoplay setting does not stop that, and should not: the
++      // document has STICKY activation from the tap that opened the
++      // title, and sticky activation permits autoplay for the life of
++      // the document. Sticky is simply the wrong test for becoming
++      // audible. Safari and Chrome both require TRANSIENT activation
++      // there - a real gesture in the last few seconds - so that a page
++      // cannot autoplay muted, wait, and then turn the sound on.
++      //
++      // Capturing, on window, so a page that stops propagation on its
++      // own handlers cannot hide the gesture from this.
++      var reynardLastGesture = 0;
++      var reynardAudiblePending = [];
++      var reynardGestureWindow = 5000;
++      var reynardBlockSelfUnmute =
++        typeof __reynardAutoplayBlocked === "boolean"
++          ? __reynardAutoplayBlocked : false;
++
++      var reynardReleaseAudible = function () {
++        var held = reynardAudiblePending;
++        reynardAudiblePending = [];
++        held.forEach(function (record) {
++          try {
++            debug(
++              "AUDIBLE RELEASED " + reynardElementTag(record.element) +
++              " - a gesture arrived, applying " + record.name + "=" +
++              String(record.value)
++            );
++            record.apply.call(record.element, record.value);
++            delete record.element.reynardHeldAudible[record.name];
++          } catch (e) {}
++        });
++      };
++
++      [
++        "pointerdown", "pointerup", "touchstart", "touchend",
++        "mousedown", "keydown", "click",
++      ].forEach(function (name) {
++        try {
++          window.addEventListener(name, function () {
++            reynardLastGesture = Date.now();
++            if (reynardAudiblePending.length) {
++              reynardReleaseAudible();
++            }
++          }, true);
++        } catch (e) {}
++      });
++
++      var reynardHasGesture = function () {
++        if (Date.now() - reynardLastGesture < reynardGestureWindow) {
++          return true;
++        }
++        try {
++          if (window.navigator.userActivation &&
++              window.navigator.userActivation.isActive) {
++            return true;
++          }
++        } catch (e) {}
++        return false;
++      };
++
++      // Would this write make a PLAYING, currently inaudible element
++      // audible? Paused elements are left to Gecko's ordinary autoplay
++      // gate, which is the right owner of that question.
++      var reynardWouldTurnSoundOn = function (element, name, value) {
++        if (!reynardBlockSelfUnmute) {
++          return false;
++        }
++        // CORRECTED while applying fix 85. This runs from the setter
++        // loop over ["src", "muted", "volume"], and nothing below tests
++        // for src - so a src write on a playing, inaudible element fell
++        // through every guard to !reynardHasGesture() and would have
++        // been held until the next tap, with the getter masking it.
++        // Only the two audibility properties are this rule's business.
++        if (name !== "muted" && name !== "volume") {
++          return false;
++        }
++        try {
++          if (element.paused) {
++            return false;
++          }
++          var audibleNow = !element.muted && element.volume > 0;
++          if (audibleNow) {
++            return false;
++          }
++          if (name === "muted" && value) {
++            return false;
++          }
++          if (name === "volume" && !(Number(value) > 0)) {
++            return false;
++          }
++          if (name === "muted" && element.volume <= 0) {
++            // Unmuting something whose volume is zero changes nothing.
++            return false;
++          }
++          if (name === "volume" && element.muted) {
++            return false;
++          }
++          return !reynardHasGesture();
++        } catch (e) {
++          return false;
++        }
 +      };
 +
 +      // src, muted and volume are reflected properties, so the setter
@@ -2371,7 +2561,19 @@ index 9ca6e15..18d37f0 100644
 +        Object.defineProperty(window.HTMLMediaElement.prototype, name, {
 +          configurable: true,
 +          enumerable: descriptor.enumerable,
-+          get: descriptor.get,
++          // What the PAGE asked for, when a write is being held - so
++          // its own state and its mute button stay consistent with what
++          // it set. Gecko still sees the element as inaudible, and that
++          // is what decides whether any sound comes out.
++          get: function () {
++            try {
++              var held = this.reynardHeldAudible;
++              if (held && Object.prototype.hasOwnProperty.call(held, name)) {
++                return held[name];
++              }
++            } catch (e) {}
++            return descriptor.get.call(this);
++          },
 +          set: function (value) {
 +            try {
 +              reynardArm(this);
@@ -2383,6 +2585,32 @@ index 9ca6e15..18d37f0 100644
 +                  "SET " + name + "=" + shown + " on " +
 +                  reynardElementTag(this) + " by " + reynardCaller()
 +                );
++              }
++            } catch (e) {}
++            // ADDED - see mse_fix_85's docstring.
++            try {
++              if (reynardWouldTurnSoundOn(this, name, value)) {
++                if (!this.reynardHeldAudible) {
++                  this.reynardHeldAudible = {};
++                }
++                this.reynardHeldAudible[name] = value;
++                reynardAudiblePending.push({
++                  element: this,
++                  name: name,
++                  value: value,
++                  apply: descriptor.set,
++                });
++                debug(
++                  "AUDIBLE REFUSED " + reynardElementTag(this) + " " +
++                  name + "=" + String(value) + " - playing, inaudible, " +
++                  "and no gesture in " +
++                  (Date.now() - reynardLastGesture) +
++                  "ms. Held until one arrives."
++                );
++                return undefined;
++              }
++              if (this.reynardHeldAudible) {
++                delete this.reynardHeldAudible[name];
 +              }
 +            } catch (e) {}
 +            return descriptor.set.call(this, value);
@@ -2913,7 +3141,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2971,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3199,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3409,7 +3637,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3577,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3805,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3431,7 +3659,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3607,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3835,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
@@ -3599,6 +3827,18 @@ index 9ca6e15..18d37f0 100644
 +        sandbox,
 +        { defineAs: "__reynardEmeLog" }
 +      );
++      // Whether the user has asked for autoplay to be blocked at all.
++      //
++      // ADDED - see mse_fix_85's docstring. 0 is "allow audio and
++      // video", and someone who chose it is not second-guessed about a
++      // page turning its own sound on. A primitive, so it crosses into
++      // the sandbox by assignment - exportFunction is for functions.
++      try {
++        sandbox.__reynardAutoplayBlocked =
++          Services.prefs.getIntPref("media.autoplay.default", 0) !== 0;
++      } catch (e) {
++        sandbox.__reynardAutoplayBlocked = false;
++      }
 +      Cu.evalInSandbox(WEBKIT_MEDIA_KEYS_SHIM, sandbox);
 +      debug`webkitmediakeys shim installed for ${host}`;
 +    } catch (e) {
