@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1899 @@
+@@ -0,0 +1,1951 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1655,8 +1655,56 @@ index 000000000000..e859b69f6239
 +// would be lost is the one that decides whether anything plays at all.
 +// A play or a pause is a user-scale event, and volume is change-gated
 +// below, so the traffic is negligible.
++// Are we inside a call the NATIVE HLS route made into MediaDecoder?
++//
++// ADDED - see mse_fix_83_the_trailer_is_not_the_feature.py's docstring.
++// AVPlayerDecoder derives from MediaDecoder and calls up to it, so the
++// trailer on tv.apple.com - native HLS, its own per-player channel -
++// also broadcast its volume and play state down the MSE route, which
++// carries no element identity and therefore applied them to the film.
++// Muting the trailer left the film silent.
++//
++// A counter rather than a bool: Play() and SetVolume() can nest through
++// a state change. Main thread throughout, which both hooks below assert
++// and every call site holds, so no lock is needed.
++//
++// This is NOT the gate the comment above rejects. An element with no
++// media keys yet is still heard; what is excluded is only the route
++// that already has a channel of its own.
++static int sReynardNativeRouteDepth = 0;
++
++void ReynardMSEEnterNativeRoute(bool aEnter) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (aEnter) {
++    ++sReynardNativeRouteDepth;
++  } else if (sReynardNativeRouteDepth > 0) {
++    --sReynardNativeRouteDepth;
++  }
++}
++
++// Said once per kind, because a fading volume control would otherwise
++// say it sixty times a second.
++static bool ReynardMSEFromNativeRoute(const char* aWhat, bool* aSaidSo) {
++  if (sReynardNativeRouteDepth <= 0) {
++    return false;
++  }
++  if (!*aSaidSo) {
++    *aSaidSo = true;
++    printf_stderr(
++        "avPlayer: ignoring %s from the native HLS route - it has a "
++        "per-player channel of its own and this one has no element "
++        "identity\n",
++        aWhat);
++  }
++  return true;
++}
++
 +void ReynardMSEPlayState(bool aPlaying) {
 +  MOZ_ASSERT(NS_IsMainThread());
++  static bool sSaidPlayState = false;
++  if (ReynardMSEFromNativeRoute("a play state", &sSaidPlayState)) {
++    return;
++  }
 +  static int sLastPlaying = -1;
 +  const int state = aPlaying ? 1 : 0;
 +  if (sLastPlaying == state) {
@@ -1678,6 +1726,10 @@ index 000000000000..e859b69f6239
 +
 +void ReynardMSEVolume(double aVolume) {
 +  MOZ_ASSERT(NS_IsMainThread());
++  static bool sSaidVolume = false;
++  if (ReynardMSEFromNativeRoute("a volume", &sSaidVolume)) {
++    return;
++  }
 +  // Clamped rather than trusted: an element's volume is only guaranteed
 +  // finite, and a renderer takes 0...1.
 +  //

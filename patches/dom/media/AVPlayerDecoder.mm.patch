@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2767 @@
+@@ -0,0 +0,2787 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1595,7 +1595,17 @@ index 000000000000..b56efaa8479c
 +  printf_stderr("avPlayer: decoder Play() player=%llu\n",
 +                (unsigned long long)mPlayerId);
 +  ControlPlayer(mPlayerId, kAVPlayerPlay);
++  // Raised across the base call - see mse_fix_83's docstring. The line
++  // above is this route's own channel; the line below also reaches the
++  // MSE parser route, which is a different element's.
++  //
++  // Block-scope declaration, which is how MediaDecoder.cpp reaches
++  // ReynardMSEPlayState in the first place. It names the enclosing
++  // namespace, and this file is inside namespace mozilla.
++  extern void ReynardMSEEnterNativeRoute(bool aEnter);
++  ReynardMSEEnterNativeRoute(true);
 +  MediaDecoder::Play();
++  ReynardMSEEnterNativeRoute(false);
 +}
 +
 +// The element's volume, forwarded to the player actually making the
@@ -1632,7 +1642,13 @@ index 000000000000..b56efaa8479c
 +  printf_stderr("avPlayer: decoder volume player=%llu -> %.3f\n",
 +                (unsigned long long)mPlayerId, volume);
 +  ControlPlayer(mPlayerId, kAVPlayerVolume, volume);
++  // See AVPlayerDecoder::Play. This is the one that mattered: the
++  // trailer's mute button wrote a zero the film's audio renderer then
++  // started life with.
++  extern void ReynardMSEEnterNativeRoute(bool aEnter);
++  ReynardMSEEnterNativeRoute(true);
 +  MediaDecoder::SetVolume(aVolume);
++  ReynardMSEEnterNativeRoute(false);
 +}
 +
 +void AVPlayerDecoder::Pause() {
@@ -1640,7 +1656,11 @@ index 000000000000..b56efaa8479c
 +  printf_stderr("avPlayer: decoder Pause() player=%llu\n",
 +                (unsigned long long)mPlayerId);
 +  ControlPlayer(mPlayerId, kAVPlayerPause);
++  // See AVPlayerDecoder::Play.
++  extern void ReynardMSEEnterNativeRoute(bool aEnter);
++  ReynardMSEEnterNativeRoute(true);
 +  MediaDecoder::Pause();
++  ReynardMSEEnterNativeRoute(false);
 +}
 +
 +void AVPlayerDecoder::Suspend() {
