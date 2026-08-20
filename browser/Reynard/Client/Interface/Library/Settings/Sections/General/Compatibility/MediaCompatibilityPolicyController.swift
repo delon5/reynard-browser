@@ -32,6 +32,27 @@ enum MediaCompatibilityPolicyController {
         ])
     }
 
+    /// audioTracks and videoTracks, which Gecko does not ship.
+    ///
+    /// ADDED - see mse_fix_89_ship_the_track_lists.py's docstring.
+    /// media.track.enabled is false upstream, so
+    /// HTMLMediaElement.audioTracks is undefined and a page's audio
+    /// language picker calls into nothing. tv.apple.com's did, and the
+    /// capture said so on every element:
+    ///
+    ///     TRACKS el#N audioTracks=absent videoTracks=absent
+    ///
+    /// Not a setting, unlike its three neighbours here. Those are
+    /// choices - which user agent to present, which init data types to
+    /// serve - and this is not one: a browser that cannot change audio
+    /// language is broken, and there is no version of that a user would
+    /// choose.
+    static func applyMediaTrackSupport() {
+        GeckoRuntime.setDefaultPrefs([
+            "media.track.enabled": true,
+        ])
+    }
+
     /// The other half of the same decision. Hiding MSE steers a player
     /// away from MSE+FairPlay; this stops the engine advertising the
     /// init data types that mean MSE+FairPlay in the first place, so

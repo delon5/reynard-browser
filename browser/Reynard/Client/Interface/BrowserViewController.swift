@@ -387,6 +387,10 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         // Same reason again: a pref the engine only learns about when the
         // field is edited is one that silently empties on every launch.
         MediaCompatibilityPolicyController.applyWebKitShimExtraHosts()
+        // And the track lists, without which a page cannot change audio
+        // language at all - see the controller for what the capture
+        // showed.
+        MediaCompatibilityPolicyController.applyMediaTrackSupport()
         
         // HLS/FairPlay through AVFoundation
         AVPlayerPolicyController.applyAVPlayerHLS()
