@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2768 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2862 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -1703,6 +1703,33 @@ index 9ca6e15..18d37f0 100644
 +    // Raised only while createSession installs this shim's own
 +    // listeners - see the addEventListener wrapper below.
 +    var reynardInstallingOwn = false;
++    // A deeper stack, for the handful of moments that deserve one.
++    //
++    // reynardCaller keeps five frames, and on the line that matters -
++    // Netflix closing its session - the fifth frame IS
++    // issueGenerateError, so whatever called it is the first frame off
++    // the end. Sixteen frames, its own budget of sixteen calls, so the
++    // general cap cannot spend it and it cannot become the capture.
++    var reynardDeepStacks = 16;
++    var reynardDeepCaller = function () {
++      if (reynardDeepStacks <= 0) {
++        return "(deep stack cap reached)";
++      }
++      reynardDeepStacks--;
++      try {
++        var frames = String(new Error().stack || "")
++            .split(String.fromCharCode(10));
++        var out = [];
++        for (var i = 1; i < frames.length && out.length < 16; i++) {
++          if (frames[i]) {
++            out.push(frames[i].slice(0, 150));
++          }
++        }
++        return out.join(" | ");
++      } catch (e) {
++        return "?";
++      }
++    };
 +    var reynardDumpStatuses = function (tag, session) {
 +      try {
 +        var parts = [];
@@ -1745,7 +1772,8 @@ index 9ca6e15..18d37f0 100644
 +                "EME " + tag + " message type=" + e.messageType + " " +
 +                (e.message ? e.message.byteLength : 0) + " bytes, " +
 +                (session.reynardListeners || 0) + " page listener(s), " +
-+                waited + "ms after generateRequest"
++                waited + "ms after generateRequest, head " +
++                reynardHex(e.message)
 +              );
 +            });
 +          } finally {
@@ -1806,7 +1834,7 @@ index 9ca6e15..18d37f0 100644
 +              debug(
 +                "EME " + (this.reynardTag || "session?") +
 +                " page attached a " + type + " listener (" +
-+                this.reynardListeners + " now) by " + reynardCaller()
++                this.reynardListeners + " now) by " + reynardDeepCaller()
 +              );
 +            }
 +          } catch (e) {}
@@ -1861,7 +1889,7 @@ index 9ca6e15..18d37f0 100644
 +          try {
 +            debug(
 +              "EME " + (this.reynardTag || "session?") + " " + name +
-+              "() by " + reynardCaller()
++              "() by " + reynardDeepCaller()
 +            );
 +          } catch (e) {}
 +          return native.apply(this, arguments);
@@ -1869,6 +1897,72 @@ index 9ca6e15..18d37f0 100644
 +      };
 +      reynardWrapEnd("close");
 +      reynardWrapEnd("remove");
++
++      // What the page reads before it decides.
++      //
++      // Netflix receives the message and calls issueGenerateError one
++      // line later. Whether it looked at the BYTES or refused on the
++      // TYPE alone are different bugs, and these three properties are
++      // the only ones it can have consulted.
++      //
++      // All three are cold - read at most once per message - so
++      // wrapping them costs nothing. keyStatuses is deliberately left
++      // alone: it is hot, and it is already dumped on every change.
++      var reynardReads = 24;
++      var reynardTraceRead = function (label, value) {
++        if (reynardReads <= 0) {
++          return;
++        }
++        var who = reynardDeepCaller();
++        if (who.indexOf("reynard") !== -1) {
++          return;
++        }
++        reynardReads--;
++        debug("EME read " + label + " -> " + value + " by " + who);
++      };
++
++      var reynardTraceGetter = function (owner, name, label, describeValue) {
++        try {
++          if (!owner || !owner.prototype) {
++            return;
++          }
++          var original = Object.getOwnPropertyDescriptor(
++            owner.prototype, name);
++          if (!original || typeof original.get !== "function") {
++            return;
++          }
++          Object.defineProperty(owner.prototype, name, {
++            configurable: true,
++            enumerable: original.enumerable,
++            get: function () {
++              var value = original.get.call(this);
++              try {
++                reynardTraceRead(label, describeValue(value));
++              } catch (e) {}
++              return value;
++            },
++          });
++        } catch (e) {
++          debug("EME could not wrap " + label + ":", describe(e));
++        }
++      };
++
++      reynardTraceGetter(
++        window.MediaKeyMessageEvent, "messageType", "event.messageType",
++        function (value) {
++          return String(value);
++        });
++      reynardTraceGetter(
++        window.MediaKeyMessageEvent, "message", "event.message",
++        function (value) {
++          return value
++            ? "ArrayBuffer(" + value.byteLength + ")" : String(value);
++        });
++      reynardTraceGetter(
++        window.MediaKeySession, "sessionId", "session.sessionId",
++        function (value) {
++          return String(value);
++        });
 +
 +      var reynardNativeUpdate = window.MediaKeySession.prototype.update;
 +      window.MediaKeySession.prototype.update = function (response) {
@@ -2771,7 +2865,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2829,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2923,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3267,7 +3361,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3435,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3529,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3289,7 +3383,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3465,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3559,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
