@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2787 @@
+@@ -0,0 +0,2813 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1453,6 +1453,32 @@ index 000000000000..b56efaa8479c
 +      return NS_ERROR_FAILURE;
 +    }
 +  }
++
++  // The element's volume, pushed once now that there is a player to
++  // push it to.
++  //
++  // ADDED - see mse_fix_90_tell_the_new_player_its_volume.py's
++  // docstring. SetVolume only runs when the volume CHANGES, and
++  // HTMLMediaElement pushes a change through mDecoder->SetVolume, which
++  // does nothing when there is no decoder yet. A page that mutes before
++  // it sets src does exactly that: the mute lands on nothing, the
++  // decoder is built afterwards, and nothing changes again - so an
++  // AVPlayer at its default 1.0 plays at full volume while Gecko
++  // believes the element is silent. That is tv.apple.com's hero
++  // trailer, whose player has not one "decoder volume" line in the
++  // capture.
++  //
++  // Here for the same shape of reason BindCDMProxyToPlayer is here, and
++  // beside it deliberately: both are state the page set before there
++  // was anything to set it on.
++  //
++  // Through SetVolume rather than around it, so the clamp, the
++  // change-gate and the native-route suppression all apply as they do
++  // to any other change. mLastVolumeSent starts negative, so this first
++  // one is never gated away.
++  printf_stderr("avPlayer: initial volume for player %llu -> %.3f\n",
++                (unsigned long long)mPlayerId, mVolume);
++  SetVolume(mVolume);
 +
 +  // The page can set mediaKeys before the element has a src, so the
 +  // proxy may already be here waiting for a player to name.
