@@ -1691,6 +1691,17 @@ public final class FairPlayStreamParser: NSObject {
         /// Has this stream already said it is not ours to render? See
         /// standDown.
         var standDownLogged = false
+        /// Did an initialisation segment for this stream carry a sinf?
+        ///
+        /// ADDED - see mse_fix_82_a_decrypted_sample_is_still_ours.py's
+        /// docstring. This is the question the stand-down rule actually
+        /// needs answered. isProtectedSample asks whether the bytes are
+        /// ciphertext NOW, which under cenc they are not - the parser
+        /// decrypts a cenc track completely and hands back plain avc1.
+        /// Whether GECKO can render them is decided by whether the track
+        /// was encrypted when the page appended it, and a protected
+        /// track says so in its init segment.
+        var trackIsProtected = false
         /// The newest PTS ever handed to the display layer.
         ///
         /// The clock being past THIS is the fatal condition: no sample
@@ -1857,13 +1868,29 @@ public final class FairPlayStreamParser: NSObject {
         // for segments small enough to BE an init segment. The media
         // segments on this route run to 8 MB and a byte scan of every
         // one of them would cost more than this is worth.
-        if withState({ entry.templateSinf == nil }), segment.count <= 65536,
-           let sinf = Self.sinfBox(in: segment) {
-            let harvested = Self.keyIdentifier(inTenc: sinf)
-            withState { entry.templateSinf = sinf }
-            Self.log("stream \(stream) kept a \(sinf.count)-byte sinf as the "
-                     + "key request template - tenc KID "
-                     + (harvested.map { Self.hexBytes($0) } ?? "absent"))
+        // CHANGED - see mse_fix_82's docstring. The scan is no longer
+        // gated on the session having no template: that gate meant the
+        // SECOND stream of a session never scanned at all, and each
+        // stream has to know about its own track. The template half is
+        // still session-wide and still taken only once.
+        if segment.count <= 65536, let sinf = Self.sinfBox(in: segment) {
+            let firstForStream = withState { () -> Bool in
+                guard !slot.trackIsProtected else { return false }
+                slot.trackIsProtected = true
+                return true
+            }
+            if firstForStream {
+                Self.log("stream \(stream) is a PROTECTED track - a sinf in "
+                         + "its init segment, so this route renders it even "
+                         + "when the parser hands back clear bytes")
+            }
+            if withState({ entry.templateSinf == nil }) {
+                let harvested = Self.keyIdentifier(inTenc: sinf)
+                withState { entry.templateSinf = sinf }
+                Self.log("stream \(stream) kept a \(sinf.count)-byte sinf "
+                         + "as the key request template - tenc KID "
+                         + (harvested.map { Self.hexBytes($0) } ?? "absent"))
+            }
         }
         Self.log("stream \(stream) appended \(segment.count) bytes")
         // Asked for again after EVERY append, not once when the licence
@@ -2028,7 +2055,14 @@ public final class FairPlayStreamParser: NSObject {
         // removed that budget because it was starving HBO, and the
         // duplicate became the whole film. This is that fix's other
         // half.
-        guard Self.isProtectedSample(sampleBuffer) else {
+        // CHANGED - see mse_fix_82's docstring. A cenc track is
+        // decrypted COMPLETELY by the parser and comes back as plain
+        // avc1, so the subtype test alone stood Netflix's video down
+        // and dropped 2626 decrypted frames - while Gecko sat on the
+        // ciphertext the page appended, which it cannot decrypt. The
+        // track being protected is the fact that decides this.
+        guard Self.isProtectedSample(sampleBuffer)
+                || withState({ slot.trackIsProtected }) else {
             standDown(streamKey: streamKey, half: "video")
             return
         }
@@ -2651,7 +2685,11 @@ public final class FairPlayStreamParser: NSObject {
         // Gecko's own audio sink, and a second copy through an
         // AVSampleBufferAudioRenderer is the doubled sound on
         // tv.apple.com.
-        guard Self.isProtectedSample(sampleBuffer) else {
+        // The same correction - see enqueueForDisplay. A clear track
+        // still stands down, which is what keeps tv.apple.com's
+        // pre-roll from being played twice.
+        guard Self.isProtectedSample(sampleBuffer)
+                || withState({ slot.trackIsProtected }) else {
             standDown(streamKey: streamKey, half: "audio")
             return
         }
