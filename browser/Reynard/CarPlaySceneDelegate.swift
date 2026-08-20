@@ -54,6 +54,21 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     private var interfaceController: CPInterfaceController?
     private var carWindow: CPWindow?
+    /// Keeps the car display's user activation from expiring.
+    ///
+    /// ADDED - see mse_fix_92's docstring. This delegate deliberately
+    /// answers the autoplay permission with .prompt, because .allow and
+    /// .deny are both persisted EXPIRE_NEVER into the same store Site
+    /// Settings reads, and relies on markUserActivated instead. That is
+    /// STICKY activation, granted at page start, first contentful paint
+    /// and page stop - and media.autoplay.blocking_policy 1 stops
+    /// honouring sticky, so each grant would expire five seconds later
+    /// with no touch events on this display to renew it.
+    ///
+    /// Not a widening of what the car may do: it already holds
+    /// activation for the life of every document it loads. This
+    /// preserves that, and still writes nothing down.
+    private var activationHeartbeat: Timer?
     
     /// The THREE-argument form. The two-argument version exists for
     /// template-only apps and never yields a window - implementing only
@@ -100,6 +115,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     ) {
         logger("carPlayLife: scene DISCONNECTING - session discarded, audio released")
         self.interfaceController = nil
+        // Stopped beside the session close below - see
+        // activationHeartbeat.
+        activationHeartbeat?.invalidate()
+        activationHeartbeat = nil
         // Close the session BEFORE dropping the references to it.
         // currentSession is weak and GeckoSession has no deinit-side
         // close, so clearing references only ORPHANED the open engine
@@ -484,6 +503,35 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
         session.contentDelegate = self
         geckoView.session = session
         CarPlaySceneDelegate.currentSession = session
+
+        // See activationHeartbeat. Three seconds against Gecko's
+        // five-second transient window, so a missed tick is not a gap.
+        //
+        // The closure captures no self - it reads the static
+        // currentSession - so the timer cannot keep this delegate
+        // alive, and disconnect invalidates it beside the session close
+        // that is already there.
+        activationHeartbeat?.invalidate()
+        // .common rather than the default mode Timer.scheduledTimer
+        // installs - ADDED while applying fix 92. A default-mode timer
+        // is suspended while a UIKit tracking loop runs, so scrolling
+        // the phone for more than five seconds would starve the
+        // heartbeat at exactly the moment a car video wants to start.
+        activationHeartbeat = Timer(
+            timeInterval: 3.0, repeats: true
+        ) { _ in
+            guard let live = CarPlaySceneDelegate.currentSession else {
+                return
+            }
+            Task { @MainActor in
+                _ = await live.markUserActivated()
+            }
+        }
+        if let activationHeartbeat {
+            RunLoop.main.add(activationHeartbeat, forMode: .common)
+        }
+        logger("CarPlay: activation heartbeat armed every 3s - "
+               + "blocking_policy 1 expires a grant after 5")
 
         // The scale has to go on the ENGINE VIEW, not the
         // GeckoView wrapper. See

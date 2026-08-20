@@ -40,8 +40,38 @@ enum AutoplayPolicyController {
         // line separates them.
         print("[Reynard] autoplay: media.autoplay.default = \(value) "
               + "(\(action)) - 0 allows, 1 allows muted, 5 blocks both")
+        // How Gecko judges activation when nothing has answered the
+        // autoplay-media permission outright.
+        //
+        // ADDED - see
+        // mse_fix_92_transient_autoplay_and_a_car_that_cannot_tap.py's
+        // docstring. The pref above is set correctly and defeated
+        // anyway: blocking_policy 0 is STICKY activation, so one tap on
+        // the page - opening a link, dismissing a banner - permits
+        // autoplay for the rest of that document's life. IGN starts
+        // three videos while scrolling with Block Audio and Video set,
+        // and tv.apple.com's hero reads
+        //
+        //     autoplay=allowed activated=1
+        //
+        // allowed BECAUSE activated. 1 is TRANSIENT activation - a real
+        // gesture in the last few seconds - which is what blocking
+        // autoplay is understood to mean.
+        //
+        // 0 when the setting is Allow, because the pref above already
+        // permits everything and a stricter test there would only read
+        // as though it did something.
+        //
+        // CarPlay rides on sticky activation and cannot produce a
+        // gesture, so it needs the heartbeat this change also adds -
+        // see CarPlaySceneDelegate.startSession. The two halves are one
+        // change and must not be built apart.
+        let blockingPolicy = action == .allowed ? 0 : 1
+        print("[Reynard] autoplay: media.autoplay.blocking_policy = "
+              + "\(blockingPolicy) - 0 sticky, 1 transient, 2 input depth")
         GeckoRuntime.setDefaultPrefs([
             "media.autoplay.default": value,
+            "media.autoplay.blocking_policy": blockingPolicy,
         ])
     }
 }
