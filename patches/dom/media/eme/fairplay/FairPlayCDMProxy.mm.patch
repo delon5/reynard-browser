@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1691 @@
+@@ -0,0 +1,1899 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -347,6 +347,173 @@ index 000000000000..e859b69f6239
 +// StaticMutex rather than a main-thread assertion because the IPC path
 +// and the bind path are different callers and this costs nothing.
 +static StaticMutex sRemoteProxiesMutex;
++// The init data type each session was created for.
++//
++// ADDED - see mse_fix_81_the_keymessage_netflix_parses.py's docstring.
++// A file static rather than a member, so this needs no header change:
++// session ids are NSUUID strings and unique across proxies, and every
++// reader and writer here is already on the main thread.
++static nsTHashMap<nsCStringHashKey, nsCString>& ReynardInitDataTypes() {
++  static auto* types = new nsTHashMap<nsCStringHashKey, nsCString>();
++  return *types;
++}
++
++// The key message a cenc FairPlay page expects.
++//
++// ADDED - see mse_fix_81's docstring. Netflix's own converter, read out
++// of cadmium-playercore, is unambiguous:
++//
++//   convertToMessageEvent(e) {
++//     if (e.messageType === "license-request") {
++//       let n = this.utf8.encode(new Uint8Array(e.message)),
++//           i = JSON.parse(n);
++//       t = i.map(e => e.keyID);
++//       r = i.map(e => e.payload)
++//     }
++//     ...
++//   }
++//
++// It runs JSON.parse over the message bytes. A raw SPC is not JSON, so
++// JSON.parse throws, onMessage's own catch turns the exception into
++// issueGenerateError, and the session closes with the error swallowed -
++// which is why no capture ever showed a JavaScript error. The stack
++// pinned the catch branch exactly: onMessage's two issueGenerateError
++// call sites are at columns 630376 and 630540, and the frame reports
++// 630540.
++//
++// So Safari's form is an array of {keyID, payload}, both base64, one
++// entry per key the initialisation data names - which is also why a
++// FairPlay pssh may carry several fpsk boxes, and why the converter
++// takes keyID out of the MESSAGE rather than out of the init data.
++//
++// Sixteen bytes of key id, not eight: getDrmKeyMapping in the same file
++// does base64.decode(keyIds[n]).subarray(0, 8), and these ids are eight
++// significant bytes followed by eight zeroes, so the fkri value is
++// already the right thing to send.
++static bool ReynardJsonKeyMessage(const nsTArray<uint8_t>& aKeyId,
++                                  const nsTArray<uint8_t>& aSpc,
++                                  nsTArray<uint8_t>& aOut) {
++  @autoreleasepool {
++    if (aSpc.IsEmpty()) {
++      return false;
++    }
++    NSData* spc = [NSData dataWithBytes:aSpc.Elements() length:aSpc.Length()];
++    NSString* payload = [spc base64EncodedStringWithOptions:0];
++    if (!payload) {
++      return false;
++    }
++    NSString* keyId = @"";
++    if (!aKeyId.IsEmpty()) {
++      NSData* kid = [NSData dataWithBytes:aKeyId.Elements()
++                                   length:aKeyId.Length()];
++      NSString* encoded = [kid base64EncodedStringWithOptions:0];
++      if (encoded) {
++        keyId = encoded;
++      }
++    }
++    NSArray* entries = @[ @{@"keyID" : keyId, @"payload" : payload} ];
++    NSError* error = nil;
++    NSData* json = [NSJSONSerialization dataWithJSONObject:entries
++                                                   options:0
++                                                     error:&error];
++    if (!json || [json length] == 0) {
++      printf_stderr(
++          "avPlayer: FairPlay could not build the JSON key message: %s\n",
++          error ? [[error description] UTF8String] : "unknown");
++      return false;
++    }
++    aOut.Clear();
++    aOut.AppendElements(static_cast<const uint8_t*>([json bytes]),
++                        [json length]);
++    return true;
++  }
++}
++
++// The CKC inside a licence response, when the response is JSON.
++//
++// ADDED - see mse_fix_81's docstring. The REQUEST side above is read
++// off Netflix's source; this side is not, because no capture has ever
++// contained a response. So this recognises the shapes the batch form
++// implies and, when it cannot, prints every key in the object and
++// leaves the bytes alone - a build that cannot unwrap still names the
++// field that would have worked, and nothing is dropped.
++static bool ReynardUnwrapJsonLicence(const nsTArray<uint8_t>& aResponse,
++                                     nsTArray<uint8_t>& aOut) {
++  @autoreleasepool {
++    if (aResponse.IsEmpty()) {
++      return false;
++    }
++    // A CKC is binary and never opens with either of these.
++    if (aResponse[0] != '{' && aResponse[0] != '[') {
++      return false;
++    }
++    NSData* data = [NSData dataWithBytes:aResponse.Elements()
++                                  length:aResponse.Length()];
++    id parsed = [NSJSONSerialization JSONObjectWithData:data
++                                                options:0
++                                                  error:nil];
++    if (!parsed) {
++      return false;
++    }
++    NSArray* entries = nil;
++    if ([parsed isKindOfClass:[NSArray class]]) {
++      entries = (NSArray*)parsed;
++    } else if ([parsed isKindOfClass:[NSDictionary class]]) {
++      for (NSString* name in @[ @"RESPONSES", @"responses", @"CHALLENGES" ]) {
++        id candidate = [(NSDictionary*)parsed objectForKey:name];
++        if ([candidate isKindOfClass:[NSArray class]]) {
++          entries = (NSArray*)candidate;
++          break;
++        }
++      }
++    }
++    if (!entries || [entries count] == 0) {
++      printf_stderr(
++          "avPlayer: FairPlay licence is JSON with no entry array\n");
++      return false;
++    }
++    id entry = [entries objectAtIndex:0];
++    if (![entry isKindOfClass:[NSDictionary class]]) {
++      return false;
++    }
++    NSString* found = nil;
++    for (NSString* name in
++         @[ @"PAYLOAD", @"payload", @"CKC", @"ckc", @"DATA", @"data" ]) {
++      id candidate = [(NSDictionary*)entry objectForKey:name];
++      if ([candidate isKindOfClass:[NSString class]]) {
++        found = (NSString*)candidate;
++        break;
++      }
++    }
++    if (!found) {
++      nsAutoCString names;
++      for (NSString* key in [(NSDictionary*)entry allKeys]) {
++        names.Append(' ');
++        names.Append([key UTF8String]);
++      }
++      printf_stderr(
++          "avPlayer: FairPlay licence JSON has no payload field - keys:%s\n",
++          names.get());
++      return false;
++    }
++    NSData* ckc =
++        [[[NSData alloc] initWithBase64EncodedString:found
++                                             options:0] autorelease];
++    if (!ckc || [ckc length] == 0) {
++      printf_stderr("avPlayer: FairPlay licence payload is not base64\n");
++      return false;
++    }
++    aOut.Clear();
++    aOut.AppendElements(static_cast<const uint8_t*>([ckc bytes]),
++                        [ckc length]);
++    printf_stderr(
++        "avPlayer: FairPlay licence unwrapped - %zu bytes of JSON -> %zu "
++        "bytes of CKC\n",
++        (size_t)aResponse.Length(), (size_t)aOut.Length());
++    return true;
++  }
++}
++
 +static nsTHashMap<nsUint64HashKey, FairPlayCDMProxy*>& RemoteProxies() {
 +  static auto* proxies = new nsTHashMap<nsUint64HashKey, FairPlayCDMProxy*>();
 +  return *proxies;
@@ -716,6 +883,10 @@ index 000000000000..e859b69f6239
 +    }
 +  }
 +
++  // What this session was created for, so OnSessionMessage can tell a
++  // cenc session from a sinf one - see ReynardJsonKeyMessage.
++  ReynardInitDataTypes().InsertOrUpdate(sessionId, initDataType);
++
 +  // The identifier FairPlay expects differs by container. HLS carries an
 +  // skd:// URI, which must be passed as a string; fragmented MP4 carries
 +  // the key id as bytes.
@@ -902,6 +1073,17 @@ index 000000000000..e859b69f6239
 +                                     PromiseId aPromiseId,
 +                                     nsTArray<uint8_t>& aResponse) {
 +  MOZ_ASSERT(NS_IsMainThread());
++
++  // ADDED - see mse_fix_81's docstring. A page handed the batched key
++  // message answers in kind, and FairPlay wants the CKC rather than the
++  // envelope around it. Bytes that are not JSON are passed through
++  // untouched, which is every response this path has ever seen.
++  {
++    nsTArray<uint8_t> unwrapped;
++    if (ReynardUnwrapJsonLicence(aResponse, unwrapped)) {
++      aResponse = std::move(unwrapped);
++    }
++  }
 +
 +  if (!mRemote && !mDelegate) {
 +    RejectPromiseWithStateError(aPromiseId,
@@ -1217,9 +1399,35 @@ index 000000000000..e859b69f6239
 +  if (mKeys.IsNull()) {
 +    return;
 +  }
++  // CHANGED - see mse_fix_81's docstring. A cenc page runs JSON.parse
++  // over these bytes; a sinf or skd page takes the SPC as it is. Only
++  // cenc is wrapped, which is what keeps HBO Max - whose init data IS a
++  // sinf, and whose licences are accepted today - on exactly the path
++  // it is on now.
++  nsTArray<uint8_t> wrapped;
++  const nsTArray<uint8_t>* message = &aMessage;
++  if (aMessageType == dom::MediaKeyMessageType::License_request) {
++    NS_ConvertUTF16toUTF8 sessionKey(aSessionId);
++    nsCString initDataType;
++    if (ReynardInitDataTypes().Get(sessionKey, &initDataType) &&
++        initDataType.EqualsLiteral("cenc")) {
++      nsTArray<uint8_t> keyId;
++      if (auto real = mKeyIdBySession.Lookup(sessionKey)) {
++        keyId.AppendElements(real->Elements(), real->Length());
++      }
++      if (ReynardJsonKeyMessage(keyId, aMessage, wrapped)) {
++        printf_stderr(
++            "avPlayer: FairPlay key message wrapped for cenc - %zu bytes "
++            "of SPC -> %zu bytes of JSON, key id %zu bytes\n",
++            (size_t)aMessage.Length(), (size_t)wrapped.Length(),
++            (size_t)keyId.Length());
++        message = &wrapped;
++      }
++    }
++  }
 +  RefPtr<dom::MediaKeySession> session = mKeys->GetSession(aSessionId);
 +  if (session) {
-+    session->DispatchKeyMessage(aMessageType, aMessage);
++    session->DispatchKeyMessage(aMessageType, *message);
 +  }
 +}
 +
