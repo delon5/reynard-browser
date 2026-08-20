@@ -1148,14 +1148,15 @@ public final class FairPlayStreamParser: NSObject {
             })
         }
 
-        // The first bytes, always, so a shape this cannot read is
-        // diagnosable from the capture instead of from another build.
-        // Every failure on this path has been silent; this is the line
-        // that makes the NEXT unknown layout cost a log line rather than
-        // a device cycle.
-        Self.log("init data \(bytes.count) bytes, box \(fourCC(4)), head "
-                 + bytes.prefix(40).map { String(format: "%02x", $0) }
-                        .joined())
+        // Every byte, once per distinct value, with the box tree
+        // inside it.
+        //
+        // CHANGED - see mse_fix_76_show_the_whole_pssh.py's docstring.
+        // The forty-byte head this replaces covers Apple's 104-byte box
+        // and none of Netflix's 344-byte payload, which is where the
+        // parse goes wrong and where nothing could be read.
+        Self.log("init data \(bytes.count) bytes, box \(fourCC(4))")
+        Self.dumpInitData(bytes)
 
         var fallback: Data?
         var boxAt = 0
@@ -1187,6 +1188,9 @@ public final class FairPlayStreamParser: NSObject {
                 if count > 0, cursor + 16 <= bytes.count {
                     let kid = Data(bytes[cursor..<(cursor + 16)])
                     if isFairPlay {
+                        Self.log("  v1 header key id "
+                                 + kid.map { String(format: "%02x", $0) }
+                                      .joined())
                         return kid
                     }
                     // Under Common Encryption the KID is often shared
@@ -1216,8 +1220,30 @@ public final class FairPlayStreamParser: NSObject {
                 // FairPlay box, so it can no longer fire on a foreign
                 // system's private payload.
                 if cursor + 16 <= payloadEnd {
-                    Self.log("  no fkri - taking the payload's first 16 bytes")
-                    return Data(bytes[cursor..<(cursor + 16)])
+                    let guess = Data(bytes[cursor..<(cursor + 16)])
+                    let hex = guess.map { String(format: "%02x", $0) }
+                                   .joined()
+                    // A key id is sixteen bytes of key material and
+                    // looks like it. What this returned for Netflix's
+                    // 344-byte box was 0000000004c37d40 followed by
+                    // eight zeroes - three non-zero bytes in the middle,
+                    // which is a length field and part of whatever
+                    // follows it. Passing that on named a key nothing
+                    // holds, and -19152 came back naming that same
+                    // value.
+                    //
+                    // This narrows a fallback the comment above already
+                    // calls a guess: nothing is substituted, a value
+                    // that cannot be a key id stops being returned as
+                    // one. Everything downstream handles nil already -
+                    // HBO Max runs that way on every request it makes.
+                    if guess.filter({ $0 != 0 }).count >= 8 {
+                        Self.log("  no fkri - taking the payload's first "
+                                 + "16 bytes, " + hex)
+                        return guess
+                    }
+                    Self.log("  no fkri, and the payload's first 16 bytes "
+                             + "are not a key id (" + hex + ") - no key id")
                 }
             }
             boxAt += size
@@ -1226,6 +1252,8 @@ public final class FairPlayStreamParser: NSObject {
         if fallback != nil {
             Self.log("no FairPlay key id - falling back to another system's, "
                      + "which may not be the right key")
+        } else {
+            Self.log("no key id in this init data")
         }
         return fallback
     }
@@ -1261,6 +1289,175 @@ public final class FairPlayStreamParser: NSObject {
             typeAt += 1
         }
         return nil
+    }
+
+    // MARK: - Init data, in full
+
+    /// So one page's repeated init data does not print the same dump
+    /// forty times, and a page that mints a fresh one per key still gets
+    /// each of them.
+    private static let dumpLock = NSLock()
+    private static var dumpedInitData = Set<String>()
+
+    /// Every byte of the initialisation data, once per distinct value.
+    ///
+    /// ADDED - see mse_fix_76_show_the_whole_pssh.py's docstring. The
+    /// forty-byte head this replaces is enough for Apple's 104-byte box
+    /// and not for Netflix's 344-byte one, where the scan comes back
+    /// with 0000000004c37d40... - and from a head there is no telling
+    /// whether it found the wrong box, the right box at the wrong
+    /// offset, or no box at all. Those want three different fixes, so
+    /// this prints the whole thing and the tree inside it.
+    static func dumpInitData(_ bytes: [UInt8]) {
+        let head = bytes.prefix(16).map { String(format: "%02x", $0) }
+                        .joined()
+        let tail = bytes.suffix(8).map { String(format: "%02x", $0) }
+                        .joined()
+        let key = "\(bytes.count):\(head):\(tail)"
+        let isNew: Bool = {
+            Self.dumpLock.lock()
+            defer { Self.dumpLock.unlock() }
+            // Bounded, because a page that mints init data per segment
+            // must not become the capture.
+            guard Self.dumpedInitData.count < 12,
+                  !Self.dumpedInitData.contains(key) else {
+                return false
+            }
+            Self.dumpedInitData.insert(key)
+            return true
+        }()
+        guard isNew else { return }
+
+        let shown = min(bytes.count, 1024)
+        var at = 0
+        while at < shown {
+            let end = min(at + 16, shown)
+            let hex = bytes[at..<end].map { String(format: "%02x", $0) }
+                                     .joined(separator: " ")
+            let text = String(bytes[at..<end].map { byte -> Character in
+                (byte >= 0x20 && byte <= 0x7e)
+                    ? Character(UnicodeScalar(byte)) : "."
+            })
+            // %lx, not %x: `at` is an Int and CVarArg passes it as
+            // sixty-four bits.
+            Self.log(String(format: "  %04lx  ", at)
+                     + hex.padding(toLength: 47, withPad: " ", startingAt: 0)
+                     + "  " + text)
+            at = end
+        }
+        if bytes.count > shown {
+            Self.log("  ... \(bytes.count - shown) more bytes")
+        }
+        Self.log("  box tree:")
+        Self.dumpBoxTree(bytes, from: 0, to: bytes.count, depth: 1)
+    }
+
+    /// The MP4 box tree in [from, to), as far as it parses.
+    ///
+    /// Descends only where the children parse as a clean run, so it
+    /// cannot invent structure inside a leaf that happens to begin with
+    /// four printable bytes. pssh is special-cased: its children sit
+    /// behind a header this has to step over, and the header is the part
+    /// that says which DRM the box is for.
+    static func dumpBoxTree(_ bytes: [UInt8], from: Int, to: Int,
+                            depth: Int) {
+        guard depth <= 6, from >= 0, to <= bytes.count else { return }
+        let indent = String(repeating: "  ", count: depth + 1)
+        var at = from
+        while at + 8 <= to {
+            let size = (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                     | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+            guard size >= 8, at + size <= to else { return }
+            let type = String(bytes[(at + 4)..<(at + 8)]
+                .map { byte -> Character in
+                    (byte >= 0x20 && byte <= 0x7e)
+                        ? Character(UnicodeScalar(byte)) : "."
+                })
+            let end = at + size
+            var bodyAt = at + 8
+            var note = ""
+            if type == "pssh", at + 32 <= to {
+                let version = bytes[at + 8]
+                let systemId = Array(bytes[(at + 12)..<(at + 28)])
+                note = " v\(version) system "
+                     + systemId.map { String(format: "%02x", $0) }.joined()
+                if systemId == Self.fairPlaySystemId {
+                    note += " (FairPlay)"
+                }
+                bodyAt = at + 28
+                if version >= 1, bodyAt + 4 <= to {
+                    let count = (Int(bytes[bodyAt]) << 24)
+                              | (Int(bytes[bodyAt + 1]) << 16)
+                              | (Int(bytes[bodyAt + 2]) << 8)
+                              | Int(bytes[bodyAt + 3])
+                    // The key ids a v1 box names in its own header,
+                    // which under Common Encryption is where the KID
+                    // lives and is the one thing a foreign system's box
+                    // can still tell us.
+                    var kidAt = bodyAt + 4
+                    var listed: [String] = []
+                    var left = max(count, 0)
+                    while left > 0, kidAt + 16 <= to {
+                        listed.append(bytes[kidAt..<(kidAt + 16)]
+                            .map { String(format: "%02x", $0) }.joined())
+                        kidAt += 16
+                        left -= 1
+                    }
+                    if !listed.isEmpty {
+                        note += " kids " + listed.joined(separator: ",")
+                    }
+                    bodyAt += 4 + 16 * max(count, 0)
+                }
+                // The payload's own length field, which is not part of
+                // the payload.
+                bodyAt += 4
+            }
+            Self.log(indent + String(format: "+%04lx ", at)
+                     + "\(size) '\(type)'" + note)
+            guard bodyAt < end, bodyAt >= 0 else {
+                at = end
+                continue
+            }
+            if Self.parsesAsBoxes(bytes, from: bodyAt, to: end) {
+                Self.dumpBoxTree(bytes, from: bodyAt, to: end,
+                                 depth: depth + 1)
+            } else {
+                let stop = min(bodyAt + 48, end)
+                Self.log(indent + "  = "
+                         + bytes[bodyAt..<stop]
+                             .map { String(format: "%02x", $0) }.joined()
+                         + (stop < end ? " ..." : ""))
+            }
+            at = end
+        }
+    }
+
+    /// Whether [from, to) is a clean run of MP4 boxes ending exactly on
+    /// `to`.
+    ///
+    /// Stricter than looksLikeBox below on the type - alphanumeric
+    /// rather than any printable byte - because this decides whether to
+    /// RECURSE, and a wrong yes here prints a tree that is not there.
+    static func parsesAsBoxes(_ bytes: [UInt8], from: Int,
+                              to: Int) -> Bool {
+        guard from >= 0, to <= bytes.count, to - from >= 8 else {
+            return false
+        }
+        var at = from
+        var seen = 0
+        while at + 8 <= to {
+            let size = (Int(bytes[at]) << 24) | (Int(bytes[at + 1]) << 16)
+                     | (Int(bytes[at + 2]) << 8) | Int(bytes[at + 3])
+            guard size >= 8, at + size <= to else { return false }
+            let named = bytes[(at + 4)..<(at + 8)].allSatisfy {
+                ($0 >= 0x61 && $0 <= 0x7a) || ($0 >= 0x41 && $0 <= 0x5a)
+                    || ($0 >= 0x30 && $0 <= 0x39)
+            }
+            guard named else { return false }
+            at += size
+            seen += 1
+        }
+        return at == to && seen > 0
     }
 
     /// Whether the bytes at `at` open an MP4 box that fills `within`.
