@@ -8,7 +8,7 @@
 import UIKit
 import QuickLook
 
-final class DownloadsViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate, UIGestureRecognizerDelegate {
+final class DownloadsViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate, UIGestureRecognizerDelegate, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
     private enum UX {
         static let estimatedRowHeight: CGFloat = 96
         static let sectionHeaderTopPadding: CGFloat = 0
@@ -81,6 +81,7 @@ final class DownloadsViewController: UIViewController, UITableViewDataSource, UI
     private var isSwipeEditing = false
     private var query = ""
     private var imagePreviewDataSource: DownloadImagePreviewDataSource?
+    private var quickLookPreviewItem: NSURL?
     
     // MARK: - Lifecycle
     
@@ -512,8 +513,11 @@ final class DownloadsViewController: UIViewController, UITableViewDataSource, UI
             return
         }
         
+        // Our image preview keeps its behaviour; everything it
+        // declines now goes to upstream's opener instead of
+        // straight to the share sheet.
         if !presentImagePreviewIfSupported(item) {
-            shareDownload(item, from: indexPath)
+            openDownload(item, from: indexPath)
         }
     }
     
@@ -544,6 +548,61 @@ final class DownloadsViewController: UIViewController, UITableViewDataSource, UI
         }
         
         return LibrarySharedUtils.isTapOutsideSearchBar(touch, in: tableView, ignoring: searchBar)
+    }
+    
+    // MARK: - File Opening
+    
+    private func openDownload(_ item: DownloadItemSnapshot, from indexPath: IndexPath) {
+        if isHTMLDownload(item) {
+            guard let fileURL = item.fileURL else {
+                return
+            }
+            LibrarySharedUtils.openLinkInBrowser(fileURL.absoluteString, from: self)
+            return
+        }
+        
+        if let fileURL = item.fileURL,
+           QLPreviewController.canPreview(fileURL as NSURL) {
+            presentQuickLookPreview(for: fileURL)
+            return
+        }
+        
+        shareDownload(item, from: indexPath)
+    }
+    
+    private func isHTMLDownload(_ item: DownloadItemSnapshot) -> Bool {
+        let pathExtension = (item.fileURL?.pathExtension ?? URL(fileURLWithPath: item.fileName).pathExtension).lowercased()
+        if pathExtension == "html" || pathExtension == "htm" || pathExtension == "xhtml" {
+            return true
+        }
+        
+        guard let mimeType = item.mimeType?.lowercased() else {
+            return false
+        }
+        return mimeType.hasPrefix("text/html") || mimeType.hasPrefix("application/xhtml+xml")
+    }
+    
+    // MARK: - Quick Look
+    
+    func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+        return quickLookPreviewItem == nil ? 0 : 1
+    }
+    
+    func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+        return quickLookPreviewItem!
+    }
+    
+    func previewControllerDidDismiss(_ controller: QLPreviewController) {
+        quickLookPreviewItem = nil
+    }
+    
+    private func presentQuickLookPreview(for fileURL: URL) {
+        quickLookPreviewItem = fileURL as NSURL
+        
+        let previewController = QLPreviewController()
+        previewController.dataSource = self
+        previewController.delegate = self
+        present(previewController, animated: true)
     }
     
     // MARK: - Item Actions

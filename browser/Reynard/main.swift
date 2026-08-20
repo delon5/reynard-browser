@@ -125,6 +125,38 @@ private func redirectStandardStreamsToFile() {
     FileHandle.standardError.write(Data(banner.utf8))
 }
 
+private func configureSandboxExtension() {
+    guard let documentsDirectoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+        return
+    }
+    
+    typealias IssueFileExtension = @convention(c) (UnsafePointer<CChar>, UnsafePointer<CChar>, UInt32) -> UnsafeMutablePointer<CChar>?
+    
+    // I can't seem to find any public documentation for these stuff on iOS?
+    // Also I'm surprised that this works on iOS
+    // https://github.com/WebKit/WebKit/blob/main/Source/WTF/wtf/spi/darwin/SandboxSPI.h
+    // https://github.com/WebKit/WebKit/blob/main/Source/WebKit/Shared/Cocoa/SandboxExtensionCocoa.mm
+    guard let sandboxHandle = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY),
+          let symbol = dlsym(sandboxHandle, "sandbox_extension_issue_file") else {
+        return
+    }
+    
+    let issueFileExtension = unsafeBitCast(symbol, to: IssueFileExtension.self)
+    let extensionClass = "com.apple.app-sandbox.read"
+    
+    guard let token = extensionClass.withCString({ extensionClassPointer in
+        documentsDirectoryURL.path.withCString { pathPointer in
+            issueFileExtension(extensionClassPointer, pathPointer, 0)
+        }
+    }) else {
+        return
+    }
+    
+    let tokenString = String(cString: token)
+    free(UnsafeMutableRawPointer(token))
+    setenv("MOZ_DOCUMENTS_SANDBOX_EXTENSION", tokenString, 1)
+}
+
 // First, before anything can write to stdout.
 redirectStandardStreamsToFile()
 
@@ -155,6 +187,7 @@ if startupMode.usesUIKitOnlyStartup {
        getEntitlementValue("com.apple.private.security.no-sandbox") {
         configureUnsandboxedAppDataDirectories(directories)
     }
+    configureSandboxExtension()
     // ReynardRunAVStreamDataParserProbe() ran here and is done. It
     // answered the question it was written for, on device:
     // AVStreamDataParser exists, declares AVContentKeyRecipient, accepts
