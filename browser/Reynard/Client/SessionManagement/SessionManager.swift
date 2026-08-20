@@ -278,10 +278,37 @@ final class SessionManager {
     /// while the phone is locked.
     private func setCommitsSuspendedForPhoneHostedSessions(_ suspended: Bool) {
         isPhoneSceneActive = !suspended
+        var swept = 0
+        var exempt = 0
         for session in sessionsRequestedActive.values {
-            session.setOffMainThreadCommitsSuspended(
-                suspended && !isCommitLatchExempt(session)
-            )
+            let isExempt = isCommitLatchExempt(session)
+            if isExempt {
+                exempt += 1
+            }
+            session.setOffMainThreadCommitsSuspended(suspended && !isExempt)
+            swept += 1
+        }
+
+        // ADDED - instrument_commit_latch.py. This function and both of
+        // its callers printed nothing, so whether the latch was set or
+        // cleared could only ever be inferred from unrelated lines
+        // elsewhere - and one such inference was wrong.
+        //
+        // The empty-set case is called out separately because it is
+        // otherwise indistinguishable from a sweep that worked: a
+        // session joining afterwards reads isPhoneSceneActive in
+        // activate() and is usually fine, but if a latched session sits
+        // outside sessionsRequestedActive this is the line that shows
+        // the sweep could not have reached it.
+        if swept == 0 {
+            NSLog("[SessionActivation] commitLatch: %@  swept 0 session(s) - the active set was EMPTY, so nothing was %@ here",
+                  suspended ? "SUSPEND" : "RESUME ",
+                  suspended ? "latched" : "un-latched")
+        } else {
+            NSLog("[SessionActivation] commitLatch: %@  swept %ld session(s), %ld exempt, phoneSceneActive now %@",
+                  suspended ? "SUSPEND" : "RESUME ",
+                  swept, exempt,
+                  isPhoneSceneActive ? "true" : "false")
         }
     }
 
