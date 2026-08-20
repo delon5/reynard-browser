@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,2558 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,2656 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2539,6 +2539,104 @@ index 9ca6e15..18d37f0 100644
 +    }
 +  } catch (e) {}
 +
++  // ---- what we tell a page it can play --------------------------------
++  //
++  // Netflix receives the SPC and never sends it. There is no Worker on
++  // that site - every WORKER line in the capture is tv.apple.com's - so
++  // the POST would be on this thread, where fetch and XMLHttpRequest are
++  // both wrapped, and it simply never happens. The decision is made on
++  // the page, after the message and before the request.
++  //
++  // And the capability answers it is deciding from disagree with each
++  // other. All nine of its addSourceBuffer probes succeed, HEVC and AV1
++  // included, while the EME layer refuses every hvc1 and av01
++  // configuration offered to it. "You can demux this" and "you cannot
++  // get a key for this" is not a ladder anyone can choose from.
++  //
++  // decodingInfo is the query that asks both halves at once, and it
++  // does not appear in a single capture because nothing has ever
++  // wrapped it.
++  try {
++    var reynardCaps = 0;
++    var reynardCapsSay = function (line) {
++      if (reynardCaps > 120) {
++        return;
++      }
++      reynardCaps++;
++      if (reynardCaps === 121) {
++        debug("CAPS budget spent - no further capability queries shown");
++        return;
++      }
++      debug("CAPS " + line);
++    };
++
++    if (window.MediaSource && window.MediaSource.isTypeSupported) {
++      var reynardNativeITS = window.MediaSource.isTypeSupported;
++      window.MediaSource.isTypeSupported = function (type) {
++        var answer = reynardNativeITS.apply(this, arguments);
++        reynardCapsSay(
++          "MediaSource.isTypeSupported(" + String(type).slice(0, 90) +
++          ") -> " + answer
++        );
++        return answer;
++      };
++    }
++
++    if (window.HTMLMediaElement) {
++      var reynardNativeCPT = window.HTMLMediaElement.prototype.canPlayType;
++      window.HTMLMediaElement.prototype.canPlayType = function (type) {
++        var answer = reynardNativeCPT.apply(this, arguments);
++        reynardCapsSay(
++          "canPlayType(" + String(type).slice(0, 90) + ") -> " +
++          (answer === "" ? "(empty)" : answer)
++        );
++        return answer;
++      };
++    }
++
++    // The one that matters. Its configuration carries the codec AND the
++    // key system, so both halves of the contradiction land on one line,
++    // and its answer is an object rather than a string.
++    if (navigator.mediaCapabilities &&
++        navigator.mediaCapabilities.decodingInfo) {
++      var reynardNativeDI = navigator.mediaCapabilities.decodingInfo;
++      navigator.mediaCapabilities.decodingInfo = function (config) {
++        var asked = "?";
++        try {
++          var video = config && config.video ? config.video.contentType : "";
++          var audio = config && config.audio ? config.audio.contentType : "";
++          var keys = config && config.keySystemConfiguration
++            ? config.keySystemConfiguration.keySystem
++            : "none";
++          asked =
++            "type=" + (config ? config.type : "?") +
++            " video=" + String(video).slice(0, 60) +
++            " audio=" + String(audio).slice(0, 40) +
++            " keySystem=" + keys;
++        } catch (e) {}
++        return reynardNativeDI.call(navigator.mediaCapabilities, config).then(
++          function (info) {
++            reynardCapsSay(
++              "decodingInfo " + asked + " -> supported=" + info.supported +
++              " smooth=" + info.smooth +
++              " powerEfficient=" + info.powerEfficient +
++              (info.keySystemAccess ? " keySystemAccess=yes" : "")
++            );
++            return info;
++          },
++          function (err) {
++            reynardCapsSay(
++              "decodingInfo " + asked + " REJECTED: " + describe(err)
++            );
++            throw err;
++          }
++        );
++      };
++    }
++
++    debug("installed the capability trace");
++  } catch (e) {}
++
 +  window.WebKitMediaKeys = WebKitMediaKeys;
 +  window.WebKitMediaKeySession = WebKitMediaKeySession;
 +  debug("installed over standard EME");
@@ -2561,7 +2659,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +2619,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +2717,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3057,7 +3155,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3225,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3323,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3079,7 +3177,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3255,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3353,193 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
