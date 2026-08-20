@@ -254,6 +254,33 @@ extension BrowserViewController: TabManagerDelegate {
                 if !contentView.isDisplaying(session: tab.session) {
                     logger("tabRecovery: rebinding the view to the tab's new session")
                     contentView.setTab(tab)
+
+                    // ADDED - see fix_activate_recovered_session.py.
+                    //
+                    // setTab rebinds the VIEW and pushes geometry; it
+                    // never activates. So without this the recovered tab
+                    // is displayed but absent from
+                    // sessionsRequestedActive, never gets
+                    // setActive(true)/setFocused(true), and is missed by
+                    // every commit-latch sweep in both directions.
+                    //
+                    // Measured 2026-08-20: activate() logged twice in 32
+                    // minutes, both at launch, while tabRecovery fired
+                    // twice - and the latch sweeps went from "swept 1
+                    // session(s)" to "swept 0 ... the active set was
+                    // EMPTY" from the recovery onwards, and stayed there.
+                    //
+                    // SessionManager.activate's own isOpen() guard names
+                    // the symptom: "A tab whose activate landed here
+                    // loads into an inactive docshell and never paints."
+                    // This is the same end state reached by never
+                    // calling it at all.
+                    //
+                    // Idempotent, and this branch only runs for the
+                    // selected tab, so setFocused goes where the user is
+                    // looking. A session that is somehow not open yet
+                    // logs "activate SKIPPED" rather than failing quietly.
+                    sessionManager.activate(tab.session)
                 }
                 
                 browserChrome.setAddressBarLoadingProgress(
