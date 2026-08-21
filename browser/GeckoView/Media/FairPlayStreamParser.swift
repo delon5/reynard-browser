@@ -2320,6 +2320,18 @@ public final class FairPlayStreamParser: NSObject {
         var lastAudioCorrectionAt: Double = 0
         /// Said once, not thirty-two times.
         var reportedUnmovedClock = false
+        /// Samples refused because the media had moved on without them.
+        ///
+        /// ADDED - see mse_fix_106's docstring. In capture 8ec30c6a the
+        /// queue held media at 954, 2015, 2370 and 3461 at the same
+        /// time while the timebase sat correctly at 3428.
+        var strandedDropped = 0
+        /// Samples already queued when the media moved, dropped with it.
+        var strandedPruned = 0
+        /// Has this stream already said its queue went stale?
+        var strandedReported = false
+        /// Has this stream already refused a correction onto stale media?
+        var reportedStaleQueue = false
         /// The samples taken in since the last sync sample.
         ///
         /// Kept so that a new sink can be started without waiting for
@@ -3176,6 +3188,60 @@ public final class FairPlayStreamParser: NSObject {
             }
         }
 
+        // MEDIA THE ELEMENT HAS ALREADY PASSED.
+        //
+        // ADDED - see mse_fix_106's docstring. Fix 102 stood the
+        // discontinuity test down - correctly, intake order proves
+        // nothing - and left nothing in its place, so since then
+        // NOTHING has flushed the video queue on a page that reports a
+        // position, which is all three sites under test. The queue then
+        // carries pre-seek media across the seek and the drift line
+        // reads 1408 to 2474 seconds for hundreds of samples, which is
+        // a frozen picture. The audio path has done this correctly all
+        // along; this is the same thing, against a better reference
+        // than intake order.
+        //
+        // Refused rather than queued, and what is already queued behind
+        // the media goes with it. needsSyncSample because a pruned
+        // queue has a hole in it exactly like a flushed one.
+        if let authority = mediaAuthority(streamKey), authority.isFinite,
+           intakePTS.isFinite, intakePTS < authority - Self.strandedBehind {
+            let oldest = authority - Self.strandedBehind
+            let tally = withState {
+                () -> (dropped: Int, pruned: Int, first: Bool) in
+                guard let slot = streamParsers[streamKey] else {
+                    return (0, 0, false)
+                }
+                slot.strandedDropped += 1
+                let live: (CMSampleBuffer) -> Bool = { sample in
+                    let at = CMSampleBufferGetPresentationTimeStamp(sample)
+                        .seconds
+                    return !at.isFinite || at >= oldest
+                }
+                let keptGOP = slot.currentGOP.filter(live)
+                let keptPending = slot.pending.filter(live)
+                let pruned = (slot.currentGOP.count - keptGOP.count)
+                    + (slot.pending.count - keptPending.count)
+                if pruned > 0 {
+                    slot.currentGOP = keptGOP
+                    slot.pending = keptPending
+                    slot.needsSyncSample = true
+                    slot.strandedPruned += pruned
+                }
+                let first = !slot.strandedReported
+                slot.strandedReported = true
+                return (slot.strandedDropped, pruned, first)
+            }
+            if tally.first || tally.pruned > 0 || tally.dropped % 100 == 0 {
+                Self.log("stream \(streamKey) sample at \(intakePTS) is "
+                         + "\(authority - intakePTS)s behind the media at "
+                         + "\(authority) - refused. \(tally.dropped) "
+                         + "stranded so far, \(tally.pruned) pruned "
+                         + "from the queue here")
+            }
+            return
+        }
+
         // Nothing is fed mid-GOP. After a flush the layer has no
         // reference frame, and after a drop there is a hole where one
         // used to be - either way the next usable sample is a keyframe
@@ -3482,7 +3548,34 @@ public final class FairPlayStreamParser: NSObject {
                     slot.maxEnqueuedPTS = pts
                     return (late, slot.clockCorrections)
                 }
-                if let ranAhead {
+                // CHANGED - see mse_fix_106's docstring. Every one of
+                // the six corrections in capture 8ec30c6a was wrong, by
+                // 31s to 1454s, and each dragged the audio after it:
+                //
+                //   CLOCK RAN AHEAD by 1453.67s - put back on the media
+                //   at 616.32
+                //
+                // three lines after the element said 2070.28 and the
+                // write landed. The clock was right and the QUEUE was
+                // stale, and this read the queue.
+                var mediaAt: Double?
+                if ranAhead != nil { mediaAt = mediaAuthority(streamKey) }
+                if let ranAhead, let mediaAt, mediaAt.isFinite,
+                   abs(pts - mediaAt) > Self.strandedBehind {
+                    let first = withState { () -> Bool in
+                        guard let slot = streamParsers[streamKey],
+                              !slot.reportedStaleQueue else { return false }
+                        slot.reportedStaleQueue = true
+                        return true
+                    }
+                    if first {
+                        Self.log("stream \(streamKey) the clock reads "
+                                 + "\(now) and this sample is at \(pts), "
+                                 + "\(ranAhead.late)s behind it - but the "
+                                 + "media is at \(mediaAt), so the QUEUE "
+                                 + "is stale and the clock is not moving")
+                    }
+                } else if let ranAhead {
                     let to = CMTime(seconds: pts, preferredTimescale: 90_000)
                     CMTimebaseSetTime(timebase, time: to)
                     // READ IT BACK - see mse_fix_100's docstring. This is
@@ -4662,11 +4755,36 @@ public final class FairPlayStreamParser: NSObject {
                 .filter { $0.isFinite }
                 .min()
         }
-        if let oldestHeld, anchor.seconds > oldestHeld {
+        // CHANGED - see mse_fix_106's docstring. Unbounded, this moved
+        // the anchor back 1429.05s on tv.apple.com and 369.62s on HBO,
+        // onto pre-seek media the queue had never dropped - and it
+        // printed the correct reading on the same line before throwing
+        // it away:
+        //
+        //   the old clock read 2070.356609875 with the media it is
+        //   handing over at 641.3070805555556 - anchoring to the media
+        //
+        // realignAudioClock then took every audio clock in the session
+        // to 641.31 as well. The clamp is for a clock that ran ahead of
+        // its own media during a pause - fix 41's ten and a half
+        // seconds - not a licence to go back to another part of the
+        // film.
+        let mediaAt = mediaAuthority(streamKey)
+        var clampable = true
+        if let mediaAt, let oldestHeld, mediaAt.isFinite {
+            clampable = oldestHeld >= mediaAt - Self.strandedBehind
+        }
+        if let oldestHeld, anchor.seconds > oldestHeld, clampable {
             Self.log("stream \(streamKey) the old clock read "
                      + "\(anchor.seconds) with the media it is handing "
                      + "over at \(oldestHeld) - anchoring to the media")
             anchor = CMTime(seconds: oldestHeld, preferredTimescale: 90_000)
+        } else if let oldestHeld, anchor.seconds > oldestHeld {
+            Self.log("stream \(streamKey) the old clock read "
+                     + "\(anchor.seconds) and the queue starts at "
+                     + "\(oldestHeld), but the media is at "
+                     + "\(mediaAt ?? Double.nan) - that queue is stale, so the "
+                     + "clock keeps its reading")
         }
 
         var timebase: CMTimebase?
@@ -5433,6 +5551,13 @@ public final class FairPlayStreamParser: NSObject {
     /// 1864 frames in one playback.
     private var ownerPosition: [UInt64: Double] = [:]
 
+    /// When each of those positions arrived.
+    ///
+    /// ADDED - see mse_fix_106's docstring. A position that stopped
+    /// arriving is not an authority, and there is no way to tell one
+    /// from a current reading without the stamp.
+    private var ownerPositionAt: [UInt64: Double] = [:]
+
     /// How far our timebase may be from the element's before it is put
     /// back on it.
     ///
@@ -5450,6 +5575,8 @@ public final class FairPlayStreamParser: NSObject {
         withState {
             if owner != 0 {
                 ownerPosition[owner] = seconds
+                // ADDED - see mse_fix_106's docstring.
+                ownerPositionAt[owner] = Self.hostNow()
             }
         }
         let clocks = withState { () -> [(String, CMTimebase)] in
@@ -5485,6 +5612,52 @@ public final class FairPlayStreamParser: NSObject {
         if moved {
             realignAudioClock(sessionId: sessionId, to: onto)
         }
+    }
+
+    /// How far behind the media a sample may be and still be shown.
+    ///
+    /// ADDED - see mse_fix_106's docstring. Not a tuning knob: the
+    /// display queue's high-water is 300 samples and its cap 900, which
+    /// at 24fps is 12.5 and 37.5 seconds, so a sample a full minute
+    /// behind the media did not come from the media being played. In
+    /// capture 8ec30c6a every legitimate backlog was under 14s and
+    /// every stranded queue was over 360s.
+    fileprivate static let strandedBehind: Double = 60.0
+
+    /// How old an element position may be before it stops being an
+    /// authority.
+    ///
+    /// Positions arrive as Gecko settles them, several times a second
+    /// on a playing element. One that has not arrived for two seconds
+    /// is a reading, not a report - HBO sent exactly one in the whole
+    /// of capture 8ec30c6a and it was 384s out by the end of it.
+    fileprivate static let authorityFreshness: Double = 2.0
+
+    /// WHERE THE MEDIA ACTUALLY IS.
+    ///
+    /// ADDED - see mse_fix_106's docstring. Two independent answers,
+    /// and this file needs both: tv.apple.com and Netflix report
+    /// element positions and Netflix has no audio renderer at all,
+    /// while HBO reported one position and then went quiet but kept an
+    /// audio clock that tracked every seek. Neither alone covers the
+    /// three sites.
+    ///
+    /// The queue is deliberately not consulted. Reading the queue is
+    /// what every one of the faults this fix addresses did.
+    fileprivate func mediaAuthority(_ streamKey: String) -> Double? {
+        let fresh = withState { () -> Double? in
+            guard let owner = streamParsers[streamKey]?.owner, owner != 0,
+                  let stamped = ownerPositionAt[owner],
+                  Self.hostNow() - stamped <= Self.authorityFreshness,
+                  let told = ownerPosition[owner], told.isFinite
+            else { return nil }
+            return told
+        }
+        if let fresh { return fresh }
+        let session = String(streamKey.split(separator: "|").first ?? "")
+        guard let heard = audioClock(sessionId: session), heard.isFinite
+        else { return nil }
+        return heard
     }
 
     /// Does this stream know where its element is?
