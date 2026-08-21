@@ -433,7 +433,8 @@ public final class FairPlayStreamParser: NSObject {
         // processContentKeyRequest accepted with no request ever
         // delivered. Off-main it arrives regardless of who is blocking.
         keySession.setDelegate(keyDelegate, queue: Self.keyDelegateQueue)
-        keySession.addContentKeyRecipient(recipient)
+        Self.addRecipient(keySession, recipient: recipient,
+                          label: "session \(sessionId) parser")
 
         withState {
             entries[sessionId] = Entry(parser: parser, recipient: recipient,
@@ -595,16 +596,28 @@ public final class FairPlayStreamParser: NSObject {
         }
         if let fresh = liveSession(sessionId) {
             for (key, slot) in carried {
-                fresh.addContentKeyRecipient(slot.recipient)
+                // GUARDED - see mse_fix_97's docstring. Every one of
+                // these three raised NSInvalidArgumentException on
+                // tv.apple.com and took the app with it: a recipient
+                // that has already established its own content
+                // protection cannot be moved to another key session.
+                // The refusal is the answer to the question fix 96
+                // asked, and it is survivable - what the parser holds
+                // is the init segment, which is what the rebuild was
+                // losing.
+                Self.addRecipient(fresh, recipient: slot.recipient,
+                                  label: "stream \(key) parser")
                 if let layer = slot.displayLayer,
                    let recipient = (layer as AnyObject)
                     as? AVContentKeyRecipient {
-                    fresh.addContentKeyRecipient(recipient)
+                    Self.addRecipient(fresh, recipient: recipient,
+                                      label: "stream \(key) display layer")
                 }
                 if let renderer = slot.audioRenderer,
                    let recipient = (renderer as AnyObject)
                     as? AVContentKeyRecipient {
-                    fresh.addContentKeyRecipient(recipient)
+                    Self.addRecipient(fresh, recipient: recipient,
+                                      label: "stream \(key) audio renderer")
                 }
                 // The recipient count is the test. If it does not climb,
                 // an AVStreamDataParser cannot be re-registered once its
@@ -946,6 +959,46 @@ public final class FairPlayStreamParser: NSObject {
     /// teardown reports nothing instead of resurrecting an entry.
     fileprivate func liveSession(_ sessionId: String) -> AVContentKeySession? {
         return withState { entries[sessionId]?.keySession }
+    }
+
+    /// addContentKeyRecipient, which THROWS.
+    ///
+    /// ADDED - see mse_fix_97's docstring. This is not a theoretical
+    /// hazard. Fix 96 carried stream parsers across a session rebuild
+    /// and re-registered them, and the device answered:
+    ///
+    ///     *** Terminating app due to uncaught exception
+    ///         'NSInvalidArgumentException', reason:
+    ///         '*** -[AVContentKeySession addContentKeyRecipient:] Can't
+    ///          add object as an AVContentKeyRecipient after it has
+    ///          established its own content protection'
+    ///
+    /// Swift cannot catch an Objective-C exception, so that is the
+    /// process gone - SIGABRT, with the .ips naming
+    /// objc_exception_throw under addContentKeyRecipient:.
+    ///
+    /// Guarded exactly as drainPending guards layer.enqueue, and for the
+    /// same reason: these APIs raise instead of returning an error, and
+    /// this route has now had two of them do it.
+    ///
+    /// A refusal is not fatal and is not silent. A recipient that has
+    /// established its own content protection keeps it - that state is
+    /// precisely what it is refusing to leave - so the sensible thing is
+    /// to say so and carry on.
+    @discardableResult
+    fileprivate static func addRecipient(_ session: AVContentKeySession,
+                                         recipient: AVContentKeyRecipient,
+                                         label: String) -> Bool {
+        if let failure = GeckoRuntimeBridge.catchException(from: {
+            session.addContentKeyRecipient(recipient)
+        }) {
+            log("\(label) was REFUSED as a content key recipient: \(failure)"
+                + " - it keeps whatever content protection it has already "
+                + "established. This is not fatal; it was, before it was "
+                + "guarded.")
+            return false
+        }
+        return true
     }
 
     /// The initialisation data processContentKeyRequest actually takes.
@@ -2090,6 +2143,22 @@ public final class FairPlayStreamParser: NSObject {
         /// stall into a memory problem, and this is a diagnostic.
         var pending: [CMSampleBuffer] = []
         var overflowed = 0
+        /// Has the parser been told to stop providing media data?
+        ///
+        /// ADDED - see mse_fix_98's docstring. The parser hands over a
+        /// whole appended segment at once and the page buffers as far
+        /// ahead as it likes, so the producer is faster than the sink
+        /// by whatever factor it feels like - fifty-seven seconds of
+        /// lookahead against a thirty-seven second queue, in the
+        /// capture this came from. A bigger bin does not fix that; not
+        /// asking for the data does.
+        var mediaDataHeld = false
+        /// Samples thrown away since the needsSyncSample gate closed.
+        ///
+        /// The overflow counter could not see these: the gate returns
+        /// before it is touched, so one overflow was reported and eight
+        /// more in the same window were silent.
+        var droppedSinceSync = 0
         /// requestMediaDataWhenReady calls its block in a loop while the
         /// layer is hungry, so it is stopped when the queue empties and
         /// re-armed when something arrives. Otherwise it spins.
@@ -2300,7 +2369,8 @@ public final class FairPlayStreamParser: NSObject {
                                                stream: stream) else {
                 return false
             }
-            entry.keySession.addContentKeyRecipient(built.recipient)
+            Self.addRecipient(entry.keySession, recipient: built.recipient,
+                              label: "stream \(stream) parser")
             withState { streamParsers[key] = built }
             Self.log("stream \(stream) parser built and added to the key "
                      + "session - recipients "
@@ -2380,7 +2450,11 @@ public final class FairPlayStreamParser: NSObject {
         // providePendingMediaData drains what is pending NOW - fragments
         // that arrive later were simply never asked for, which is why
         // eight forwarded fragments produced one sample.
-        Self.drainMediaData(slot.parser, tracks: slot.trackIDs, label: stream)
+        // CHANGED - see mse_fix_98's docstring. This armed the tracks and
+        // drained on every append unconditionally, which is what let a
+        // parser fifty-seven seconds ahead of the picture keep pushing
+        // into a queue that could hold thirty-seven.
+        pumpMediaData(slot: slot, label: stream)
         return true
     }
 
@@ -2455,6 +2529,111 @@ public final class FairPlayStreamParser: NSObject {
             }
         }
         log("stream \(label) armed tracks \(tracks) and drained")
+    }
+
+    // ==================================================================
+    // BACK PRESSURE
+    //
+    // ADDED - see mse_fix_98's docstring. AVStreamDataParser delivers a
+    // whole appended segment the moment it has parsed it, and the page
+    // decides how far ahead it appends. In the capture this came from
+    // the parser was handing over pts 5544 while the display layer's
+    // timebase was at 5487 - fifty-seven seconds of lookahead against a
+    // nine-hundred sample queue, which is thirty-seven. The excess went
+    // in the bin, each drop closed the needsSyncSample gate, and the
+    // next two seconds went with it. Nine times in ninety seconds.
+    //
+    // No queue size fixes that, because how far the page buffers is not
+    // ours to choose. setShouldProvideMediaData:forTrackID: is the
+    // parser's own back-pressure switch and this file has only ever
+    // called it with YES.
+    // ==================================================================
+
+    /// How deep the display queue may get before the parser is told to
+    /// stop, and how far it must drain before it is asked again.
+    ///
+    /// 300 is roughly twelve seconds at 24fps, which is more than one
+    /// appended segment, so an ordinary append never trips it. 120 is
+    /// five seconds - enough that the release has time to arrive before
+    /// the layer runs dry.
+    fileprivate static let mediaDataHighWater = 300
+    fileprivate static let mediaDataLowWater = 120
+
+    /// Turn the parser's push on or off for every track of one stream.
+    ///
+    /// Same shape as drainMediaData's arming loop, guarded the same way
+    /// and for the same reason: this is SPI that raises rather than
+    /// returning an error, and it has already aborted the app once from
+    /// a track that did not exist yet.
+    private static func setProvideMediaData(_ parser: NSObject,
+                                            tracks: [Int32], on: Bool,
+                                            label: String) {
+        guard !tracks.isEmpty else { return }
+        let shouldProvide =
+            NSSelectorFromString("setShouldProvideMediaData:forTrackID:")
+        guard parser.responds(to: shouldProvide),
+              let implementation = parser.method(for: shouldProvide) else {
+            return
+        }
+        typealias ProvideFunction =
+            @convention(c) (AnyObject, Selector, Bool, Int32) -> Void
+        let call = unsafeBitCast(implementation, to: ProvideFunction.self)
+        for trackID in tracks {
+            if let failure = GeckoRuntimeBridge.catchException(from: {
+                call(parser, shouldProvide, on, trackID)
+            }) {
+                log("stream \(label) refused "
+                    + (on ? "arming" : "holding") + " track \(trackID): "
+                    + failure)
+            }
+        }
+    }
+
+    /// Ask for more, or ask for nothing, depending on how deep the queue
+    /// already is. Called from append, which is where new data enters.
+    fileprivate func pumpMediaData(slot: StreamParser, label: String) {
+        let depth = withState { slot.pending.count }
+        guard depth >= Self.mediaDataHighWater else {
+            withState { slot.mediaDataHeld = false }
+            Self.drainMediaData(slot.parser, tracks: slot.trackIDs,
+                                label: label)
+            return
+        }
+        let first = withState { () -> Bool in
+            guard !slot.mediaDataHeld else { return false }
+            slot.mediaDataHeld = true
+            return true
+        }
+        Self.setProvideMediaData(slot.parser, tracks: slot.trackIDs,
+                                 on: false, label: label)
+        if first {
+            Self.log("stream \(label) HOLDING the parser - \(depth) samples "
+                     + "already queued for a layer that presents them in "
+                     + "real time. It is asked again at "
+                     + "\(Self.mediaDataLowWater).")
+        }
+    }
+
+    /// The layer has taken enough. Ask the parser for the rest.
+    ///
+    /// Called from the drain, which is the only place that knows the
+    /// queue is going down. Cheap when there is nothing to do: one lock
+    /// and two comparisons.
+    fileprivate func releaseMediaDataIfDrained(streamKey: String) {
+        let work = withState { () -> (parser: NSObject, tracks: [Int32],
+                                      left: Int)? in
+            guard let slot = streamParsers[streamKey], slot.mediaDataHeld,
+                  slot.pending.count <= Self.mediaDataLowWater else {
+                return nil
+            }
+            slot.mediaDataHeld = false
+            return (slot.parser, slot.trackIDs, slot.pending.count)
+        }
+        guard let work else { return }
+        Self.log("stream \(streamKey) releasing the parser - the layer has "
+                 + "drained to \(work.left)")
+        Self.drainMediaData(work.parser, tracks: work.tracks,
+                            label: streamKey)
     }
 
     /// Tracks a stream's parser reported, recorded and then acted on.
@@ -2683,11 +2862,22 @@ public final class FairPlayStreamParser: NSObject {
         // and everything before it decodes to garbage.
         if withState({ slot.needsSyncSample }) {
             guard Self.isSyncSample(sampleBuffer) else {
+                // COUNTED - see mse_fix_98's docstring. Everything
+                // between the drop and the next keyframe goes, and until
+                // now nothing said how much. Nine of these in one window
+                // is the whole of the missing picture.
+                withState { slot.droppedSinceSync += 1 }
                 return
             }
-            withState { slot.needsSyncSample = false }
+            let lost = withState { () -> Int in
+                slot.needsSyncSample = false
+                let n = slot.droppedSinceSync
+                slot.droppedSinceSync = 0
+                return n
+            }
             Self.log("stream \(streamKey) resync complete - first sync "
-                     + "sample at pts \(intakePTS)")
+                     + "sample at pts \(intakePTS), \(lost) samples lost "
+                     + "waiting for it")
         }
 
         // The independent answer, before anything to do with the layer:
@@ -2737,12 +2927,20 @@ public final class FairPlayStreamParser: NSObject {
             return slot.pending.count
         }
         if queued < 0 {
+            // PER EPISODE, not per hundredth sample.
+            //
+            // CHANGED - see mse_fix_98's docstring. The old throttle was
+            // `dropped == 1 || dropped % 100 == 0`, and the counter never
+            // reached 100 because the needsSyncSample gate returns before
+            // it is incremented. So the first overflow was reported and
+            // the eight after it, in the same ninety seconds, were not.
+            // An episode is one closing of the gate, which is the thing
+            // that costs a picture.
             let dropped = withState { slot.overflowed }
-            if dropped == 1 || dropped % 100 == 0 {
-                Self.log("stream \(streamKey) pending queue FULL - "
-                         + "\(dropped) samples dropped, will restart at the "
-                         + "next sync sample. The layer is not draining.")
-            }
+            Self.log("stream \(streamKey) pending queue FULL at 900 - "
+                     + "overflow \(dropped), restarting at the next sync "
+                     + "sample. Back pressure should have stopped this "
+                     + "before it got here.")
             return
         }
         armDrainIfNeeded(streamKey: streamKey)
@@ -2834,6 +3032,12 @@ public final class FairPlayStreamParser: NSObject {
             guard let sample = next else {
                 // Nothing left. Stop, or the block spins on an empty
                 // queue for as long as the layer stays ready.
+                //
+                // And ask the parser first - see mse_fix_98's docstring.
+                // An empty queue under a hold is the worst case there
+                // is: the samples exist, the parser is holding them, and
+                // the picture has stopped.
+                releaseMediaDataIfDrained(streamKey: streamKey)
                 layer.stopRequestingMediaData()
                 withState { streamParsers[streamKey]?.drainArmed = false }
                 return
@@ -2853,6 +3057,11 @@ public final class FairPlayStreamParser: NSObject {
                 slot.enqueued += 1
                 return slot.enqueued
             }
+            // ADDED - see mse_fix_98's docstring. The other half of the
+            // back pressure: a hold that is never released is a stall,
+            // and the append that would have released it may be seconds
+            // away or may never come if the page has finished buffering.
+            releaseMediaDataIfDrained(streamKey: streamKey)
 
             // A sample went into the compositor's layer, so the overlay
             // has done its job and can go. This is the only place that
@@ -2977,7 +3186,8 @@ public final class FairPlayStreamParser: NSObject {
                     Self.log("stream \(streamKey) at \(count) - timebase "
                              + "\(now) vs sample pts \(pts), drift "
                              + "\(now - pts), av "
-                             + (av.map { String($0) } ?? "no audio clock"))
+                             + (av.map { String($0) } ?? "no audio clock")
+                             + audioHealth(sessionId: session))
                 }
             }
         }
@@ -3493,6 +3703,55 @@ public final class FairPlayStreamParser: NSObject {
         return CMTimebaseGetTime(sync.timebase).seconds
     }
 
+    /// The sound's own health, for the drift line.
+    ///
+    /// ADDED - see mse_fix_97's docstring. av does not hold at the
+    /// adoption step, it grows: 2.336, 2.618, 12.750, 14.876 across one
+    /// playback, while the video timebase advanced 33.1s and the audio
+    /// clock advanced 18.2.
+    ///
+    /// The two are different KINDS of clock. The video timebase is a
+    /// plain CMTimebase on the host clock and runs whatever happens; an
+    /// AVSampleBufferRenderSynchronizer's timebase is driven by the
+    /// renderer's actual rendering and holds when it is not rendering.
+    /// A stalling synchronizer produces exactly this shape - and so
+    /// would a rate that quietly went to zero.
+    ///
+    /// Four columns on a line that already prints, rather than a new
+    /// line: this is a measurement, and the drift line is where the
+    /// other half of the comparison already lives.
+    fileprivate func audioHealth(sessionId: String) -> String {
+        let found = withState {
+            () -> (key: String, sync: AVSampleBufferRenderSynchronizer,
+                   renderer: AVSampleBufferAudioRenderer?,
+                   held: Int, fed: Int)? in
+            var best: (key: String, sync: AVSampleBufferRenderSynchronizer,
+                       renderer: AVSampleBufferAudioRenderer?,
+                       held: Int, fed: Int)?
+            var fedAt = -Double.infinity
+            // The most recently fed, matching audioClock's choice - a
+            // session with two renderers must not report one clock and
+            // the other's health.
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") {
+                guard slot.audioStarted,
+                      let sync = slot.audioSynchronizer else { continue }
+                guard slot.lastSampleAt > fedAt else { continue }
+                fedAt = slot.lastSampleAt
+                best = (key: key, sync: sync, renderer: slot.audioRenderer,
+                        held: slot.audioPending.count,
+                        fed: slot.audioEnqueued)
+            }
+            return best
+        }
+        guard let found else { return "" }
+        return " | sound \(found.key) rate \(found.sync.rate)"
+            + " ready \(found.renderer?.isReadyForMoreMediaData ?? false)"
+            + " status \(found.renderer?.status.rawValue ?? -1)"
+            + " held \(found.held) fed \(found.fed)"
+            + (found.renderer?.error.map { " ERROR \($0)" } ?? "")
+    }
+
     /// Move every started audio clock in this session onto the picture's.
     fileprivate func realignAudioClock(sessionId: String, to time: CMTime) {
         let cutoff = Self.hostNow() - Self.livenessWindow
@@ -3773,7 +4032,9 @@ public final class FairPlayStreamParser: NSObject {
                      + "cannot decode in it and the sink has to change")
             return
         }
-        keySession.addContentKeyRecipient(recipient)
+        guard Self.addRecipient(keySession, recipient: recipient,
+                                label: "stream \(streamKey) audio renderer")
+        else { return }
         Self.log("stream \(streamKey) audio renderer added as a content key "
                  + "recipient - recipients now "
                  + "\(keySession.contentKeyRecipients.count)")
@@ -4119,6 +4380,32 @@ public final class FairPlayStreamParser: NSObject {
                  + "samples in front of \(handover.held) held, "
                  + resumption + ". The overlay stays until this layer "
                  + "takes one.")
+        // AND THE SOUND FOLLOWS THE PICTURE, HERE TOO.
+        //
+        // ADDED - see mse_fix_97's docstring. markLayerAttached
+        // re-anchors the audio when it starts the video timebase, and
+        // says why - "the master clock just started ... so it is
+        // re-anchored here, to the one clock that matters". This path
+        // moves that clock as well: it builds a NEW timebase and anchors
+        // it to the oldest sample being handed over. It never told the
+        // audio, so every adoption left a fixed offset:
+        //
+        //     released the timebase at 5476.586125
+        //     audio clock re-anchored to 5476.586125
+        //     at 30 - ... av 0.0
+        //     adopted the compositor's layer at 5478.921788888889
+        //     at 60 - ... av 2.33566388888903
+        //
+        // 5478.921789 - 5476.586125 = 2.335664, to the microsecond.
+        //
+        // The timebase is READ BACK rather than assumed. Fix 94 added
+        // that read-back because the set does not always take, and
+        // anchoring the sound to a time the picture is not at would
+        // trade one offset for another.
+        if let landed = sink.controlTimebase {
+            realignAudioClock(sessionId: sessionOf(streamKey),
+                              to: CMTimebaseGetTime(landed))
+        }
         armDrainIfNeeded(streamKey: streamKey)
     }
 
@@ -4775,7 +5062,9 @@ public final class FairPlayStreamParser: NSObject {
                      + "cannot decode in it and the sink has to change")
             return
         }
-        keySession.addContentKeyRecipient(recipient)
+        guard Self.addRecipient(keySession, recipient: recipient,
+                                label: "stream \(streamKey) display layer")
+        else { return }
         Self.log("stream \(streamKey) display layer added as a content key "
                  + "recipient - recipients now "
                  + "\(keySession.contentKeyRecipients.count)")
