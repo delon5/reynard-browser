@@ -474,39 +474,15 @@ public final class FairPlayStreamParser: NSObject {
             }
             return out
         }
+        // CHANGED - see mse_fix_95's docstring. This block was the only
+        // place that knew how to take a stream apart, and it could only
+        // do it for a whole session at once. A page that rebuilds its
+        // player abandons two streams without going anywhere near
+        // destroySession, so the same work is now a helper.
         for (key, slot) in orphans {
-            entry.keySession.removeContentKeyRecipient(slot.recipient)
-            if let layer = slot.displayLayer,
-               let recipient = (layer as AnyObject) as? AVContentKeyRecipient {
-                entry.keySession.removeContentKeyRecipient(recipient)
-            }
-            if let renderer = slot.audioRenderer {
-                if let recipient = (renderer as AnyObject)
-                    as? AVContentKeyRecipient {
-                    entry.keySession.removeContentKeyRecipient(recipient)
-                }
-                renderer.stopRequestingMediaData()
-                renderer.flush()
-            }
-            slot.audioSynchronizer?.rate = 0
-            slot.displayLayer?.stopRequestingMediaData()
-            if let observer = slot.failObserver {
-                NotificationCenter.default.removeObserver(observer)
-            }
-            if let observer = slot.audioFlushObserver {
-                NotificationCenter.default.removeObserver(observer)
-            }
-            // Only layers this parser built. A compositor layer lives in
-            // NativeLayerCA's tree and is not ours to remove.
-            let owned = slot.ownsDisplayLayer ? slot.displayLayer : nil
-            let overlay = slot.retiringOverlay
-            let proof = slot.proofLayer
-            DispatchQueue.main.async {
-                owned?.removeFromSuperlayer()
-                overlay?.removeFromSuperlayer()
-                proof?.removeFromSuperlayer()
-            }
-            Self.log("stream \(key) torn down with its session")
+            tearDownStream(key: key, slot: slot,
+                           keySession: entry.keySession,
+                           why: "its session was destroyed")
         }
         Self.log("session \(sessionId) destroyed")
     }
@@ -531,11 +507,120 @@ public final class FairPlayStreamParser: NSObject {
                  + "again. A key session raises no request for a key it "
                  + "already holds, and this one served an earlier "
                  + "playback in the same content process.")
+        // THE STREAMS SURVIVE THE REBUILD.
+        //
+        // CHANGED - see mse_fix_96's docstring. This went straight
+        // through destroySession, which tears down every stream parser
+        // in the session - and a stream parser holds the INIT SEGMENT.
+        // The page appended that once, at the start of playback, and
+        // will never append it again, so every fragment after a rebuild
+        // went into a virgin AVStreamDataParser with no idea what it was
+        // looking at. On Netflix the same SourceBuffer went from
+        //
+        //     stream child-11|sb-4942676128 standing down ... a VIDEO
+        //       sink here would be a second copy
+        //
+        // to, four lines after the rebuild,
+        //
+        //     payload 93075 bytes, head fff7d3d8... -> NOT H.264
+        //     MEDIA DATA track 100 (soun) ... subtype=.mp1
+        //
+        // - an H.264 video track reported as MPEG-1 Layer 1 audio,
+        // because a parser with no initialisation scans for anything
+        // frame-shaped and finds ADTS syncwords in ciphertext.
+        //
+        // Only the KEY SESSION is deaf. The parsers are fine, so they
+        // come off the dying session's books before it goes and go onto
+        // the new one's afterwards. Everything that is genuinely about
+        // the key session - the pending originations, the batch, the
+        // specifiers already raised - is still thrown away, which is the
+        // whole point of the rebuild.
+        let carried = withState { () -> [(String, StreamParser)] in
+            var out: [(String, StreamParser)] = []
+            // Keys snapshotted before anything is removed - see
+            // destroySession for why.
+            for key in Array(streamParsers.keys).sorted()
+            where key.hasPrefix(sessionId + "|") {
+                if let slot = streamParsers.removeValue(forKey: key) {
+                    out.append((key, slot))
+                }
+            }
+            return out
+        }
+        // And the media facts the entry had learned. These describe the
+        // CONTENT, not the key session, and cannot be re-derived once
+        // the page has stopped sending init segments - the log said
+        //
+        //     using the page's own sinf as the template, 72 bytes
+        //
+        // before the rebuild and
+        //
+        //     no sinf template yet - synthesising 72 bytes
+        //
+        // after it, and a synthesised template is what fix 63 exists to
+        // avoid: it carries a fabricated tenc rather than the track's
+        // real constant IV.
+        let carriedTemplate = withState { entries[sessionId]?.templateSinf }
+        let carriedSpecifiers = withState {
+            entries[sessionId]?.specifierByKeyId ?? [:] }
+        if let old = liveSession(sessionId) {
+            for (_, slot) in carried {
+                old.removeContentKeyRecipient(slot.recipient)
+                if let layer = slot.displayLayer,
+                   let recipient = (layer as AnyObject)
+                    as? AVContentKeyRecipient {
+                    old.removeContentKeyRecipient(recipient)
+                }
+                if let renderer = slot.audioRenderer,
+                   let recipient = (renderer as AnyObject)
+                    as? AVContentKeyRecipient {
+                    old.removeContentKeyRecipient(recipient)
+                }
+            }
+        }
         destroySession(sessionId)
         guard createSession(sessionId) else {
             Self.log("session \(sessionId) could not be rebuilt - this "
                      + "playback has no route")
             return
+        }
+        withState {
+            for (key, slot) in carried {
+                streamParsers[key] = slot
+            }
+            if let fresh = entries[sessionId] {
+                fresh.templateSinf = carriedTemplate
+                fresh.specifierByKeyId = carriedSpecifiers
+            }
+        }
+        if let fresh = liveSession(sessionId) {
+            for (key, slot) in carried {
+                fresh.addContentKeyRecipient(slot.recipient)
+                if let layer = slot.displayLayer,
+                   let recipient = (layer as AnyObject)
+                    as? AVContentKeyRecipient {
+                    fresh.addContentKeyRecipient(recipient)
+                }
+                if let renderer = slot.audioRenderer,
+                   let recipient = (renderer as AnyObject)
+                    as? AVContentKeyRecipient {
+                    fresh.addContentKeyRecipient(recipient)
+                }
+                // The recipient count is the test. If it does not climb,
+                // an AVStreamDataParser cannot be re-registered once its
+                // session has gone and the init segment has to be
+                // replayed instead - which is a different fix.
+                Self.log("stream \(key) carried across the rebuild with "
+                         + "its parser - the init segment the page sent "
+                         + "once is still in it. Recipients now "
+                         + "\(fresh.contentKeyRecipients.count).")
+            }
+        }
+        if let carriedTemplate {
+            Self.log("session \(sessionId) kept its "
+                     + "\(carriedTemplate.count)-byte sinf template and "
+                     + "\(carriedSpecifiers.count) parser specifiers "
+                     + "across the rebuild")
         }
         if let certificate {
             setCertificate(sessionId, certificate: certificate)
@@ -2160,6 +2245,31 @@ public final class FairPlayStreamParser: NSObject {
         var audioStarted = false
         var lastAudioIntakePTS = Double.nan
         var audioFlushObserver: NSObjectProtocol?
+        /// Host time of the last APPEND from the page.
+        ///
+        /// ADDED - see mse_fix_95's docstring. lastSampleAt is when the
+        /// PARSER last handed something over, which is a different
+        /// question: AVStreamDataParser holds what it has been given and
+        /// delivers it as the sink asks, so a stream the page abandoned
+        /// keeps producing samples for as long as its buffer lasts. In
+        /// the capture that produced this fix, tv.apple.com destroyed
+        /// its hls.js player - both SourceBuffers removed, both key
+        /// sessions closed - and the display layer belonging to it was
+        /// still being fed seventeen thousand log lines later, from
+        /// eighteen fragments appended before the teardown.
+        ///
+        /// The page's own last word is the only thing that says whether
+        /// a stream is still wanted.
+        var lastAppendAt: Double = 0
+        /// The stream that took this one's place, if any.
+        ///
+        /// A superseded stream is PARKED rather than destroyed: clocks
+        /// stopped, renderer muted, queue dropped, nothing more fed -
+        /// and an append revives it. Destroying it outright would be a
+        /// guess about a page that legitimately holds two audio
+        /// SourceBuffers at once; parking one that is still wanted
+        /// costs a segment of latency and nothing else.
+        var supersededBy: String?
 
         init(parser: NSObject, recipient: AVContentKeyRecipient,
              delegate: ParserDelegate) {
@@ -2245,6 +2355,25 @@ public final class FairPlayStreamParser: NSObject {
                          + (harvested.map { Self.hexBytes($0) } ?? "absent"))
             }
         }
+        // ADDED - see mse_fix_95's docstring. This is the liveness
+        // signal the file did not have. Everything else it knows about
+        // a stream comes from the parser, and the parser goes on
+        // talking about a stream the page has finished with.
+        let revivedBy = withState { () -> String? in
+            slot.lastAppendAt = Self.hostNow()
+            guard let who = slot.supersededBy else { return nil }
+            slot.supersededBy = nil
+            return who
+        }
+        if let revivedBy {
+            Self.log("stream \(key) was appended to again - it is NOT the "
+                     + "abandoned half of \(revivedBy) after all, so it is "
+                     + "unparked. If this line appears on a site that "
+                     + "plays one video at a time, the supersede rule is "
+                     + "wrong for it.")
+            unpark(streamKey: key)
+        }
+        reapSuperseded(sessionId: sessionId)
         Self.log("stream \(stream) appended \(segment.count) bytes")
         // Asked for again after EVERY append, not once when the licence
         // landed. setShouldProvideMediaData is armed per track and
@@ -2368,6 +2497,20 @@ public final class FairPlayStreamParser: NSObject {
     fileprivate func enqueueForDisplay(streamKey: String,
                                        sampleBuffer: CMSampleBuffer,
                                        mediaType: String) {
+        // ADDED - see mse_fix_95's docstring. A parked stream is half of
+        // a player the page threw away, and its parser goes on
+        // delivering for as long as the fragments it was already given
+        // last - eighteen of them, thirty seconds of media, in the
+        // capture this came from.
+        //
+        // Dropped here rather than queued. Queuing would fill the bound
+        // and report an overflow for every sample of a stream nobody is
+        // listening to, and - worse - would keep lastSampleAt fresh,
+        // which is the liveness signal adopt() and videoClock() read to
+        // decide which stream is playing.
+        if withState({ streamParsers[streamKey]?.supersededBy != nil }) {
+            return
+        }
         // Audio now has somewhere to go.
         //
         // This used to be "Video only. Audio has no display layer to go
@@ -2457,6 +2600,11 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("stream \(streamKey) built a display layer - "
                      + "status \(layer.status.rawValue) "
                      + "timebase \(timebase != nil) - paused until attached")
+            // ADDED - see mse_fix_95's docstring. A second display layer
+            // in one session is a second picture, and a session is one
+            // content process playing one element. Whatever held the
+            // picture until now belongs to a player the page threw away.
+            supersede(winner: streamKey, half: "video")
             if Self.showLayerMarkerPresent() {
                 Self.showLayerIfRequested(layer, label: streamKey)
             } else {
@@ -2658,6 +2806,7 @@ public final class FairPlayStreamParser: NSObject {
                                       queue: DispatchQueue)? in
             guard let slot = streamParsers[streamKey],
                   slot.layerAttached, !slot.drainArmed,
+                  slot.supersededBy == nil,
                   !slot.pending.isEmpty,
                   let layer = slot.displayLayer,
                   let queue = slot.drainQueue else { return nil }
@@ -3096,6 +3245,12 @@ public final class FairPlayStreamParser: NSObject {
                         ? " - the session has no other"
                         : " - session already has \(already.count): ["
                           + already.joined(separator: ", ") + "]"))
+            // ADDED - see mse_fix_95's docstring. Fix 87 added the line
+            // above to find out whether this ever happened. It happens
+            // on tv.apple.com and on Netflix, every player rebuild, and
+            // both renderers went on singing. This is what that
+            // diagnostic was for.
+            supersede(winner: streamKey, half: "audio")
         }
 
         // Fix 27's discontinuity test, on this stream's own intake.
@@ -3215,6 +3370,16 @@ public final class FairPlayStreamParser: NSObject {
     /// lives in between.
     fileprivate static let livenessWindow: Double = 2.0
 
+    /// How long a PARKED stream may go without an append before it is
+    /// torn down for good.
+    ///
+    /// ADDED - see mse_fix_95's docstring. Parking is instant, because
+    /// the sound has to stop instantly. Teardown waits, because a page
+    /// that really does hold two of one half would append to the parked
+    /// one again within a segment - and a segment on these sites is two
+    /// to six seconds.
+    fileprivate static let supersedeWindow: Double = 8.0
+
     /// The stream videoClock last chose, so a change of mind is visible.
     ///
     /// ADDED - see mse_fix_94's docstring.
@@ -3235,6 +3400,7 @@ public final class FairPlayStreamParser: NSObject {
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") {
                 guard slot.layerAttached, slot.lastSampleAt > cutoff,
+                      slot.supersededBy == nil,
                       let found = slot.displayLayer else { continue }
                 if newest == nil || slot.lastSampleAt > newest!.fedAt {
                     newest = (found, slot.lastSampleAt)
@@ -3294,14 +3460,34 @@ public final class FairPlayStreamParser: NSObject {
     /// Only used to report the offset between the two. Nothing anchors
     /// to it - the video timebase is the timeline, and audio follows.
     fileprivate func audioClock(sessionId: String) -> Double? {
+        // THE MOST RECENTLY FED, and never a parked one.
+        //
+        // CHANGED - see mse_fix_95's docstring. This took the FIRST
+        // started synchronizer in dictionary order, with no liveness
+        // test of any kind, and dictionary order is not ordered by
+        // anything. In a session holding two renderers - which is every
+        // player rebuild on tv.apple.com and on Netflix - the av figure
+        // was measured against whichever one the hash landed on, which
+        // is where
+        //
+        //     av -4759.470286519
+        //
+        // came from: the dead stream's own drift line, reading the live
+        // stream's clock. videoClock has picked the most recently fed
+        // live stream since fix 94; this is the same choice, for the
+        // same reason.
         let sync = withState { () -> AVSampleBufferRenderSynchronizer? in
+            var newest: (sync: AVSampleBufferRenderSynchronizer,
+                         fedAt: Double)?
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") {
-                if slot.audioStarted, let found = slot.audioSynchronizer {
-                    return found
+                guard slot.audioStarted, slot.supersededBy == nil,
+                      let found = slot.audioSynchronizer else { continue }
+                if newest == nil || slot.lastSampleAt > newest!.fedAt {
+                    newest = (found, slot.lastSampleAt)
                 }
             }
-            return nil
+            return newest?.sync
         }
         guard let sync else { return nil }
         return CMTimebaseGetTime(sync.timebase).seconds
@@ -3320,6 +3506,7 @@ public final class FairPlayStreamParser: NSObject {
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") {
                 if slot.audioStarted, slot.lastSampleAt > cutoff,
+                   slot.supersededBy == nil,
                    let sync = slot.audioSynchronizer {
                     out.append((key, sync))
                 }
@@ -3389,6 +3576,7 @@ public final class FairPlayStreamParser: NSObject {
                                       queue: DispatchQueue)? in
             guard let slot = streamParsers[streamKey],
                   slot.audioStarted, !slot.audioDrainArmed,
+                  slot.supersededBy == nil,
                   !slot.audioPending.isEmpty,
                   let renderer = slot.audioRenderer,
                   let queue = slot.audioQueue else { return nil }
@@ -3724,7 +3912,8 @@ public final class FairPlayStreamParser: NSObject {
         let chosen = withState { () -> (key: String, fedAt: Double)? in
             var best: (key: String, fedAt: Double, seen: Int)?
             var any: (key: String, fedAt: Double, seen: Int)?
-            for (key, slot) in streamParsers where slot.displayLayer != nil {
+            for (key, slot) in streamParsers
+            where slot.displayLayer != nil && slot.supersededBy == nil {
                 let candidate = (key: key, fedAt: slot.lastSampleAt,
                                  seen: slot.videoSeen)
                 if any == nil || candidate.fedAt > any!.fedAt
@@ -4186,6 +4375,239 @@ public final class FairPlayStreamParser: NSObject {
         return String(streamKey.split(separator: "|").first ?? "")
     }
 
+    // ==================================================================
+    // A PLAYER THE PAGE THREW AWAY
+    //
+    // ADDED - see mse_fix_95's docstring. tv.apple.com destroys its
+    // whole hls.js player between the trailer and the feature: both
+    // SourceBuffers removed, both MediaKeySessions closed, a new player
+    // built five hundred log lines later. Netflix does the same on a
+    // profile change. Nothing here noticed, so the abandoned player's
+    // display layer and audio renderer went on running at rate 1.0,
+    // draining thirty seconds of fragments that had already been
+    // forwarded, while the new one played somewhere else entirely.
+    //
+    // A session is one content process, and it plays one element. Two
+    // display layers in a session is two pictures; two audio renderers
+    // is the two soundtracks the user heard.
+    // ==================================================================
+
+    /// This stream just built a sink. Park whatever else in its session
+    /// already had that half.
+    ///
+    /// Parked, not destroyed, and the difference matters: a page MAY
+    /// legitimately hold two SourceBuffers of one kind, and this cannot
+    /// tell that case from an abandoned player at the moment the second
+    /// sink appears. Parking is silent, instant and reversible - the
+    /// next append to a parked stream revives it - and only a stream
+    /// that then stays silent is torn down.
+    private func supersede(winner: String, half: String) {
+        let session = sessionOf(winner)
+        let losers = withState { () -> [String] in
+            var out: [String] = []
+            for (key, slot) in streamParsers
+            where key != winner && key.hasPrefix(session + "|")
+                    && slot.supersededBy == nil {
+                let holdsSameHalf = half == "audio"
+                    ? slot.audioRenderer != nil
+                    : slot.displayLayer != nil
+                guard holdsSameHalf else { continue }
+                slot.supersededBy = winner
+                out.append(key)
+            }
+            return out.sorted()
+        }
+        for key in losers {
+            Self.log("stream \(key) is PARKED - \(winner) built this "
+                     + "session's \(half) sink and a session plays one "
+                     + "element, so this is the half of a player the "
+                     + "page threw away. Clocks stopped, queue dropped. "
+                     + "An append revives it; \(Self.supersedeWindow)s "
+                     + "without one retires it.")
+            park(streamKey: key)
+        }
+    }
+
+    /// Stop a superseded stream making any sound or any picture.
+    ///
+    /// Everything here is reversible. Nothing is released, no observer
+    /// is removed and the parser keeps its tracks - this is the pause
+    /// button, not the teardown.
+    private func park(streamKey: String) {
+        let work = withState {
+            () -> (timebase: CMTimebase?,
+                   sync: AVSampleBufferRenderSynchronizer?,
+                   renderer: AVSampleBufferAudioRenderer?,
+                   audioQueue: DispatchQueue?,
+                   layer: AVSampleBufferDisplayLayer?,
+                   drainQueue: DispatchQueue?,
+                   held: Int, audioHeld: Int) in
+            guard let slot = streamParsers[streamKey] else {
+                return (timebase: nil, sync: nil, renderer: nil,
+                        audioQueue: nil, layer: nil, drainQueue: nil,
+                        held: 0, audioHeld: 0)
+            }
+            let held = slot.pending.count
+            let audioHeld = slot.audioPending.count
+            slot.pending.removeAll()
+            slot.audioPending.removeAll()
+            slot.currentGOP.removeAll()
+            slot.drainArmed = false
+            slot.audioDrainArmed = false
+            return (timebase: slot.displayLayer?.controlTimebase,
+                    sync: slot.audioSynchronizer,
+                    renderer: slot.audioRenderer,
+                    audioQueue: slot.audioQueue,
+                    layer: slot.displayLayer,
+                    drainQueue: slot.drainQueue,
+                    held: held, audioHeld: audioHeld)
+        }
+        // The clocks first, so nothing already inside a sink is
+        // presented while the rest of this runs.
+        if let timebase = work.timebase {
+            CMTimebaseSetRate(timebase, rate: 0.0)
+        }
+        work.sync?.rate = 0
+        // Muted as well as stopped. A synchronizer at rate 0 should be
+        // silent, and belt-and-braces on the half the user can hear
+        // costs one property write.
+        work.renderer?.isMuted = true
+        // On their own queues, because drainPending and
+        // drainAudioPending run there and flush() must not race an
+        // enqueue() - the same rule resynchroniseAudio follows.
+        if let renderer = work.renderer {
+            if let queue = work.audioQueue {
+                queue.async {
+                    renderer.stopRequestingMediaData()
+                    renderer.flush()
+                }
+            } else {
+                renderer.stopRequestingMediaData()
+                renderer.flush()
+            }
+        }
+        if let layer = work.layer {
+            if let queue = work.drainQueue {
+                queue.async { layer.stopRequestingMediaData() }
+            } else {
+                layer.stopRequestingMediaData()
+            }
+        }
+        Self.log("stream \(streamKey) parked - \(work.held) video and "
+                 + "\(work.audioHeld) audio samples dropped, clocks at "
+                 + "rate 0")
+    }
+
+    /// The page appended to a parked stream, so it was never abandoned.
+    private func unpark(streamKey: String) {
+        // Read outside the lock: both of these take it.
+        let volume = volumeFor(streamKey)
+        let rate = gatedRate(streamKey)
+        let work = withState {
+            () -> (renderer: AVSampleBufferAudioRenderer?,
+                   sync: AVSampleBufferRenderSynchronizer?,
+                   timebase: CMTimebase?) in
+            guard let slot = streamParsers[streamKey] else {
+                return (renderer: nil, sync: nil, timebase: nil)
+            }
+            return (renderer: slot.audioRenderer,
+                    sync: slot.audioSynchronizer,
+                    timebase: slot.layerAttached
+                        ? slot.displayLayer?.controlTimebase : nil)
+        }
+        if let renderer = work.renderer {
+            renderer.volume = Float(volume)
+            renderer.isMuted = volume <= 0.0
+        }
+        work.sync?.rate = rate
+        if let timebase = work.timebase {
+            CMTimebaseSetRate(timebase, rate: Float64(rate))
+        }
+        armDrainIfNeeded(streamKey: streamKey)
+        armAudioDrainIfNeeded(streamKey: streamKey)
+    }
+
+    /// Retire parked streams the page has stayed silent about.
+    ///
+    /// Called from append, which is the only place that learns anything
+    /// new about what the page still wants. A session with nothing being
+    /// appended to it is a session where nothing is playing, and a
+    /// parked stream there is already silent - so there is no need for a
+    /// timer.
+    private func reapSuperseded(sessionId: String) {
+        let cutoff = Self.hostNow() - Self.supersedeWindow
+        let doomed = withState { () -> [(String, StreamParser)] in
+            var out: [(String, StreamParser)] = []
+            // Keys snapshotted before anything is removed - see
+            // destroySession for why.
+            for key in Array(streamParsers.keys).sorted()
+            where key.hasPrefix(sessionId + "|") {
+                guard let slot = streamParsers[key],
+                      slot.supersededBy != nil,
+                      slot.lastAppendAt < cutoff else { continue }
+                streamParsers.removeValue(forKey: key)
+                out.append((key, slot))
+            }
+            return out
+        }
+        guard !doomed.isEmpty else { return }
+        let keySession = liveSession(sessionId)
+        for (key, slot) in doomed {
+            tearDownStream(
+                key: key, slot: slot, keySession: keySession,
+                why: "parked for more than \(Self.supersedeWindow)s with "
+                     + "no append - the page is finished with it")
+        }
+    }
+
+    /// Take one stream apart: sinks, clocks, key-session registrations,
+    /// observers and any layer this parser owns.
+    ///
+    /// The slot must already have been removed from streamParsers by the
+    /// caller, so that nothing can find it half-dismantled.
+    private func tearDownStream(key: String, slot: StreamParser,
+                                keySession: AVContentKeySession?,
+                                why: String) {
+        keySession?.removeContentKeyRecipient(slot.recipient)
+        if let layer = slot.displayLayer,
+           let recipient = (layer as AnyObject) as? AVContentKeyRecipient {
+            keySession?.removeContentKeyRecipient(recipient)
+        }
+        if let renderer = slot.audioRenderer {
+            if let recipient = (renderer as AnyObject)
+                as? AVContentKeyRecipient {
+                keySession?.removeContentKeyRecipient(recipient)
+            }
+            renderer.stopRequestingMediaData()
+            renderer.flush()
+        }
+        slot.audioSynchronizer?.rate = 0
+        slot.displayLayer?.stopRequestingMediaData()
+        // The timebase too. destroySession never stopped it, so a torn
+        // down layer's clock carried on running - and adopt() and
+        // videoClock() both read timebases.
+        if let timebase = slot.displayLayer?.controlTimebase {
+            CMTimebaseSetRate(timebase, rate: 0.0)
+        }
+        if let observer = slot.failObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = slot.audioFlushObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        // Only layers this parser built. A compositor layer lives in
+        // NativeLayerCA's tree and is not ours to remove.
+        let owned = slot.ownsDisplayLayer ? slot.displayLayer : nil
+        let overlay = slot.retiringOverlay
+        let proof = slot.proofLayer
+        DispatchQueue.main.async {
+            owned?.removeFromSuperlayer()
+            overlay?.removeFromSuperlayer()
+            proof?.removeFromSuperlayer()
+        }
+        Self.log("stream \(key) torn down - \(why)")
+    }
+
     /// Say once that this stream is not ours to render.
     ///
     /// Once, because it is true for every sample of a clear stream and
@@ -4248,7 +4670,8 @@ public final class FairPlayStreamParser: NSObject {
             var out: [(String, CMTimebase?,
                        AVSampleBufferRenderSynchronizer?)] = []
             for (key, slot) in streamParsers
-            where key.hasPrefix(sessionId + "|") {
+            where key.hasPrefix(sessionId + "|")
+                    && slot.supersededBy == nil {
                 let timebase = slot.layerAttached
                     ? slot.displayLayer?.controlTimebase : nil
                 let sync = slot.audioStarted ? slot.audioSynchronizer : nil
@@ -4296,7 +4719,8 @@ public final class FairPlayStreamParser: NSObject {
         let renderers = withState { () -> [(String, AVSampleBufferAudioRenderer)] in
             var out: [(String, AVSampleBufferAudioRenderer)] = []
             for (key, slot) in streamParsers
-            where key.hasPrefix(sessionId + "|") {
+            where key.hasPrefix(sessionId + "|")
+                    && slot.supersededBy == nil {
                 if let renderer = slot.audioRenderer {
                     out.append((key, renderer))
                 }
