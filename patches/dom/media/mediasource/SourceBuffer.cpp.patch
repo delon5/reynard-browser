@@ -2,7 +2,43 @@ diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/Sour
 index d79526afbbfa..cb10fad683d0 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -568,6 +568,157 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -446,7 +446,35 @@ void SourceBuffer::Detach() {
+   if (!mMediaSource) {
+     MSE_DEBUG("Already detached");
+     return;
+   }
++  // Reynard: the page is finished with this SourceBuffer.
++  //
++  // MediaSource::Detach reaches here for every buffer it owns, and so
++  // does cycle-collection unlink. RemoveSourceBuffer does NOT - it
++  // aborts the append and drops the buffer from mSourceBuffers - so
++  // that path has a call of its own; see MediaSource.cpp.
++  //
++  // The app process keeps an AVStreamDataParser, an
++  // AVSampleBufferDisplayLayer and an AVSampleBufferAudioRenderer per
++  // SourceBuffer, keyed on THIS pointer - see AppendData below, which
++  // sends the same value as the stream id. Nothing ever told it they
++  // were finished with. A parser holds what it has been given and
++  // hands it over as the sink asks for it, so an abandoned one kept a
++  // display layer and an audio renderer fed for another thirty
++  // seconds, at a completely different point in the film - two
++  // pictures and two soundtracks from one presentation.
++  //
++  // Before the teardown below, so `this` is still the object the app
++  // process has under that key.
++  //
++  // A block-scope declaration names the ENCLOSING namespace, which
++  // here is mozilla::dom - the same reason AppendData's declaration is
++  // spelled this way rather than with extern "C", which is not
++  // permitted at block scope.
++  {
++    extern void ReynardMSEForwardRetire(uintptr_t aStreamId);
++    ReynardMSEForwardRetire(reinterpret_cast<uintptr_t>(this));
++  }
+   AbortBufferAppend();
+   if (mTrackBuffersManager) {
+     mMediaSource->GetDecoder()->GetDemuxer()->DetachSourceBuffer(
+@@ -568,6 +596,157 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  

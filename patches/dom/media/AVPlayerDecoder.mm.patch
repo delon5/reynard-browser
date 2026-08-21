@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2813 @@
+@@ -0,0 +0,2836 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1091,6 +1091,29 @@ index 000000000000..b56efaa8479c
 +                             segment:[NSData
 +                                         dataWithBytes:aInitData.Elements()
 +                                                length:aInitData.Length()]];
++      return;
++    }
++    // The page removed that SourceBuffer, or dropped the MediaSource it
++    // lived on. Nothing will ever be appended to it again, and whatever
++    // the parser is still holding must stop being rendered.
++    //
++    // ADDED - see mse_fix_99's docstring. No session is built for a
++    // retire and none is looked up: if there is nothing under the key
++    // there is nothing to retire, which is the ordinary case for the
++    // capability-probe SourceBuffers a page never appends to.
++    if (aInitDataType.EqualsLiteral("retire")) {
++      SEL parserRetire = @selector(parserRetireStream:stream:);
++      if (!host || ![host respondsToSelector:parserRetire]) {
++        printf_stderr(
++            "avPlayer: MSE retire route unavailable for child %llu\n",
++            (unsigned long long)(aKey >> 32));
++        return;
++      }
++      printf_stderr("avPlayer: MSE retire child=%llu stream=%s\n",
++                    (unsigned long long)(aKey >> 32), aContentId.get());
++      [host parserRetireStream:static_cast<NSUInteger>(aKey >> 32)
++                        stream:[NSString
++                                   stringWithUTF8String:aContentId.get()]];
 +      return;
 +    }
 +    // The element's play state, and its volume. Neither is key

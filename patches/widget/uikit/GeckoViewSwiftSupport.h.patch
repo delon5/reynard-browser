@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,252 @@
+@@ -18,16 +18,262 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -148,6 +148,16 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +- (void)parserAppendMediaSegment:(NSUInteger)childId
 +                          stream:(NSString*)stream
 +                         segment:(NSData*)segment;
++// That SourceBuffer has ended - the page removed it, or dropped the
++// MediaSource it lived on.
++//
++// Everything the app process holds under that stream id is finished
++// with: the AVStreamDataParser, its display layer, its audio renderer
++// and their content-key registrations. Without this the appends simply
++// stop and nothing says why, and a parser with fragments still in it
++// goes on feeding its sinks in real time for as long as they last.
++- (void)parserRetireStream:(NSUInteger)childId
++                    stream:(NSString*)stream;
 +// A fragmented-MP4 init segment the page appended to a SourceBuffer.
 +//
 +// Distinct from parserAppendInitData:contentId:initData: above, which
@@ -255,7 +265,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +291,44 @@
+@@ -55,8 +301,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -300,7 +310,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +337,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +347,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

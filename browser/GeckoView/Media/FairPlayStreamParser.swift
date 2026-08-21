@@ -488,6 +488,35 @@ public final class FairPlayStreamParser: NSObject {
         Self.log("session \(sessionId) destroyed")
     }
 
+    /// The page removed this SourceBuffer, or dropped the MediaSource it
+    /// lived on. Nothing more will ever be appended to it.
+    ///
+    /// ADDED - see mse_fix_99's docstring. This is the signal fix 95
+    /// did not have. Fix 95 parks a stream when a NEWER sink of the same
+    /// half appears, which is a good guess and arrives late: on
+    /// tv.apple.com the page removed both SourceBuffers five hundred log
+    /// lines before the replacement renderer was built, and the
+    /// abandoned one was singing for all of them.
+    ///
+    /// Torn down rather than parked. Parking is reversible because it
+    /// answers a guess; this is the page itself saying it is finished,
+    /// and there is nothing to be careful about.
+    ///
+    /// A retire for a stream that does not exist is ordinary - most
+    /// SourceBuffers on a page are never appended to at all - so it is
+    /// silent.
+    @objc public func retireStream(_ sessionId: String, stream: String) {
+        let key = sessionId + "|" + stream
+        guard let slot = withState({
+            streamParsers.removeValue(forKey: key)
+        }) else {
+            return
+        }
+        tearDownStream(key: key, slot: slot,
+                       keySession: liveSession(sessionId),
+                       why: "the page removed its SourceBuffer")
+    }
+
     /// Rebuild a session that has stopped raising key requests, and ask
     /// again.
     ///

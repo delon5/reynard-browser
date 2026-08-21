@@ -25,7 +25,32 @@ diff --git a/dom/media/mediasource/MediaSource.cpp b/dom/media/mediasource/Media
 
  struct JSContext;
  class JSObject;
-@@ -420,6 +424,60 @@
+@@ -358,7 +362,24 @@ void MediaSource::RemoveSourceBuffer(SourceBuffer& aSourceBuffer,
+     return;
+   }
+ 
+   sourceBuffer->AbortBufferAppend();
++  // Reynard: the page is finished with this SourceBuffer.
++  //
++  // THIS is the path that matters. hls.js's destroy() removes both
++  // SourceBuffers and builds a new player, and the MediaSource itself
++  // survives - so SourceBuffer::Detach never runs, and the app process
++  // went on rendering the old presentation from fragments it had
++  // already been given. On tv.apple.com that was thirty seconds of a
++  // second soundtrack over the top of the film.
++  //
++  // See SourceBuffer::Detach for the other half - the element losing
++  // its source, and cycle-collection unlink - and for what is being
++  // retired. Both may fire for one buffer; the second finds nothing
++  // and returns.
++  {
++    extern void ReynardMSEForwardRetire(uintptr_t aStreamId);
++    ReynardMSEForwardRetire(reinterpret_cast<uintptr_t>(sourceBuffer));
++  }
+   // TODO:
+   // abort stream append loop (if running)
+ 
+@@ -420,6 +441,60 @@
    mDecoder->DecodeError(aError);
  }
 

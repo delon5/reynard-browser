@@ -388,6 +388,18 @@ public final class AVPlayerHost: NSObject {
         }
     }
 
+    /// That SourceBuffer has ended.
+    ///
+    /// ADDED - see mse_fix_99's docstring. No session is created here
+    /// and none is looked up: a retire for a stream that was never built
+    /// is the ordinary case, not an error - Netflix makes nine
+    /// SourceBuffers to probe codec support and appends to none of them.
+    @objc public func parserRetireStream(_ childId: UInt, stream: String) {
+        let sessionId = "child-\(childId)"
+        avLog("retire for child \(childId) stream \(stream)")
+        FairPlayStreamParser.shared.retireStream(sessionId, stream: stream)
+    }
+
     /// The element's play state, for this child's parser session.
     ///
     /// Straight through: the parser holds this per session and applies

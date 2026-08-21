@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,1976 @@
+@@ -0,0 +1,2009 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1658,6 +1658,39 @@ index 000000000000..e859b69f6239
 +                aLength, streamId.get());
 +  cc->SendAVPlayerKeyGenerateRequest(0, streamId, nsCString("initseg"),
 +                                     segment);
++}
++
++// The page removed that SourceBuffer, or dropped the MediaSource it
++// lived on.
++//
++// ADDED - see mse_fix_99's docstring. Called from
++// MediaSource::RemoveSourceBuffer and from SourceBuffer::Detach, which
++// are the two ways a SourceBuffer ends. Until this existed the app
++// process had no way to learn it: appends simply stopped, and a parser
++// with fragments still in it goes on feeding a sink for as long as they
++// last.
++//
++// Same message, same key, no payload. The id rides in the contentId
++// field exactly as the init segments do, and the type string is what
++// the parent switches on - so no IPDL change, and no protocol rebuild.
++void ReynardMSEForwardRetire(uintptr_t aStreamId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  nsPrintfCString streamId("sb-%llu", (unsigned long long)aStreamId);
++  printf_stderr("avPlayer: MSE retiring %s - the page removed it\n",
++                streamId.get());
++  // Sent for every SourceBuffer that ends, including ones nothing was
++  // ever forwarded for - Netflix builds nine of those to probe codec
++  // support and appends to none of them. The app side finds no stream
++  // under the key and returns, which is cheaper than remembering here
++  // which ids were ever used.
++  nsTArray<uint8_t> empty;
++  cc->SendAVPlayerKeyGenerateRequest(0, streamId, nsCString("retire"),
++                                     empty);
 +}
 +}  // namespace dom
 +
