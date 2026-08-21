@@ -2340,6 +2340,21 @@ public final class FairPlayStreamParser: NSObject {
         /// already been handed to the layer being replaced. Cleared on
         /// every sync sample, so it holds one GOP and no more.
         var currentGOP: [CMSampleBuffer] = []
+        /// The GOP before that one.
+        ///
+        /// ADDED - see mse_fix_110's docstring. One GOP only covers a
+        /// handover that happens while the display queue is nearly
+        /// empty. In capture 7a522e97 seven of eleven adoptions carried
+        /// NOTHING, every one of them with a queue deeper than a GOP -
+        /// held 183, 220, 241, 285, 342, 372 - and each left its new
+        /// layer with one to five seconds between its clock and the
+        /// first frame it was given, which is one to five seconds of
+        /// black.
+        ///
+        /// Two GOPs, not a window of seconds: the bound stays the same
+        /// shape as currentGOP's and the memory stays compressed
+        /// samples this file was holding anyway a moment earlier.
+        var previousGOP: [CMSampleBuffer] = []
         /// Did this parser build the layer it is feeding?
         ///
         /// True for the hardcoded overlay it makes itself, false once the
@@ -3220,9 +3235,14 @@ public final class FairPlayStreamParser: NSObject {
                 }
                 let keptGOP = slot.currentGOP.filter(live)
                 let keptPending = slot.pending.filter(live)
+                // ADDED - see mse_fix_110's docstring. Reference frames
+                // go stale exactly as queued ones do.
+                let keptPrevious = slot.previousGOP.filter(live)
                 let pruned = (slot.currentGOP.count - keptGOP.count)
                     + (slot.pending.count - keptPending.count)
+                    + (slot.previousGOP.count - keptPrevious.count)
                 if pruned > 0 {
+                    slot.previousGOP = keptPrevious
                     slot.currentGOP = keptGOP
                     slot.pending = keptPending
                     slot.needsSyncSample = true
@@ -3302,6 +3322,10 @@ public final class FairPlayStreamParser: NSObject {
             // is not happening, and half of one is worth nothing: the
             // whole value of this is that it starts at a keyframe.
             if isSync {
+                // KEPT, not dropped - see mse_fix_110's docstring. This
+                // is the GOP the layer is most likely to be inside when
+                // the compositor takes its layer away.
+                slot.previousGOP = slot.currentGOP
                 slot.currentGOP.removeAll()
             }
             if slot.currentGOP.count >= 300 {
@@ -4902,9 +4926,18 @@ public final class FairPlayStreamParser: NSObject {
             // currentGOP and pending overlap - pending is the tail of the
             // GOP that has not been drained yet - so only the part
             // already fed to the old layer is prepended.
-            let alreadyFed = max(0, slot.currentGOP.count
-                                    - slot.pending.count)
-            let carried = Array(slot.currentGOP.prefix(alreadyFed))
+            // TWO GOPS - see mse_fix_110's docstring. With one, this
+            // was zero by arithmetic whenever the display queue was
+            // deeper than a GOP, which is most of the time: seven of
+            // eleven adoptions in capture 7a522e97 carried nothing and
+            // every one of those had a queue of 183 samples or more.
+            //
+            // The run still starts on a keyframe, because previousGOP
+            // starts on one by construction, so the new layer can
+            // decode from the first sample it is handed.
+            let fed = slot.previousGOP + slot.currentGOP
+            let alreadyFed = max(0, fed.count - slot.pending.count)
+            let carried = Array(fed.prefix(alreadyFed))
             let held = slot.pending.count
             if !carried.isEmpty {
                 slot.pending = carried + slot.pending
@@ -4965,6 +4998,27 @@ public final class FairPlayStreamParser: NSObject {
                  + "samples in front of \(handover.held) held, "
                  + resumption + ". The overlay stays until this layer "
                  + "takes one.")
+        // HOW LONG THE BLACK IS - see mse_fix_110's docstring. The
+        // clock is anchored where the picture was; this is the first
+        // frame the new layer will actually be given, and the distance
+        // between them is time with nothing to show. Reconstructing it
+        // from separate lines took eleven adoptions and a script.
+        let firstUp = withState { () -> Double? in
+            guard let head = streamParsers[streamKey]?.pending.first
+            else { return nil }
+            let at = CMSampleBufferGetPresentationTimeStamp(head).seconds
+            return at.isFinite ? at : nil
+        }
+        if let firstUp {
+            Self.log("stream \(streamKey) the new layer starts "
+                     + "\(firstUp - anchor.seconds)s after its clock - "
+                     + "first frame at \(firstUp), clock at "
+                     + "\(anchor.seconds)")
+        } else {
+            Self.log("stream \(streamKey) the new layer has NO frame to "
+                     + "start from - its clock is at \(anchor.seconds) "
+                     + "and the queue is empty")
+        }
         // ADDED - see mse_fix_105's docstring. Said only when there is
         // something to say, so a clean handover stays a single line.
         if adoptTrimmed > 0 || adoptDumped > 0 || adoptGateHeld > 0 {
@@ -5333,6 +5387,8 @@ public final class FairPlayStreamParser: NSObject {
             slot.pending.removeAll()
             slot.audioPending.removeAll()
             slot.currentGOP.removeAll()
+            // ADDED - see mse_fix_110's docstring.
+            slot.previousGOP.removeAll()
             slot.drainArmed = false
             slot.audioDrainArmed = false
             return (timebase: slot.displayLayer?.controlTimebase,
@@ -5752,9 +5808,13 @@ public final class FairPlayStreamParser: NSObject {
             guard let slot = streamParsers[streamKey] else { return (0, 0) }
             let keptGOP = slot.currentGOP.filter(near)
             let keptPending = slot.pending.filter(near)
+            // ADDED - see mse_fix_110's docstring.
+            let keptPrevious = slot.previousGOP.filter(near)
             let gone = (slot.currentGOP.count - keptGOP.count)
                 + (slot.pending.count - keptPending.count)
+                + (slot.previousGOP.count - keptPrevious.count)
             if gone > 0 {
+                slot.previousGOP = keptPrevious
                 slot.currentGOP = keptGOP
                 slot.pending = keptPending
                 slot.needsSyncSample = true
