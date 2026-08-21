@@ -407,17 +407,33 @@ public final class AVPlayerHost: NSObject {
     /// the certificate that builds a session at all. No session is
     /// created here for the same reason - a play state on its own is
     /// not a reason to build a parser.
-    @objc public func parserSetPlaying(_ childId: UInt, playing: Bool) {
+    @objc public func parserSetPlaying(_ childId: UInt, owner: UInt64,
+                                       playing: Bool) {
         avLog("play state for child \(childId) -> "
               + (playing ? "playing" : "paused"))
         FairPlayStreamParser.shared.setSessionPlaying("child-\(childId)",
+                                                      owner: owner,
                                                       playing: playing)
     }
 
+    /// Which element a SourceBuffer belongs to.
+    ///
+    /// ADDED - see mse_fix_101's docstring. No session is built here: an
+    /// owner for a stream that does not exist yet is ordinary, and the
+    /// parser keeps it against the key either way.
+    @objc public func parserSetStreamOwner(_ childId: UInt, stream: String,
+                                           owner: UInt64) {
+        FairPlayStreamParser.shared.setStreamOwner("child-\(childId)",
+                                                   stream: stream,
+                                                   owner: owner)
+    }
+
     /// The element's volume, for this child's parser session.
-    @objc public func parserSetVolume(_ childId: UInt, volume: Double) {
-        avLog("volume for child \(childId) -> \(volume)")
+    @objc public func parserSetVolume(_ childId: UInt, owner: UInt64,
+                                      volume: Double) {
+        avLog("volume for child \(childId) element \(owner) -> \(volume)")
         FairPlayStreamParser.shared.setSessionVolume("child-\(childId)",
+                                                     owner: owner,
                                                      volume: volume)
     }
 

@@ -38,7 +38,7 @@ index d79526afbbfa..cb10fad683d0 100644
    AbortBufferAppend();
    if (mTrackBuffersManager) {
      mMediaSource->GetDecoder()->GetDemuxer()->DetachSourceBuffer(
-@@ -568,6 +596,157 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -568,6 +596,181 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
  
@@ -186,6 +186,30 @@ index d79526afbbfa..cb10fad683d0 100644
 +      // and the element is an ordinary video again. Init segments only;
 +      // a media fragment answers nothing the first segment has not.
 +      if (mseIsInit) {
++        // WHICH ELEMENT owns this SourceBuffer.
++        //
++        // Reynard: see mse_fix_101. The play state and volume this
++        // route carries had no element on them at all - the key is
++        // (childID << 32) | 0, so one bit served a whole content
++        // process, and tv.apple.com's feature element started the
++        // film's soundtrack while the film was still behind its own
++        // muted pre-roll.
++        //
++        // MediaSource::GetDecoder() is the identity, because
++        // MediaDecoder::Play and SetVolume have the same object as
++        // `this`. Upcast to MediaDecoder* EXPLICITLY: MediaSourceDecoder
++        // has more than one base, and a derived pointer and a
++        // non-primary base pointer are not required to compare equal
++        // once both are integers.
++        //
++        // On init segments only. One per SourceBuffer per
++        // initialisation is plenty, and the app side keeps it.
++        extern void ReynardMSEForwardOwner(uintptr_t aStreamId,
++                                           uintptr_t aOwnerId);
++        MediaDecoder* mseOwner =
++            mMediaSource ? mMediaSource->GetDecoder() : nullptr;
++        ReynardMSEForwardOwner(reinterpret_cast<uintptr_t>(this),
++                               reinterpret_cast<uintptr_t>(mseOwner));
 +        extern void ReynardMSEContentProcessProbe(const uint8_t* aData,
 +                                                  size_t aLength);
 +        ReynardMSEContentProcessProbe(aData->Elements(), mseLength);

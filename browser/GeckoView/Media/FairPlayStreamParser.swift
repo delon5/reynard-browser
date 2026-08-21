@@ -2133,6 +2133,13 @@ public final class FairPlayStreamParser: NSObject {
     /// every recipient, so the whole EME exchange (key request, SPC,
     /// CKC, all keyed by child) is untouched by this.
     fileprivate final class StreamParser {
+        /// The media element this SourceBuffer belongs to.
+        ///
+        /// ADDED - see mse_fix_101's docstring. Zero until the owner
+        /// message arrives, which reads as "unknown" and falls back to
+        /// the session-wide state - the behaviour this had before there
+        /// was an owner at all.
+        var owner: UInt64 = 0
         let parser: NSObject
         let recipient: AVContentKeyRecipient
         let delegate: ParserDelegate
@@ -5117,20 +5124,91 @@ public final class FairPlayStreamParser: NSObject {
     /// a route that quietly un-pauses itself.
     fileprivate func gatedRate(_ streamKey: String) -> Float {
         let sessionId = String(streamKey.split(separator: "|").first ?? "")
-        return withState { sessionPlaying[sessionId] ?? false } ? 1.0 : 0.0
+        // THIS STREAM'S ELEMENT FIRST - see mse_fix_101's docstring.
+        // sessionPlaying is per CONTENT PROCESS, and on tv.apple.com
+        // that meant the feature element's play() started the film's
+        // soundtrack under a pre-roll trailer playing in a different
+        // element. The session-wide answer is still the fallback, for a
+        // stream whose owner never arrived.
+        return withState { () -> Bool in
+            if let owner = streamParsers[streamKey]?.owner, owner != 0,
+               let playing = ownerPlaying[owner] {
+                return playing
+            }
+            return sessionPlaying[sessionId] ?? false
+        } ? 1.0 : 0.0
+    }
+
+    /// Which element a SourceBuffer belongs to, and what that element is
+    /// doing. Keyed on the MediaDecoder both sides can see.
+    private var ownerPlaying: [UInt64: Bool] = [:]
+    private var ownerVolume: [UInt64: Double] = [:]
+
+    @objc public func setStreamOwner(_ sessionId: String, stream: String,
+                                     owner: UInt64) {
+        let key = sessionId + "|" + stream
+        let changed = withState { () -> Bool in
+            guard let slot = streamParsers[key], slot.owner != owner else {
+                return false
+            }
+            slot.owner = owner
+            return true
+        }
+        guard changed else { return }
+        Self.log("stream \(key) belongs to element \(owner) - its clock "
+                 + "and its volume follow THAT element now, not whatever "
+                 + "else is playing in this content process")
+        // The element may already have said what it is doing, before
+        // this stream existed to hear it.
+        let rate = gatedRate(key)
+        let volume = volumeFor(key)
+        let work = withState {
+            () -> (AVSampleBufferAudioRenderer?,
+                   AVSampleBufferRenderSynchronizer?, CMTimebase?)? in
+            guard let slot = streamParsers[key] else { return nil }
+            return (slot.audioRenderer,
+                    slot.audioStarted ? slot.audioSynchronizer : nil,
+                    slot.layerAttached
+                        ? slot.displayLayer?.controlTimebase : nil)
+        }
+        guard let work else { return }
+        if let renderer = work.0 {
+            renderer.volume = Float(volume)
+            renderer.isMuted = volume <= 0.0
+        }
+        work.1?.rate = rate
+        if let timebase = work.2 {
+            CMTimebaseSetRate(timebase, rate: Float64(rate))
+        }
     }
 
     /// The element started or stopped.
-    @objc public func setSessionPlaying(_ sessionId: String, playing: Bool) {
+    @objc public func setSessionPlaying(_ sessionId: String, owner: UInt64,
+                                        playing: Bool) {
+        // CHANGED - see mse_fix_101's docstring. The session-wide value
+        // is still kept, because it is the fallback for a stream whose
+        // owner never arrived, but what gates a clock is the element's.
         let changed = withState { () -> Bool in
+            var moved = false
+            if owner != 0 {
+                moved = ownerPlaying[owner] != playing
+                ownerPlaying[owner] = playing
+            }
             let was = sessionPlaying[sessionId]
             sessionPlaying[sessionId] = playing
-            return was != playing
+            return moved || was != playing
         }
         guard changed else { return }
-        Self.log("session \(sessionId) is now "
+        let mine = withState {
+            streamParsers.filter {
+                $0.key.hasPrefix(sessionId + "|")
+                    && (owner == 0 || $0.value.owner == owner)
+            }.count
+        }
+        Self.log("session \(sessionId) element \(owner) is now "
                  + (playing ? "PLAYING" : "PAUSED")
-                 + " - applying it to every stream it owns")
+                 + " - applying it to the \(mine) stream(s) that element "
+                 + "owns")
         let rate: Float = playing ? 1.0 : 0.0
         // The clocks are read out UNDER the lock and set outside it.
         // Only a layer that has somewhere to render: starting a clock
@@ -5143,7 +5221,9 @@ public final class FairPlayStreamParser: NSObject {
                        AVSampleBufferRenderSynchronizer?)] = []
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|")
-                    && slot.supersededBy == nil {
+                    && slot.supersededBy == nil
+                    && (owner == 0 || slot.owner == 0
+                        || slot.owner == owner) {
                 let timebase = slot.layerAttached
                     ? slot.displayLayer?.controlTimebase : nil
                 let sync = slot.audioStarted ? slot.audioSynchronizer : nil
@@ -5185,14 +5265,22 @@ public final class FairPlayStreamParser: NSObject {
     /// Muting collapses into this: Gecko passes the effective volume,
     /// zero when the element is muted, which is also how
     /// AVPlayerHost.setVolume treats it.
-    @objc public func setSessionVolume(_ sessionId: String, volume: Double) {
+    @objc public func setSessionVolume(_ sessionId: String, owner: UInt64,
+                                       volume: Double) {
         let clamped = max(0.0, min(1.0, volume.isFinite ? volume : 1.0))
-        withState { sessionVolume[sessionId] = clamped }
+        withState {
+            sessionVolume[sessionId] = clamped
+            if owner != 0 {
+                ownerVolume[owner] = clamped
+            }
+        }
         let renderers = withState { () -> [(String, AVSampleBufferAudioRenderer)] in
             var out: [(String, AVSampleBufferAudioRenderer)] = []
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|")
-                    && slot.supersededBy == nil {
+                    && slot.supersededBy == nil
+                    && (owner == 0 || slot.owner == 0
+                        || slot.owner == owner) {
                 if let renderer = slot.audioRenderer {
                     out.append((key, renderer))
                 }
@@ -5213,7 +5301,14 @@ public final class FairPlayStreamParser: NSObject {
     /// which for a muted autoplaying trailer is never.
     fileprivate func volumeFor(_ streamKey: String) -> Double {
         let sessionId = String(streamKey.split(separator: "|").first ?? "")
-        return withState { sessionVolume[sessionId] ?? 1.0 }
+        // THIS STREAM'S ELEMENT FIRST, for the reason in gatedRate.
+        return withState { () -> Double in
+            if let owner = streamParsers[streamKey]?.owner, owner != 0,
+               let volume = ownerVolume[owner] {
+                return volume
+            }
+            return sessionVolume[sessionId] ?? 1.0
+        }
     }
 
     /// Register the display layer with the stream's content key session.

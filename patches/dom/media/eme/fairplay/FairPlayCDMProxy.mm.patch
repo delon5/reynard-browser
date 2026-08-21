@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,2009 @@
+@@ -0,0 +1,2080 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1637,6 +1637,27 @@ index 000000000000..e859b69f6239
 +#pragma clang diagnostic pop
 +}
 +
++// Which element a SourceBuffer belongs to.
++//
++// ADDED - see mse_fix_101's docstring. Sent once per init segment on
++// the message the segments already ride, so no IPDL changes.
++void ReynardMSEForwardOwner(uintptr_t aStreamId, uintptr_t aOwnerId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  printf_stderr("avPlayer: MSE stream sb-%llu belongs to element %llu\n",
++                (unsigned long long)aStreamId,
++                (unsigned long long)aOwnerId);
++  nsTArray<uint8_t> empty;
++  cc->SendAVPlayerKeyGenerateRequest(
++      0, nsPrintfCString("sb-%llu:%llu", (unsigned long long)aStreamId,
++                         (unsigned long long)aOwnerId),
++      nsCString("owner"), empty);
++}
++
 +void ReynardMSEForwardInitSegment(uintptr_t aStreamId, const uint8_t* aData,
 +                                  size_t aLength) {
 +  MOZ_ASSERT(NS_IsMainThread());
@@ -1757,15 +1778,58 @@ index 000000000000..e859b69f6239
 +  return true;
 +}
 +
-+void ReynardMSEPlayState(bool aPlaying) {
++// The last state seen for each element.
++//
++// ADDED - see mse_fix_101's docstring. These used to be two process-wide
++// statics, so a second element reporting the same value as the first was
++// dropped as a repeat when it was nothing of the kind - which is why
++// tv.apple.com's feature element, at volume 0.50, does not appear in the
++// capture at all.
++//
++// A fixed table rather than a map: this file includes no container
++// header, the number of elements playing protected content in one
++// process is one or two, and scanning eight is free. Past eight the
++// oldest slot is reused, which costs a duplicate message and nothing
++// else.
++struct ReynardMSEOwnerState {
++  uintptr_t owner;
++  int playing;
++  double volume;
++};
++static const size_t kReynardMSEOwnerSlots = 8;
++static ReynardMSEOwnerState sReynardMSEOwners[kReynardMSEOwnerSlots] = {};
++static size_t sReynardMSEOwnerNext = 0;
++static ReynardMSEOwnerState* ReynardMSEOwnerSlot(uintptr_t aOwner) {
++  for (size_t i = 0; i < kReynardMSEOwnerSlots; i++) {
++    if (sReynardMSEOwners[i].owner == aOwner) {
++      return &sReynardMSEOwners[i];
++    }
++  }
++  for (size_t i = 0; i < kReynardMSEOwnerSlots; i++) {
++    if (sReynardMSEOwners[i].owner == 0) {
++      sReynardMSEOwners[i].owner = aOwner;
++      sReynardMSEOwners[i].playing = -1;
++      sReynardMSEOwners[i].volume = -1.0;
++      return &sReynardMSEOwners[i];
++    }
++  }
++  size_t slot = sReynardMSEOwnerNext % kReynardMSEOwnerSlots;
++  sReynardMSEOwnerNext++;
++  sReynardMSEOwners[slot].owner = aOwner;
++  sReynardMSEOwners[slot].playing = -1;
++  sReynardMSEOwners[slot].volume = -1.0;
++  return &sReynardMSEOwners[slot];
++}
++
++void ReynardMSEPlayState(uintptr_t aOwnerId, bool aPlaying) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  static bool sSaidPlayState = false;
 +  if (ReynardMSEFromNativeRoute("a play state", &sSaidPlayState)) {
 +    return;
 +  }
-+  static int sLastPlaying = -1;
++  ReynardMSEOwnerState* slot = ReynardMSEOwnerSlot(aOwnerId);
 +  const int state = aPlaying ? 1 : 0;
-+  if (sLastPlaying == state) {
++  if (slot->playing == state) {
 +    return;
 +  }
 +  ::mozilla::dom::ContentChild* cc =
@@ -1773,16 +1837,19 @@ index 000000000000..e859b69f6239
 +  if (!cc) {
 +    return;
 +  }
-+  sLastPlaying = state;
-+  printf_stderr("avPlayer: MSE element is %s\n",
++  slot->playing = state;
++  printf_stderr("avPlayer: MSE element %llu is %s\n",
++                (unsigned long long)aOwnerId,
 +                aPlaying ? "playing" : "paused");
 +  nsTArray<uint8_t> empty;
 +  cc->SendAVPlayerKeyGenerateRequest(
-+      0, nsCString(aPlaying ? "playing" : "paused"), nsCString("playstate"),
-+      empty);
++      0,
++      nsPrintfCString("%s:%llu", aPlaying ? "playing" : "paused",
++                      (unsigned long long)aOwnerId),
++      nsCString("playstate"), empty);
 +}
 +
-+void ReynardMSEVolume(double aVolume) {
++void ReynardMSEVolume(uintptr_t aOwnerId, double aVolume) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  static bool sSaidVolume = false;
 +  if (ReynardMSEFromNativeRoute("a volume", &sSaidVolume)) {
@@ -1802,12 +1869,13 @@ index 000000000000..e859b69f6239
 +    volume = 1.0;
 +  }
 +  // A fading volume control produces one of these per animation frame.
-+  static double sLastVolume = -1.0;
-+  double moved = sLastVolume - volume;
++  // Per ELEMENT now - see mse_fix_101's docstring.
++  ReynardMSEOwnerState* slot = ReynardMSEOwnerSlot(aOwnerId);
++  double moved = slot->volume - volume;
 +  if (moved < 0.0) {
 +    moved = -moved;
 +  }
-+  if (sLastVolume >= 0.0 && moved < 0.001) {
++  if (slot->volume >= 0.0 && moved < 0.001) {
 +    return;
 +  }
 +  ::mozilla::dom::ContentChild* cc =
@@ -1815,11 +1883,14 @@ index 000000000000..e859b69f6239
 +  if (!cc) {
 +    return;
 +  }
-+  sLastVolume = volume;
-+  printf_stderr("avPlayer: MSE element volume -> %.3f\n", volume);
++  slot->volume = volume;
++  printf_stderr("avPlayer: MSE element %llu volume -> %.3f\n",
++                (unsigned long long)aOwnerId, volume);
 +  nsTArray<uint8_t> empty;
 +  cc->SendAVPlayerKeyGenerateRequest(
-+      0, nsPrintfCString("%.6f", volume), nsCString("volume"), empty);
++      0,
++      nsPrintfCString("%.6f:%llu", volume, (unsigned long long)aOwnerId),
++      nsCString("volume"), empty);
 +}
 +
 +void FairPlayCDMProxy::SendRemoteKeyRequest(

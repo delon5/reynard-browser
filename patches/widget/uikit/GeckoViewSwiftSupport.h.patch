@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..5d66fa8f26ec 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,262 @@
+@@ -18,16 +18,276 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -195,12 +195,26 @@ index e68fca9134c0..5d66fa8f26ec 100644
 +// kept playing and the "Block Audio and Video" autoplay setting was
 +// defeated. Routed by CHILD like everything else on this path; a
 +// content process owns no player to route by.
-+- (void)parserSetPlaying:(NSUInteger)childId playing:(BOOL)playing;
++- (void)parserSetPlaying:(NSUInteger)childId
++                   owner:(uint64_t)owner
++                 playing:(BOOL)playing;
++// Which ELEMENT a SourceBuffer belongs to.
++//
++// The two methods around this one used to carry no element at all - the
++// route's key is (childID << 32) | 0 - so one element's play state and
++// volume were applied to every MSE stream in the process. This is the
++// identity that separates them: MediaSource::GetDecoder() on one side
++// and MediaDecoder's own `this` on the other.
++- (void)parserSetStreamOwner:(NSUInteger)childId
++                      stream:(NSString*)stream
++                       owner:(uint64_t)owner;
 +// And its volume. "Block Audio Only" is Gecko's Allowed_muted: the
 +// play is permitted because the element is believed inaudible, which
 +// an audio renderer that never heard the volume made untrue. The twin
 +// of setVolume:to: above, which does this for the native HLS route.
-+- (void)parserSetVolume:(NSUInteger)childId volume:(double)volume;
++- (void)parserSetVolume:(NSUInteger)childId
++                  owner:(uint64_t)owner
++                 volume:(double)volume;
 +
 +// The compositor's layer for a protected stream.
 +//
@@ -265,7 +279,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +301,44 @@
+@@ -55,8 +315,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -310,7 +324,7 @@ index e68fca9134c0..5d66fa8f26ec 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +347,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +361,99 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

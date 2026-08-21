@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2836 @@
+@@ -0,0 +0,2875 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1120,34 +1120,73 @@ index 000000000000..b56efaa8479c
 +    // material; they ride this message because it is already routed
 +    // per child and adding an IPDL message for two scalars would be a
 +    // protocol change and a wide rebuild for nothing.
++    // The element the state belongs to, appended by the sender as
++    // ":<owner>". See mse_fix_101's docstring: this route carried one
++    // play state and one volume per CONTENT PROCESS, so tv.apple.com's
++    // feature element started the film's soundtrack while the film was
++    // still behind its own muted pre-roll.
++    //
++    // Absent on an older content process, which reads as owner 0 and
++    // falls back to the session-wide behaviour this had before.
++    nsCString mseValue(aContentId);
++    uint64_t mseOwner = 0;
++    int32_t mseColon = mseValue.FindChar(':');
++    if (mseColon >= 0) {
++      mseOwner = strtoull(mseValue.get() + mseColon + 1, nullptr, 10);
++      mseValue.Truncate(mseColon);
++    }
++    // Which element a SourceBuffer belongs to - "sb-<stream>:<owner>".
++    if (aInitDataType.EqualsLiteral("owner")) {
++      SEL setOwner = @selector(parserSetStreamOwner:stream:owner:);
++      if (!host || ![host respondsToSelector:setOwner]) {
++        printf_stderr(
++            "avPlayer: MSE owner route unavailable for child %llu\n",
++            (unsigned long long)(aKey >> 32));
++        return;
++      }
++      printf_stderr("avPlayer: MSE owner child=%llu stream=%s -> %llu\n",
++                    (unsigned long long)(aKey >> 32), mseValue.get(),
++                    (unsigned long long)mseOwner);
++      [host parserSetStreamOwner:static_cast<NSUInteger>(aKey >> 32)
++                          stream:[NSString
++                                     stringWithUTF8String:mseValue.get()]
++                           owner:mseOwner];
++      return;
++    }
 +    if (aInitDataType.EqualsLiteral("playstate")) {
-+      SEL setPlaying = @selector(parserSetPlaying:playing:);
++      SEL setPlaying = @selector(parserSetPlaying:owner:playing:);
 +      if (!host || ![host respondsToSelector:setPlaying]) {
 +        printf_stderr(
 +            "avPlayer: MSE play state route unavailable for child %llu\n",
 +            (unsigned long long)(aKey >> 32));
 +        return;
 +      }
-+      const bool playing = aContentId.EqualsLiteral("playing");
-+      printf_stderr("avPlayer: MSE play state child=%llu -> %s\n",
++      const bool playing = mseValue.EqualsLiteral("playing");
++      printf_stderr("avPlayer: MSE play state child=%llu element=%llu "
++                    "-> %s\n",
 +                    (unsigned long long)(aKey >> 32),
++                    (unsigned long long)mseOwner,
 +                    playing ? "playing" : "paused");
 +      [host parserSetPlaying:static_cast<NSUInteger>(aKey >> 32)
++                       owner:mseOwner
 +                     playing:playing];
 +      return;
 +    }
 +    if (aInitDataType.EqualsLiteral("volume")) {
-+      SEL setVolume = @selector(parserSetVolume:volume:);
++      SEL setVolume = @selector(parserSetVolume:owner:volume:);
 +      if (!host || ![host respondsToSelector:setVolume]) {
 +        printf_stderr(
 +            "avPlayer: MSE volume route unavailable for child %llu\n",
 +            (unsigned long long)(aKey >> 32));
 +        return;
 +      }
-+      const double volume = strtod(aContentId.get(), nullptr);
-+      printf_stderr("avPlayer: MSE volume child=%llu -> %.3f\n",
-+                    (unsigned long long)(aKey >> 32), volume);
++      const double volume = strtod(mseValue.get(), nullptr);
++      printf_stderr("avPlayer: MSE volume child=%llu element=%llu "
++                    "-> %.3f\n",
++                    (unsigned long long)(aKey >> 32),
++                    (unsigned long long)mseOwner, volume);
 +      [host parserSetVolume:static_cast<NSUInteger>(aKey >> 32)
++                      owner:mseOwner
 +                     volume:volume];
 +      return;
 +    }

@@ -1,7 +1,7 @@
 diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 --- a/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
 +++ b/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
-@@ -129,17 +129,42 @@
+@@ -129,17 +129,44 @@
  void MediaDecoder::Pause() {
    MOZ_ASSERT(NS_IsMainThread());
    MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
@@ -21,8 +21,10 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 +  // include for one call. A block-scope declaration names the
 +  // ENCLOSING namespace, and this one is mozilla rather than
 +  // mozilla::dom.
-+  extern void ReynardMSEPlayState(bool aPlaying);
-+  ReynardMSEPlayState(false);
++  // WITH THE ELEMENT - see mse_fix_101. Without it this pause stopped
++  // every MSE stream in the process, and the play below started them.
++  extern void ReynardMSEPlayState(uintptr_t aOwnerId, bool aPlaying);
++  ReynardMSEPlayState(reinterpret_cast<uintptr_t>(this), false);
    if (mPlayState == PLAY_STATE_LOADING || IsEnded()) {
      mNextState = PLAY_STATE_PAUSED;
      return;
@@ -39,12 +41,12 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 +  // an audio renderer that never heard about the volume made that
 +  // belief false. This is the MSE twin of AVPlayerDecoder::SetVolume,
 +  // which exists for the identical reason on the native HLS route.
-+  extern void ReynardMSEVolume(double aVolume);
-+  ReynardMSEVolume(aVolume);
++  extern void ReynardMSEVolume(uintptr_t aOwnerId, double aVolume);
++  ReynardMSEVolume(reinterpret_cast<uintptr_t>(this), aVolume);
  }
  
  RefPtr<GenericPromise> MediaDecoder::SetSink(AudioDeviceInfo* aSinkDevice) {
-@@ -546,15 +571,25 @@
+@@ -546,15 +573,25 @@
    SetStateMachine(CreateStateMachine(aDisableExternalEngine));
  
    NS_ENSURE_TRUE(GetStateMachine(), NS_ERROR_FAILURE);
@@ -70,7 +72,7 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
  
    return NS_OK;
  }
-@@ -623,10 +658,21 @@
+@@ -623,10 +660,21 @@
  void MediaDecoder::Play() {
    MOZ_ASSERT(NS_IsMainThread());
  
@@ -85,14 +87,14 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 +  // returns without playing and no Pause() follows - named rather than
 +  // chased, because a page that calls play() at rate zero is not a
 +  // thing that has ever been seen on this route.
-+  extern void ReynardMSEPlayState(bool aPlaying);
-+  ReynardMSEPlayState(true);
++  extern void ReynardMSEPlayState(uintptr_t aOwnerId, bool aPlaying);
++  ReynardMSEPlayState(reinterpret_cast<uintptr_t>(this), true);
    if (mPlaybackRate == 0) {
      return;
    }
  
    if (IsEnded()) {
-@@ -916,18 +962,26 @@
+@@ -916,18 +964,26 @@
  void MediaDecoder::PlaybackEnded() {
    MOZ_ASSERT(NS_IsMainThread());
    MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
