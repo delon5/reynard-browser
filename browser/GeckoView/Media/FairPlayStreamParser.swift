@@ -3020,7 +3020,43 @@ public final class FairPlayStreamParser: NSObject {
             return delta
         }
         if let jump {
-            resynchronise(streamKey: streamKey, to: intakePTS, jump: jump)
+            // INTAKE ORDER IS NOT TIMELINE ORDER.
+            //
+            // CHANGED - see mse_fix_102's docstring. lastIntakeDTS is one
+            // number and a page may hold as many buffered ranges as it
+            // likes: Netflix appends a range ahead of the one it is
+            // playing and then fills in behind it, and this read the two
+            // as a discontinuity each way round. Seven events in one
+            // playback, 1188 frames flushed out of 1864 taken in, 946
+            // ever shown - more picture discarded than presented, and
+            // 1026 of the loss to FORWARD jumps, which strand nothing at
+            // all.
+            //
+            // With the element's own position known there is nothing to
+            // infer. A display layer holds a sample that is not due yet
+            // and skips one whose time has passed; that is what its
+            // control timebase is for, and it does not need this file to
+            // second-guess it.
+            //
+            // A stream with no position - an older content process, or a
+            // page this never reaches - keeps the old behaviour exactly.
+            if elementPosition(streamKey) != nil {
+                let first = withState { () -> Bool in
+                    guard let slot = streamParsers[streamKey],
+                          !slot.standDownLogged else { return false }
+                    slot.standDownLogged = true
+                    return true
+                }
+                if first {
+                    Self.log("stream \(streamKey) standing down from the "
+                             + "discontinuity test - the element says "
+                             + "where it is, so intake order proves "
+                             + "nothing. Jump \(jump)s ignored.")
+                }
+            } else {
+                resynchronise(streamKey: streamKey, to: intakePTS,
+                              jump: jump)
+            }
         }
 
         // Nothing is fed mid-GOP. After a flush the layer has no
@@ -5143,6 +5179,77 @@ public final class FairPlayStreamParser: NSObject {
     /// doing. Keyed on the MediaDecoder both sides can see.
     private var ownerPlaying: [UInt64: Bool] = [:]
     private var ownerVolume: [UInt64: Double] = [:]
+    /// Where each element is playing, as Gecko settles it.
+    ///
+    /// ADDED - see mse_fix_102's docstring. The number this file has
+    /// been inferring from intake order since it was written, and
+    /// inferring wrongly: on Netflix that inference discarded 1188 of
+    /// 1864 frames in one playback.
+    private var ownerPosition: [UInt64: Double] = [:]
+
+    /// How far our timebase may be from the element's before it is put
+    /// back on it.
+    ///
+    /// Half a second is comfortably more than the gap a host clock can
+    /// open in the quarter second between positions, and comfortably
+    /// less than anything a viewer would call out of sync. Correcting
+    /// smaller differences would move the picture four times a second
+    /// for no reason.
+    fileprivate static let positionSlack: Double = 0.5
+
+    /// The element moved. Put this session's picture on its clock.
+    @objc public func setPosition(_ sessionId: String, owner: UInt64,
+                                  seconds: Double) {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        withState {
+            if owner != 0 {
+                ownerPosition[owner] = seconds
+            }
+        }
+        let clocks = withState { () -> [(String, CMTimebase)] in
+            var out: [(String, CMTimebase)] = []
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") && slot.supersededBy == nil
+                    && (owner == 0 || slot.owner == 0
+                        || slot.owner == owner) {
+                guard slot.layerAttached,
+                      let timebase = slot.displayLayer?.controlTimebase
+                else { continue }
+                out.append((key, timebase))
+            }
+            return out
+        }
+        let onto = CMTime(seconds: seconds, preferredTimescale: 90_000)
+        var moved = false
+        for (key, timebase) in clocks {
+            let before = CMTimebaseGetTime(timebase).seconds
+            guard before.isFinite,
+                  abs(before - seconds) > Self.positionSlack else {
+                continue
+            }
+            CMTimebaseSetTime(timebase, time: onto)
+            // Read back, for the reason fix 100 gives: this file has
+            // been misled three times by a line that reported a write
+            // as though it were a result.
+            let after = CMTimebaseGetTime(timebase).seconds
+            moved = true
+            Self.log("stream \(key) clock put on the ELEMENT at "
+                     + "\(seconds) - it read \(before), it now reads "
+                     + "\(after)")
+        }
+        if moved {
+            realignAudioClock(sessionId: sessionId, to: onto)
+        }
+    }
+
+    /// Does this stream know where its element is?
+    fileprivate func elementPosition(_ streamKey: String) -> Double? {
+        return withState { () -> Double? in
+            guard let owner = streamParsers[streamKey]?.owner,
+                  owner != 0 else { return nil }
+            return ownerPosition[owner]
+        }
+    }
 
     @objc public func setStreamOwner(_ sessionId: String, stream: String,
                                      owner: UInt64) {

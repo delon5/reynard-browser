@@ -421,6 +421,18 @@ public final class AVPlayerHost: NSObject {
     /// ADDED - see mse_fix_101's docstring. No session is built here: an
     /// owner for a stream that does not exist yet is ordinary, and the
     /// parser keeps it against the key either way.
+    /// Where that element is playing.
+    ///
+    /// ADDED - see mse_fix_102's docstring. Not logged here: four a
+    /// second per element would bury everything else, and the parser
+    /// says something only when it acts on one.
+    @objc public func parserSetPosition(_ childId: UInt, owner: UInt64,
+                                        seconds: Double) {
+        FairPlayStreamParser.shared.setPosition("child-\(childId)",
+                                                owner: owner,
+                                                seconds: seconds)
+    }
+
     @objc public func parserSetStreamOwner(_ childId: UInt, stream: String,
                                            owner: UInt64) {
         FairPlayStreamParser.shared.setStreamOwner("child-\(childId)",

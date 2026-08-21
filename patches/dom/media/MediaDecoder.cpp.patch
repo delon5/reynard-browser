@@ -121,3 +121,31 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 +      "mediaDecoder: PlaybackEnded - element will fire 'ended' and Pause()\n");
    GetOwner()->PlaybackEnded();
  }
+@@ -1081,8 +1137,27 @@ void MediaDecoder::UpdateLogicalPositionInternal() {
+   TimeUnit currentPosition = CurrentPosition();
+   if (mPlayState == PLAY_STATE_ENDED) {
+     currentPosition =
+         std::max(currentPosition, mDuration.match(DurationToTimeUnit()));
+   }
++  // Reynard: where the ELEMENT is, for the FairPlay MSE route.
++  //
++  // That route paints through an AVSampleBufferDisplayLayer on a
++  // control timebase of its own, and until now nothing ever told it
++  // where the page had got to. It guessed, from the order samples
++  // arrived in - and MSE has no order, so on Netflix the guess threw
++  // away 1188 of 1864 frames in one playback and showed 946.
++  //
++  // This is the number it was guessing at. Gecko settles it here, on
++  // the main thread, and it is the same value that drives the
++  // timeupdate event, so it is exactly what the page believes its own
++  // currentTime to be.
++  //
++  // Declared at block scope like the play state and volume above, and
++  // in namespace mozilla for the same reason. The send is rate-limited
++  // on the far side of the call; this runs often.
++  extern void ReynardMSEPosition(uintptr_t aOwnerId, double aSeconds);
++  ReynardMSEPosition(reinterpret_cast<uintptr_t>(this),
++                     currentPosition.ToSeconds());
+ 
+   const PositionUpdate reason =
+       GetPositionUpdateReason(mLogicalPosition, currentPosition);

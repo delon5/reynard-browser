@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,2080 @@
+@@ -0,0 +1,2139 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1795,6 +1795,9 @@ index 000000000000..e859b69f6239
 +  uintptr_t owner;
 +  int playing;
 +  double volume;
++  // ADDED - see mse_fix_102's docstring. The last position sent, so a
++  // decoder that updates its clock sixty times a second sends four.
++  double position;
 +};
 +static const size_t kReynardMSEOwnerSlots = 8;
 +static ReynardMSEOwnerState sReynardMSEOwners[kReynardMSEOwnerSlots] = {};
@@ -1810,6 +1813,7 @@ index 000000000000..e859b69f6239
 +      sReynardMSEOwners[i].owner = aOwner;
 +      sReynardMSEOwners[i].playing = -1;
 +      sReynardMSEOwners[i].volume = -1.0;
++      sReynardMSEOwners[i].position = -1.0;
 +      return &sReynardMSEOwners[i];
 +    }
 +  }
@@ -1818,6 +1822,7 @@ index 000000000000..e859b69f6239
 +  sReynardMSEOwners[slot].owner = aOwner;
 +  sReynardMSEOwners[slot].playing = -1;
 +  sReynardMSEOwners[slot].volume = -1.0;
++  sReynardMSEOwners[slot].position = -1.0;
 +  return &sReynardMSEOwners[slot];
 +}
 +
@@ -1891,6 +1896,60 @@ index 000000000000..e859b69f6239
 +      0,
 +      nsPrintfCString("%.6f:%llu", volume, (unsigned long long)aOwnerId),
 +      nsCString("volume"), empty);
++}
++
++// Where the element is playing.
++//
++// ADDED - see mse_fix_102's docstring. HERE, beside the play state and
++// the volume, and NOT beside ReynardMSEForwardOwner: these three live in
++// namespace mozilla because MediaDecoder does, and the forward
++// functions live in namespace mozilla::dom because SourceBuffer does. A
++// block-scope extern names its enclosing namespace, so putting this one
++// in dom would declare mozilla::ReynardMSEPosition at the call site and
++// define mozilla::dom::ReynardMSEPosition here - and it would reference
++// the owner table below it, before that table is declared. The first
++// draft of this fix did exactly that and could not compile.
++//
++// Rate limited here rather than at the call site:
++// MediaDecoder::UpdateLogicalPositionInternal runs far more often than
++// four times a second, and a quarter second is finer than any
++// correction this feeds.
++void ReynardMSEPosition(uintptr_t aOwnerId, double aSeconds) {
++  MOZ_ASSERT(NS_IsMainThread());
++  static bool sSaidPosition = false;
++  if (ReynardMSEFromNativeRoute("a position", &sSaidPosition)) {
++    return;
++  }
++  if (!(aSeconds >= 0.0)) {
++    return;
++  }
++  ReynardMSEOwnerState* slot = ReynardMSEOwnerSlot(aOwnerId);
++  double moved = slot->position - aSeconds;
++  if (moved < 0.0) {
++    moved = -moved;
++  }
++  if (slot->position >= 0.0 && moved < 0.25) {
++    return;
++  }
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  // Once per element. Four a second would bury the log, but a route
++  // that says NOTHING cannot be told from one that is not built - and
++  // the first draft of this fix logged nothing at all, so the capture
++  // that came back could not answer whether it was in the binary.
++  if (slot->position < 0.0) {
++    printf_stderr("avPlayer: MSE position route live - element %llu at "
++                  "%.3f\n", (unsigned long long)aOwnerId, aSeconds);
++  }
++  slot->position = aSeconds;
++  nsTArray<uint8_t> empty;
++  cc->SendAVPlayerKeyGenerateRequest(
++      0,
++      nsPrintfCString("%.6f:%llu", aSeconds, (unsigned long long)aOwnerId),
++      nsCString("position"), empty);
 +}
 +
 +void FairPlayCDMProxy::SendRemoteKeyRequest(

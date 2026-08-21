@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2875 @@
+@@ -0,0 +0,2886 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1151,6 +1151,17 @@ index 000000000000..b56efaa8479c
 +                          stream:[NSString
 +                                     stringWithUTF8String:mseValue.get()]
 +                           owner:mseOwner];
++      return;
++    }
++    // Where the element is playing - see mse_fix_102's docstring.
++    if (aInitDataType.EqualsLiteral("position")) {
++      SEL setPosition = @selector(parserSetPosition:owner:seconds:);
++      if (!host || ![host respondsToSelector:setPosition]) {
++        return;
++      }
++      [host parserSetPosition:static_cast<NSUInteger>(aKey >> 32)
++                        owner:mseOwner
++                      seconds:strtod(mseValue.get(), nullptr)];
 +      return;
 +    }
 +    if (aInitDataType.EqualsLiteral("playstate")) {
