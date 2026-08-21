@@ -5647,7 +5647,19 @@ public final class FairPlayStreamParser: NSObject {
             // Only for a move the element could not have made by
             // playing. The 0.5s positionSlack corrections this makes
             // several times a second sweep nothing and walk no queue.
-            if abs(before - seconds) > Self.strandedBehind {
+            // CHANGED - see mse_fix_109's docstring. This was gated on
+            // how far the ELEMENT moved, which says nothing. In capture
+            // 2231f247 tv.apple.com swapped a pre-roll for a feature in
+            // one SourceBuffer: the element moved 45.15s and then
+            // 55.51s, both under strandedBehind, so neither swept -
+            // while the queue was 45s away in the first case and 6242s
+            // in the second, and three hundred and thirty samples went
+            // out late in a row.
+            //
+            // What matters is how far the QUEUE is from where the
+            // element now is. A small move can leave a queue a long way
+            // off, and a large move need not.
+            if queueStrays(key, from: seconds) {
                 sweepMediaAwayFrom(key, authority: seconds,
                                    why: "the element moved to")
             }
@@ -5678,6 +5690,34 @@ public final class FairPlayStreamParser: NSObject {
     /// is a reading, not a report - HBO sent exactly one in the whole
     /// of capture 8ec30c6a and it was 384s out by the end of it.
     fileprivate static let authorityFreshness: Double = 2.0
+
+    /// Is this stream holding media a long way from where the element
+    /// now is?
+    ///
+    /// ADDED - see mse_fix_109's docstring. Three timestamp reads, not
+    /// nine hundred: positions arrive several times a second and the
+    /// answer only has to be good enough to decide whether a full sweep
+    /// is worth walking. The ends of the queue and the head of the
+    /// current GOP are where a strayed queue shows itself - a queue
+    /// spanning a discontinuity has one end on each side of it.
+    fileprivate func queueStrays(_ streamKey: String,
+                                 from authority: Double) -> Bool {
+        guard authority.isFinite else { return false }
+        return withState { () -> Bool in
+            guard let slot = streamParsers[streamKey] else { return false }
+            let ends = [slot.pending.first, slot.pending.last,
+                        slot.currentGOP.first].compactMap { $0 }
+            for sample in ends {
+                let at = CMSampleBufferGetPresentationTimeStamp(sample)
+                    .seconds
+                if at.isFinite,
+                   abs(at - authority) > Self.strandedBehind {
+                    return true
+                }
+            }
+            return false
+        }
+    }
 
     /// Drop queued media that is nowhere near where the media now is.
     ///
