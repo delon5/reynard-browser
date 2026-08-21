@@ -3618,6 +3618,12 @@ public final class FairPlayStreamParser: NSObject {
                     let clockFrom = withState {
                         streamParsers[streamKey]?.timebaseFrom ?? "unknown"
                     }
+                    // Hoisted for the reason clockFrom above is hoisted:
+                    // this concatenation is already long enough that
+                    // adding calls into it is a fight with the type
+                    // checker for no gain.
+                    let effectiveRate = CMTimebaseGetEffectiveRate(timebase)
+                    let readingAt = Self.hostNow()
                     Self.log("stream \(streamKey) at \(count) - timebase "
                              + "\(now) vs sample pts \(pts), drift "
                              + "\(now - pts), av "
@@ -3631,6 +3637,19 @@ public final class FairPlayStreamParser: NSObject {
                              // this file thinks or the clock being read
                              // is not the one being written.
                              + " | clock rate \(CMTimebaseGetRate(timebase))"
+                             // ADDED - see mse_fix_108's docstring.
+                             // CMTimebaseGetRate is the rate relative
+                             // to the IMMEDIATE source; this is the one
+                             // relative to the master clock, and in
+                             // capture 80deceef a clock reporting 1.0
+                             // advanced 0.154s in 9.08s of wall time.
+                             + " effective \(effectiveRate)"
+                             // WHEN the reading was taken, so that
+                             // clock-versus-real is arithmetic on two
+                             // adjacent lines rather than an
+                             // interpolation between unrelated
+                             // timestamped ones nine seconds apart.
+                             + " host \(readingAt)"
                              // ADDED - see mse_fix_105's docstring. WHICH
                              // timebase, and who installed it.
                              + " timebase "
