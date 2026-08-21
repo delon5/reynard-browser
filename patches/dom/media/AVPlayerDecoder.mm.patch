@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2898 @@
+@@ -0,0 +0,2908 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1137,7 +1137,17 @@ index 000000000000..b56efaa8479c
 +    }
 +    // Which element a SourceBuffer belongs to - "sb-<stream>:<owner>".
 +    if (aInitDataType.EqualsLiteral("owner")) {
-+      SEL setOwner = @selector(parserSetStreamOwner:stream:owner:);
++      // FOUR PARTS, matching the call below.
++      //
++      // CHANGED - see mse_fix_104's docstring. Fix 103 added offset: to
++      // the call, the protocol and the Swift method and left this at
++      // three, so the host answered NO to a selector that no longer
++      // exists and every owner message took the branch below and
++      // returned. Eight sent, eight refused, none delivered - and with
++      // no owner the whole of 101, 102 and 103 fell back to behaviour
++      // they were written to replace.
++      SEL setOwner =
++          @selector(parserSetStreamOwner:stream:owner:offset:);
 +      if (!host || ![host respondsToSelector:setOwner]) {
 +        printf_stderr(
 +            "avPlayer: MSE owner route unavailable for child %llu\n",

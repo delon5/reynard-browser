@@ -2440,6 +2440,9 @@ public final class FairPlayStreamParser: NSObject {
             Self.addRecipient(entry.keySession, recipient: built.recipient,
                               label: "stream \(stream) parser")
             withState { streamParsers[key] = built }
+            // Any owner that arrived before this moment - see
+            // mse_fix_104's docstring.
+            adoptPendingOwner(key)
             Self.log("stream \(stream) parser built and added to the key "
                      + "session - recipients "
                      + "\(entry.keySession.contentKeyRecipients.count)")
@@ -5246,6 +5249,28 @@ public final class FairPlayStreamParser: NSObject {
     /// Asked at every site that starts a clock rather than assumed,
     /// because there are six of them and one that assumed 1.0 would be
     /// a route that quietly un-pauses itself.
+    /// May a message from `sender` act on a stream owned by `held`?
+    ///
+    /// ADDED - see mse_fix_104's docstring. This was written inline as
+    ///
+    ///     owner == 0 || slot.owner == 0 || slot.owner == owner
+    ///
+    /// and the middle clause is the bug. It was meant as "do not regress
+    /// a stream whose owner has not arrived"; it reads as "a stream with
+    /// no owner accepts anybody", and with fix 103 inert every stream had
+    /// no owner - so an element that owned nothing at all was yanking
+    /// the film's clock back to zero four times a second, 254 times in
+    /// one capture.
+    ///
+    /// An unknown sender still reaches everything: that is the genuine
+    /// legacy case, a content process too old to name its elements. An
+    /// unknown STREAM now waits, which costs it nothing - a stream with
+    /// no owner has no clock worth setting yet.
+    fileprivate static func ownerMatches(_ held: UInt64,
+                                         _ sender: UInt64) -> Bool {
+        return sender == 0 || held == sender
+    }
+
     fileprivate func gatedRate(_ streamKey: String) -> Float {
         let sessionId = String(streamKey.split(separator: "|").first ?? "")
         // THIS STREAM'S ELEMENT FIRST - see mse_fix_101's docstring.
@@ -5298,8 +5323,7 @@ public final class FairPlayStreamParser: NSObject {
             var out: [(String, CMTimebase)] = []
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|") && slot.supersededBy == nil
-                    && (owner == 0 || slot.owner == 0
-                        || slot.owner == owner) {
+                    && Self.ownerMatches(slot.owner, owner) {
                 guard slot.layerAttached,
                       let timebase = slot.displayLayer?.controlTimebase
                 else { continue }
@@ -5339,12 +5363,40 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
+    /// Owners that arrived before the stream they name.
+    ///
+    /// ADDED - see mse_fix_104's docstring. AppendData sends the owner
+    /// before the segment, so the first one reaches this process before
+    /// the stream exists - and the sender dedups, so unless the offset
+    /// later moves it is never sent again. Dropping it left slot.owner
+    /// at zero for the life of the stream, which is what let every
+    /// element's clock reach every stream.
+    private var pendingOwners: [String: (owner: UInt64, offset: Double)] = [:]
+
+    /// Apply an owner that was waiting for this stream to exist.
+    fileprivate func adoptPendingOwner(_ key: String) {
+        let waiting = withState { () -> (owner: UInt64, offset: Double)? in
+            guard let held = pendingOwners[key],
+                  let slot = streamParsers[key] else { return nil }
+            pendingOwners.removeValue(forKey: key)
+            slot.owner = held.owner
+            slot.timestampOffset = held.offset
+            return held
+        }
+        guard let waiting else { return }
+        Self.log("stream \(key) belongs to element \(waiting.owner), offset "
+                 + "\(waiting.offset) - held until the stream existed")
+    }
+
     @objc public func setStreamOwner(_ sessionId: String, stream: String,
                                      owner: UInt64, offset: Double) {
         let key = sessionId + "|" + stream
         let shift = offset.isFinite ? offset : 0
         let changed = withState { () -> Bool in
-            guard let slot = streamParsers[key] else { return false }
+            guard let slot = streamParsers[key] else {
+                pendingOwners[key] = (owner: owner, offset: shift)
+                return false
+            }
             let moved = slot.owner != owner
                 || abs(slot.timestampOffset - shift) > 0.0005
             slot.owner = owner
@@ -5401,7 +5453,7 @@ public final class FairPlayStreamParser: NSObject {
         let mine = withState {
             streamParsers.filter {
                 $0.key.hasPrefix(sessionId + "|")
-                    && (owner == 0 || $0.value.owner == owner)
+                    && Self.ownerMatches($0.value.owner, owner)
             }.count
         }
         Self.log("session \(sessionId) element \(owner) is now "
@@ -5421,8 +5473,7 @@ public final class FairPlayStreamParser: NSObject {
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|")
                     && slot.supersededBy == nil
-                    && (owner == 0 || slot.owner == 0
-                        || slot.owner == owner) {
+                    && Self.ownerMatches(slot.owner, owner) {
                 let timebase = slot.layerAttached
                     ? slot.displayLayer?.controlTimebase : nil
                 let sync = slot.audioStarted ? slot.audioSynchronizer : nil
@@ -5478,8 +5529,7 @@ public final class FairPlayStreamParser: NSObject {
             for (key, slot) in streamParsers
             where key.hasPrefix(sessionId + "|")
                     && slot.supersededBy == nil
-                    && (owner == 0 || slot.owner == 0
-                        || slot.owner == owner) {
+                    && Self.ownerMatches(slot.owner, owner) {
                 if let renderer = slot.audioRenderer {
                     out.append((key, renderer))
                 }
