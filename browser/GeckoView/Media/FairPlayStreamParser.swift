@@ -4318,6 +4318,18 @@ public final class FairPlayStreamParser: NSObject {
                  + "sample \(work.at) - flushing (\(work.abandoned) held "
                  + "samples abandoned), re-anchoring to \(pts). "
                  + "Flush \(work.count).")
+        // AND THE PICTURE'S QUEUE WITH IT - see mse_fix_107's docstring.
+        //
+        // This detector has been right every time it has fired - nine
+        // firings in capture c49b7746, five in 8ec30c6a, no false ones
+        // - and the video half has never been told. HBO needs it: it
+        // reported ONE element position in each of the last two
+        // captures, so setPosition's sweep will not reach it, and its
+        // audio path caught every seek in both.
+        let session = String(streamKey.split(separator: "|").first ?? "")
+        let owner = withState { streamParsers[streamKey]?.owner ?? 0 }
+        sweepOwnedVideo(sessionId: session, owner: owner, authority: pts,
+                        why: "the sound jumped to")
         // On the drain queue, for the same collision flush() and
         // enqueue() can have on the video side.
         work.queue.async {
@@ -5605,6 +5617,21 @@ public final class FairPlayStreamParser: NSObject {
             // as though it were a result.
             let after = CMTimebaseGetTime(timebase).seconds
             moved = true
+            // AND THE QUEUE GOES WITH IT - see mse_fix_107's docstring.
+            //
+            // Every catastrophic drift run in capture c49b7746 begins
+            // on the line after one of these. The clock lands here,
+            // sixteen times out of sixteen; the queue is left holding
+            // the media the page has just seeked away from, and drains
+            // it against the new clock for hundreds of samples.
+            //
+            // Only for a move the element could not have made by
+            // playing. The 0.5s positionSlack corrections this makes
+            // several times a second sweep nothing and walk no queue.
+            if abs(before - seconds) > Self.strandedBehind {
+                sweepMediaAwayFrom(key, authority: seconds,
+                                   why: "the element moved to")
+            }
             Self.log("stream \(key) clock put on the ELEMENT at "
                      + "\(seconds) - it read \(before), it now reads "
                      + "\(after)")
@@ -5632,6 +5659,82 @@ public final class FairPlayStreamParser: NSObject {
     /// is a reading, not a report - HBO sent exactly one in the whole
     /// of capture 8ec30c6a and it was 384s out by the end of it.
     fileprivate static let authorityFreshness: Double = 2.0
+
+    /// Drop queued media that is nowhere near where the media now is.
+    ///
+    /// ADDED - see mse_fix_107's docstring. Fix 106 refuses stranded
+    /// samples as they arrive, which stops the queue REFILLING with
+    /// media the page has left behind but does nothing about what it is
+    /// already holding: a seek stops the old range being appended, so
+    /// no further stranded sample arrives to trigger the prune, and the
+    /// three hundred already queued drain out one at a time against a
+    /// clock twenty minutes away from them.
+    ///
+    /// Symmetric, unlike the intake test. tv.apple.com seeked backwards
+    /// in capture c49b7746 - remove(1984.5, Infinity), buffered
+    /// [1927.26-1977.89] - and left the queue holding 3475, which is
+    /// 1546s in the FUTURE. A layer holds those and shows nothing,
+    /// which is the same frozen picture from the other side.
+    ///
+    /// needsSyncSample because a pruned queue has a hole in it exactly
+    /// like a flushed one, and everything before the next keyframe
+    /// decodes to garbage.
+    @discardableResult
+    fileprivate func sweepMediaAwayFrom(_ streamKey: String,
+                                        authority: Double,
+                                        why: String) -> Int {
+        guard authority.isFinite else { return 0 }
+        let near = { (sample: CMSampleBuffer) -> Bool in
+            let at = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            return !at.isFinite
+                || abs(at - authority) <= Self.strandedBehind
+        }
+        let swept = withState { () -> (gone: Int, left: Int) in
+            guard let slot = streamParsers[streamKey] else { return (0, 0) }
+            let keptGOP = slot.currentGOP.filter(near)
+            let keptPending = slot.pending.filter(near)
+            let gone = (slot.currentGOP.count - keptGOP.count)
+                + (slot.pending.count - keptPending.count)
+            if gone > 0 {
+                slot.currentGOP = keptGOP
+                slot.pending = keptPending
+                slot.needsSyncSample = true
+                slot.strandedPruned += gone
+            }
+            return (gone, slot.pending.count)
+        }
+        if swept.gone > 0 {
+            Self.log("stream \(streamKey) \(why) \(authority) - swept "
+                     + "\(swept.gone) samples that were not near it, "
+                     + "\(swept.left) left in the queue")
+        }
+        return swept.gone
+    }
+
+    /// The same, for every video stream the element owns.
+    ///
+    /// ADDED - see mse_fix_107's docstring. Owner-matched rather than
+    /// session-wide: tv.apple.com runs a pre-roll element and a feature
+    /// element in one content process, and one of them moving is not
+    /// the other one moving. A stream with no owner keeps the old
+    /// session-wide behaviour, which is what an older content process
+    /// gives us.
+    fileprivate func sweepOwnedVideo(sessionId: String, owner: UInt64,
+                                     authority: Double, why: String) {
+        let keys = withState { () -> [String] in
+            var out: [String] = []
+            for (key, slot) in streamParsers
+            where key.hasPrefix(sessionId + "|") && slot.supersededBy == nil
+                    && slot.displayLayer != nil
+                    && Self.ownerMatches(slot.owner, owner) {
+                out.append(key)
+            }
+            return out
+        }
+        for key in keys {
+            sweepMediaAwayFrom(key, authority: authority, why: why)
+        }
+    }
 
     /// WHERE THE MEDIA ACTUALLY IS.
     ///
