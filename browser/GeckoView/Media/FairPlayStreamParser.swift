@@ -2219,6 +2219,16 @@ public final class FairPlayStreamParser: NSObject {
         /// before it is touched, so one overflow was reported and eight
         /// more in the same window were silent.
         var droppedSinceSync = 0
+        /// Which call installed the timebase this stream's layer is on.
+        ///
+        /// ADDED - see mse_fix_105's docstring. On tv.apple.com a layer
+        /// pointer that did not change read 2328.149 and then, with no
+        /// write from this file in between, 2359.051 - and that step is
+        /// 80.3% of the site's measured A/V error. Either the layer is
+        /// on a different timebase from the one that was installed, or
+        /// something outside this file is writing it. The drift line
+        /// could not tell those apart because it named neither.
+        var timebaseFrom = "unset"
         /// requestMediaDataWhenReady calls its block in a loop while the
         /// layer is hungry, so it is stopped when the queue empties and
         /// re-armed when something arrives. Otherwise it spins.
@@ -2781,8 +2791,15 @@ public final class FairPlayStreamParser: NSObject {
             DispatchQueue.main.async {
                 let append = NSSelectorFromString("appendStreamData:")
                 guard fragment.parser.responds(to: append) else { return }
+                // CAPTURED AND LIVE - see mse_fix_105's docstring. The
+                // depth above was read on the drain queue; this block
+                // runs on the main queue an unknown time later, and in
+                // the capture that produced this eight of these lines
+                // reported 116-119 while the queue actually stood at its
+                // 900 cap and was overflowing.
+                let live = FairPlayStreamParser.shared.pendingDepth(streamKey)
                 Self.log("stream \(streamKey) releasing a held fragment "
-                         + "- the layer has drained to \(fragment.depth), "
+                         + "- captured \(fragment.depth), live \(live), "
                          + "\(fragment.left) still held")
                 fragment.parser.perform(append, with: fragment.bytes)
             }
@@ -2801,6 +2818,14 @@ public final class FairPlayStreamParser: NSObject {
                  + "drained to \(work.left)")
         Self.drainMediaData(work.parser, tracks: work.tracks,
                             label: streamKey)
+    }
+
+    /// How deep the display queue is right now.
+    ///
+    /// ADDED - see mse_fix_105's docstring. Read at the moment of use
+    /// rather than at the moment of capture.
+    fileprivate func pendingDepth(_ streamKey: String) -> Int {
+        return withState { streamParsers[streamKey]?.pending.count ?? -1 }
     }
 
     /// ftyp or moov at the top, which is what an fMP4 initialisation
@@ -3028,6 +3053,7 @@ public final class FairPlayStreamParser: NSObject {
             }
             layer.videoGravity = .resizeAspect
             withState {
+                slot.timebaseFrom = "build"
                 slot.displayLayer = layer
                 slot.drainQueue = DispatchQueue(
                     label: "org.reynard.fps.display")
@@ -3491,6 +3517,14 @@ public final class FairPlayStreamParser: NSObject {
                     let session =
                         String(streamKey.split(separator: "|").first ?? "")
                     let av = audioClock(sessionId: session).map { now - $0 }
+                    // ADDED - see mse_fix_105's docstring. Read here and
+                    // not concatenated into the line below: that chain
+                    // is already long enough that adding a generic call
+                    // to it is a fight with the type checker for no
+                    // gain.
+                    let clockFrom = withState {
+                        streamParsers[streamKey]?.timebaseFrom ?? "unknown"
+                    }
                     Self.log("stream \(streamKey) at \(count) - timebase "
                              + "\(now) vs sample pts \(pts), drift "
                              + "\(now - pts), av "
@@ -3504,6 +3538,11 @@ public final class FairPlayStreamParser: NSObject {
                              // this file thinks or the clock being read
                              // is not the one being written.
                              + " | clock rate \(CMTimebaseGetRate(timebase))"
+                             // ADDED - see mse_fix_105's docstring. WHICH
+                             // timebase, and who installed it.
+                             + " timebase "
+                             + "\(Unmanaged.passUnretained(timebase).toOpaque())"
+                             + " from \(clockFrom)"
                              + " layer "
                              + "\(Unmanaged.passUnretained(layer).toOpaque())"
                              + audioHealth(sessionId: session))
@@ -3869,7 +3908,9 @@ public final class FairPlayStreamParser: NSObject {
         guard let synchronizer = withState({
             streamParsers[streamKey]?.audioSynchronizer
         }) else { return }
-        synchronizer.setRate(gatedRate(streamKey), time: anchor)
+        writeAudioClock(synchronizer, to: anchor,
+                        rate: gatedRate(streamKey), label: streamKey,
+                        reason: "startAudioClock")
         withState { streamParsers[streamKey]?.audioStarted = true }
         let origin = master != nil ? "from the video timebase"
                                    : "from the first audio sample"
@@ -4071,6 +4112,62 @@ public final class FairPlayStreamParser: NSObject {
             + (found.renderer?.error.map { " ERROR \($0)" } ?? "")
     }
 
+    /// A queue used only to READ a clock back a moment later.
+    ///
+    /// ADDED - see mse_fix_105's docstring. Deliberately not a write
+    /// queue: the serial clock queue the redesign needs belongs with the
+    /// redesign, and introducing it in a measurement patch would change
+    /// the ordering of the very writes being measured.
+    fileprivate static let clockProbeQueue =
+        DispatchQueue(label: "org.reynard.fps.clockprobe")
+
+    /// Every audio clock write in this file goes through here.
+    ///
+    /// ADDED - see mse_fix_105's docstring. The five call sites each
+    /// wrote and then logged the value they ASKED FOR. On child-19 six
+    /// of eight of those writes did not land - two by more than three
+    /// hundred seconds - and nothing said so, because there was nothing
+    /// to say it. Four separate fixes in this series have been sent
+    /// down the wrong path by a line that reports a request as though
+    /// it were a result; this is the last place in the file that still
+    /// does it.
+    ///
+    /// The write itself is unchanged: same object, same value, same
+    /// thread, same order. Only the reporting is new.
+    ///
+    /// Read back TWICE. AVSampleBufferRenderSynchronizer schedules a
+    /// rate change rather than performing one, so an immediate read can
+    /// legitimately show the old value while a later read shows the new
+    /// one - and the two cases have opposite implications for the
+    /// redesign.
+    @discardableResult
+    fileprivate func writeAudioClock(
+        _ synchronizer: AVSampleBufferRenderSynchronizer,
+        to time: CMTime, rate: Float, label: String, reason: String
+    ) -> Double {
+        synchronizer.setRate(rate, time: time)
+        let asked = time.seconds
+        let reads = CMTimebaseGetTime(synchronizer.timebase).seconds
+        let missed = asked.isFinite && reads.isFinite
+            && abs(reads - asked) > 0.05
+        Self.log("stream \(label) CLOCK WRITE \(reason) asked \(asked) "
+                 + "rate \(rate) - reads \(reads)"
+                 + (missed ? " - DID NOT TAKE" : ""))
+        Self.clockProbeQueue.asyncAfter(deadline: .now() + 0.05) {
+            let later = CMTimebaseGetTime(synchronizer.timebase).seconds
+            guard later.isFinite else { return }
+            let settled = asked.isFinite && abs(later - asked) <= 0.05
+            // Only when it says something the line above did not: a
+            // write that landed immediately and stayed put needs no
+            // second line.
+            guard missed || !settled else { return }
+            Self.log("stream \(label) CLOCK WRITE \(reason) reads "
+                     + "\(later) after 50ms"
+                     + (settled ? " - it settled" : " - still adrift"))
+        }
+        return reads
+    }
+
     /// Move every started audio clock in this session onto the picture's.
     fileprivate func realignAudioClock(sessionId: String, to time: CMTime) {
         let cutoff = Self.hostNow() - Self.livenessWindow
@@ -4092,7 +4189,8 @@ public final class FairPlayStreamParser: NSObject {
             return out
         }
         for (key, synchronizer) in started {
-            synchronizer.setRate(gatedRate(key), time: time)
+            writeAudioClock(synchronizer, to: time, rate: gatedRate(key),
+                            label: key, reason: "realignAudioClock")
             Self.log("stream \(key) audio clock re-anchored to "
                      + "\(time.seconds) - following the video timebase")
         }
@@ -4143,7 +4241,10 @@ public final class FairPlayStreamParser: NSObject {
             let session = String(streamKey.split(separator: "|").first ?? "")
             let onto = parser.videoClock(sessionId: session)
                 ?? CMTime(seconds: pts, preferredTimescale: 90_000)
-            work.sync.setRate(parser.gatedRate(streamKey), time: onto)
+            parser.writeAudioClock(work.sync, to: onto,
+                                   rate: parser.gatedRate(streamKey),
+                                   label: streamKey,
+                                   reason: "resynchroniseAudio")
         }
     }
 
@@ -4278,7 +4379,10 @@ public final class FairPlayStreamParser: NSObject {
                         String(streamKey.split(separator: "|").first ?? "")
                     let onto = videoClock(sessionId: session)
                         ?? CMTime(seconds: pts, preferredTimescale: 90_000)
-                    sync.setRate(gatedRate(streamKey), time: onto)
+                    writeAudioClock(sync, to: onto,
+                                    rate: gatedRate(streamKey),
+                                    label: streamKey,
+                                    reason: "audioCorrector")
                     Self.log("stream \(streamKey) AUDIO CLOCK RAN AHEAD by "
                              + "\(ranAhead.late)s - put back on the media "
                              + "at \(pts). Correction \(ranAhead.nth).")
@@ -4604,6 +4708,14 @@ public final class FairPlayStreamParser: NSObject {
         }
         sink.videoGravity = .resizeAspect
 
+        // ADDED - see mse_fix_105's docstring. Two of Netflix's three
+        // silent discard sinks are in the block below, and between them
+        // they account for frames this file has never reported at all.
+        // Captured rather than logged in place: nothing should log while
+        // it holds the lock.
+        var adoptTrimmed = 0
+        var adoptDumped = 0
+        var adoptGateHeld = 0
         let handover = withState {
             () -> (old: AVSampleBufferDisplayLayer?, observer: NSObjectProtocol?,
                    queue: DispatchQueue?, carried: Int, held: Int,
@@ -4611,6 +4723,7 @@ public final class FairPlayStreamParser: NSObject {
             guard let slot = streamParsers[streamKey] else { return nil }
             let old = slot.displayLayer
             let observer = slot.failObserver
+            slot.timebaseFrom = "adopt"
             slot.displayLayer = sink
             slot.failObserver = nil
             slot.drainArmed = false
@@ -4652,10 +4765,14 @@ public final class FairPlayStreamParser: NSObject {
                 // Nothing to carry, but the queue already contains a
                 // keyframe: start there rather than waiting for the next
                 // one to arrive from the source.
+                adoptTrimmed = at
+                adoptGateHeld = slot.droppedSinceSync
+                slot.droppedSinceSync = 0
                 slot.pending.removeFirst(at)
                 slot.needsSyncSample = false
             } else {
                 // The one case where the old behaviour was right.
+                adoptDumped = slot.pending.count
                 slot.pending.removeAll()
                 slot.needsSyncSample = true
             }
@@ -4699,6 +4816,15 @@ public final class FairPlayStreamParser: NSObject {
                  + "samples in front of \(handover.held) held, "
                  + resumption + ". The overlay stays until this layer "
                  + "takes one.")
+        // ADDED - see mse_fix_105's docstring. Said only when there is
+        // something to say, so a clean handover stays a single line.
+        if adoptTrimmed > 0 || adoptDumped > 0 || adoptGateHeld > 0 {
+            Self.log("stream \(streamKey) adopt trimmed \(adoptTrimmed) "
+                     + "samples ahead of the first sync sample, dumped "
+                     + "\(adoptDumped), and reopened the resync gate with "
+                     + "\(adoptGateHeld) already dropped and never "
+                     + "reported")
+        }
         // AND THE SOUND FOLLOWS THE PICTURE, HERE TOO.
         //
         // ADDED - see mse_fix_97's docstring. markLayerAttached
@@ -5211,7 +5337,14 @@ public final class FairPlayStreamParser: NSObject {
             overlay?.removeFromSuperlayer()
             proof?.removeFromSuperlayer()
         }
-        Self.log("stream \(key) torn down - \(why)")
+        // ADDED - see mse_fix_105's docstring. A torn-down slot takes
+        // its queues with it, and until now that was the largest of
+        // Netflix's unreported losses.
+        Self.log("stream \(key) torn down - \(why)"
+                 + " - \(slot.pending.count) video and "
+                 + "\(slot.audioPending.count) audio samples went with it, "
+                 + "\(slot.enqueued) video and \(slot.audioEnqueued) audio "
+                 + "ever reached a sink")
     }
 
     /// Say once that this stream is not ours to render.
@@ -5500,7 +5633,8 @@ public final class FairPlayStreamParser: NSObject {
             }
             if let sync {
                 if let onto {
-                    sync.setRate(rate, time: onto)
+                    writeAudioClock(sync, to: onto, rate: rate, label: key,
+                                    reason: "setSessionPlaying")
                 } else {
                     sync.rate = rate
                 }
