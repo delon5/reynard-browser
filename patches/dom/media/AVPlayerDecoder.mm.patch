@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2886 @@
+@@ -0,0 +0,2898 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1147,10 +1147,22 @@ index 000000000000..b56efaa8479c
 +      printf_stderr("avPlayer: MSE owner child=%llu stream=%s -> %llu\n",
 +                    (unsigned long long)(aKey >> 32), mseValue.get(),
 +                    (unsigned long long)mseOwner);
++      // "sb-<stream>:<owner>:<offset>". mseValue/mseOwner above split
++      // at the FIRST colon, so mseOwner still carries the offset behind
++      // it and has to be split again - see mse_fix_103's docstring.
++      double mseOffset = 0.0;
++      nsCString mseTail(aContentId);
++      int32_t mseSecond = mseTail.RFindChar(':');
++      if (mseSecond > mseColon) {
++        mseOffset = strtod(mseTail.get() + mseSecond + 1, nullptr);
++        mseTail.Truncate(mseSecond);
++        mseOwner = strtoull(mseTail.get() + mseColon + 1, nullptr, 10);
++      }
 +      [host parserSetStreamOwner:static_cast<NSUInteger>(aKey >> 32)
 +                          stream:[NSString
 +                                     stringWithUTF8String:mseValue.get()]
-+                           owner:mseOwner];
++                           owner:mseOwner
++                          offset:mseOffset];
 +      return;
 +    }
 +    // Where the element is playing - see mse_fix_102's docstring.

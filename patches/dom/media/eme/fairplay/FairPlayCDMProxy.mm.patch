@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,2139 @@
+@@ -0,0 +1,2191 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1641,20 +1641,72 @@ index 000000000000..e859b69f6239
 +//
 +// ADDED - see mse_fix_101's docstring. Sent once per init segment on
 +// the message the segments already ride, so no IPDL changes.
-+void ReynardMSEForwardOwner(uintptr_t aStreamId, uintptr_t aOwnerId) {
++// Which element a SourceBuffer belongs to, and where the page has put
++// it on that element's timeline.
++//
++// CHANGED - see mse_fix_103's docstring. Sent on every forward now,
++// because timestampOffset moves mid-stream: tv.apple.com walks it from
++// -1.99 to 32.08 to splice the feature onto the end of its own
++// pre-roll. Deduped here so the traffic is one message per CHANGE
++// rather than one per segment.
++void ReynardMSEForwardStream(uintptr_t aStreamId, uintptr_t aOwnerId,
++                             double aTimestampOffset) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  ::mozilla::dom::ContentChild* cc =
 +      ::mozilla::dom::ContentChild::GetSingleton();
 +  if (!cc) {
 +    return;
 +  }
-+  printf_stderr("avPlayer: MSE stream sb-%llu belongs to element %llu\n",
-+                (unsigned long long)aStreamId,
-+                (unsigned long long)aOwnerId);
++  // Eight slots, linear scan, oldest reused - the same shape and the
++  // same reasoning as the element table below. A page with more than
++  // eight live SourceBuffers costs a duplicate message, not a fault.
++  struct StreamState {
++    uintptr_t stream;
++    uintptr_t owner;
++    double offset;
++  };
++  static const size_t kSlots = 8;
++  static StreamState sStreams[kSlots] = {};
++  static size_t sNext = 0;
++  StreamState* slot = nullptr;
++  for (size_t i = 0; i < kSlots && !slot; i++) {
++    if (sStreams[i].stream == aStreamId) {
++      slot = &sStreams[i];
++    }
++  }
++  if (!slot) {
++    for (size_t i = 0; i < kSlots && !slot; i++) {
++      if (sStreams[i].stream == 0) {
++        slot = &sStreams[i];
++      }
++    }
++  }
++  if (!slot) {
++    slot = &sStreams[sNext % kSlots];
++    sNext++;
++    slot->stream = 0;
++  }
++  double moved = slot->offset - aTimestampOffset;
++  if (moved < 0.0) {
++    moved = -moved;
++  }
++  if (slot->stream == aStreamId && slot->owner == aOwnerId &&
++      moved < 0.0005) {
++    return;
++  }
++  slot->stream = aStreamId;
++  slot->owner = aOwnerId;
++  slot->offset = aTimestampOffset;
++  printf_stderr(
++      "avPlayer: MSE stream sb-%llu belongs to element %llu, offset "
++      "%.3f\n",
++      (unsigned long long)aStreamId, (unsigned long long)aOwnerId,
++      aTimestampOffset);
 +  nsTArray<uint8_t> empty;
 +  cc->SendAVPlayerKeyGenerateRequest(
-+      0, nsPrintfCString("sb-%llu:%llu", (unsigned long long)aStreamId,
-+                         (unsigned long long)aOwnerId),
++      0,
++      nsPrintfCString("sb-%llu:%llu:%.6f", (unsigned long long)aStreamId,
++                      (unsigned long long)aOwnerId, aTimestampOffset),
 +      nsCString("owner"), empty);
 +}
 +

@@ -2140,6 +2140,15 @@ public final class FairPlayStreamParser: NSObject {
         /// the session-wide state - the behaviour this had before there
         /// was an owner at all.
         var owner: UInt64 = 0
+        /// What the page adds to this buffer's stamps to place it on the
+        /// element's timeline.
+        ///
+        /// ADDED - see mse_fix_103's docstring. tv.apple.com splices the
+        /// feature onto the end of its own pre-roll by walking this from
+        /// -1.99 to 32.08 on the SAME SourceBuffer, and without it this
+        /// route played the film's soundtrack at element time ten -
+        /// under the trailer.
+        var timestampOffset: Double = 0
         let parser: NSObject
         let recipient: AVContentKeyRecipient
         let delegate: ParserDelegate
@@ -2223,6 +2232,14 @@ public final class FairPlayStreamParser: NSObject {
         /// So the "these are protected, the probe cannot help" note is
         /// made once rather than 360 times.
         var probeSkippedLogged = false
+        /// Has this stream already said its samples could not be shifted?
+        ///
+        /// ADDED while applying fix 103. It reused probeSkippedLogged,
+        /// which the decode-probe message already owns - and unlike the
+        /// stand-down flags those two are NOT mutually exclusive: a
+        /// protected stream can both fail to shift and skip the probe,
+        /// and whichever spoke first would silence the other.
+        var shiftFailedLogged = false
         /// The last DECODE stamp taken in, which is what discontinuity
         /// detection actually uses.
         ///
@@ -2840,9 +2857,80 @@ public final class FairPlayStreamParser: NSObject {
     /// If a display layer takes these samples, the remaining work is
     /// compositor wiring and nothing more; if it refuses, its error says
     /// so in as many words and no amount of wiring would have helped.
+    /// Put a sample on the element's timeline.
+    ///
+    /// ADDED - see mse_fix_103's docstring. Everything downstream of
+    /// this - the clocks, the drift line, the discontinuity test, fix
+    /// 102's position feedback - compares against numbers the PAGE
+    /// produced, and until now it was comparing them with numbers from a
+    /// different coordinate system.
+    ///
+    /// Done once, at the door, so nothing below has to know. A copy with
+    /// new timing shares the data buffer; only the timing is rewritten.
+    fileprivate func shiftIntoElementTime(_ streamKey: String,
+                                          _ sampleBuffer: CMSampleBuffer)
+        -> CMSampleBuffer {
+        let offset = withState {
+            streamParsers[streamKey]?.timestampOffset ?? 0
+        }
+        guard offset != 0, offset.isFinite else { return sampleBuffer }
+        let shift = CMTime(seconds: offset, preferredTimescale: 90_000)
+        var count: CMItemCount = 0
+        guard CMSampleBufferGetSampleTimingInfoArray(
+                  sampleBuffer, entryCount: 0, arrayToFill: nil,
+                  entriesNeededOut: &count) == noErr, count > 0 else {
+            return sampleBuffer
+        }
+        var timings = [CMSampleTimingInfo](
+            repeating: CMSampleTimingInfo(), count: Int(count))
+        guard CMSampleBufferGetSampleTimingInfoArray(
+                  sampleBuffer, entryCount: count, arrayToFill: &timings,
+                  entriesNeededOut: nil) == noErr else {
+            return sampleBuffer
+        }
+        for i in 0..<timings.count {
+            if timings[i].presentationTimeStamp.isValid {
+                timings[i].presentationTimeStamp =
+                    CMTimeAdd(timings[i].presentationTimeStamp, shift)
+            }
+            if timings[i].decodeTimeStamp.isValid {
+                timings[i].decodeTimeStamp =
+                    CMTimeAdd(timings[i].decodeTimeStamp, shift)
+            }
+        }
+        var shifted: CMSampleBuffer?
+        guard CMSampleBufferCreateCopyWithNewTiming(
+                  allocator: kCFAllocatorDefault,
+                  sampleBuffer: sampleBuffer,
+                  sampleTimingEntryCount: count,
+                  sampleTimingArray: &timings,
+                  sampleBufferOut: &shifted) == noErr,
+              let shifted else {
+            // Said once per stream rather than per sample: a stream that
+            // cannot be shifted is one whose picture will be in the
+            // wrong place, and that is worth knowing without 10,000
+            // lines of it.
+            let first = withState { () -> Bool in
+                guard let slot = streamParsers[streamKey],
+                      !slot.shiftFailedLogged else { return false }
+                slot.shiftFailedLogged = true
+                return true
+            }
+            if first {
+                Self.log("stream \(streamKey) could NOT be shifted by "
+                         + "\(offset) - CMSampleBufferCreateCopyWithNewTiming "
+                         + "refused, so this stream stays in its own "
+                         + "coordinates and will not line up with the page")
+            }
+            return sampleBuffer
+        }
+        return shifted
+    }
+
     fileprivate func enqueueForDisplay(streamKey: String,
-                                       sampleBuffer: CMSampleBuffer,
+                                       sampleBuffer rawSampleBuffer: CMSampleBuffer,
                                        mediaType: String) {
+        let sampleBuffer = shiftIntoElementTime(streamKey, rawSampleBuffer)
         // ADDED - see mse_fix_95's docstring. A parked stream is half of
         // a player the page threw away, and its parser goes on
         // delivering for as long as the fragments it was already given
@@ -5252,19 +5340,23 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     @objc public func setStreamOwner(_ sessionId: String, stream: String,
-                                     owner: UInt64) {
+                                     owner: UInt64, offset: Double) {
         let key = sessionId + "|" + stream
+        let shift = offset.isFinite ? offset : 0
         let changed = withState { () -> Bool in
-            guard let slot = streamParsers[key], slot.owner != owner else {
-                return false
-            }
+            guard let slot = streamParsers[key] else { return false }
+            let moved = slot.owner != owner
+                || abs(slot.timestampOffset - shift) > 0.0005
             slot.owner = owner
-            return true
+            slot.timestampOffset = shift
+            return moved
         }
         guard changed else { return }
-        Self.log("stream \(key) belongs to element \(owner) - its clock "
-                 + "and its volume follow THAT element now, not whatever "
-                 + "else is playing in this content process")
+        Self.log("stream \(key) belongs to element \(owner), offset "
+                 + "\(shift) - its samples are shifted into the element's "
+                 + "timeline, and its clock and volume follow THAT "
+                 + "element rather than whatever else is playing in this "
+                 + "content process")
         // The element may already have said what it is doing, before
         // this stream existed to hear it.
         let rate = gatedRate(key)

@@ -434,10 +434,11 @@ public final class AVPlayerHost: NSObject {
     }
 
     @objc public func parserSetStreamOwner(_ childId: UInt, stream: String,
-                                           owner: UInt64) {
+                                           owner: UInt64, offset: Double) {
         FairPlayStreamParser.shared.setStreamOwner("child-\(childId)",
                                                    stream: stream,
-                                                   owner: owner)
+                                                   owner: owner,
+                                                   offset: offset)
     }
 
     /// The element's volume, for this child's parser session.
