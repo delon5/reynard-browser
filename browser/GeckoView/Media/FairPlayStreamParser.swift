@@ -2172,6 +2172,21 @@ public final class FairPlayStreamParser: NSObject {
         /// stall into a memory problem, and this is a diagnostic.
         var pending: [CMSampleBuffer] = []
         var overflowed = 0
+        /// Fragments withheld from the parser because the display queue
+        /// is already full enough.
+        ///
+        /// ADDED - see mse_fix_100's docstring. Fix 98 tried to throttle
+        /// the parser with setShouldProvideMediaData:forTrackID:, which
+        /// needs a track id, and trackIDs is empty in every capture
+        /// there has ever been - didParseStreamDataAsAsset has never
+        /// fired. So the hold printed a line and did nothing, and the
+        /// queue went on overflowing twenty-three times in one capture.
+        ///
+        /// These are OUR bytes, held on OUR side. Nothing can decline
+        /// them, discard them or ignore them, which is the whole reason
+        /// the back pressure moved here.
+        var heldSegments: [Data] = []
+        var heldFragments = 0
         /// Has the parser been told to stop providing media data?
         ///
         /// ADDED - see mse_fix_98's docstring. The parser hands over a
@@ -2414,6 +2429,63 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("no appendStreamData: on the stream parser")
             return false
         }
+        // BACK PRESSURE, ON THE BYTES.
+        //
+        // ADDED - see mse_fix_100's docstring. The parser delivers what
+        // it parses, immediately, and no switch this file can reach
+        // stops it: fix 98's setShouldProvideMediaData: needs a track id
+        // and trackIDs has been empty in every capture. So the throttle
+        // is here, on data we still own.
+        //
+        // An INIT SEGMENT is never held. ftyp and moov have to reach the
+        // parser before any media does, they are small, and holding one
+        // would fail the stream rather than pace it.
+        if !Self.isInitSegment(segment) {
+            let verdict = withState { () -> (hold: Bool, depth: Int,
+                                             held: Int, forced: Bool) in
+                let depth = slot.pending.count
+                guard depth >= Self.mediaDataHighWater else {
+                    return (hold: false, depth: depth,
+                            held: slot.heldSegments.count, forced: false)
+                }
+                // Bounded. Past the cap the segment goes in anyway: a
+                // queue overflow costs samples, refusing the page's data
+                // outright costs the stream, and one of those is
+                // recoverable.
+                guard slot.heldSegments.count < Self.heldFragmentCap else {
+                    return (hold: false, depth: depth,
+                            held: slot.heldSegments.count, forced: true)
+                }
+                slot.heldSegments.append(segment)
+                slot.heldFragments += 1
+                return (hold: true, depth: depth,
+                        held: slot.heldSegments.count, forced: false)
+            }
+            if verdict.forced {
+                Self.log("stream \(stream) held fragment cap reached "
+                         + "(\(Self.heldFragmentCap)) with \(verdict.depth) "
+                         + "samples still queued - appending anyway. The "
+                         + "layer is not draining and the cap is the only "
+                         + "thing between that and unbounded memory.")
+            } else if verdict.hold {
+                if verdict.held == 1 {
+                    Self.log("stream \(stream) HOLDING the parser - "
+                             + "\(verdict.depth) samples already queued, "
+                             + "\(verdict.held) fragments held. The bytes "
+                             + "wait here until the layer drains to "
+                             + "\(Self.mediaDataLowWater).")
+                }
+                // The PAGE appended, even though the parser has not been
+                // given it yet - ADDED while applying fix 100. Holding is
+                // our decision, not the page going quiet, and
+                // lastAppendAt is fix 95's liveness signal: the stamp and
+                // the reap below this early return would otherwise be
+                // skipped for every held fragment.
+                withState { slot.lastAppendAt = Self.hostNow() }
+                reapSuperseded(sessionId: sessionId)
+                return true
+            }
+        }
         slot.parser.perform(append, with: segment)
         // Keep the sinf the page's OWN init segment carries.
         //
@@ -2649,6 +2721,45 @@ public final class FairPlayStreamParser: NSObject {
     /// queue is going down. Cheap when there is nothing to do: one lock
     /// and two comparisons.
     fileprivate func releaseMediaDataIfDrained(streamKey: String) {
+        // THE HELD BYTES FIRST - see mse_fix_100's docstring. This is
+        // the half that actually does anything; everything below it
+        // depends on a track id this route has never had.
+        //
+        // One fragment per call rather than the lot. Each is two to six
+        // seconds of media and the parser hands over the whole of it at
+        // once, so releasing four would put the queue straight back over
+        // the mark it just came under. This runs on every sample the
+        // layer takes, so the next one is never far away.
+        let fragment = withState { () -> (bytes: Data, parser: NSObject,
+                                          left: Int, depth: Int)? in
+            guard let slot = streamParsers[streamKey],
+                  !slot.heldSegments.isEmpty,
+                  slot.pending.count <= Self.mediaDataLowWater else {
+                return nil
+            }
+            let next = slot.heldSegments.removeFirst()
+            return (bytes: next, parser: slot.parser,
+                    left: slot.heldSegments.count,
+                    depth: slot.pending.count)
+        }
+        if let fragment {
+            // ON THE MAIN QUEUE, because that is where every other
+            // appendStreamData: on this parser happens - the IPC
+            // handler that calls parserAppendMediaSegment runs there.
+            // This release is reached from the DRAIN queue, and two
+            // threads appending to one AVStreamDataParser is a race
+            // this file has no way to win. It also keeps the delivery
+            // the append triggers out of the drain loop that asked
+            // for it.
+            DispatchQueue.main.async {
+                let append = NSSelectorFromString("appendStreamData:")
+                guard fragment.parser.responds(to: append) else { return }
+                Self.log("stream \(streamKey) releasing a held fragment "
+                         + "- the layer has drained to \(fragment.depth), "
+                         + "\(fragment.left) still held")
+                fragment.parser.perform(append, with: fragment.bytes)
+            }
+        }
         let work = withState { () -> (parser: NSObject, tracks: [Int32],
                                       left: Int)? in
             guard let slot = streamParsers[streamKey], slot.mediaDataHeld,
@@ -2664,6 +2775,26 @@ public final class FairPlayStreamParser: NSObject {
         Self.drainMediaData(work.parser, tracks: work.tracks,
                             label: streamKey)
     }
+
+    /// ftyp or moov at the top, which is what an fMP4 initialisation
+    /// segment looks like and what a media fragment (moof) does not.
+    ///
+    /// The same test SourceBuffer::AppendData already makes before it
+    /// forwards anything - four bytes after a big-endian length.
+    fileprivate static func isInitSegment(_ segment: Data) -> Bool {
+        guard segment.count >= 8 else { return false }
+        let box = segment.subdata(in: 4..<8)
+        return box == Data("ftyp".utf8) || box == Data("moov".utf8)
+    }
+
+    /// How many fragments may wait on our side before one is appended
+    /// regardless.
+    ///
+    /// 32 fragments is a minute or two of media and tens of megabytes.
+    /// Reaching it means the layer has stopped draining entirely, which
+    /// is a different fault, and the cap is what keeps that fault from
+    /// also being an out-of-memory.
+    fileprivate static let heldFragmentCap = 32
 
     /// Tracks a stream's parser reported, recorded and then acted on.
     ///
@@ -3194,6 +3325,20 @@ public final class FairPlayStreamParser: NSObject {
                 if let ranAhead {
                     let to = CMTime(seconds: pts, preferredTimescale: 90_000)
                     CMTimebaseSetTime(timebase, time: to)
+                    // READ IT BACK - see mse_fix_100's docstring. This is
+                    // the last CMTimebaseSetTime in this file that
+                    // reported what it ASKED FOR and never what it got,
+                    // and the capture that produced this fix has it
+                    // asking for 5514.874 and reading 5537.048 thirty
+                    // samples later. Fix 93 was written on exactly that
+                    // mistake and had to be withdrawn.
+                    let landed = CMTimebaseGetTime(timebase).seconds
+                    if abs(landed - to.seconds) > 0.25 {
+                        Self.log("stream \(streamKey) THE CORRECTION DID "
+                                 + "NOT TAKE - asked for \(to.seconds), it "
+                                 + "reads \(landed) rate "
+                                 + "\(CMTimebaseGetRate(timebase))")
+                    }
                     realignAudioClock(
                         sessionId: String(
                             streamKey.split(separator: "|").first ?? ""),
@@ -3216,6 +3361,17 @@ public final class FairPlayStreamParser: NSObject {
                              + "\(now) vs sample pts \(pts), drift "
                              + "\(now - pts), av "
                              + (av.map { String($0) } ?? "no audio clock")
+                             // ADDED - see mse_fix_100's docstring. The
+                             // video counterpart of fix 97's sound
+                             // columns. A timebase on the host clock at
+                             // rate 1.0 cannot advance 0.67s in twelve
+                             // seconds, and cannot jump twenty-two
+                             // forward, so either the rate is not what
+                             // this file thinks or the clock being read
+                             // is not the one being written.
+                             + " | clock rate \(CMTimebaseGetRate(timebase))"
+                             + " layer "
+                             + "\(Unmanaged.passUnretained(layer).toOpaque())"
                              + audioHealth(sessionId: session))
                 }
             }
@@ -6172,6 +6328,29 @@ private final class ParserDelegate: NSObject {
             FairPlayStreamParser.shared.noteStreamTracks(streamKey: streamKey,
                                                          tracks: reported)
         }
+    }
+
+    /// The same callback, with the discontinuity flag.
+    ///
+    /// ADDED - see mse_fix_100's docstring. WebKit's delegate implements
+    /// BOTH spellings and this file declared only the first, which has
+    /// never fired: "parsed asset" appears zero times in a capture with
+    /// sixteen thousand media-data callbacks in it. If this one is the
+    /// one the OS calls, trackIDs stops being empty and arming becomes
+    /// possible for the first time on this route.
+    ///
+    /// Straight through to the arity-2 handler. The flag says the asset
+    /// follows a timeline break, which this side already detects for
+    /// itself from the sample stamps - see the discontinuity test in
+    /// enqueueForDisplay - so nothing here needs to act on it.
+    @objc(streamDataParser:didParseStreamDataAsAsset:withDiscontinuity:)
+    func streamDataParser(_ parser: Any,
+                          didParseStreamDataAsAsset asset: AVAsset,
+                          withDiscontinuity discontinuity: Bool) {
+        fputs("fpsParser: session \(sessionId) parsed asset WITH "
+              + "discontinuity=\(discontinuity) - it is this spelling the "
+              + "OS calls, not the arity-2 one\n", stderr)
+        streamDataParser(parser, didParseStreamDataAsAsset: asset)
     }
 
     /// A sample the parser vended - the answer to the render question.
