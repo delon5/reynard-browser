@@ -332,7 +332,7 @@ index 94efd9b6c370..9039890c772e 100644
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2019,12 @@
+@@ -1810,8 +2019,28 @@
      }
    }
  
@@ -342,12 +342,28 @@ index 94efd9b6c370..9039890c772e 100644
 +    // Only AVSampleBufferDisplayLayer takes this. A protected stream now
 +    // gets an AVPlayerLayer, where the cast would be wrong.
 +    if ([mContentCALayer isKindOfClass:[AVSampleBufferDisplayLayer class]]) {
-+      ((AVSampleBufferDisplayLayer*)mContentCALayer).preventsCapture = aIsDRM;
++      // OFF - see mse_fix_152's docstring. A DIAGNOSTIC, and the only
++      // difference between this layer and the non-DRM trailer's that
++      // has not been ruled out, apart from EnqueueSurface skipping it.
++      //
++      // The layer presents its frames - numberOfDisplayedVideoFrames
++      // climbs 300, 184 and 207 across three landscape stretches with
++      // status 1 and error nil - and the glass is black. Either the
++      // secure path is dropping them or the surface path is, and this
++      // is the line that says which.
++      //
++      // PUT IT BACK. mse_fix_152_restore.py. While this is false,
++      // FairPlay video is not excluded from screenshots, recording or
++      // mirroring, which is the whole reason the flag exists.
++      ((AVSampleBufferDisplayLayer*)mContentCALayer).preventsCapture = false;
++      printf_stderr(
++          "NativeLayerCA: preventsCapture NOT SET - mse_fix_152 diagnostic "
++          "build, protected video is capturable. Restore before shipping.\n");
 +    }
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2209,7 @@
+@@ -1996,7 +2225,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -356,7 +372,7 @@ index 94efd9b6c370..9039890c772e 100644
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2225,7 @@
+@@ -2012,6 +2241,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
