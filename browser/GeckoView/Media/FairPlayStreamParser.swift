@@ -7005,6 +7005,11 @@ public final class FairPlayStreamParser: NSObject {
                                      owner: UInt64, offset: Double) {
         let key = sessionId + "|" + stream
         let shift = offset.isFinite ? offset : 0
+        // Filled under the lock and acted on once it is released - see
+        // mse_fix_141's docstring.
+        var shifted = false
+        var wasAt = Double.nan
+        let sounded = withState { streamParsers[key]?.audioEnqueued ?? 0 }
         let changed = withState { () -> Bool in
             guard let slot = streamParsers[key] else {
                 pendingOwners[key] = (owner: owner, offset: shift)
@@ -7012,9 +7017,40 @@ public final class FairPlayStreamParser: NSObject {
             }
             let moved = slot.owner != owner
                 || abs(slot.timestampOffset - shift) > 0.0005
+            // WHAT WAS ALREADY FED AT THE OLD ONE - see mse_fix_141's
+            // docstring. Only a real move, and only once something has
+            // gone into the renderer: an offset that arrives before the
+            // first sample is the ordinary case and needs nothing.
+            shifted = slot.audioEnqueued > 0
+                && slot.timestampOffset.isFinite
+                && abs(slot.timestampOffset - shift) > 0.05
+            wasAt = slot.timestampOffset
             slot.owner = owner
             slot.timestampOffset = shift
             return moved
+        }
+        if shifted {
+            // Through resynchroniseAudio because the ORDER is what
+            // matters and it already has it right: flush the renderer,
+            // then write the clock. An AVSampleBufferRenderSynchronizer
+            // will not skip past media its renderer already holds, so a
+            // write before the flush is refused - which is what capture
+            // 56fcf67c has it doing three times in a row, `asked 2811.0
+            // - reads 2771.687066666667 - DID NOT TAKE`, and then
+            // thirty-seven seconds of silence while the clock walked up
+            // to media it should never have been anchored behind.
+            let session = String(key.split(separator: "|").first ?? "")
+            let target = videoClock(sessionId: session)?.seconds
+                ?? elementPosition(key)
+            if let target, target.isFinite {
+                Self.log("stream \(key) the element's offset moved from "
+                         + "\(wasAt) to \(shift) after \(sounded) audio "
+                         + "samples had been fed - flushing what was timed "
+                         + "against the old one and re-anchoring to "
+                         + "\(target).")
+                resynchroniseAudio(streamKey: key, to: target,
+                                   jump: shift - wasAt)
+            }
         }
         guard changed else { return }
         Self.log("stream \(key) belongs to element \(owner), offset "
