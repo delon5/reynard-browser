@@ -53,6 +53,25 @@ private func configureUnsandboxedAppDataDirectories(_ directories: ReynardDirect
     if getenv("RUST_LOG") == nil {
         setenv("RUST_LOG", "webrender=warn", 1)
     }
+    // AND SAY SO - see mse_fix_160b's docstring. A diagnostic whose
+    // silence is indistinguishable from a clean run is not a
+    // diagnostic. This prints the value that is actually in force.
+    if let value = getenv("RUST_LOG") {
+        fputs("reynardWR: RUST_LOG=\(String(cString: value))\n", stderr)
+    } else {
+        fputs("reynardWR: RUST_LOG is NOT SET\n", stderr)
+    }
+    // A SECOND WAY OUT - see mse_fix_160b's docstring. GeckoLogger
+    // tries Gecko's own logging first and only falls back to
+    // env_logger, so naming the module in MOZ_LOG gives the same
+    // warning a second, independent path to the log.
+    if getenv("MOZ_LOG") == nil {
+        setenv("MOZ_LOG", "webrender:4", 1)
+    }
+    if let value = getenv("MOZ_LOG") {
+        fputs("reynardWR: MOZ_LOG=\(String(cString: value))\n", stderr)
+    }
+    fflush(stderr)
 }
 
 /// Points stdout and stderr at a real file.

@@ -74,6 +74,13 @@ enum MediaCompatibilityPolicyController {
         GeckoRuntime.setDefaultPrefs([
             "gfx.webrender.debug.surface-promotion-logging": true,
         ])
+        // ASKED, NOT ANSWERED - see mse_fix_160b's docstring.
+        // setDefaultPrefs is a dispatch with no reply, so this proves
+        // the ask happened and nothing more. An ask that never
+        // happened is still worth ruling out.
+        fputs("reynardWR: asked for "
+              + "gfx.webrender.debug.surface-promotion-logging\n", stderr)
+        fflush(stderr)
     }
 
     /// The other half of the same decision. Hiding MSE steers a player
