@@ -227,8 +227,44 @@ public final class FairPlayStreamParser: NSObject {
     private static let keyDelegateQueue =
         DispatchQueue(label: "com.reynard.fairplay.keysession")
 
+    /// Guards the once-a-second wall-clock note below.
+    ///
+    /// ADDED - see mse_fix_119's docstring. log() is called from the
+    /// main queue, the drain queues, the audio queues and the key
+    /// session's delegate queue, so the note's bookkeeping needs a lock
+    /// of its own. Not the state lock: log() is called from inside
+    /// withState in several places and that lock is not recursive.
+    private static let stampLock = NSLock()
+    private static var lastClockNote: Double = 0
+    private static let wallClockFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS Z"
+        return f
+    }()
+
     fileprivate static func log(_ message: String) {
-        fputs("fpsParser: \(message)\n", stderr)
+        // WHEN, ON EVERY LINE - see mse_fix_119's docstring. One percent
+        // of the lines in the last capture carried a time, and three of
+        // the conclusions drawn from it were wrong because durations had
+        // to be inferred from how many lines apart things were.
+        let now = hostNow()
+        // And once a second, what that host reading is in wall clock, so
+        // this file can be lined up against the system's own timestamped
+        // lines without interpolating between them.
+        var note: String?
+        stampLock.lock()
+        if now - lastClockNote > 1.0 {
+            lastClockNote = now
+            note = wallClockFormat.string(from: Date())
+        }
+        stampLock.unlock()
+        if let note {
+            fputs("fpsParser: CLOCK host "
+                  + String(format: "%.3f", now) + " = " + note + "\n",
+                  stderr)
+        }
+        fputs("fpsParser: [" + String(format: "%.3f", now) + "] "
+              + message + "\n", stderr)
     }
 
     /// Hands a specifier to the key session so a REAL request comes back.
@@ -2346,6 +2382,13 @@ public final class FairPlayStreamParser: NSObject {
         /// already been handed to the layer being replaced. Cleared on
         /// every sync sample, so it holds one GOP and no more.
         var currentGOP: [CMSampleBuffer] = []
+        /// The last frame counts read from the layer.
+        ///
+        /// ADDED - see mse_fix_120's docstring. Totals answer nothing on
+        /// their own; the deltas between two readings are what say
+        /// whether the picture moved.
+        var lastShown: Int = -1
+        var lastDropped: Int = -1
         /// The GOP before that one.
         ///
         /// ADDED - see mse_fix_110's docstring. One GOP only covers a
@@ -3721,6 +3764,43 @@ public final class FairPlayStreamParser: NSObject {
                              + "and none could be presented. Put back on "
                              + "the media at \(pts). "
                              + "Correction \(ranAhead.nth).")
+                }
+                // DID A FRAME REACH THE SCREEN - see mse_fix_120's
+                // docstring. Ten times less often than the drift line:
+                // the counts move slowly and the deltas are what matter.
+                if count % 300 == 0 {
+                    if let metrics = Self.pictureMetrics(layer) {
+                        let delta = withState { () -> String in
+                            guard let slot = streamParsers[streamKey] else {
+                                return ""
+                            }
+                            var out = ""
+                            if slot.lastShown >= 0, metrics.shown >= 0 {
+                                out += " (+\(metrics.shown - slot.lastShown)"
+                                    + " shown, +"
+                                    + "\(metrics.dropped - slot.lastDropped)"
+                                    + " dropped since last)"
+                            }
+                            slot.lastShown = metrics.shown
+                            slot.lastDropped = metrics.dropped
+                            return out
+                        }
+                        Self.log("stream \(streamKey) PICTURE "
+                                 + metrics.text + delta
+                                 + " - we enqueued \(count)")
+                    } else {
+                        let first = withState { () -> Bool in
+                            guard let slot = streamParsers[streamKey],
+                                  slot.lastShown == -1 else { return false }
+                            slot.lastShown = -2
+                            return true
+                        }
+                        if first {
+                            Self.log("stream \(streamKey) PICTURE metrics "
+                                     + "unavailable on this OS - fall back "
+                                     + "to enqueued against drift")
+                        }
+                    }
                 }
                 if count % 30 == 0 {
                     // With the offset between the two clocks, so "out of
@@ -5200,6 +5280,51 @@ public final class FairPlayStreamParser: NSObject {
             + "\(Int(box.height.rounded()))"
             + " super \(layer.superlayer != nil)"
             + " hidden \(layer.isHidden)"
+    }
+
+    /// What the layer says it has actually put on the screen.
+    ///
+    /// ADDED - see mse_fix_120's docstring. Reached by name rather than
+    /// by call: videoPerformanceMetrics is not on every OS this runs
+    /// on, and a KVC read of a key an object does not have RAISES. Both
+    /// of those are handled here rather than at the call site.
+    fileprivate static func pictureMetrics(
+        _ layer: AVSampleBufferDisplayLayer
+    ) -> (text: String, shown: Int, dropped: Int)? {
+        var found: (String, Int, Int)?
+        let failure = GeckoRuntimeBridge.catchException(from: {
+            let key = "videoPerformanceMetrics"
+            guard layer.responds(to: NSSelectorFromString(key)),
+                  let m = layer.value(forKey: key) as? NSObject else {
+                return
+            }
+            func read(_ name: String) -> Int? {
+                guard m.responds(to: NSSelectorFromString(name)),
+                      let v = m.value(forKey: name) as? NSNumber else {
+                    return nil
+                }
+                return v.intValue
+            }
+            func readDouble(_ name: String) -> Double? {
+                guard m.responds(to: NSSelectorFromString(name)),
+                      let v = m.value(forKey: name) as? NSNumber else {
+                    return nil
+                }
+                return v.doubleValue
+            }
+            let shown = read("numberOfDisplayedVideoFrames")
+                ?? read("totalNumberOfVideoFrames") ?? -1
+            let dropped = read("numberOfDroppedVideoFrames") ?? -1
+            let corrupt = read("numberOfCorruptedVideoFrames") ?? -1
+            let delay = readDouble("totalFrameDelay") ?? Double.nan
+            found = ("shown \(shown) dropped \(dropped) corrupt "
+                     + "\(corrupt) delay \(delay)", shown, dropped)
+        })
+        if let failure {
+            return ("metrics REFUSED - " + failure, -1, -1)
+        }
+        guard let found else { return nil }
+        return (found.0, found.1, found.2)
     }
 
     fileprivate static func isSyncSample(_ sampleBuffer: CMSampleBuffer)

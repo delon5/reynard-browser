@@ -5,8 +5,23 @@
 //  Created by Minh Ton on 4/3/26.
 //
 
+import CoreMedia
 import GeckoView
 import UIKit
+
+/// Who currently holds first responder in this window, so the shake
+/// marker can ask for it without taking it from anything.
+///
+/// ADDED - see mse_fix_122's docstring.
+private extension UIView {
+    var firstResponder: UIResponder? {
+        if isFirstResponder { return self }
+        for child in subviews {
+            if let found = child.firstResponder { return found }
+        }
+        return nil
+    }
+}
 
 final class BrowserViewController: UIViewController, GeckoScreenOrientationDelegate {
     private enum UX {
@@ -306,6 +321,14 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // ADDED - see mse_fix_122's docstring. Nothing receives a shake
+        // unless something is first responder to receive it. Asked for
+        // only when nothing else already holds it, so this cannot take
+        // focus away from the URL bar or a text field.
+        if !isFirstResponder,
+           view.window?.firstResponder == nil {
+            becomeFirstResponder()
+        }
         performContentLifecycle {
             syncBrowserNavigationChrome(animated: false)
             browserChrome.syncSidebarButton(splitViewController: splitViewController)
@@ -1309,11 +1332,72 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         GeckoRuntime.orientationController.delegate = nil
     }
     
+    // ===== MARKING THE LOG =====
+    //
+    // ADDED - see mse_fix_122's docstring. A capture is twenty-seven
+    // thousand lines and none of them say what was being done to the
+    // phone, so every report of "in landscape, with the controls up,
+    // the picture went black" has had to be located by scanning for a
+    // plausible window. Shaking the phone puts a numbered line in the
+    // log; the region between two of them is the fault.
+    //
+    // The same clock fix 119 stamps the parser's lines with, so a mark
+    // lands exactly in the stream of everything else.
+    private static var reynardMarkCount = 0
+
+    private static let reynardMarkClock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS Z"
+        return f
+    }()
+
+    fileprivate static func reynardNote(_ message: String) {
+        let host = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+        fputs("reynardMark: " + message + " host "
+              + String(format: "%.3f", host) + "\n", stderr)
+    }
+
+    private func reynardOrientationName(
+        _ orientation: UIInterfaceOrientation
+    ) -> String {
+        switch orientation {
+        case .portrait: return "portrait"
+        case .portraitUpsideDown: return "portraitUpsideDown"
+        case .landscapeLeft: return "landscapeLeft"
+        case .landscapeRight: return "landscapeRight"
+        default: return "unknown"
+        }
+    }
+
+    // Needed to receive the shake at all. Given up the moment anything
+    // else asks for it - the URL bar, a text field - which is the
+    // behaviour without this.
+    override var canBecomeFirstResponder: Bool { return true }
+
+    override func motionEnded(_ motion: UIEvent.EventSubtype,
+                              with event: UIEvent?) {
+        if motion == .motionShake {
+            Self.reynardMarkCount += 1
+            let now = Self.reynardMarkClock.string(from: Date())
+            let facing = view.window?.windowScene?.interfaceOrientation
+            Self.reynardNote(
+                "===== MARK \(Self.reynardMarkCount) ===== orientation "
+                + reynardOrientationName(facing ?? .unknown)
+                + " " + now)
+        }
+        super.motionEnded(motion, with: event)
+    }
+
     func screenOrientationChanged(to interfaceOrientation: UIInterfaceOrientation) {
         guard interfaceOrientation != .unknown else {
             return
         }
-        
+        // ADDED - see mse_fix_122's docstring. This already runs on
+        // every rotation and told nobody, and "does it happen in
+        // landscape" is a question every recent capture has had to
+        // answer by inference.
+        Self.reynardNote("orientation -> "
+                         + reynardOrientationName(interfaceOrientation))
         tabManager.selectedTab?.session.notifyScreenOrientationChanged(to: interfaceOrientation)
         completePendingOrientationRequestIfSatisfied()
     }
