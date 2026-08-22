@@ -2492,6 +2492,14 @@ public final class FairPlayStreamParser: NSObject {
         /// up here before it can strand anything. NaN until the first
         /// sample.
         var lastIntakePTS = Double.nan
+        /// Consecutive drift lines with the sound behind the picture,
+        /// and when it was last put back.
+        ///
+        /// ADDED - see mse_fix_148's docstring. Two in a row, because
+        /// the av column spikes for one line after a handover while the
+        /// drain still reads the old timebase.
+        var audioLagSeen = 0
+        var audioLagFixedAt = Double.nan
         /// Forward steps in intake PTS big enough to be missing media.
         ///
         /// ADDED - see mse_fix_137's docstring.
@@ -4277,6 +4285,45 @@ public final class FairPlayStreamParser: NSObject {
                     // forty-two seconds in capture 6db1f5c7. A line
                     // that can see a stall can end one.
                     nudgeAudio(sessionId: session)
+                    // AND WATCHES THE LAG - see mse_fix_148's
+                    // docstring. This column has been printed since fix
+                    // 100 and never acted on, and in capture d8bae8d7
+                    // it read three and a half seconds on thirty-eight
+                    // lines in a row while the answer sat in it.
+                    //
+                    // Positive av is the sound BEHIND the picture. 146
+                    // is what makes the write stick: the renderer holds
+                    // the media the clock is being moved past, and a
+                    // refused write now flushes it and asks again.
+                    if let av, av > Self.audioLagLimit, now.isFinite {
+                        let due = withState { () -> Bool in
+                            guard let slot = streamParsers[streamKey] else {
+                                return false
+                            }
+                            slot.audioLagSeen += 1
+                            guard slot.audioLagSeen >= 2 else { return false }
+                            let last = slot.audioLagFixedAt
+                            if last.isFinite,
+                               readingAt - last < Self.audioLagGrace {
+                                return false
+                            }
+                            slot.audioLagSeen = 0
+                            slot.audioLagFixedAt = readingAt
+                            return true
+                        }
+                        if due {
+                            Self.log("stream \(streamKey) the sound is "
+                                     + "\(av)s behind the picture and has "
+                                     + "been for two readings - putting it "
+                                     + "back on the video clock at \(now)")
+                            realignAudioClock(
+                                sessionId: session,
+                                to: CMTime(seconds: now,
+                                           preferredTimescale: 90_000))
+                        }
+                    } else {
+                        withState { streamParsers[streamKey]?.audioLagSeen = 0 }
+                    }
                     Self.log("stream \(streamKey) at \(count) - timebase "
                              + "\(now) vs sample pts \(pts), drift "
                              + "\(now - pts), av "
@@ -5049,9 +5096,58 @@ public final class FairPlayStreamParser: NSObject {
                         reason: "realignAudioClock after a seek")
                 }
             } else {
-                writeAudioClock(synchronizer, to: time,
-                                rate: gatedRate(key),
-                                label: key, reason: "realignAudioClock")
+                let reads = writeAudioClock(synchronizer, to: time,
+                                            rate: gatedRate(key),
+                                            label: key,
+                                            reason: "realignAudioClock")
+                // AND IF IT WAS REFUSED, FLUSH AND ASK AGAIN - see
+                // mse_fix_146's docstring.
+                //
+                // 143 predicts the refusal from the video queue having
+                // been swept, and in capture dd24aee2 both failures are
+                // moves where nothing was swept: Netflix sits three and
+                // a half seconds out for a whole playback because the
+                // renderer holds the samples the clock is being moved
+                // past, and a scrub in the same session is refused five
+                // hundred and forty seconds out. queueStrays answers a
+                // question about the VIDEO queue; this is a fact about
+                // the audio renderer.
+                //
+                // The read-back is not a prediction. It has said DID
+                // NOT TAKE on every one of these and on nothing else,
+                // so acting on it cannot flush a write that would have
+                // worked.
+                if reads.isFinite, time.seconds.isFinite,
+                   abs(reads - time.seconds) > Self.clockLanded {
+                    let refused = withState {
+                        () -> (renderer: AVSampleBufferAudioRenderer,
+                               queue: DispatchQueue, dropped: Int)? in
+                        guard let slot = streamParsers[key],
+                              let renderer = slot.audioRenderer,
+                              let queue = slot.audioQueue else {
+                            return nil
+                        }
+                        let dropped = slot.audioPending.count
+                        slot.audioPending.removeAll()
+                        return (renderer, queue, dropped)
+                    }
+                    if let refused {
+                        Self.log("stream \(key) the clock would not move "
+                                 + "to \(time.seconds) - it reads "
+                                 + "\(reads), so the renderer is holding "
+                                 + "media in the way. Dropping "
+                                 + "\(refused.dropped) queued samples, "
+                                 + "flushing it and asking again.")
+                        let rate = gatedRate(key)
+                        refused.queue.async {
+                            refused.renderer.flush()
+                            FairPlayStreamParser.shared.writeAudioClock(
+                                synchronizer, to: time, rate: rate,
+                                label: key,
+                                reason: "realignAudioClock after a refusal")
+                        }
+                    }
+                }
             }
             Self.log("stream \(key) audio clock re-anchored to "
                      + "\(time.seconds) - following the video timebase")
@@ -5736,6 +5832,28 @@ public final class FairPlayStreamParser: NSObject {
         var clampable = true
         if let mediaAt, let oldestHeld, mediaAt.isFinite {
             clampable = oldestHeld >= mediaAt - Self.strandedBehind
+        }
+        // AND NOT WHEN THE ANCHOR IS ALREADY WHERE THE ELEMENT IS - see
+        // mse_fix_148's docstring.
+        //
+        // This clamp is for a clock that ran ahead of its own media
+        // while the page was paused - fix 41's ten and a half seconds -
+        // and the test for that is whether the anchor is ahead of where
+        // the MEDIA is, not ahead of whatever the queue still holds.
+        //
+        // HBO resumes at 1023.697 into a buffered range of
+        // [1020.16-1024.12], so the queue legitimately starts three and
+        // a half seconds before the element. The guard above asked
+        // `1020.12 >= 963.697` and clamped, the realign at the end of
+        // adopt copied 1020.12 onto the audio clock, and the sound sat
+        // three and a half seconds behind the picture for the rest of
+        // the playback.
+        //
+        // An anchor at or behind the element is already correct.
+        // Nothing is gained by moving it and this is what was lost.
+        if let mediaAt, mediaAt.isFinite, anchor.seconds.isFinite,
+           anchor.seconds <= mediaAt + Self.positionSlack {
+            clampable = false
         }
         if let oldestHeld, anchor.seconds > oldestHeld, clampable {
             Self.log("stream \(streamKey) the old clock read "
@@ -6832,6 +6950,29 @@ public final class FairPlayStreamParser: NSObject {
     /// capture 8ec30c6a every legitimate backlog was under 14s and
     /// every stranded queue was over 360s.
     fileprivate static let strandedBehind: Double = 60.0
+
+    /// How close a clock read-back has to be to count as landed.
+    ///
+    /// ADDED - see mse_fix_146's docstring. The same 0.05 writeAudioClock
+    /// has used to decide whether to print DID NOT TAKE since it was
+    /// written, named here so the two cannot drift apart: this file must
+    /// act on exactly the condition it reports.
+    fileprivate static let clockLanded: Double = 0.05
+
+    /// How far the sound may fall behind the picture before it is put
+    /// back.
+    ///
+    /// ADDED - see mse_fix_148's docstring. tv.apple.com's median |av|
+    /// is 0.000 across 133 drift lines in capture d8bae8d7 and HBO's is
+    /// 3.401 across 38, so there is no honest reading anywhere near
+    /// half a second.
+    fileprivate static let audioLagLimit: Double = 0.5
+
+    /// And how often that may be done.
+    ///
+    /// ADDED - see mse_fix_148's docstring. A realign that lands fixes
+    /// it; this is so a realign that does not cannot become a loop.
+    fileprivate static let audioLagGrace: Double = 3.0
 
     /// A forward step in intake PTS large enough to be a hole.
     ///
