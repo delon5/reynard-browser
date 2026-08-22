@@ -2284,6 +2284,11 @@ public final class FairPlayStreamParser: NSObject {
         /// before it is touched, so one overflow was reported and eight
         /// more in the same window were silent.
         var droppedSinceSync = 0
+        /// Segments refused because the bin was already twice its cap.
+        ///
+        /// ADDED - see mse_fix_134's docstring. Never a reorder: the
+        /// page's bytes go into the parser in order or not at all.
+        var binRefused = 0
         /// Samples refused for being unreachably ahead of the media.
         ///
         /// ADDED - see mse_fix_133's docstring.
@@ -2621,6 +2626,12 @@ public final class FairPlayStreamParser: NSObject {
         // An INIT SEGMENT is never held. ftyp and moov have to reach the
         // parser before any media does, they are small, and holding one
         // would fail the stream rather than pace it.
+        // WHAT ACTUALLY GOES TO THE PARSER - see mse_fix_134's
+        // docstring. Not always the segment that just arrived: when the
+        // bin has older bytes in it, the oldest of those goes instead
+        // and this one takes its place at the back.
+        var outgoing = segment
+        var sentFromTheBin = false
         if !Self.isInitSegment(segment) {
             // BEFORE the lock, because mediaAuthority takes it - see
             // mse_fix_133's docstring. NaN when the element has not
@@ -2628,32 +2639,92 @@ public final class FairPlayStreamParser: NSObject {
             // and keeps.
             let heldAt = mediaAuthority(key) ?? Double.nan
             let verdict = withState { () -> (hold: Bool, depth: Int,
-                                             held: Int, forced: Bool) in
+                                             held: Int, forced: Bool,
+                                             instead: Data?,
+                                             refused: Bool) in
                 let depth = slot.pending.count
-                guard depth >= Self.mediaDataHighWater else {
-                    return (hold: false, depth: depth,
-                            held: slot.heldSegments.count, forced: false)
+                // IN THE ORDER THE PAGE WROTE THEM - see mse_fix_134's
+                // docstring. The depth test on its own let a segment
+                // walk past everything already waiting whenever the
+                // queue happened to be shallow when it arrived. In
+                // capture e19d2555 twelve segments sat in the bin from
+                // 59971.5 while 7228242 - the one AFTER the newest of
+                // them - went straight in at 59986.633, and the queue
+                // head stepped from 2599.26 to 2646.14 with forty-five
+                // seconds of the film unreachable behind it.
+                //
+                // appendStreamData: is a stream. A stream has an order.
+                if depth < Self.mediaDataHighWater,
+                   slot.heldSegments.isEmpty {
+                    return (hold: false, depth: depth, held: 0,
+                            forced: false, instead: nil, refused: false)
                 }
-                // Bounded. Past the cap the segment goes in anyway: a
-                // queue overflow costs samples, refusing the page's data
-                // outright costs the stream, and one of those is
-                // recoverable.
-                guard slot.heldSegments.count < Self.heldFragmentCap else {
-                    return (hold: false, depth: depth,
-                            held: slot.heldSegments.count, forced: true)
+                // A HARD CEILING regardless. `forced` below cannot fire
+                // while a release from the drain queue is in flight,
+                // and a run of appends on the main queue can outrun that
+                // flag being cleared - these fragments are five to nine
+                // megabytes each, so a bin that grows unchecked is an
+                // out-of-memory rather than a stall. Past twice the cap
+                // the NEWEST bytes are refused: an ordered hole that the
+                // next sync sample closes, and never an out-of-order
+                // stream.
+                if slot.heldSegments.count >= Self.heldFragmentCap * 2 {
+                    slot.needsSyncSample = true
+                    slot.binRefused += 1
+                    return (hold: true, depth: depth,
+                            held: slot.heldSegments.count, forced: false,
+                            instead: nil, refused: true)
                 }
                 slot.heldSegments.append(
                     StreamParser.HeldFragment(bytes: segment, at: heldAt))
                 slot.heldFragments += 1
+                // Bounded, and the cap no longer reorders either: it
+                // used to put the NEWEST segment in, which is the same
+                // overtake with a log line in front of it.
+                let forced = slot.heldSegments.count > Self.heldFragmentCap
+                // Not while one is already on its way from the drain
+                // queue - fix 132's flag. That fragment came off the
+                // front and lands on the main queue after this call, so
+                // sending another now would put them in backwards.
+                if !slot.releaseInFlight,
+                   forced || depth < Self.mediaDataHighWater {
+                    let next = slot.heldSegments.removeFirst().bytes
+                    return (hold: false, depth: depth,
+                            held: slot.heldSegments.count, forced: forced,
+                            instead: next, refused: false)
+                }
                 return (hold: true, depth: depth,
-                        held: slot.heldSegments.count, forced: false)
+                        held: slot.heldSegments.count, forced: false,
+                        instead: nil, refused: false)
+            }
+            // One in, one out - see mse_fix_134's docstring. The bin
+            // turns over at the page's own append rate rather than
+            // waiting on the drain queue to reach its low water.
+            if let instead = verdict.instead {
+                outgoing = instead
+                sentFromTheBin = true
+            }
+            if verdict.refused {
+                let nth = withState { slot.binRefused }
+                if nth == 1 || nth % 50 == 0 {
+                    Self.log("stream \(stream) REFUSED the page's bytes - "
+                             + "\(verdict.held) fragments already held with "
+                             + "\(verdict.depth) samples queued, twice the "
+                             + "cap. Refused \(nth) so far. The layer has "
+                             + "stopped draining; this is a hole, not a "
+                             + "reorder.")
+                }
+                withState { slot.lastAppendAt = Self.hostNow() }
+                reapSuperseded(sessionId: sessionId)
+                return true
             }
             if verdict.forced {
                 Self.log("stream \(stream) held fragment cap reached "
                          + "(\(Self.heldFragmentCap)) with \(verdict.depth) "
-                         + "samples still queued - appending anyway. The "
-                         + "layer is not draining and the cap is the only "
-                         + "thing between that and unbounded memory.")
+                         + "samples still queued - sending the OLDEST held "
+                         + "fragment anyway. The layer is not draining and "
+                         + "the cap is the only thing between that and "
+                         + "unbounded memory. \(verdict.held) still held.")
             } else if verdict.hold {
                 if verdict.held == 1 {
                     Self.log("stream \(stream) HOLDING the parser - "
@@ -2673,7 +2744,7 @@ public final class FairPlayStreamParser: NSObject {
                 return true
             }
         }
-        slot.parser.perform(append, with: segment)
+        slot.parser.perform(append, with: outgoing)
         // Keep the sinf the page's OWN init segment carries.
         //
         // The other harvest, in append(_:initSegment:), is on the
@@ -2732,7 +2803,18 @@ public final class FairPlayStreamParser: NSObject {
             unpark(streamKey: key)
         }
         reapSuperseded(sessionId: sessionId)
-        Self.log("stream \(stream) appended \(segment.count) bytes")
+        // OUTGOING, not segment - see mse_fix_134's docstring. This
+        // line is the only record of what appendStreamData: was given,
+        // and comparing it against the content process's forwarding log
+        // is what found the reordering. It has to describe the bytes
+        // that actually went in.
+        var whichBytes = ""
+        if sentFromTheBin {
+            whichBytes = " from the bin, in place of the "
+                + "\(segment.count) just in"
+        }
+        Self.log("stream \(stream) appended \(outgoing.count) bytes"
+                 + whichBytes)
         // Asked for again after EVERY append, not once when the licence
         // landed. setShouldProvideMediaData is armed per track and
         // providePendingMediaData drains what is pending NOW - fragments
