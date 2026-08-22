@@ -3435,9 +3435,40 @@ public final class FairPlayStreamParser: NSObject {
                 // has to be bounded. 400 compressed samples is fewer
                 // than the 900 pending is already allowed.
                 slot.previousGOP += slot.currentGOP
-                if slot.previousGOP.count > Self.keepBackSamples {
+                // AGAINST THE CLOCK - see mse_fix_131's docstring.
+                // Trimming to the newest four hundred keeps the wrong
+                // end: after the queue is emptied into the layer in one
+                // second, which capture 0c6b8550 has it doing, the
+                // newest samples are thirty seconds past the clock and
+                // the frames a handover would anchor at are gone. The
+                // new layer then carries nothing and the picture stops
+                // for forty seconds.
+                //
+                // What a handover needs is what is AROUND the clock, so
+                // that is what is kept: everything from staleBehind
+                // before the clock forwards.
+                // Two steps on purpose: displayLayer? and
+                // controlTimebase are both optional, and chaining map
+                // over them gives a Double?? that will not compile
+                // against isFinite.
+                var clockNow: Double?
+                if let running = slot.displayLayer?.controlTimebase {
+                    clockNow = CMTimebaseGetTime(running).seconds
+                }
+                if let clockNow, clockNow.isFinite {
+                    let floor = clockNow - Self.staleBehind
+                    slot.previousGOP.removeAll { sample in
+                        let at = CMSampleBufferGetPresentationTimeStamp(
+                            sample).seconds
+                        return at.isFinite && at < floor
+                    }
+                }
+                // And a hard cap regardless, so a stream with no clock
+                // - or one whose clock has stopped - cannot grow this
+                // without bound.
+                if slot.previousGOP.count > Self.keepBackSamples * 3 {
                     slot.previousGOP.removeFirst(
-                        slot.previousGOP.count - Self.keepBackSamples)
+                        slot.previousGOP.count - Self.keepBackSamples * 3)
                 }
                 slot.currentGOP.removeAll()
             }
