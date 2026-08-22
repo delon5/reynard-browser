@@ -170,11 +170,17 @@ redirectStandardStreamsToFile()
 // After redirectStandardStreamsToFile above, so what it prints reaches
 // the capture rather than the streams' pre-redirect destination.
 //
+// info rather than warn - see mse_fix_160d's docstring. Warn makes
+// log::max_level Warn, which discards every info! in the crate before
+// any logger sees it, and the five ungated info! calls in Device::new
+// are the only thing that can prove this route is alive at all. warn!
+// is still admitted at Info, so the line this is for is unaffected.
+//
 // The whole crate rather than one module: the warning is in
 // webrender::tile_cache, picture.rs carries no log macros at all, and
 // a filter that matches nothing is indistinguishable from a clean run.
 if getenv("RUST_LOG") == nil {
-    setenv("RUST_LOG", "webrender=warn", 1)
+    setenv("RUST_LOG", "webrender=info", 1)
 }
 if let reynardRustLog = getenv("RUST_LOG") {
     fputs("reynardWR: RUST_LOG=\(String(cString: reynardRustLog))\n", stderr)
