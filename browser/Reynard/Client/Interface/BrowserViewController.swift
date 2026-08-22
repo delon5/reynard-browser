@@ -9,20 +9,6 @@ import CoreMedia
 import GeckoView
 import UIKit
 
-/// Who currently holds first responder in this window, so the shake
-/// marker can ask for it without taking it from anything.
-///
-/// ADDED - see mse_fix_122's docstring.
-private extension UIView {
-    var firstResponder: UIResponder? {
-        if isFirstResponder { return self }
-        for child in subviews {
-            if let found = child.firstResponder { return found }
-        }
-        return nil
-    }
-}
-
 final class BrowserViewController: UIViewController, GeckoScreenOrientationDelegate {
     private enum UX {
         static let layoutAnimationDuration: TimeInterval = 0.22
@@ -321,14 +307,10 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // ADDED - see mse_fix_122's docstring. Nothing receives a shake
-        // unless something is first responder to receive it. Asked for
-        // only when nothing else already holds it, so this cannot take
-        // focus away from the URL bar or a text field.
-        if !isFirstResponder,
-           view.window?.firstResponder == nil {
-            becomeFirstResponder()
-        }
+        // CHANGED - see mse_fix_126's docstring. This asked for first
+        // responder and never got it, so the marker never fired. A
+        // gesture recogniser on the window needs neither.
+        installReynardMarkGesture()
         performContentLifecycle {
             syncBrowserNavigationChrome(animated: false)
             browserChrome.syncSidebarButton(splitViewController: splitViewController)
@@ -1369,23 +1351,48 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         }
     }
 
-    // Needed to receive the shake at all. Given up the moment anything
-    // else asks for it - the URL bar, a text field - which is the
-    // behaviour without this.
-    override var canBecomeFirstResponder: Bool { return true }
+    // A GESTURE, NOT A MOTION EVENT - see mse_fix_126's docstring. The
+    // shake this replaces never fired once: motion events go to the
+    // first responder, the engine view holds that from the moment a
+    // page loads, and asking for it would have taken focus off the URL
+    // bar.
+    //
+    // A recogniser is delivered by hit-testing instead, so nothing has
+    // to hold first responder and nothing loses focus. Two fingers held
+    // for half a second cannot happen by accident and collides with no
+    // system gesture.
+    private var reynardMarkGesture: UILongPressGestureRecognizer?
 
-    override func motionEnded(_ motion: UIEvent.EventSubtype,
-                              with event: UIEvent?) {
-        if motion == .motionShake {
-            Self.reynardMarkCount += 1
-            let now = Self.reynardMarkClock.string(from: Date())
-            let facing = view.window?.windowScene?.interfaceOrientation
-            Self.reynardNote(
-                "===== MARK \(Self.reynardMarkCount) ===== orientation "
-                + reynardOrientationName(facing ?? .unknown)
-                + " " + now)
+    fileprivate func installReynardMarkGesture() {
+        guard reynardMarkGesture == nil, let window = view.window else {
+            return
         }
-        super.motionEnded(motion, with: event)
+        let press = UILongPressGestureRecognizer(
+            target: self, action: #selector(reynardMarkPressed(_:)))
+        press.numberOfTouchesRequired = 2
+        press.minimumPressDuration = 0.5
+        // The page must not notice this at all.
+        press.cancelsTouchesInView = false
+        press.delaysTouchesBegan = false
+        press.delaysTouchesEnded = false
+        window.addGestureRecognizer(press)
+        reynardMarkGesture = press
+        Self.reynardNote("mark gesture installed - two fingers, half a "
+                         + "second, anywhere")
+    }
+
+    @objc private func reynardMarkPressed(
+        _ sender: UILongPressGestureRecognizer
+    ) {
+        guard sender.state == .began else { return }
+        Self.reynardMarkCount += 1
+        let now = Self.reynardMarkClock.string(from: Date())
+        let facing = view.window?.windowScene?.interfaceOrientation
+        Self.reynardNote(
+            "===== MARK \(Self.reynardMarkCount) ===== by two-finger "
+            + "press orientation "
+            + reynardOrientationName(facing ?? .unknown)
+            + " " + now)
     }
 
     func screenOrientationChanged(to interfaceOrientation: UIInterfaceOrientation) {

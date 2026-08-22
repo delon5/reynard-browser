@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3307 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3312 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2444,50 +2444,55 @@ index 9ca6e15..18d37f0 100644
 +        "[class*=control i], [class*=button i]," +
 +        "[data-testid*=control i]";
 +
-+      // Does this element cover the picture? A control is small; a
-+      // sheet you tap to summon the controls is the size of the video,
-+      // because that is its whole job.
-+      function reynardCoversTheVideo(t) {
++      // How much of the picture does this element cover? A control is
++      // small; a click-through sheet is the video's own box, because
++      // that is its whole job. Returns 0 when there is nothing to
++      // compare against.
++      function reynardCoverage(t) {
 +        try {
 +          var doc = t.ownerDocument || document;
 +          var v = doc.querySelector("video");
 +          if (!v) {
-+            return false;
++            return 0;
 +          }
 +          var a = t.getBoundingClientRect();
 +          var b = v.getBoundingClientRect();
 +          if (!b.width || !b.height) {
-+            return false;
++            return 0;
 +          }
 +          var w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
 +          var h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
 +          if (w <= 0 || h <= 0) {
-+            return false;
++            return 0;
 +          }
-+          return (w * h) / (b.width * b.height) >= 0.6;
++          return (w * h) / (b.width * b.height);
 +        } catch (e) {
-+          return false;
++          return 0;
 +        }
 +      }
 +
 +      // Returns [isControl, whyString].
++      //
++      // CHANGED - see mse_fix_127's docstring. There used to be a
++      // branch that declined anything not matching the name patterns,
++      // and on Netflix - whose controls sit on a full-size container -
++      // it declined presses the viewer meant. Only a thing that covers
++      // the picture is declined now. Everything this cannot identify
++      // is allowed, because being wrong that way costs a convenience
++      // and being wrong the other way makes the player unstoppable.
 +      function reynardJudgeTap(t) {
 +        if (!t || typeof t.closest !== "function") {
-+          // Cannot tell - allow the pause. A guard that guesses wrong
-+          // in this direction loses a feature; the other direction
-+          // makes the player unstoppable.
 +          return [true, "unknown"];
 +        }
++        var covered = reynardCoverage(t);
++        var much = " (covers " + covered.toFixed(2) + " of the picture)";
 +        if (t.closest(REYNARD_STRICT_SELECTOR)) {
-+          return [true, "button"];
++          return [true, "button" + much];
 +        }
-+        if (!t.closest(REYNARD_NAMED_SELECTOR)) {
-+          return [false, "not a control"];
++        if (covered >= 0.6) {
++          return [false, "covers the picture" + much];
 +        }
-+        if (reynardCoversTheVideo(t)) {
-+          return [false, "covers the picture"];
-+        }
-+        return [true, "named"];
++        return [true, "allowed" + much];
 +      }
 +      // Capture phase, on the window: the page's own handler runs after
 +      // this and calls pause(), so the tap has to be recorded before it
@@ -3310,7 +3315,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3368,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3373,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3806,7 +3811,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3974,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3979,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3828,7 +3833,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4004,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4009,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

@@ -2397,6 +2397,16 @@ public final class FairPlayStreamParser: NSObject {
         /// whether the picture moved.
         var lastShown: Int = -1
         var lastDropped: Int = -1
+        /// Which layer those counts belong to, and how much has been
+        /// enqueued into it.
+        ///
+        /// ADDED - see mse_fix_125's docstring. The metrics belong to
+        /// the layer and the enqueue counter belongs to the stream, and
+        /// reading one against the other while the layer is replaced
+        /// several times a minute produced a line that looked like a
+        /// dead picture and was not.
+        var metricsLayer: ObjectIdentifier?
+        var enqueuedIntoLayer = 0
         /// The GOP before that one.
         ///
         /// ADDED - see mse_fix_110's docstring. One GOP only covers a
@@ -3805,26 +3815,49 @@ public final class FairPlayStreamParser: NSObject {
                 // DID A FRAME REACH THE SCREEN - see mse_fix_120's
                 // docstring. Ten times less often than the drift line:
                 // the counts move slowly and the deltas are what matter.
-                if count % 300 == 0 {
+                // PER LAYER - see mse_fix_125's docstring. The counts
+                // belong to the layer, so the enqueues they are read
+                // against have to as well, and a layer change has to be
+                // said rather than shown as a negative delta.
+                let here = ObjectIdentifier(layer)
+                let changed = withState { () -> Bool in
+                    guard let slot = streamParsers[streamKey] else {
+                        return false
+                    }
+                    slot.enqueuedIntoLayer += 1
+                    guard slot.metricsLayer != here else { return false }
+                    slot.metricsLayer = here
+                    slot.enqueuedIntoLayer = 1
+                    slot.lastShown = -1
+                    slot.lastDropped = -1
+                    return true
+                }
+                if changed || count % 300 == 0 {
                     if let metrics = Self.pictureMetrics(layer) {
-                        let delta = withState { () -> String in
+                        let tail = withState { () -> String in
                             guard let slot = streamParsers[streamKey] else {
                                 return ""
                             }
                             var out = ""
-                            if slot.lastShown >= 0, metrics.shown >= 0 {
+                            if !changed, slot.lastShown >= 0,
+                               metrics.shown >= 0 {
                                 out += " (+\(metrics.shown - slot.lastShown)"
                                     + " shown, +"
                                     + "\(metrics.dropped - slot.lastDropped)"
-                                    + " dropped since last)"
+                                    + " dropped)"
                             }
                             slot.lastShown = metrics.shown
                             slot.lastDropped = metrics.dropped
+                            out += changed
+                                ? " - NEW LAYER, \(slot.enqueuedIntoLayer) "
+                                    + "enqueued into it so far"
+                                : " - \(slot.enqueuedIntoLayer) enqueued "
+                                    + "into this layer"
                             return out
                         }
                         Self.log("stream \(streamKey) PICTURE "
-                                 + metrics.text + delta
-                                 + " - we enqueued \(count)")
+                                 + metrics.text + tail
+                                 + " (stream total \(count))")
                     } else {
                         let first = withState { () -> Bool in
                             guard let slot = streamParsers[streamKey],
