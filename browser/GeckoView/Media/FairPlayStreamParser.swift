@@ -3591,16 +3591,30 @@ public final class FairPlayStreamParser: NSObject {
     fileprivate func drainPending(streamKey: String,
                                   layer: AVSampleBufferDisplayLayer) {
         while layer.isReadyForMoreMediaData {
-            // PACED - see mse_fix_114's docstring. The layer's readiness
-            // is not a measure of how much it should be given: it stays
-            // ready long enough to take the entire queue, and everything
-            // taken is inside the layer rather than in pending, so the
-            // next time the compositor replaces the layer it all goes.
+            // NO LONGER A HOLD - see mse_fix_130's docstring. 114
+            // paced the feed by calling stopRequestingMediaData and
+            // re-arming from a timer, and capture 328fcc2f proves that
+            // re-arm never happens: 167 backstop releases, 15 holds,
+            // and 'the feed came back after' - the line that fires when
+            // the DRAIN QUEUE brings it back - not once. Every hold in
+            // the capture was released by 129's main-queue backstop
+            // two seconds late.
             //
-            // Only against a running clock. A stopped one never reaches
-            // the media, so pacing against it would hold the feed off
-            // for ever; at rate 0 this is exactly the old behaviour.
-            var holdFor: Double?
+            // The reason 114 existed was that everything inside a layer
+            // is lost when the compositor replaces it. That is no
+            // longer true: 110 and 111 carry a bounded reference run
+            // across a handover, and in this same capture the two
+            // handovers started at -0.38s and -2.15s, which is seamless.
+            //
+            // So the layer's own readiness is the pacing again, as it
+            // was before 114. isReadyForMoreMediaData going false is
+            // the layer saying it has enough, and it is the only signal
+            // here that has never failed.
+            //
+            // Kept: the measurement. A queue running a long way ahead
+            // of the clock is worth knowing about, because it is what
+            // 114 was written for, and if it comes back this line says
+            // so without stopping anything.
             if let timebase = layer.controlTimebase,
                CMTimebaseGetRate(timebase) != 0 {
                 let now = CMTimebaseGetTime(timebase).seconds
@@ -3611,80 +3625,21 @@ public final class FairPlayStreamParser: NSObject {
                         .seconds
                     return at.isFinite ? at : nil
                 }
-                if now.isFinite, let head, head - now > Self.feedAhead {
-                    holdFor = head - now - Self.feedAhead
-                }
-            }
-            if let holdFor {
-                // HALF THE LEAD, NOT THE THRESHOLD - see mse_fix_117's
-                // docstring. Waking when the lead is still feedAhead
-                // means feeding one or two samples and stopping again,
-                // fourteen times a second. Waking when it has decayed to
-                // half gives every wake a second and a half of media to
-                // hand over.
-                let sleepFor = min(max(holdFor + Self.feedAhead / 2,
-                                       0.05), 2.0)
-                let told = withState { () -> (queue: DispatchQueue?,
-                                              nth: Int) in
-                    guard let slot = streamParsers[streamKey] else {
-                        return (nil, 0)
+                if now.isFinite, let head, head - now > Self.feedAhead * 10 {
+                    let nth = withState { () -> Int in
+                        guard let slot = streamParsers[streamKey] else {
+                            return 0
+                        }
+                        slot.pacedStops += 1
+                        return slot.pacedStops
                     }
-                    slot.drainArmed = false
-                    slot.pacedStops += 1
-                    slot.holdUntil = Self.hostNow() + sleepFor
-                    // ADDED - see mse_fix_129's docstring.
-                    slot.holdStartedAt = Self.hostNow()
-                    slot.holdIntended = sleepFor
-                    return (slot.drainQueue, slot.pacedStops)
+                    if nth == 1 || nth % 200 == 0 {
+                        Self.log("stream \(streamKey) the queue is "
+                                 + "\(head - now)s ahead of the layer's "
+                                 + "clock and being fed anyway - the layer "
+                                 + "decides. Seen \(nth).")
+                    }
                 }
-                layer.stopRequestingMediaData()
-                if told.nth == 1 || told.nth % 20 == 0 {
-                    Self.log("stream \(streamKey) holding off - the queue "
-                             + "is \(holdFor + Self.feedAhead)s ahead of "
-                             + "the layer's clock, back in \(sleepFor)s. "
-                             + "Hold \(told.nth).")
-                }
-                // AND COME BACK. armDrainIfNeeded is otherwise only
-                // reached from an append, so a page that has finished
-                // buffering would never ask this layer for anything
-                // again. Capped so a wild timestamp cannot park the
-                // stream for minutes.
-                //
-                // The wake clears the hold first: the guard in
-                // armDrainIfNeeded is there to stop APPENDS re-arming
-                // through a hold, and it must never be what stops this.
-                told.queue?.asyncAfter(deadline: .now() + sleepFor) {
-                    FairPlayStreamParser.shared.withStateClearHold(
-                        streamKey: streamKey)
-                    FairPlayStreamParser.shared.armDrainIfNeeded(
-                        streamKey: streamKey)
-                }
-                // AND A BACKSTOP - see mse_fix_129's docstring. The wake
-                // above runs on the drain queue and depends on
-                // requestMediaDataWhenReady calling back. When that did
-                // not happen the stream stalled for twenty-three seconds
-                // on a hold that meant to last two. A second wake on the
-                // main queue, at twice the sleep, cannot be blocked by
-                // the same thing.
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + sleepFor * 2) {
-                    let stuck = FairPlayStreamParser.shared
-                        .withStateHoldOverran(streamKey: streamKey)
-                    guard stuck else { return }
-                    Self.log("stream \(streamKey) the backstop released a "
-                             + "hold that overran - the drain queue did "
-                             + "not come back")
-                    FairPlayStreamParser.shared.armDrainIfNeeded(
-                        streamKey: streamKey)
-                }
-                return
-            }
-            // THE HOLD ENDED - see mse_fix_129's docstring. Said only
-            // when it lasted well past its intent, which is the case
-            // that has been invisible.
-            if let overran = withStateHoldEnded(streamKey: streamKey) {
-                Self.log("stream \(streamKey) the feed came back after "
-                         + "\(overran.0)s, meant to wait \(overran.1)s")
             }
             let next = withState { () -> CMSampleBuffer? in
                 guard let slot = streamParsers[streamKey],
