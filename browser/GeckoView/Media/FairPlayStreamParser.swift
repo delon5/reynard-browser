@@ -2275,6 +2275,14 @@ public final class FairPlayStreamParser: NSObject {
         /// then rarely: pacing is the normal state of a healthy stream
         /// and a line per stop would be a line per second.
         var pacedStops = 0
+        /// Host time until which the feed is deliberately held off.
+        ///
+        /// ADDED - see mse_fix_117's docstring. Without it every append
+        /// re-arms the drain, which walks straight back into the hold it
+        /// just took: capture e10b8c17 has six hundred holds in thirty
+        /// seconds, each one a stopRequestingMediaData and a
+        /// requestMediaDataWhenReady on a layer that is presenting.
+        var holdUntil: Double = 0
         var failObserver: NSObjectProtocol?
         var drainQueue: DispatchQueue?
         /// The independent decode probe - see runDecodeProbe.
@@ -3496,13 +3504,27 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     /// Ask the layer to come and get them, if it is not already asking.
-    private func armDrainIfNeeded(streamKey: String) {
+    /// Release a deliberate hold, so the wake that scheduled it is not
+    /// turned away by its own guard.
+    ///
+    /// ADDED - see mse_fix_117's docstring.
+    fileprivate func withStateClearHold(streamKey: String) {
+        withState { streamParsers[streamKey]?.holdUntil = 0 }
+    }
+
+    fileprivate func armDrainIfNeeded(streamKey: String) {
         let work = withState { () -> (layer: AVSampleBufferDisplayLayer,
                                       queue: DispatchQueue)? in
             guard let slot = streamParsers[streamKey],
                   slot.layerAttached, !slot.drainArmed,
                   slot.supersededBy == nil,
                   !slot.pending.isEmpty,
+                  // ADDED - see mse_fix_117's docstring. A hold that an
+                  // append can re-arm through is not a hold. The wake
+                  // this hold scheduled clears holdUntil before it calls
+                  // here, so the timer is never blocked by its own
+                  // guard.
+                  Self.hostNow() >= slot.holdUntil,
                   let layer = slot.displayLayer,
                   let queue = slot.drainQueue else { return nil }
             slot.drainArmed = true
@@ -3546,6 +3568,14 @@ public final class FairPlayStreamParser: NSObject {
                 }
             }
             if let holdFor {
+                // HALF THE LEAD, NOT THE THRESHOLD - see mse_fix_117's
+                // docstring. Waking when the lead is still feedAhead
+                // means feeding one or two samples and stopping again,
+                // fourteen times a second. Waking when it has decayed to
+                // half gives every wake a second and a half of media to
+                // hand over.
+                let sleepFor = min(max(holdFor + Self.feedAhead / 2,
+                                       0.05), 2.0)
                 let told = withState { () -> (queue: DispatchQueue?,
                                               nth: Int) in
                     guard let slot = streamParsers[streamKey] else {
@@ -3553,21 +3583,28 @@ public final class FairPlayStreamParser: NSObject {
                     }
                     slot.drainArmed = false
                     slot.pacedStops += 1
+                    slot.holdUntil = Self.hostNow() + sleepFor
                     return (slot.drainQueue, slot.pacedStops)
                 }
                 layer.stopRequestingMediaData()
-                if told.nth == 1 || told.nth % 200 == 0 {
+                if told.nth == 1 || told.nth % 20 == 0 {
                     Self.log("stream \(streamKey) holding off - the queue "
                              + "is \(holdFor + Self.feedAhead)s ahead of "
-                             + "the layer's clock. Hold \(told.nth).")
+                             + "the layer's clock, back in \(sleepFor)s. "
+                             + "Hold \(told.nth).")
                 }
                 // AND COME BACK. armDrainIfNeeded is otherwise only
                 // reached from an append, so a page that has finished
                 // buffering would never ask this layer for anything
                 // again. Capped so a wild timestamp cannot park the
                 // stream for minutes.
-                told.queue?.asyncAfter(
-                    deadline: .now() + min(max(holdFor, 0.05), 2.0)) {
+                //
+                // The wake clears the hold first: the guard in
+                // armDrainIfNeeded is there to stop APPENDS re-arming
+                // through a hold, and it must never be what stops this.
+                told.queue?.asyncAfter(deadline: .now() + sleepFor) {
+                    FairPlayStreamParser.shared.withStateClearHold(
+                        streamKey: streamKey)
                     FairPlayStreamParser.shared.armDrainIfNeeded(
                         streamKey: streamKey)
                 }

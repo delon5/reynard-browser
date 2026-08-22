@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3216 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3254 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2439,25 +2439,56 @@ index 9ca6e15..18d37f0 100644
 +      // Capture phase, on the window: the page's own handler runs after
 +      // this and calls pause(), so the tap has to be recorded before it
 +      // gets there. Passive, so this cannot affect scrolling.
++      var reynardLastTapVia = "";
++      // THREE EVENTS, NOT ONE - see mse_fix_118's docstring. A tap that
++      // the platform routes as a touch or a mouse event rather than a
++      // pointer event would otherwise never be recorded, and the guard
++      // would silently never fire.
 +      try {
-+        window.addEventListener(
-+          "pointerdown",
-+          function (e) {
-+            try {
-+              reynardLastTapAt = Date.now();
-+              reynardLastTapTarget = e.target;
-+              reynardLastTapWasControl = !!(
-+                e.target &&
-+                typeof e.target.closest === "function" &&
-+                e.target.closest(REYNARD_CONTROL_SELECTOR)
-+              );
-+            } catch (e2) {
-+              reynardLastTapWasControl = true;
-+            }
-+          },
-+          { capture: true, passive: true }
-+        );
++        ["pointerdown", "mousedown", "touchstart"].forEach(function (kind) {
++          window.addEventListener(
++            kind,
++            function (e) {
++              try {
++                reynardLastTapAt = Date.now();
++                reynardLastTapVia = kind;
++                reynardLastTapTarget =
++                  e.target ||
++                  (e.touches && e.touches[0] && e.touches[0].target) ||
++                  null;
++                reynardLastTapWasControl = !!(
++                  reynardLastTapTarget &&
++                  typeof reynardLastTapTarget.closest === "function" &&
++                  reynardLastTapTarget.closest(REYNARD_CONTROL_SELECTOR)
++                );
++              } catch (e2) {
++                reynardLastTapWasControl = true;
++              }
++            },
++            { capture: true, passive: true }
++          );
++        });
++        debug("TAP-PAUSE GUARD armed");
 +      } catch (e) {}
++
++      // What the guard saw, on every pause it lets through. Without
++      // this a guard that never fires is indistinguishable from a guard
++      // that is not in the build.
++      function reynardTapEvidence() {
++        if (!reynardLastTapAt) {
++          return "tap=none";
++        }
++        return (
++          "tap=" +
++          (Date.now() - reynardLastTapAt) +
++          "ms via " +
++          reynardLastTapVia +
++          " on " +
++          reynardDescribeTapTarget() +
++          " control=" +
++          (reynardLastTapWasControl ? "yes" : "no")
++        );
++      }
 +
 +      function reynardDescribeTapTarget() {
 +        var t = reynardLastTapTarget;
@@ -2488,7 +2519,7 @@ index 9ca6e15..18d37f0 100644
 +          if (
 +            reynardTapPauseGuard &&
 +            !reynardLastTapWasControl &&
-+            Date.now() - reynardLastTapAt < 500
++            Date.now() - reynardLastTapAt < 800
 +          ) {
 +            debug(
 +              "PAUSE() DECLINED - the tap was on " +
@@ -2500,7 +2531,14 @@ index 9ca6e15..18d37f0 100644
 +            );
 +            return undefined;
 +          }
-+          debug("PAUSE() " + reynardWho(this) + " by " + reynardCaller());
++          debug(
++            "PAUSE() " +
++              reynardWho(this) +
++              " " +
++              reynardTapEvidence() +
++              " by " +
++              reynardCaller()
++          );
 +        } catch (e) {}
 +        return reynardNativePause.apply(this, arguments);
 +      };
@@ -3219,7 +3257,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3277,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3315,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3715,7 +3753,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3883,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3921,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3737,7 +3775,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3913,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3951,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
