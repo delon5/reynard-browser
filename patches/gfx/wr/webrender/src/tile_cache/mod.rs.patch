@@ -1,0 +1,38 @@
+diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_cache/mod.rs
+--- a/gfx/wr/webrender/src/tile_cache/mod.rs
++++ b/gfx/wr/webrender/src/tile_cache/mod.rs
+@@ -2162,6 +2162,34 @@
+                                 result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
+                                 rect: PictureRect,
+                                 ignored: bool) {
++        // REYNARD: say it whatever else is switched off.
++        //
++        // The line below is the only thing in this crate that can name
++        // why a video stopped being a compositor surface, and on the
++        // protected MSE route that is the difference between a picture
++        // and a black rectangle: the decoded frames never pass through
++        // Gecko, so a demoted video paints as nothing.
++        //
++        // Reaching it needs a pref, a debug flag and a live log crate,
++        // and three captures in a row came back empty without ever
++        // establishing which of the three was missing. An unconditional
++        // eprintln! has none of those dependencies, so silence here
++        // means exactly one thing: no promotion was refused.
++        //
++        // Throttled rather than gated. The first twenty name the reason
++        // - which is all this is for - and one in six hundred after
++        // that keeps a stuck state visible at about a line every ten
++        // seconds without turning a frame loop into a log flood.
++        if let Err(reason) = &result {
++            use std::sync::atomic::{AtomicUsize, Ordering};
++            static REYNARD_SEEN: AtomicUsize = AtomicUsize::new(0);
++            let nth = REYNARD_SEEN.fetch_add(1, Ordering::Relaxed);
++            if nth < 20 || nth % 600 == 0 {
++                eprintln!("reynardWR: surface promotion {} with: {} (at {:?}, {} so far)",
++                          if ignored { "failure ignored" } else { "failed" },
++                          reason, rect, nth + 1);
++            }
++        }
+         if !self.debug_flags.contains(DebugFlags::SURFACE_PROMOTION_LOGGING) || result.is_ok() {
+             return;
+         }
