@@ -2509,6 +2509,14 @@ public final class FairPlayStreamParser: NSObject {
         /// decode from.
         var needsSyncSample = false
         var flushes = 0
+        /// When this stream last flushed a FAILED display layer, and how
+        /// many times it has had to.
+        ///
+        /// ADDED - see mse_fix_157's docstring. Zero rather than a
+        /// sentinel: hostNow is a mach uptime in the tens of thousands,
+        /// so the first check is always outside the gap.
+        var lastFailRecoveryAt = 0.0
+        var failRecoveries = 0
         var videoSeen = 0
         /// The second sink: a plain CALayer whose contents are set from
         /// the decoded pixel buffers. No renderer, no timebase, no
@@ -4091,6 +4099,49 @@ public final class FairPlayStreamParser: NSObject {
             }
             if changed || count == 1 {
                 Self.log("stream \(streamKey) enqueued \(count) - " + report)
+            }
+
+            // A FAILED LAYER NEVER UN-FAILS ITSELF - see mse_fix_157's
+            // docstring.
+            //
+            // status .failed is terminal. The layer goes on accepting
+            // samples and discarding all of them until flush() resets
+            // it, and the comment above has been describing that state
+            // for several rounds without anything acting on it.
+            //
+            // Netflix in capture 94b3e7b8 failed on its FIRST sample -
+            // "no content key present", 291ms before the licence
+            // arrived - and stayed failed for 18.865 seconds and 3,548
+            // enqueues. It came back only because entering fullscreen
+            // made the compositor build a new layer.
+            //
+            // The gate is re-opened with the flush because a flushed
+            // layer cannot decode until it is given a keyframe, which
+            // is the same pair resynchronise uses for a discontinuity.
+            if layer.status == .failed {
+                let recovery = withState { () -> Int? in
+                    guard let slot = streamParsers[streamKey] else {
+                        return nil
+                    }
+                    let now = Self.hostNow()
+                    guard now - slot.lastFailRecoveryAt
+                            > Self.failRecoveryGap else { return nil }
+                    slot.lastFailRecoveryAt = now
+                    slot.failRecoveries += 1
+                    slot.needsSyncSample = true
+                    return slot.failRecoveries
+                }
+                if let recovery {
+                    Self.log("stream \(streamKey) the display layer has "
+                             + "FAILED - "
+                             + (layer.error.map { String(describing: $0) }
+                                ?? "no error reported")
+                             + " - flushing and re-feeding from the next "
+                             + "keyframe. Recovery \(recovery).")
+                    // Already on the drain queue, which is where enqueue
+                    // happens - the one collision flush() can have.
+                    layer.flush()
+                }
             }
             // A CLOCK AHEAD OF THE MEDIA IS FATAL, AND SILENT.
             //
@@ -6883,6 +6934,13 @@ public final class FairPlayStreamParser: NSObject {
     /// smaller differences would move the picture four times a second
     /// for no reason.
     fileprivate static let positionSlack: Double = 0.5
+
+    /// The least time between two recoveries of a failed layer.
+    ///
+    /// ADDED - see mse_fix_157's docstring. A flush that does not fix
+    /// the failure would otherwise be attempted on every sample, which
+    /// on this route is a hundred and eighty a second.
+    fileprivate static let failRecoveryGap: Double = 1.0
 
     /// The element moved. Put this session's picture on its clock.
     @objc public func setPosition(_ sessionId: String, owner: UInt64,

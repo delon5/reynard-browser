@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3581 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3565 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -3110,42 +3110,34 @@ index 9ca6e15..18d37f0 100644
 +  // Prime Video and Disney+, all of which UserAgentPolicy hands the
 +  // Safari iPhone string.
 +  //
-+  // HOST-GATED, and that is not belt and braces. HBO Max carries the
-+  // same Macintosh override as Netflix - a per-site override outranks
-+  // UserAgentPolicy's domain list - and HBO Max is the one site on this
-+  // route that works end to end today: 147 enqueues at status=1,
-+  // rendering, with sound. Deriving an identity is a hypothesis, and a
-+  // hypothesis does not get to run on the control.
++  // NOT HOST-GATED - see mse_fix_156's docstring. The list used to be
++  // ["netflix.com", "hbomax.com"], written when deriving an identity
++  // was a hypothesis and HBO Max was the control that had to be left
++  // alone. It has applied 123 times across the capture set since, with
++  // no failure attributable to it, and the list is now a second
++  // opinion that can only disagree with the UA. It does, once, on
++  // tv.apple.com carrying the Macintosh override:
 +  //
-+  // The list is whatever --hosts named when this was applied;
-+  // subdomains are covered, so one entry reaches play.hbomax.com too.
++  //   identity not applied on tv.apple.com - not in the follow-the-UA
++  //   list. native platform=Linux x86_64 oscpu=iPhone vendor=
++  //   maxTouchPoints=5 safari=no ua=Mozilla/5.0 (Macintosh; Intel Mac
++  //   OS X 10_15_7) AppleWebKit/
++  //
++  // A page told it is talking to a Mac, reading platform Linux
++  // x86_64, oscpu iPhone and maxTouchPoints 5 - a combination no real
++  // browser produces. The other 80 declines on that host, and all 8
++  // on www.primevideo.com, carry the iPhone Safari string and are
++  // correct; the UA says so and the list adds nothing.
++  //
++  // The UA is the whole gate now. An iPhone cannot natively report
++  // Macintosh, Windows NT or X11, so a UA that says one of them is
++  // necessarily an override and the identity follows it; a UA that
++  // says none of them is left completely alone, which is every
++  // ordinary page in the browser.
 +  try {
-+    var reynardIdentityHosts = ["netflix.com", "hbomax.com"];
 +    var reynardIdentityHost = String(location.hostname || "");
-+    var reynardIdentityWanted = reynardIdentityHosts.some(function (domain) {
-+      return (
-+        reynardIdentityHost === domain ||
-+        reynardIdentityHost.slice(-(domain.length + 1)) === "." + domain
-+      );
-+    });
 +    var reynardIdentityUA = String(navigator.userAgent || "");
 +    var reynardIdentity = null;
-+    if (!reynardIdentityWanted) {
-+      // Declined, but still reported - and with the values, because
-+      // this is the only place that ever prints what navigator natively
-+      // says on this device. It is what answers "does the iPhone UA
-+      // spoof anything beyond the string" for tv.apple.com and HBO Max
-+      // without touching either of them.
-+      debug(
-+        "identity not applied on " + reynardIdentityHost +
-+        " - not in the follow-the-UA list. native platform=" +
-+        navigator.platform + " oscpu=" + navigator.oscpu +
-+        " vendor=" + navigator.vendor +
-+        " maxTouchPoints=" + navigator.maxTouchPoints +
-+        " safari=" + (window.safari ? "yes" : "no") +
-+        " ua=" + reynardIdentityUA.slice(0, 60)
-+      );
-+    } else
 +    if (reynardIdentityUA.indexOf("Macintosh") !== -1) {
 +      reynardIdentity = {
 +        name: "Macintosh",
@@ -3177,34 +3169,30 @@ index 9ca6e15..18d37f0 100644
 +        safari: false,
 +      };
 +    } else {
-+      // A listed host whose UA does not claim a desktop OS yet.
++      // A UA that claims no desktop OS. Nothing is assumed.
 +      //
-+      // This is not an edge case, it is the FIRST document of every
-+      // navigation: the shim runs at DOMWindowCreated, and the override
-+      // is applied after that. The capture is unambiguous - the shim
-+      // installed on www.netflix.com at line 668, the redirect to
-+      // /unsupported happened at 672, and the first identity line in the
-+      // whole log is at 4145 on the next document. Whatever Netflix
-+      // read, it read here, with navigator untouched.
++      // The branch that stood here assumed Macintosh, and could only
++      // do that because a host in the list was by definition being
++      // given a desktop UA even on the first document - the shim runs
++      // at DOMWindowCreated and the override lands after it. With no
++      // list there is nothing to assume FROM, and assuming anyway
++      // would put MacIntel on every ordinary mobile page in the
++      // browser.
 +      //
-+      // The host list is the set of sites being given a desktop UA, so
-+      // membership is enough to act on. macOS because that is what the
-+      // list is for; a UA that turns out to claim Windows or Linux still
-+      // wins on every later document, where it is readable.
-+      reynardIdentity = {
-+        name: "Macintosh",
-+        platform: "MacIntel",
-+        oscpu: "Intel Mac OS X 10.15",
-+        vendor: "Apple Computer, Inc.",
-+        vendorSub: "",
-+        maxTouchPoints: 0,
-+        safari: true,
-+        assumed: true,
-+      };
++      // It fired ONCE in the whole capture set against 123 real
++      // applications, so what this gives up is one first document.
++      //
++      // Still reported, and with the values, because this is the only
++      // place that ever prints what navigator natively says on this
++      // device.
 +      debug(
-+        "identity UA is not desktop yet (" +
-+        reynardIdentityUA.slice(0, 48) +
-+        ") - assuming Macintosh for a listed host"
++        "identity not applied on " + reynardIdentityHost +
++        " - the UA claims no desktop OS. native platform=" +
++        navigator.platform + " oscpu=" + navigator.oscpu +
++        " vendor=" + navigator.vendor +
++        " maxTouchPoints=" + navigator.maxTouchPoints +
++        " safari=" + (window.safari ? "yes" : "no") +
++        " ua=" + reynardIdentityUA.slice(0, 60)
 +      );
 +    }
 +
@@ -3249,15 +3237,11 @@ index 9ca6e15..18d37f0 100644
 +
 +      reynardDefine("platform", reynardIdentity.platform);
 +      reynardDefine("oscpu", reynardIdentity.oscpu);
-+      // Not when the identity was assumed. The other five are
-+      // operating-system facts that follow from the host being listed;
-+      // appVersion is the user agent's own tail, and inventing one when
-+      // the real string is not readable would put a version in
-+      // navigator that nothing else in the browser agrees with. The
-+      // readback below shows what it was left as.
-+      if (!reynardIdentity.assumed) {
-+        reynardDefine("appVersion", reynardAppVersion);
-+      }
++      // appVersion unconditionally - see mse_fix_156's docstring. The
++      // guard that stood here was for the assumed identity, which had
++      // no real UA to take a tail from. Nothing is assumed any more,
++      // so this is always the string the site was actually given.
++      reynardDefine("appVersion", reynardAppVersion);
 +      reynardDefine("vendor", reynardIdentity.vendor);
 +      reynardDefine("vendorSub", reynardIdentity.vendorSub);
 +      reynardDefine("maxTouchPoints", reynardIdentity.maxTouchPoints);
@@ -3584,7 +3568,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3642,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3626,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4080,7 +4064,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4248,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4232,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4102,7 +4086,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4278,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4262,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
