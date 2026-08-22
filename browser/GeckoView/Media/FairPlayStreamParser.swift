@@ -2249,12 +2249,37 @@ public final class FairPlayStreamParser: NSObject {
         /// capture this came from. A bigger bin does not fix that; not
         /// asking for the data does.
         var mediaDataHeld = false
+        /// Whether a held fragment is already on its way to the parser.
+        ///
+        /// ADDED - see mse_fix_132's docstring. releaseMediaDataIfDrained
+        /// decides on the drain queue and appends on the main queue, and
+        /// it is called once per sample the layer takes. In capture
+        /// ee663d06 sixteen of those decisions were taken before the
+        /// first of them landed: the live-depth column fix 105 added
+        /// reads 120, 234, 336, 458, 522, 617, 740, 862 and then 900
+        /// eight times, against a captured depth of 115-120 on every
+        /// one. Forty-eight seconds of media went into a queue that
+        /// holds thirty-seven and the rest was destroyed.
+        ///
+        /// One in flight at a time, which is what the "one fragment per
+        /// call rather than the lot" comment beside the dispatch has
+        /// always claimed to do.
+        var releaseInFlight = false
         /// Samples thrown away since the needsSyncSample gate closed.
         ///
         /// The overflow counter could not see these: the gate returns
         /// before it is touched, so one overflow was reported and eight
         /// more in the same window were silent.
         var droppedSinceSync = 0
+        /// The first and last PTS thrown away since the gate closed.
+        ///
+        /// ADDED - see mse_fix_132's docstring. A count says nothing
+        /// about a hole. Capture ee663d06 reports "63 samples lost
+        /// waiting for it" sixteen times running and never once says
+        /// that between them they are forty-eight seconds of the film,
+        /// which is the only number that identifies the fault.
+        var droppedSinceSyncFrom = Double.nan
+        var droppedSinceSyncTo = Double.nan
         /// Which call installed the timebase this stream's layer is on.
         ///
         /// ADDED - see mse_fix_105's docstring. On tv.apple.com a layer
@@ -2898,9 +2923,17 @@ public final class FairPlayStreamParser: NSObject {
                                           left: Int, depth: Int)? in
             guard let slot = streamParsers[streamKey],
                   !slot.heldSegments.isEmpty,
+                  // ONE AT A TIME - see mse_fix_132's docstring. This
+                  // runs on every sample the layer takes, and the
+                  // append it asks for happens on another queue an
+                  // unknown time later, so without this the drain
+                  // dispatches a release per drained sample and the
+                  // whole backlog lands at once.
+                  !slot.releaseInFlight,
                   slot.pending.count <= Self.mediaDataLowWater else {
                 return nil
             }
+            slot.releaseInFlight = true
             let next = slot.heldSegments.removeFirst()
             return (bytes: next, parser: slot.parser,
                     left: slot.heldSegments.count,
@@ -2917,7 +2950,12 @@ public final class FairPlayStreamParser: NSObject {
             // for it.
             DispatchQueue.main.async {
                 let append = NSSelectorFromString("appendStreamData:")
-                guard fragment.parser.responds(to: append) else { return }
+                guard fragment.parser.responds(to: append) else {
+                    FairPlayStreamParser.shared.finishRelease(
+                        fragment.bytes, streamKey: streamKey,
+                        appended: false)
+                    return
+                }
                 // CAPTURED AND LIVE - see mse_fix_105's docstring. The
                 // depth above was read on the drain queue; this block
                 // runs on the main queue an unknown time later, and in
@@ -2925,10 +2963,39 @@ public final class FairPlayStreamParser: NSObject {
                 // reported 116-119 while the queue actually stood at its
                 // 900 cap and was overflowing.
                 let live = FairPlayStreamParser.shared.pendingDepth(streamKey)
+                // AND ACTED ON - see mse_fix_132's docstring. The
+                // column above has reported the queue at its cap while
+                // the guard that let this through read 116 since fix
+                // 105 added it, and nothing ever looked. The check that
+                // counts is the one taken beside the thing it guards.
+                guard live <= Self.mediaDataLowWater else {
+                    FairPlayStreamParser.shared.finishRelease(
+                        fragment.bytes, streamKey: streamKey,
+                        appended: false)
+                    Self.log("stream \(streamKey) held a fragment BACK - "
+                             + "the queue was \(fragment.depth) when this "
+                             + "was decided and \(live) by the time it "
+                             + "ran. \(fragment.left + 1) still held.")
+                    return
+                }
                 Self.log("stream \(streamKey) releasing a held fragment "
                          + "- captured \(fragment.depth), live \(live), "
                          + "\(fragment.left) still held")
-                fragment.parser.perform(append, with: fragment.bytes)
+                // GUARDED, because the flag above must be cleared on
+                // every exit and appendStreamData: is SPI that raises
+                // rather than returning an error - see mse_fix_132's
+                // docstring. An exception unwinding past the clear
+                // would strand every fragment behind it forever.
+                let failure = GeckoRuntimeBridge.catchException(from: {
+                    _ = fragment.parser.perform(append,
+                                                with: fragment.bytes)
+                })
+                FairPlayStreamParser.shared.finishRelease(
+                    fragment.bytes, streamKey: streamKey, appended: true)
+                if let failure {
+                    Self.log("stream \(streamKey) the parser REFUSED a "
+                             + "held fragment: \(failure)")
+                }
             }
         }
         let work = withState { () -> (parser: NSObject, tracks: [Int32],
@@ -2945,6 +3012,25 @@ public final class FairPlayStreamParser: NSObject {
                  + "drained to \(work.left)")
         Self.drainMediaData(work.parser, tracks: work.tracks,
                             label: streamKey)
+    }
+
+    /// The main queue is done with a held fragment.
+    ///
+    /// ADDED - see mse_fix_132's docstring. Clears the in-flight flag
+    /// on every exit, and puts the bytes back at the FRONT of the held
+    /// list when they were not appended, so the order the page produced
+    /// them in survives the deferral. The next sample the layer takes
+    /// calls releaseMediaDataIfDrained again, so a fragment put back
+    /// here is never far from another try.
+    fileprivate func finishRelease(_ bytes: Data, streamKey: String,
+                                   appended: Bool) {
+        withState {
+            guard let slot = streamParsers[streamKey] else { return }
+            slot.releaseInFlight = false
+            if !appended {
+                slot.heldSegments.insert(bytes, at: 0)
+            }
+        }
     }
 
     /// How deep the display queue is right now.
@@ -3367,23 +3453,63 @@ public final class FairPlayStreamParser: NSObject {
         // used to be - either way the next usable sample is a keyframe
         // and everything before it decodes to garbage.
         if withState({ slot.needsSyncSample }) {
-            guard Self.isSyncSample(sampleBuffer) else {
+            // AND ROOM FOR IT - see mse_fix_132's docstring. A keyframe
+            // arriving into a full queue clears this gate, the append
+            // sixty lines below then overflows and closes it again, and
+            // the GOP behind that keyframe is thrown away for nothing.
+            // Capture ee663d06 ran that sixteen times in thirty-one
+            // milliseconds - overflow 4 through 19, resyncs at 4203.7,
+            // 4206.4, 4208.7, 4211.0, 4213.7, 4216.4, 4219.6, 4222.5,
+            // 4225.1, 4227.8, 4230.8, 4240.9, 4243.8, 4246.7, 4249.5,
+            // 4251.6 - and lost the forty-eight seconds between them.
+            //
+            // One closure per burst instead: with no room the gate
+            // stays shut, and the next keyframe is two or three seconds
+            // of media away rather than one sample.
+            guard Self.isSyncSample(sampleBuffer),
+                  withState({ slot.pending.count < 900 }) else {
                 // COUNTED - see mse_fix_98's docstring. Everything
                 // between the drop and the next keyframe goes, and until
                 // now nothing said how much. Nine of these in one window
                 // is the whole of the missing picture.
-                withState { slot.droppedSinceSync += 1 }
+                // WHAT, not just how many - see mse_fix_132's
+                // docstring.
+                withState {
+                    slot.droppedSinceSync += 1
+                    guard intakePTS.isFinite else { return }
+                    if slot.droppedSinceSyncFrom.isNaN {
+                        slot.droppedSinceSyncFrom = intakePTS
+                    }
+                    slot.droppedSinceSyncTo = intakePTS
+                }
                 return
             }
-            let lost = withState { () -> Int in
+            let lost = withState { () -> (n: Int, from: Double,
+                                          to: Double) in
                 slot.needsSyncSample = false
                 let n = slot.droppedSinceSync
+                let from = slot.droppedSinceSyncFrom
+                let to = slot.droppedSinceSyncTo
                 slot.droppedSinceSync = 0
-                return n
+                slot.droppedSinceSyncFrom = Double.nan
+                slot.droppedSinceSyncTo = Double.nan
+                return (n, from, to)
+            }
+            // AS MEDIA - see mse_fix_132's docstring. Sixteen of these
+            // in capture ee663d06 said "63 samples lost" and not one of
+            // them said the sixteen together were forty-eight seconds
+            // of the film, which is the number that names the fault.
+            // Built as a statement, not a ternary: this file's own
+            // note about long concatenations applies, and the operands
+            // here are two interpolations and a subtraction.
+            var hole = ""
+            if lost.from.isFinite, lost.to.isFinite {
+                hole = " - lost \(lost.from) to \(lost.to), "
+                    + "\(lost.to - lost.from)s of media"
             }
             Self.log("stream \(streamKey) resync complete - first sync "
-                     + "sample at pts \(intakePTS), \(lost) samples lost "
-                     + "waiting for it")
+                     + "sample at pts \(intakePTS), \(lost.n) samples "
+                     + "lost waiting for it" + hole)
         }
 
         // The independent answer, before anything to do with the layer:
@@ -5298,6 +5424,10 @@ public final class FairPlayStreamParser: NSObject {
                 adoptTrimmed = at
                 adoptGateHeld = slot.droppedSinceSync
                 slot.droppedSinceSync = 0
+                // With the span it was accumulating - see
+                // mse_fix_132's docstring.
+                slot.droppedSinceSyncFrom = Double.nan
+                slot.droppedSinceSyncTo = Double.nan
                 slot.pending.removeFirst(at)
                 slot.needsSyncSample = false
             } else {
