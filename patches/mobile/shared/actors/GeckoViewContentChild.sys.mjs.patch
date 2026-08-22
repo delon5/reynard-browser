@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3752 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3758 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2921,11 +2921,17 @@ index 9ca6e15..18d37f0 100644
 +            return;
 +          }
 +          var doc = (t && t.ownerDocument) || document;
-+          // AND A MEASUREMENT OF NOTHING IS NOT A MEASUREMENT. All six
-+          // probes in that capture reported `controls=notfound` and
-+          // `no video element`, because there was no player yet. Those
-+          // must not count against the budget or the real taps never
-+          // get one.
++          // AND A MEASUREMENT OF NOTHING IS NOT A MEASUREMENT. All
++          // six probes in capture 37d82f28 reported controls=notfound
++          // and no video element, because there was no player yet.
++          // Those must not count against the budget or the real taps
++          // never get one.
++          //
++          // NO BACKTICKS IN HERE - see mse_fix_145's docstring. This
++          // comment is inside a template literal thirty-six hundred
++          // lines long, so a backtick ends it and everything after is
++          // parsed as code. The first version of this comment quoted
++          // those two values and took the entire content script down.
 +          if (!doc.querySelector("video")) {
 +            return;
 +          }
@@ -3755,7 +3761,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3813,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3819,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4251,7 +4257,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4419,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4425,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4273,7 +4279,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4449,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4455,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
