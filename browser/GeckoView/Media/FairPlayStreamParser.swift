@@ -2721,6 +2721,16 @@ public final class FairPlayStreamParser: NSObject {
     /// appended segment, so an ordinary append never trips it. 120 is
     /// five seconds - enough that the release has time to arrive before
     /// the layer runs dry.
+    /// How many already-fed samples to keep for the next handover.
+    ///
+    /// ADDED - see mse_fix_111's docstring. The compositor replaces the
+    /// video layer every six to thirteen seconds on these sites, and
+    /// the replacement can only paint if it is given a keyframe at or
+    /// before the clock it inherits. In capture 5f8a8ea2 the furthest
+    /// back that was needed was 11.2 seconds; 400 samples is about
+    /// sixteen at 24fps.
+    fileprivate static let keepBackSamples = 400
+
     fileprivate static let mediaDataHighWater = 300
     fileprivate static let mediaDataLowWater = 120
 
@@ -3322,10 +3332,23 @@ public final class FairPlayStreamParser: NSObject {
             // is not happening, and half of one is worth nothing: the
             // whole value of this is that it starts at a keyframe.
             if isSync {
-                // KEPT, not dropped - see mse_fix_110's docstring. This
-                // is the GOP the layer is most likely to be inside when
-                // the compositor takes its layer away.
-                slot.previousGOP = slot.currentGOP
+                // A ROLLING WINDOW, not one GOP - see mse_fix_111's
+                // docstring. Two GOPs carried nothing at every handover
+                // where the display queue was deeper than they were,
+                // which in capture 5f8a8ea2 was four of six, held 347
+                // to 400, and each left its new layer one and a half to
+                // eleven seconds short of a frame it could paint.
+                //
+                // Trimmed by count rather than by span: the span of a
+                // queue is a property of the content, the memory is a
+                // property of this process, and it is the memory that
+                // has to be bounded. 400 compressed samples is fewer
+                // than the 900 pending is already allowed.
+                slot.previousGOP += slot.currentGOP
+                if slot.previousGOP.count > Self.keepBackSamples {
+                    slot.previousGOP.removeFirst(
+                        slot.previousGOP.count - Self.keepBackSamples)
+                }
                 slot.currentGOP.removeAll()
             }
             if slot.currentGOP.count >= 300 {
@@ -4935,9 +4958,31 @@ public final class FairPlayStreamParser: NSObject {
             // The run still starts on a keyframe, because previousGOP
             // starts on one by construction, so the new layer can
             // decode from the first sample it is handed.
+            // BY TIME, not by counting - see mse_fix_111's docstring.
+            // What the new layer needs is the run from the last
+            // KEYFRAME at or before the clock it is inheriting, forward
+            // to the first sample still queued. The old arithmetic -
+            // window size minus queue depth - answered a different
+            // question, and answered zero whenever the queue was deeper
+            // than the window.
             let fed = slot.previousGOP + slot.currentGOP
-            let alreadyFed = max(0, fed.count - slot.pending.count)
-            let carried = Array(fed.prefix(alreadyFed))
+            let target = anchor.seconds
+            let queuedFrom = slot.pending.first.map {
+                CMSampleBufferGetPresentationTimeStamp($0).seconds
+            } ?? Double.infinity
+            let usable = fed.filter { sample in
+                let at = CMSampleBufferGetPresentationTimeStamp(sample)
+                    .seconds
+                return at.isFinite && at < queuedFrom
+            }
+            var carried: [CMSampleBuffer] = []
+            if let start = usable.lastIndex(where: { sample in
+                let at = CMSampleBufferGetPresentationTimeStamp(sample)
+                    .seconds
+                return Self.isSyncSample(sample) && at <= target
+            }) {
+                carried = Array(usable[start...])
+            }
             let held = slot.pending.count
             if !carried.isEmpty {
                 slot.pending = carried + slot.pending
