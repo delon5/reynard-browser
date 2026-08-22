@@ -32,46 +32,6 @@ private func configureUnsandboxedAppDataDirectories(_ directories: ReynardDirect
     
     setenv("MOZ_APP_DATA", appDataDirectory.path, 1)
     setenv("MOZ_LOCAL_APP_DATA", appDataDirectory.path, 1)
-
-    // WHY THE VIDEO LOST ITS COMPOSITOR SURFACE - see
-    // mse_fix_160's docstring. WebRender warns with the reason it
-    // refused to promote a video, but the warning goes through
-    // GeckoLogger, which wraps env_logger and reads RUST_LOG -
-    // defaulting to "error" in a release build, which swallows it.
-    //
-    // CORRECTED - see mse_fix_160a's docstring. This was
-    // "webrender::picture=warn", and the warning is not in that
-    // module: picture.rs carries no log macros at all, and the one
-    // that matters is tile_cache/mod.rs:2172, a separate top-level
-    // module. The filter matched nothing, and a filter that matches
-    // nothing looks exactly like a run with nothing to report.
-    //
-    // The whole crate, not the one module, on purpose: precision is
-    // what broke it, WebRender warns rarely in a working run, and this
-    // survives the code being reorganised again. Skipped entirely when
-    // something outside has already set RUST_LOG.
-    if getenv("RUST_LOG") == nil {
-        setenv("RUST_LOG", "webrender=warn", 1)
-    }
-    // AND SAY SO - see mse_fix_160b's docstring. A diagnostic whose
-    // silence is indistinguishable from a clean run is not a
-    // diagnostic. This prints the value that is actually in force.
-    if let value = getenv("RUST_LOG") {
-        fputs("reynardWR: RUST_LOG=\(String(cString: value))\n", stderr)
-    } else {
-        fputs("reynardWR: RUST_LOG is NOT SET\n", stderr)
-    }
-    // A SECOND WAY OUT - see mse_fix_160b's docstring. GeckoLogger
-    // tries Gecko's own logging first and only falls back to
-    // env_logger, so naming the module in MOZ_LOG gives the same
-    // warning a second, independent path to the log.
-    if getenv("MOZ_LOG") == nil {
-        setenv("MOZ_LOG", "webrender:4", 1)
-    }
-    if let value = getenv("MOZ_LOG") {
-        fputs("reynardWR: MOZ_LOG=\(String(cString: value))\n", stderr)
-    }
-    fflush(stderr)
 }
 
 /// Points stdout and stderr at a real file.
@@ -199,6 +159,37 @@ private func configureSandboxExtension() {
 
 // First, before anything can write to stdout.
 redirectStandardStreamsToFile()
+
+// WHY THE VIDEO LOST ITS COMPOSITOR SURFACE - see mse_fix_160c's
+// docstring, and mse_fix_160's for what this is asking.
+//
+// Top level, not inside configureUnsandboxedAppDataDirectories, which
+// is @available(obsoleted: 14.0) and gated on the no-sandbox
+// entitlement - it has never run on this device, and neither had this.
+//
+// After redirectStandardStreamsToFile above, so what it prints reaches
+// the capture rather than the streams' pre-redirect destination.
+//
+// The whole crate rather than one module: the warning is in
+// webrender::tile_cache, picture.rs carries no log macros at all, and
+// a filter that matches nothing is indistinguishable from a clean run.
+if getenv("RUST_LOG") == nil {
+    setenv("RUST_LOG", "webrender=warn", 1)
+}
+if let reynardRustLog = getenv("RUST_LOG") {
+    fputs("reynardWR: RUST_LOG=\(String(cString: reynardRustLog))\n", stderr)
+} else {
+    fputs("reynardWR: RUST_LOG is NOT SET\n", stderr)
+}
+// A second, independent route for the same warning: GeckoLogger tries
+// Gecko's own logging first and only falls back to env_logger.
+if getenv("MOZ_LOG") == nil {
+    setenv("MOZ_LOG", "webrender:4", 1)
+}
+if let reynardMozLog = getenv("MOZ_LOG") {
+    fputs("reynardWR: MOZ_LOG=\(String(cString: reynardMozLog))\n", stderr)
+}
+fflush(stderr)
 
 let recoveryFailed: Bool
 do {
