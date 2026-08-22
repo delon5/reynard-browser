@@ -6147,6 +6147,8 @@ public final class FairPlayStreamParser: NSObject {
             + " hidden \(layer.isHidden)"
             // WHO IS ABOVE IT - see mse_fix_138's docstring.
             + Self.layerChain(layer)
+            // AND WHAT IS OVER IT - see mse_fix_154's docstring.
+            + Self.layersOver(layer)
     }
 
     /// Every ancestor of this layer, from its parent to the root.
@@ -6188,6 +6190,60 @@ public final class FairPlayStreamParser: NSObject {
         }
         if depth == 0 { out += " <none>" }
         return out
+    }
+
+    /// What is drawn ON TOP of this layer, at every level of the tree.
+    ///
+    /// ADDED - see mse_fix_154's docstring. layerChain walks ancestors
+    /// and has answered its question - nothing above the sink is hidden
+    /// or transparent in any of the 262 landscape samples this log has
+    /// taken. This walks the same path and looks sideways instead: at
+    /// each level, the siblings ordered AFTER the child on the path are
+    /// the ones the render server composites over it.
+    ///
+    /// Only siblings that are visible and whose frame actually
+    /// intersects the sink's are reported, so a controls bar that sits
+    /// beside the picture is silent and one that sits on it is not.
+    ///
+    /// Six at most and twelve levels deep, for the reason layerChain is
+    /// bounded: a diagnostic must not be able to turn one log line into
+    /// a hang or a page of text.
+    fileprivate static func layersOver(_ layer: CALayer) -> String {
+        var out = ""
+        var child: CALayer = layer
+        var current = layer.superlayer
+        var depth = 0
+        var found = 0
+        while let here = current, depth < 12 {
+            guard let siblings = here.sublayers,
+                  let index = siblings.firstIndex(where: { $0 === child })
+            else {
+                break
+            }
+            let mine = layer.convert(layer.bounds, to: here)
+            for above in siblings.dropFirst(index + 1) {
+                guard !above.isHidden, above.opacity > 0.01 else { continue }
+                let box = above.frame
+                guard box.intersects(mine) else { continue }
+                let hit = box.intersection(mine)
+                found += 1
+                guard found <= 6 else { continue }
+                out += " <\(type(of: above))"
+                    + " \(Int(box.width.rounded()))x"
+                    + "\(Int(box.height.rounded()))"
+                    + " covering \(Int(hit.width.rounded()))x"
+                    + "\(Int(hit.height.rounded()))"
+                if above.opacity < 0.999 { out += " opacity \(above.opacity)" }
+                if above.isOpaque { out += " opaque" }
+                out += (above.contents != nil) ? " drawn" : " empty"
+                out += ">"
+            }
+            child = here
+            current = here.superlayer
+            depth += 1
+        }
+        if found == 0 { return " over nothing" }
+        return " over \(found):" + out
     }
 
     /// What the layer says it has actually put on the screen.
