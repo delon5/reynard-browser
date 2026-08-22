@@ -2283,6 +2283,14 @@ public final class FairPlayStreamParser: NSObject {
         /// seconds, each one a stopRequestingMediaData and a
         /// requestMediaDataWhenReady on a layer that is presenting.
         var holdUntil: Double = 0
+        /// When the current hold began and how long it meant to last.
+        ///
+        /// ADDED - see mse_fix_129's docstring. A hold at a lead of
+        /// 8.29s, whose sleep is capped at two seconds, produced a
+        /// twenty-three second stall in capture c7528ff8 - and nothing
+        /// in the log says a hold ever ended, only that one began.
+        var holdStartedAt: Double = 0
+        var holdIntended: Double = 0
         var failObserver: NSObjectProtocol?
         var drainQueue: DispatchQueue?
         /// The independent decode probe - see runDecodeProbe.
@@ -3522,6 +3530,36 @@ public final class FairPlayStreamParser: NSObject {
         withState { streamParsers[streamKey]?.holdUntil = 0 }
     }
 
+    /// Is a hold still standing well past the time it meant to?
+    ///
+    /// ADDED - see mse_fix_129's docstring. Clears it if so, and says
+    /// so to the caller, which is the only place that reports it.
+    fileprivate func withStateHoldOverran(streamKey: String) -> Bool {
+        return withState { () -> Bool in
+            guard let slot = streamParsers[streamKey],
+                  slot.holdStartedAt > 0 else { return false }
+            slot.holdUntil = 0
+            slot.holdStartedAt = 0
+            return true
+        }
+    }
+
+    /// How long the hold that has just ended really lasted.
+    ///
+    /// ADDED - see mse_fix_129's docstring. Reported only when it
+    /// overran, so a healthy stream says nothing.
+    fileprivate func withStateHoldEnded(streamKey: String) -> (Double, Double)? {
+        return withState { () -> (Double, Double)? in
+            guard let slot = streamParsers[streamKey],
+                  slot.holdStartedAt > 0 else { return nil }
+            let lasted = Self.hostNow() - slot.holdStartedAt
+            let meant = slot.holdIntended
+            slot.holdStartedAt = 0
+            guard lasted > meant * 2 + 0.5 else { return nil }
+            return (lasted, meant)
+        }
+    }
+
     fileprivate func armDrainIfNeeded(streamKey: String) {
         let work = withState { () -> (layer: AVSampleBufferDisplayLayer,
                                       queue: DispatchQueue)? in
@@ -3594,6 +3632,9 @@ public final class FairPlayStreamParser: NSObject {
                     slot.drainArmed = false
                     slot.pacedStops += 1
                     slot.holdUntil = Self.hostNow() + sleepFor
+                    // ADDED - see mse_fix_129's docstring.
+                    slot.holdStartedAt = Self.hostNow()
+                    slot.holdIntended = sleepFor
                     return (slot.drainQueue, slot.pacedStops)
                 }
                 layer.stopRequestingMediaData()
@@ -3618,7 +3659,32 @@ public final class FairPlayStreamParser: NSObject {
                     FairPlayStreamParser.shared.armDrainIfNeeded(
                         streamKey: streamKey)
                 }
+                // AND A BACKSTOP - see mse_fix_129's docstring. The wake
+                // above runs on the drain queue and depends on
+                // requestMediaDataWhenReady calling back. When that did
+                // not happen the stream stalled for twenty-three seconds
+                // on a hold that meant to last two. A second wake on the
+                // main queue, at twice the sleep, cannot be blocked by
+                // the same thing.
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + sleepFor * 2) {
+                    let stuck = FairPlayStreamParser.shared
+                        .withStateHoldOverran(streamKey: streamKey)
+                    guard stuck else { return }
+                    Self.log("stream \(streamKey) the backstop released a "
+                             + "hold that overran - the drain queue did "
+                             + "not come back")
+                    FairPlayStreamParser.shared.armDrainIfNeeded(
+                        streamKey: streamKey)
+                }
                 return
+            }
+            // THE HOLD ENDED - see mse_fix_129's docstring. Said only
+            // when it lasted well past its intent, which is the case
+            // that has been invisible.
+            if let overran = withStateHoldEnded(streamKey: streamKey) {
+                Self.log("stream \(streamKey) the feed came back after "
+                         + "\(overran.0)s, meant to wait \(overran.1)s")
             }
             let next = withState { () -> CMSampleBuffer? in
                 guard let slot = streamParsers[streamKey],
@@ -5217,11 +5283,20 @@ public final class FairPlayStreamParser: NSObject {
                     .seconds
                 return at.isFinite && at < queuedFrom
             }
+            // AND NOT FROM ANOTHER PART OF THE FILM - see
+            // mse_fix_129's docstring. The window is four hundred
+            // samples, and when it spans a gap the last keyframe at or
+            // before the clock can be thirty-nine seconds back, as it
+            // was in capture c7528ff8. Those frames decode and are
+            // thrown away. staleBehind is what 124 already decided
+            // "too far behind" means, and a reference run is no
+            // different.
             var carried: [CMSampleBuffer] = []
             if let start = usable.lastIndex(where: { sample in
                 let at = CMSampleBufferGetPresentationTimeStamp(sample)
                     .seconds
                 return Self.isSyncSample(sample) && at <= target
+                    && at >= target - Self.staleBehind
             }) {
                 carried = Array(usable[start...])
             }
