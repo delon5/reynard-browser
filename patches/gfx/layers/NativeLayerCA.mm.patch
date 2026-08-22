@@ -47,7 +47,7 @@ index 94efd9b6c370..9039890c772e 100644
    return true;
  }
  
-@@ -924,6 +948,38 @@
+@@ -924,6 +948,46 @@
 +  // PROTECTED FIRST - see mse_fix_116's docstring. Upstream asks
 +  // whether the surface looks like video before it asks whether it is
 +  // protected, and IsVideo is mTextureHostIsVideo, which is
@@ -74,10 +74,18 @@ index 94efd9b6c370..9039890c772e 100644
 +    // fix 116 had to be moved in front of, and it decides on inputs
 +    // that nothing prints. A protected layer reaching here means 116
 +    // is not holding.
-+    printf_stderr(
-+        "NativeLayerCA: not specialized - isVideo=0 isDRM=%d isHDR=%d "
-+        "fullscreen=%d\n",
-+        mIsDRM ? 1 : 0, mIsHDR ? 1 : 0, mRootWindowIsFullscreen ? 1 : 0);
++    // PROTECTED ONLY - see mse_fix_138's docstring. This fired 5,976
++    // times in seventy-eight seconds of capture 94cc3a44 and 10,808
++    // times in d655146f, every one of them isVideo=0 isDRM=0 - layers
++    // that were never eligible. Fix 121 added it to catch a PROTECTED
++    // layer reaching a gate fix 116 should have kept it away from, and
++    // that is the only case worth a line.
++    if (mIsDRM) {
++      printf_stderr(
++          "NativeLayerCA: not specialized - isVideo=0 isDRM=1 isHDR=%d "
++          "fullscreen=%d\n",
++          mIsHDR ? 1 : 0, mRootWindowIsFullscreen ? 1 : 0);
++    }
      return false;
 +  }
 +
@@ -86,7 +94,7 @@ index 94efd9b6c370..9039890c772e 100644
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1348,17 @@
+@@ -1292,6 +1356,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -104,7 +112,7 @@ index 94efd9b6c370..9039890c772e 100644
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1469,7 +1536,8 @@
+@@ -1469,7 +1544,8 @@
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
@@ -114,7 +122,7 @@ index 94efd9b6c370..9039890c772e 100644
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-@@ -1521,12 +1589,38 @@
+@@ -1521,12 +1597,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -154,7 +162,7 @@ index 94efd9b6c370..9039890c772e 100644
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +1734,11 @@
+@@ -1640,6 +1742,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -166,7 +174,7 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +1779,11 @@
+@@ -1680,7 +1787,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -179,7 +187,7 @@ index 94efd9b6c370..9039890c772e 100644
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +1797,14 @@
+@@ -1694,13 +1805,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -195,7 +203,7 @@ index 94efd9b6c370..9039890c772e 100644
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +1821,23 @@
+@@ -1717,7 +1829,23 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -220,7 +228,7 @@ index 94efd9b6c370..9039890c772e 100644
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +1881,7 @@
+@@ -1761,7 +1889,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -229,7 +237,7 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +1890,84 @@
+@@ -1770,6 +1898,84 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -314,7 +322,7 @@ index 94efd9b6c370..9039890c772e 100644
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +1981,7 @@
+@@ -1783,6 +1989,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -322,7 +330,7 @@ index 94efd9b6c370..9039890c772e 100644
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2009,12 @@
+@@ -1810,8 +2017,12 @@
      }
    }
  
@@ -337,7 +345,7 @@ index 94efd9b6c370..9039890c772e 100644
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2199,7 @@
+@@ -1996,7 +2207,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -346,7 +354,7 @@ index 94efd9b6c370..9039890c772e 100644
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2215,7 @@
+@@ -2012,6 +2223,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;

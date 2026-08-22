@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3312 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3580 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2528,6 +2528,274 @@ index 9ca6e15..18d37f0 100644
 +        debug("TAP-PAUSE GUARD armed");
 +      } catch (e) {}
 +
++      // AND THE TAP GOES NO FURTHER - see mse_fix_139's docstring.
++      //
++      // The guard above records the tap and the wrapper below refuses
++      // the pause it leads to. That refuses the consequence and allows
++      // the cause: the page's handler still runs, and it flips its own
++      // play/pause button, which is the page's state and not the
++      // element's. The picture then plays under a button that says it
++      // is paused.
++      //
++      // So the tap stops here. Same judgement, capture phase, before
++      // anything on the page can see it.
++      //
++      // Safe on exactly the elements this fires for: a target the judge
++      // declines covers 60% or more of the video and matches nothing
++      // interactive - div.scrim__clickable on tv.apple.com,
++      // div.ProtectionLayerContainer on HBO Max - and catching taps on
++      // the picture is the whole of what such an element does. There is
++      // nothing else on it to swallow.
++      var reynardSwallowed = 0;
++      var reynardSwallowLogged = false;
++
++      function reynardDescribeElement(t) {
++        if (!t) {
++          return "nothing";
++        }
++        try {
++          return (
++            (t.tagName || "?").toLowerCase() +
++            (t.id ? "#" + t.id : "") +
++            (t.className && typeof t.className === "string"
++              ? "." +
++                t.className.trim().split(" ").filter(Boolean).slice(0, 2).join(".")
++              : "")
++          );
++        } catch (e) {
++          return "?";
++        }
++      }
++
++      // Pointer movement is what every one of these players shows its
++      // controls on, and what resets their auto-hide. Dispatched only
++      // on the way out, so one tap produces one summons rather than
++      // seven.
++      function reynardSummonControls(e, t) {
++        try {
++          var x = 0;
++          var y = 0;
++          if (typeof e.clientX === "number") {
++            x = e.clientX;
++            y = e.clientY;
++          } else if (e.changedTouches && e.changedTouches[0]) {
++            x = e.changedTouches[0].clientX;
++            y = e.changedTouches[0].clientY;
++          }
++          var view = (t.ownerDocument && t.ownerDocument.defaultView) || window;
++          var shape = {
++            bubbles: true,
++            cancelable: true,
++            clientX: x,
++            clientY: y,
++          };
++          t.dispatchEvent(new view.MouseEvent("mousemove", shape));
++          if (view.PointerEvent) {
++            shape.pointerType = "touch";
++            t.dispatchEvent(new view.PointerEvent("pointermove", shape));
++          }
++        } catch (e2) {}
++      }
++
++      function reynardSwallowTap(e) {
++        try {
++          var t =
++            e.target ||
++            (e.touches && e.touches[0] && e.touches[0].target) ||
++            (e.changedTouches && e.changedTouches[0] &&
++              e.changedTouches[0].target) ||
++            null;
++          if (!t || !reynardTapPauseGuard) {
++            return;
++          }
++          // BEFORE THE JUDGEMENT - see mse_fix_140's docstring, so this
++          // sees the taps that are allowed through to a real control as
++          // well as the ones that are swallowed. A real control press
++          // is where the controls-are-down state comes from, and
++          // without both there is nothing to compare.
++          if (
++            e.type === "click" ||
++            e.type === "pointerup" ||
++            e.type === "touchend"
++          ) {
++            reynardProbeControls(t);
++          }
++          var judged = reynardJudgeTap(t);
++          if (judged[0]) {
++            return;
++          }
++          e.preventDefault();
++          e.stopImmediatePropagation();
++          reynardSwallowed++;
++          if (!reynardSwallowLogged) {
++            reynardSwallowLogged = true;
++            debug(
++              "TAP SWALLOWED on " +
++                reynardDescribeElement(t) +
++                " - " +
++                judged[1] +
++                ". The page's play/pause handler never runs, so its " +
++                "button cannot disagree with the element."
++            );
++          }
++          if (
++            e.type === "click" ||
++            e.type === "pointerup" ||
++            e.type === "touchend"
++          ) {
++            reynardSummonControls(e, t);
++          }
++        } catch (e2) {}
++      }
++
++      // SEVEN EVENTS, because the two players disagree about which one
++      // pauses. tv.apple.com's real button pauses 182ms after
++      // mousedown, which is a click; HBO Max's pauses 3ms after
++      // mousedown, which is the down event itself. Swallowing one of
++      // them would fix one site.
++      //
++      // Registered AFTER the recorder above, so the recorder still runs
++      // first and the tap evidence line keeps working:
++      // stopImmediatePropagation only stops listeners registered later
++      // on the same node in the same phase.
++      //
++      // passive: false, because a listener that cannot preventDefault
++      // cannot do this job.
++      try {
++        [
++          "pointerdown",
++          "mousedown",
++          "touchstart",
++          "pointerup",
++          "mouseup",
++          "touchend",
++          "click",
++        ].forEach(function (kind) {
++          window.addEventListener(kind, reynardSwallowTap, {
++            capture: true,
++            passive: false,
++          });
++        });
++        debug("TAP SWALLOW armed");
++      } catch (e) {}
++
++      // WHAT THE CONTROLS ARE DOING - see mse_fix_140's docstring.
++      //
++      // 139 summons the controls and does not dismiss them, because
++      // nothing logged so far says what dismissal is bound to. Either
++      // the player's own auto-hide takes them away, in which case there
++      // is nothing left to do, or it does not, in which case this says
++      // exactly which attribute differs between up and down.
++      var reynardProbes = 0;
++
++      // Found from the play/pause button rather than by guessing a
++      // class name: walk up until an ancestor covers half the video.
++      // That is the overlay on every player under test, and it is the
++      // same coverage test reynardJudgeTap already trusts.
++      function reynardControlsBox(doc) {
++        try {
++          var btn = doc.querySelector(
++            "[aria-label*=pause i], [aria-label*=play i]," +
++              "[data-testid*=play i], [data-testid*=pause i]"
++          );
++          var v = doc.querySelector("video");
++          if (!btn || !v) {
++            return null;
++          }
++          var vb = v.getBoundingClientRect();
++          if (!vb.width || !vb.height) {
++            return null;
++          }
++          var here = btn;
++          for (var i = 0; i < 8 && here.parentElement; i++) {
++            here = here.parentElement;
++            var r = here.getBoundingClientRect();
++            var w = Math.min(r.right, vb.right) - Math.max(r.left, vb.left);
++            var h = Math.min(r.bottom, vb.bottom) - Math.max(r.top, vb.top);
++            if (w > 0 && h > 0 && (w * h) / (vb.width * vb.height) >= 0.5) {
++              return here;
++            }
++          }
++          return here;
++        } catch (e) {
++          return null;
++        }
++      }
++
++      // Everything a web player uses to mean "showing" or "hidden".
++      // Printed together because which one a given player uses is the
++      // question, and reading them one at a time over several captures
++      // is how this file has wasted a week before.
++      function reynardControlsState(el) {
++        if (!el) {
++          return "controls=notfound";
++        }
++        try {
++          var doc = el.ownerDocument;
++          var view = doc.defaultView || window;
++          var cs = view.getComputedStyle(el);
++          var r = el.getBoundingClientRect();
++          return (
++            "controls=" +
++            reynardDescribeElement(el) +
++            " opacity=" +
++            cs.opacity +
++            " visibility=" +
++            cs.visibility +
++            " display=" +
++            cs.display +
++            " pointer=" +
++            cs.pointerEvents +
++            " aria-hidden=" +
++            (el.getAttribute("aria-hidden") || "-") +
++            " box=" +
++            Math.round(r.width) +
++            "x" +
++            Math.round(r.height) +
++            " class=" +
++            ((el.className && typeof el.className === "string"
++              ? el.className.trim()
++              : "-"
++            ).slice(0, 160))
++          );
++        } catch (e) {
++          return "controls=?";
++        }
++      }
++
++      // At the tap and then three times after it. 4s is past the
++      // auto-hide on every player under test, so a run of four lines
++      // that never changes is itself the answer.
++      function reynardProbeControls(t) {
++        try {
++          if (reynardProbes >= 6) {
++            return;
++          }
++          reynardProbes++;
++          var nth = reynardProbes;
++          var doc = (t && t.ownerDocument) || document;
++          var view = doc.defaultView || window;
++          var say = function (at) {
++            try {
++              debug(
++                "TAP PROBE " +
++                  nth +
++                  " t+" +
++                  at +
++                  "ms " +
++                  reynardControlsState(reynardControlsBox(doc))
++              );
++            } catch (e) {}
++          };
++          say(0);
++          [400, 1500, 4000].forEach(function (at) {
++            view.setTimeout(function () {
++              say(at);
++            }, at);
++          });
++        } catch (e) {}
++      }
++
 +      // What the guard saw, on every pause it lets through. Without
 +      // this a guard that never fires is indistinguishable from a guard
 +      // that is not in the build.
@@ -3315,7 +3583,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3373,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3641,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3811,7 +4079,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3979,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4247,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3833,7 +4101,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4009,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4277,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

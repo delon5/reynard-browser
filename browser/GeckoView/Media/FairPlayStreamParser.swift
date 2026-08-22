@@ -2492,6 +2492,10 @@ public final class FairPlayStreamParser: NSObject {
         /// up here before it can strand anything. NaN until the first
         /// sample.
         var lastIntakePTS = Double.nan
+        /// Forward steps in intake PTS big enough to be missing media.
+        ///
+        /// ADDED - see mse_fix_137's docstring.
+        var intakeHoles = 0
         /// After a flush or a drop, nothing is fed until a sync sample: a
         /// display layer handed a mid-GOP frame has no reference to
         /// decode from.
@@ -3000,26 +3004,35 @@ public final class FairPlayStreamParser: NSObject {
     /// Ask for more, or ask for nothing, depending on how deep the queue
     /// already is. Called from append, which is where new data enters.
     fileprivate func pumpMediaData(slot: StreamParser, label: String) {
-        let depth = withState { slot.pending.count }
-        guard depth >= Self.mediaDataHighWater else {
-            withState { slot.mediaDataHeld = false }
-            Self.drainMediaData(slot.parser, tracks: slot.trackIDs,
-                                label: label)
-            return
-        }
-        let first = withState { () -> Bool in
-            guard !slot.mediaDataHeld else { return false }
-            slot.mediaDataHeld = true
-            return true
-        }
-        Self.setProvideMediaData(slot.parser, tracks: slot.trackIDs,
-                                 on: false, label: label)
-        if first {
-            Self.log("stream \(label) HOLDING the parser - \(depth) samples "
-                     + "already queued for a layer that presents them in "
-                     + "real time. It is asked again at "
-                     + "\(Self.mediaDataLowWater).")
-        }
+        // ONE BACK PRESSURE, NOT TWO - see mse_fix_137's docstring.
+        //
+        // This used to answer a deep queue with
+        // setShouldProvideMediaData:NO, and the comment beside this
+        // file's own re-arm says what that costs: "providePendingMediaData
+        // drains what is pending NOW - fragments that arrive later were
+        // simply never asked for, which is why eight forwarded fragments
+        // produced one sample". Media goes into the parser and does not
+        // come out.
+        //
+        // The back pressure moved to the bytes in fix 100 and was
+        // finished in 132 and 134. It never moved AWAY from here, so
+        // both were live, and in capture 42d770ba this one fired six
+        // times - 314 samples queued, 360, 361, 357, 380, 325 - beside a
+        // picture that stopped for four to six seconds every eight, with
+        // the page's own buffered range contiguous across every one of
+        // them and 134's append order exact.
+        //
+        // Removing it cannot unbound the queue. A segment only reaches
+        // the parser when the queue is under this high water or the bin
+        // turns one over for it, so the worst case is one fragment on
+        // top of 299 - about a hundred samples against a cap of 900.
+        //
+        // mediaDataHeld is left in place and simply never set: it still
+        // gates releaseMediaDataIfDrained's own arm, which is harmless
+        // and keeps that path's shape.
+        withState { slot.mediaDataHeld = false }
+        Self.drainMediaData(slot.parser, tracks: slot.trackIDs,
+                            label: label)
     }
 
     /// The layer has taken enough. Ask the parser for the rest.
@@ -3459,9 +3472,32 @@ public final class FairPlayStreamParser: NSObject {
         let stamped = CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
         let intakeDTS = stamped.isValid ? stamped.seconds : intakePTS
         let arrivedAt = Self.hostNow()
+        // Filled by the block below and reported once the lock is
+        // released - see mse_fix_137's docstring.
+        var holeFrom = Double.nan
+        var holeTo = Double.nan
+        var holeNth = 0
         let jump = withState { () -> Double? in
             slot.videoSeen += 1
             slot.lastSampleAt = arrivedAt
+            // WHAT CAME IN, AND WHAT DID NOT - see mse_fix_137's
+            // docstring. Measured here because this is the last point
+            // where the sequence means what it says: after a handover
+            // 111 re-feeds a carried run, so the PTS on the drift line
+            // steps backwards by design and a hole cannot be told from
+            // a carry.
+            //
+            // Against the running maximum, so B-frame reordering - which
+            // moves PTS backwards in decode order - cannot register.
+            // Only a forward step larger than intakeGap counts, and at
+            // 24fps that is twelve frames.
+            if slot.lastIntakePTS.isFinite, intakePTS.isFinite,
+               intakePTS - slot.lastIntakePTS > Self.intakeGap {
+                slot.intakeHoles += 1
+                holeFrom = slot.lastIntakePTS
+                holeTo = intakePTS
+                holeNth = slot.intakeHoles
+            }
             slot.lastIntakePTS = max(slot.lastIntakePTS.isFinite
                                      ? slot.lastIntakePTS : intakePTS,
                                      intakePTS)
@@ -3475,6 +3511,13 @@ public final class FairPlayStreamParser: NSObject {
                 return nil
             }
             return delta
+        }
+        if holeNth > 0, holeFrom.isFinite, holeTo.isFinite {
+            Self.log("stream \(streamKey) A HOLE IN THE INTAKE - the "
+                     + "parser went from \(holeFrom) to \(holeTo), "
+                     + "\(holeTo - holeFrom)s of media that the page "
+                     + "appended and this process never saw. Hole "
+                     + "\(holeNth).")
         }
         if let jump {
             // INTAKE ORDER IS NOT TIMELINE ORDER.
@@ -5926,6 +5969,49 @@ public final class FairPlayStreamParser: NSObject {
             + "\(Int(box.height.rounded()))"
             + " super \(layer.superlayer != nil)"
             + " hidden \(layer.isHidden)"
+            // WHO IS ABOVE IT - see mse_fix_138's docstring.
+            + Self.layerChain(layer)
+    }
+
+    /// Every ancestor of this layer, from its parent to the root.
+    ///
+    /// ADDED - see mse_fix_138's docstring. layerShape has described
+    /// one layer since fix 113, and four captures of "landscape with
+    /// the controls up shows no picture" have all reported that one
+    /// layer as attached, unhidden, correctly sized and still taking
+    /// frames. Whatever removes the picture is not that layer, and
+    /// nothing in this log has ever described anything else.
+    ///
+    /// An ancestor that goes hidden, drops to zero opacity, collapses
+    /// to zero height or starts clipping does all of that while leaving
+    /// `super true hidden false` reading exactly as it does today.
+    ///
+    /// The root's box is the window, so this also says which way up the
+    /// device is without asking UIKit - which matters, because this
+    /// runs on the drain queue and every orientation API wants the main
+    /// thread.
+    ///
+    /// Bounded at twelve, which is deeper than this tree has ever been,
+    /// so a cycle or a surprise cannot turn a log line into a hang.
+    fileprivate static func layerChain(_ layer: CALayer) -> String {
+        var out = " chain"
+        var current = layer.superlayer
+        var depth = 0
+        while let here = current, depth < 12 {
+            let box = here.bounds.size
+            out += " <\(type(of: here))"
+                + " \(Int(box.width.rounded()))x"
+                + "\(Int(box.height.rounded()))"
+            if here.isHidden { out += " HIDDEN" }
+            if here.opacity < 0.999 { out += " opacity \(here.opacity)" }
+            if here.masksToBounds { out += " clips" }
+            if here.superlayer == nil { out += " ROOT" }
+            out += ">"
+            current = here.superlayer
+            depth += 1
+        }
+        if depth == 0 { out += " <none>" }
+        return out
     }
 
     /// What the layer says it has actually put on the screen.
@@ -6661,6 +6747,15 @@ public final class FairPlayStreamParser: NSObject {
     /// capture 8ec30c6a every legitimate backlog was under 14s and
     /// every stranded queue was over 360s.
     fileprivate static let strandedBehind: Double = 60.0
+
+    /// A forward step in intake PTS large enough to be a hole.
+    ///
+    /// ADDED - see mse_fix_137's docstring. Half a second is twelve
+    /// frames at 24fps - far beyond any reordering, far below the four
+    /// to six second gaps capture 42d770ba stalls on - and it is
+    /// measured against the running maximum, so decode-order
+    /// reordering cannot reach it at all.
+    fileprivate static let intakeGap: Double = 0.5
 
     /// How far AHEAD of the element a sample may be and still be taken.
     ///
