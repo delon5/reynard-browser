@@ -6053,6 +6053,22 @@ public final class FairPlayStreamParser: NSObject {
     /// every stranded queue was over 360s.
     fileprivate static let strandedBehind: Double = 60.0
 
+    /// How far BEHIND the media a queued sample may be before the queue
+    /// holding it is stale.
+    ///
+    /// ADDED - see mse_fix_124's docstring. Ahead of the element is
+    /// buffer and a page may hand over a lot of it. Behind the element
+    /// is nothing at all: the clock has passed those frames and no
+    /// layer can present them. The only frames legitimately behind are
+    /// the reference run 111 carries at a handover, which starts at the
+    /// last keyframe at or before the clock - one GOP, two to four
+    /// seconds.
+    ///
+    /// Eight seconds is two GOPs, comfortably above that and far below
+    /// the fifty-four that slipped under strandedBehind in capture
+    /// 84425dde and cost five hundred unpresentable frames.
+    fileprivate static let staleBehind: Double = 8.0
+
     /// How old an element position may be before it stops being an
     /// authority.
     ///
@@ -6081,8 +6097,11 @@ public final class FairPlayStreamParser: NSObject {
             for sample in ends {
                 let at = CMSampleBufferGetPresentationTimeStamp(sample)
                     .seconds
+                // ASYMMETRIC - see mse_fix_124's docstring. Behind the
+                // element cannot be shown; ahead of it is buffer.
                 if at.isFinite,
-                   abs(at - authority) > Self.strandedBehind {
+                   at < authority - Self.staleBehind
+                    || at > authority + Self.strandedBehind {
                     return true
                 }
             }
@@ -6114,10 +6133,14 @@ public final class FairPlayStreamParser: NSObject {
                                         authority: Double,
                                         why: String) -> Int {
         guard authority.isFinite else { return 0 }
+        // ASYMMETRIC, for the reason queueStrays is - see
+        // mse_fix_124's docstring. What is kept behind the element is
+        // only what a handover needs to decode from.
         let near = { (sample: CMSampleBuffer) -> Bool in
             let at = CMSampleBufferGetPresentationTimeStamp(sample).seconds
             return !at.isFinite
-                || abs(at - authority) <= Self.strandedBehind
+                || (at >= authority - Self.staleBehind
+                    && at <= authority + Self.strandedBehind)
         }
         let swept = withState { () -> (gone: Int, left: Int) in
             guard let slot = streamParsers[streamKey] else { return (0, 0) }

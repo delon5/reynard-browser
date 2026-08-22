@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3254 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3307 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2431,15 +2431,69 @@ index 9ca6e15..18d37f0 100644
 +      var reynardLastTapAt = 0;
 +      var reynardLastTapTarget = null;
 +      var reynardLastTapWasControl = false;
-+      var REYNARD_CONTROL_SELECTOR =
-+        "button, [role=button], a, input, select, summary, label," +
++      // A REAL interactive element. An ancestor of these genuinely is
++      // the thing that was tapped - an svg inside the fullscreen
++      // button is a tap on that button.
++      var REYNARD_STRICT_SELECTOR =
++        "button, [role=button], a[href], input, select, summary, label";
++      // Names that SUGGEST a control. Not sufficient on their own -
++      // see mse_fix_123's docstring. Everything over the picture lives
++      // inside the player's container and inherits these from it.
++      var REYNARD_NAMED_SELECTOR =
 +        "[aria-label*=play i], [aria-label*=pause i]," +
 +        "[class*=control i], [class*=button i]," +
 +        "[data-testid*=control i]";
++
++      // Does this element cover the picture? A control is small; a
++      // sheet you tap to summon the controls is the size of the video,
++      // because that is its whole job.
++      function reynardCoversTheVideo(t) {
++        try {
++          var doc = t.ownerDocument || document;
++          var v = doc.querySelector("video");
++          if (!v) {
++            return false;
++          }
++          var a = t.getBoundingClientRect();
++          var b = v.getBoundingClientRect();
++          if (!b.width || !b.height) {
++            return false;
++          }
++          var w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
++          var h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
++          if (w <= 0 || h <= 0) {
++            return false;
++          }
++          return (w * h) / (b.width * b.height) >= 0.6;
++        } catch (e) {
++          return false;
++        }
++      }
++
++      // Returns [isControl, whyString].
++      function reynardJudgeTap(t) {
++        if (!t || typeof t.closest !== "function") {
++          // Cannot tell - allow the pause. A guard that guesses wrong
++          // in this direction loses a feature; the other direction
++          // makes the player unstoppable.
++          return [true, "unknown"];
++        }
++        if (t.closest(REYNARD_STRICT_SELECTOR)) {
++          return [true, "button"];
++        }
++        if (!t.closest(REYNARD_NAMED_SELECTOR)) {
++          return [false, "not a control"];
++        }
++        if (reynardCoversTheVideo(t)) {
++          return [false, "covers the picture"];
++        }
++        return [true, "named"];
++      }
 +      // Capture phase, on the window: the page's own handler runs after
 +      // this and calls pause(), so the tap has to be recorded before it
 +      // gets there. Passive, so this cannot affect scrolling.
 +      var reynardLastTapVia = "";
++      var reynardLastTapWhy = "";
 +      // THREE EVENTS, NOT ONE - see mse_fix_118's docstring. A tap that
 +      // the platform routes as a touch or a mouse event rather than a
 +      // pointer event would otherwise never be recorded, and the guard
@@ -2456,11 +2510,9 @@ index 9ca6e15..18d37f0 100644
 +                  e.target ||
 +                  (e.touches && e.touches[0] && e.touches[0].target) ||
 +                  null;
-+                reynardLastTapWasControl = !!(
-+                  reynardLastTapTarget &&
-+                  typeof reynardLastTapTarget.closest === "function" &&
-+                  reynardLastTapTarget.closest(REYNARD_CONTROL_SELECTOR)
-+                );
++                var judged = reynardJudgeTap(reynardLastTapTarget);
++                reynardLastTapWasControl = judged[0];
++                reynardLastTapWhy = judged[1];
 +              } catch (e2) {
 +                reynardLastTapWasControl = true;
 +              }
@@ -2486,7 +2538,8 @@ index 9ca6e15..18d37f0 100644
 +          " on " +
 +          reynardDescribeTapTarget() +
 +          " control=" +
-+          (reynardLastTapWasControl ? "yes" : "no")
++          (reynardLastTapWasControl ? "yes" : "no") +
++          "(" + reynardLastTapWhy + ")"
 +        );
 +      }
 +
@@ -3257,7 +3310,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3315,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3368,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3753,7 +3806,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3921,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3974,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3775,7 +3828,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3951,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4004,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
