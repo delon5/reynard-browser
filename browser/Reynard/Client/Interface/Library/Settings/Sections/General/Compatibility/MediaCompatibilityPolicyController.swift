@@ -53,6 +53,29 @@ enum MediaCompatibilityPolicyController {
         ])
     }
 
+    /// Make WebRender say why it stopped carrying a video.
+    ///
+    /// ADDED - see mse_fix_160's docstring. Not a setting, like
+    /// applyMediaTrackSupport above: the black screen on this route is
+    /// the video losing its compositor surface, WebRender already
+    /// knows which of its twelve reasons applied, and the only thing
+    /// standing between us and the answer is a pref that defaults to
+    /// false.
+    ///
+    /// Its own comment upstream says what it is for: "When true, we
+    /// output warning messages when rejecting surface promotion when
+    /// it has been requested. This is important for color correctness
+    /// of wide color videos, as well as for GPU performance for all
+    /// videos."
+    ///
+    /// The message still needs RUST_LOG to escape env_logger's release
+    /// default - main.swift sets it.
+    static func applySurfacePromotionLogging() {
+        GeckoRuntime.setDefaultPrefs([
+            "gfx.webrender.debug.surface-promotion-logging": true,
+        ])
+    }
+
     /// The other half of the same decision. Hiding MSE steers a player
     /// away from MSE+FairPlay; this stops the engine advertising the
     /// init data types that mean MSE+FairPlay in the first place, so

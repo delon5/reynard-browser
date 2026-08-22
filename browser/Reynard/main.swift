@@ -32,6 +32,33 @@ private func configureUnsandboxedAppDataDirectories(_ directories: ReynardDirect
     
     setenv("MOZ_APP_DATA", appDataDirectory.path, 1)
     setenv("MOZ_LOCAL_APP_DATA", appDataDirectory.path, 1)
+
+    // WHY THE VIDEO LOST ITS COMPOSITOR SURFACE - see
+    // mse_fix_160's docstring. WebRender warns with the reason it
+    // refused to promote a video, but the warning goes through
+    // GeckoLogger, which wraps env_logger and reads RUST_LOG -
+    // defaulting to "error" in a release build, which swallows it.
+    //
+    // Scoped to the one CRATE that answers the question, so this does
+    // not turn on every warning in the engine, and skipped entirely
+    // when something outside has already set RUST_LOG.
+    //
+    // webrender, not webrender::picture. The warning is emitted by
+    // TileCacheInstance::report_promotion_failure in
+    // gfx/wr/webrender/src/tile_cache/mod.rs, and lib.rs declares that
+    // as `mod tile_cache` - so the target is webrender::tile_cache.
+    // picture.rs has no warn! in it at all. env_logger filters on the
+    // module the macro expands in, so naming picture would have
+    // silenced the one line this exists to produce, and an empty
+    // capture would have read as "nothing was rejected".
+    //
+    // The whole crate rather than that one module because tile_cache
+    // was plainly part of picture.rs at some point, and a diagnostic
+    // that breaks when a module moves is worth less than a few extra
+    // warning lines.
+    if getenv("RUST_LOG") == nil {
+        setenv("RUST_LOG", "webrender=warn", 1)
+    }
 }
 
 /// Points stdout and stderr at a real file.

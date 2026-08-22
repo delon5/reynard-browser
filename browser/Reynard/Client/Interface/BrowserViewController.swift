@@ -396,6 +396,9 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         // language at all - see the controller for what the capture
         // showed.
         MediaCompatibilityPolicyController.applyMediaTrackSupport()
+        // And why a video stopped being a compositor surface - see
+        // mse_fix_160's docstring.
+        MediaCompatibilityPolicyController.applySurfacePromotionLogging()
         
         // HLS/FairPlay through AVFoundation
         AVPlayerPolicyController.applyAVPlayerHLS()
