@@ -2541,6 +2541,11 @@ public final class FairPlayStreamParser: NSObject {
         var audioEnqueued = 0
         var audioSeen = 0
         var audioFlushes = 0
+        /// Said once - see mse_fix_136's docstring. The audio twin of
+        /// standDownLogged.
+        var audioStandDownLogged = false
+        /// Said once - see mse_fix_136's docstring.
+        var audioHorizonLogged = false
         var audioLastReport = ""
         /// Has the synchronizer been given a rate? Nothing is fed before
         /// it has, for fix 26's reason: a renderer clocked at a time the
@@ -4569,8 +4574,49 @@ public final class FairPlayStreamParser: NSObject {
             return delta
         }
         if let jump {
-            resynchroniseAudio(streamKey: streamKey, to: intakePTS,
-                               jump: jump)
+            // INTAKE ORDER IS NOT TIMELINE ORDER, ON THIS HALF EITHER.
+            //
+            // CHANGED - see mse_fix_136's docstring. This is fix 27's
+            // test, which fix 102 stood down on the video half three
+            // years of captures ago and left running here. In capture
+            // 94cc3a44 it fired four times in seventy seconds, threw
+            // away 208 queued samples against the 118 that ever reached
+            // the renderer, left the renderer holding media forty-six
+            // seconds in its own future - thirty seconds of silence,
+            // `ready false held 80 fed 24` - and swept the video queue
+            // twice on the way past.
+            //
+            // Its first firing there is false on its own terms:
+            // `+32.129s at sample 14` is `belongs to element ... offset
+            // 32.083208` being applied partway through intake, the same
+            // false positive the video half logs as `Jump 29.12s
+            // ignored`.
+            //
+            // With the element's own position known there is nothing to
+            // infer. A renderer holds a sample that is not due and
+            // discards one whose time has passed; that is what the
+            // synchronizer is for.
+            //
+            // A stream with no position - the HBO case
+            // resynchroniseAudio's own comment is about - keeps the old
+            // behaviour exactly.
+            if elementPosition(streamKey) != nil {
+                let first = withState { () -> Bool in
+                    guard let slot = streamParsers[streamKey],
+                          !slot.audioStandDownLogged else { return false }
+                    slot.audioStandDownLogged = true
+                    return true
+                }
+                if first {
+                    Self.log("stream \(streamKey) standing down from the "
+                             + "AUDIO discontinuity test - the element "
+                             + "says where it is, so intake order proves "
+                             + "nothing. Jump \(jump)s ignored.")
+                }
+            } else {
+                resynchroniseAudio(streamKey: streamKey, to: intakePTS,
+                                   jump: jump)
+            }
         }
 
         let queued = withState { () -> Int in
@@ -4954,7 +5000,20 @@ public final class FairPlayStreamParser: NSObject {
         // audio path caught every seek in both.
         let session = String(streamKey.split(separator: "|").first ?? "")
         let owner = withState { streamParsers[streamKey]?.owner ?? 0 }
-        sweepOwnedVideo(sessionId: session, owner: owner, authority: pts,
+        // AGAINST THE ELEMENT, not against the sound's intake - see
+        // mse_fix_136's docstring. `pts` is where the AUDIO PARSER has
+        // reached, which on a page that buffers ahead is not where
+        // anything is being played. In capture 94cc3a44 that was 2733
+        // while the picture was at 2687, and this line swept all 460
+        // samples out of a healthy video queue: `the sound jumped to
+        // 2733.644533333333 - swept 460 samples that were not near it,
+        // 0 left in the queue`.
+        //
+        // Sweeping the picture to where the sound's buffer has reached
+        // is never right. Where the element is, is.
+        let authority = mediaAuthority(streamKey) ?? pts
+        sweepOwnedVideo(sessionId: session, owner: owner,
+                        authority: authority,
                         why: "the sound jumped to")
         // On the drain queue, for the same collision flush() and
         // enqueue() can have on the video side.
@@ -4989,6 +5048,37 @@ public final class FairPlayStreamParser: NSObject {
     /// 6db1f5c7 on the first check.
     fileprivate static let audioArmGrace: Double = 1.0
 
+    /// How far past the synchronizer's clock the head of the audio
+    /// queue is, when that is further than the drain should go.
+    ///
+    /// ADDED - see mse_fix_136's docstring. nil means "feed it": the
+    /// queue is empty, the clock cannot be read, or the head is due.
+    /// An AVSampleBufferAudioRenderer handed media a long way into its
+    /// own future schedules it, reports itself not ready, and stops
+    /// asking - which in capture 94cc3a44 was thirty seconds of
+    /// silence with `ready false held 80 fed 24`.
+    ///
+    /// The same three seconds the video half paces to, for the same
+    /// reason: it is comfortably more than playback needs and an order
+    /// of magnitude below a page's lookahead.
+    fileprivate func audioHeadIsAhead(_ streamKey: String) -> Double? {
+        let found = withState {
+            () -> (sync: AVSampleBufferRenderSynchronizer, at: Double)? in
+            guard let slot = streamParsers[streamKey],
+                  let sync = slot.audioSynchronizer,
+                  let first = slot.audioPending.first else { return nil }
+            let at = CMSampleBufferGetPresentationTimeStamp(first).seconds
+            guard at.isFinite else { return nil }
+            return (sync, at)
+        }
+        guard let found else { return nil }
+        let now = CMTimebaseGetTime(found.sync.timebase).seconds
+        guard now.isFinite, found.at - now > Self.feedAhead else {
+            return nil
+        }
+        return found.at - now
+    }
+
     /// Is this stream's arm set but doing nothing?
     ///
     /// ADDED - see mse_fix_135's docstring. Read as two steps because
@@ -5006,14 +5096,22 @@ public final class FairPlayStreamParser: NSObject {
         guard let found, found.since.isFinite,
               Self.hostNow() - found.since > Self.audioArmGrace
         else { return false }
+        // A HOLD IS NOT A STALL - see mse_fix_136's docstring. With the
+        // horizon in place the drain deliberately leaves a ready
+        // renderer unfed while the head is not due, and 135's detector
+        // would read that as a dead callback and raise the arm again
+        // every second for as long as it lasted.
+        guard audioHeadIsAhead(streamKey) == nil else { return false }
         return found.renderer.isReadyForMoreMediaData
     }
 
     /// Ask the renderer to come and get them, if it is not already
     /// asking - or if it is asking and nothing is coming.
     private func armAudioDrainIfNeeded(streamKey: String) {
-        // OUTSIDE the lock, because it reads the renderer.
+        // OUTSIDE the lock, because both read the renderer or its
+        // clock.
         let stalled = audioArmIsStalled(streamKey)
+        let headIsAhead = audioHeadIsAhead(streamKey) != nil
         let work = withState { () -> (renderer: AVSampleBufferAudioRenderer,
                                       queue: DispatchQueue,
                                       again: Bool, held: Int)? in
@@ -5027,6 +5125,10 @@ public final class FairPlayStreamParser: NSObject {
                   !slot.audioDrainArmed || stalled,
                   slot.supersededBy == nil,
                   !slot.audioPending.isEmpty,
+                  // AND DUE - see mse_fix_136's docstring. Arming on a
+                  // head the drain will refuse puts the block straight
+                  // back into the loop it just left.
+                  !headIsAhead,
                   let renderer = slot.audioRenderer,
                   let queue = slot.audioQueue else { return nil }
             let again = slot.audioDrainArmed
@@ -5086,6 +5188,33 @@ public final class FairPlayStreamParser: NSObject {
     fileprivate func drainAudioPending(
         streamKey: String, renderer: AVSampleBufferAudioRenderer) {
         while renderer.isReadyForMoreMediaData {
+            // NOT ITS OWN FUTURE - see mse_fix_136's docstring.
+            //
+            // Stopped rather than simply returned: this block is being
+            // called in a loop for as long as the renderer is ready, so
+            // returning without enqueueing would spin. The re-arm comes
+            // from audio intake, which runs on every append, and from
+            // 135's nudge on the video drain every thirty samples - so
+            // feeding resumes within about a second of the head coming
+            // due, against a three second horizon.
+            if let ahead = audioHeadIsAhead(streamKey) {
+                let first = withState { () -> Bool in
+                    guard let slot = streamParsers[streamKey],
+                          !slot.audioHorizonLogged else { return false }
+                    slot.audioHorizonLogged = true
+                    return true
+                }
+                if first {
+                    Self.log("stream \(streamKey) holding the sound at the "
+                             + "horizon - the head of the queue is "
+                             + "\(ahead)s past the synchronizer's clock, "
+                             + "and a renderer handed that stops asking. "
+                             + "Fed again as the clock reaches it.")
+                }
+                renderer.stopRequestingMediaData()
+                withState { streamParsers[streamKey]?.audioDrainArmed = false }
+                return
+            }
             let next = withState { () -> CMSampleBuffer? in
                 guard let slot = streamParsers[streamKey],
                       !slot.audioPending.isEmpty else { return nil }
