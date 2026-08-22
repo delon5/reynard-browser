@@ -2530,6 +2530,14 @@ public final class FairPlayStreamParser: NSObject {
         var audioPending: [CMSampleBuffer] = []
         var audioOverflowed = 0
         var audioDrainArmed = false
+        /// Host time of the last sample the renderer actually took.
+        ///
+        /// ADDED - see mse_fix_135's docstring. The difference between
+        /// "armed" and "working": in capture 6db1f5c7 audioDrainArmed
+        /// was true for the last forty-two seconds of the stream while
+        /// the renderer sat ready with ninety-four samples queued
+        /// behind it and took none of them.
+        var audioFedAt = Double.nan
         var audioEnqueued = 0
         var audioSeen = 0
         var audioFlushes = 0
@@ -4215,6 +4223,12 @@ public final class FairPlayStreamParser: NSObject {
                     // checker for no gain.
                     let effectiveRate = CMTimebaseGetEffectiveRate(timebase)
                     let readingAt = Self.hostNow()
+                    // AND ACT ON IT - see mse_fix_135's docstring. The
+                    // sound columns below reported `ready true held 94
+                    // fed 23` on every one of these lines for
+                    // forty-two seconds in capture 6db1f5c7. A line
+                    // that can see a stall can end one.
+                    nudgeAudio(sessionId: session)
                     Self.log("stream \(streamKey) at \(count) - timebase "
                              + "\(now) vs sample pts \(pts), drift "
                              + "\(now - pts), av "
@@ -4965,26 +4979,105 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
-    /// Ask the renderer to come and get them, if it is not already
-    /// asking.
-    private func armAudioDrainIfNeeded(streamKey: String) {
-        let work = withState { () -> (renderer: AVSampleBufferAudioRenderer,
-                                      queue: DispatchQueue)? in
+    /// How long an armed drain may sit on a ready renderer with a
+    /// queue behind it before the arm is presumed dead.
+    ///
+    /// ADDED - see mse_fix_135's docstring. A renderer that is ready
+    /// with samples waiting is fed within a millisecond when the
+    /// callback is alive; a second is three orders of magnitude of
+    /// slack and still catches the forty-two second silence in capture
+    /// 6db1f5c7 on the first check.
+    fileprivate static let audioArmGrace: Double = 1.0
+
+    /// Is this stream's arm set but doing nothing?
+    ///
+    /// ADDED - see mse_fix_135's docstring. Read as two steps because
+    /// isReadyForMoreMediaData belongs to the renderer and everything
+    /// else belongs to the lock, and this file does not call out of
+    /// withState.
+    private func audioArmIsStalled(_ streamKey: String) -> Bool {
+        let found = withState {
+            () -> (renderer: AVSampleBufferAudioRenderer, since: Double)? in
             guard let slot = streamParsers[streamKey],
-                  slot.audioStarted, !slot.audioDrainArmed,
+                  slot.audioDrainArmed, !slot.audioPending.isEmpty,
+                  let renderer = slot.audioRenderer else { return nil }
+            return (renderer, slot.audioFedAt)
+        }
+        guard let found, found.since.isFinite,
+              Self.hostNow() - found.since > Self.audioArmGrace
+        else { return false }
+        return found.renderer.isReadyForMoreMediaData
+    }
+
+    /// Ask the renderer to come and get them, if it is not already
+    /// asking - or if it is asking and nothing is coming.
+    private func armAudioDrainIfNeeded(streamKey: String) {
+        // OUTSIDE the lock, because it reads the renderer.
+        let stalled = audioArmIsStalled(streamKey)
+        let work = withState { () -> (renderer: AVSampleBufferAudioRenderer,
+                                      queue: DispatchQueue,
+                                      again: Bool, held: Int)? in
+            guard let slot = streamParsers[streamKey],
+                  slot.audioStarted,
+                  // RAISED AGAIN - see mse_fix_135's docstring. This
+                  // guard used to be `!slot.audioDrainArmed` alone, and
+                  // in capture 6db1f5c7 it turned away every call for
+                  // the last forty-two seconds of the stream while the
+                  // renderer sat ready and the queue grew from 3 to 94.
+                  !slot.audioDrainArmed || stalled,
                   slot.supersededBy == nil,
                   !slot.audioPending.isEmpty,
                   let renderer = slot.audioRenderer,
                   let queue = slot.audioQueue else { return nil }
+            let again = slot.audioDrainArmed
             slot.audioDrainArmed = true
-            return (renderer, queue)
+            // Started now, so a fresh arm gets a full grace period
+            // before it can be judged stalled.
+            slot.audioFedAt = Self.hostNow()
+            return (renderer, queue, again, slot.audioPending.count)
         }
         guard let work else { return }
-        work.renderer.requestMediaDataWhenReady(on: work.queue) {
-            [weak renderer = work.renderer] in
-            guard let renderer else { return }
-            FairPlayStreamParser.shared.drainAudioPending(
-                streamKey: streamKey, renderer: renderer)
+        if work.again {
+            Self.log("stream \(streamKey) the audio arm was set and "
+                     + "nothing was coming - renderer ready with "
+                     + "\(work.held) samples waiting. Raised again.")
+        }
+        // ON THE AUDIO QUEUE, both halves - see mse_fix_135's docstring.
+        // stopRequestingMediaData already ran there, from inside the
+        // block; the request that pairs with it was raised from
+        // whichever thread the parser called us on, and those two have
+        // to be ordered against each other.
+        work.queue.async {
+            if work.again {
+                work.renderer.stopRequestingMediaData()
+            }
+            work.renderer.requestMediaDataWhenReady(on: work.queue) {
+                [weak renderer = work.renderer] in
+                guard let renderer else { return }
+                FairPlayStreamParser.shared.drainAudioPending(
+                    streamKey: streamKey, renderer: renderer)
+            }
+        }
+    }
+
+    /// Give every audio renderer in a session a chance to be re-armed.
+    ///
+    /// ADDED - see mse_fix_135's docstring. Called from the video
+    /// drain's periodic block, which is the line that watched this
+    /// stall for forty-two seconds and only reported it. Intake covers
+    /// the ordinary case; this covers a page that has buffered ahead
+    /// and gone quiet, where there is no intake left to re-arm on.
+    fileprivate func nudgeAudio(sessionId: String) {
+        let keys = withState { () -> [String] in
+            streamParsers.compactMap { key, slot -> String? in
+                guard key.hasPrefix(sessionId + "|"), slot.audioStarted,
+                      slot.supersededBy == nil,
+                      !slot.audioPending.isEmpty else { return nil }
+                return key
+            }
+        }
+        for key in keys {
+            armAudioDrainIfNeeded(streamKey: key)
         }
     }
 
@@ -5017,6 +5110,9 @@ public final class FairPlayStreamParser: NSObject {
             let count = withState { () -> Int in
                 guard let slot = streamParsers[streamKey] else { return 0 }
                 slot.audioEnqueued += 1
+                // WHEN - see mse_fix_135's docstring. This is what tells
+                // a working arm from a dead one.
+                slot.audioFedAt = Self.hostNow()
                 return slot.audioEnqueued
             }
             let report = "status=\(renderer.status.rawValue) "
