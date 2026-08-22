@@ -5036,7 +5036,24 @@ public final class FairPlayStreamParser: NSObject {
         if let old = previous?.controlTimebase,
            CMTimebaseGetRate(old) != 0 {
             anchor = CMTimebaseGetTime(old)
+        } else if let mediaAt = mediaAuthority(streamKey), mediaAt.isFinite {
+            // WHERE THE MEDIA IS - see mse_fix_128's docstring. There is
+            // no running clock to copy at launch, and the fallback below
+            // is lastIntakePTS: the last sample taken in, which after a
+            // seek is media the sweep has just thrown away. In capture
+            // b6d4f046 that anchored the first layer at 852.76 when the
+            // element had said 883.0 one line earlier, so nothing the
+            // layer was given could be presented and the picture did not
+            // appear until the fourth layer.
+            //
+            // This is the same authority 106, 107, 109 and 124 use for
+            // every other question about where the media is. Adopt was
+            // the last place still guessing from intake.
+            anchor = CMTime(seconds: mediaAt, preferredTimescale: 90_000)
         } else {
+            // Neither a clock nor an authority - an older content
+            // process, or a stream that has not been claimed by an
+            // element. Unchanged.
             let last = withState {
                 streamParsers[streamKey]?.lastIntakePTS ?? 0 }
             anchor = CMTime(seconds: last.isFinite ? last : 0,
