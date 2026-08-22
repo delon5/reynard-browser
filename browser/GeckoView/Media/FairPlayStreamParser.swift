@@ -2237,7 +2237,20 @@ public final class FairPlayStreamParser: NSObject {
         /// These are OUR bytes, held on OUR side. Nothing can decline
         /// them, discard them or ignore them, which is the whole reason
         /// the back pressure moved here.
-        var heldSegments: [Data] = []
+        ///
+        /// STAMPED - see mse_fix_133's docstring. A fragment is bytes
+        /// and nothing else until the parser reads it, so on its own it
+        /// cannot say whether it belongs to the media the element is
+        /// playing now. In capture d655146f thirty-two fragments of a
+        /// 4481-second timeline sat here across a swap to a 2494-second
+        /// one and were appended eighty-six seconds later, and every
+        /// sample fed after that was 1944 seconds ahead of the clock.
+        struct HeldFragment {
+            let bytes: Data
+            /// Where the media was when the back pressure took these.
+            let at: Double
+        }
+        var heldSegments: [HeldFragment] = []
         var heldFragments = 0
         /// Has the parser been told to stop providing media data?
         ///
@@ -2271,6 +2284,10 @@ public final class FairPlayStreamParser: NSObject {
         /// before it is touched, so one overflow was reported and eight
         /// more in the same window were silent.
         var droppedSinceSync = 0
+        /// Samples refused for being unreachably ahead of the media.
+        ///
+        /// ADDED - see mse_fix_133's docstring.
+        var aheadDropped = 0
         /// The first and last PTS thrown away since the gate closed.
         ///
         /// ADDED - see mse_fix_132's docstring. A count says nothing
@@ -2605,6 +2622,11 @@ public final class FairPlayStreamParser: NSObject {
         // parser before any media does, they are small, and holding one
         // would fail the stream rather than pace it.
         if !Self.isInitSegment(segment) {
+            // BEFORE the lock, because mediaAuthority takes it - see
+            // mse_fix_133's docstring. NaN when the element has not
+            // said where it is, which a sweep reads as "cannot tell"
+            // and keeps.
+            let heldAt = mediaAuthority(key) ?? Double.nan
             let verdict = withState { () -> (hold: Bool, depth: Int,
                                              held: Int, forced: Bool) in
                 let depth = slot.pending.count
@@ -2620,7 +2642,8 @@ public final class FairPlayStreamParser: NSObject {
                     return (hold: false, depth: depth,
                             held: slot.heldSegments.count, forced: true)
                 }
-                slot.heldSegments.append(segment)
+                slot.heldSegments.append(
+                    StreamParser.HeldFragment(bytes: segment, at: heldAt))
                 slot.heldFragments += 1
                 return (hold: true, depth: depth,
                         held: slot.heldSegments.count, forced: false)
@@ -2919,7 +2942,8 @@ public final class FairPlayStreamParser: NSObject {
         // once, so releasing four would put the queue straight back over
         // the mark it just came under. This runs on every sample the
         // layer takes, so the next one is never far away.
-        let fragment = withState { () -> (bytes: Data, parser: NSObject,
+        let fragment = withState { () -> (bytes: Data, at: Double,
+                                          parser: NSObject,
                                           left: Int, depth: Int)? in
             guard let slot = streamParsers[streamKey],
                   !slot.heldSegments.isEmpty,
@@ -2935,7 +2959,9 @@ public final class FairPlayStreamParser: NSObject {
             }
             slot.releaseInFlight = true
             let next = slot.heldSegments.removeFirst()
-            return (bytes: next, parser: slot.parser,
+            // WITH ITS STAMP - see mse_fix_133's docstring, so a
+            // fragment put back by fix 132 goes back as what it was.
+            return (bytes: next.bytes, at: next.at, parser: slot.parser,
                     left: slot.heldSegments.count,
                     depth: slot.pending.count)
         }
@@ -2952,8 +2978,8 @@ public final class FairPlayStreamParser: NSObject {
                 let append = NSSelectorFromString("appendStreamData:")
                 guard fragment.parser.responds(to: append) else {
                     FairPlayStreamParser.shared.finishRelease(
-                        fragment.bytes, streamKey: streamKey,
-                        appended: false)
+                        fragment.bytes, at: fragment.at,
+                        streamKey: streamKey, appended: false)
                     return
                 }
                 // CAPTURED AND LIVE - see mse_fix_105's docstring. The
@@ -2970,8 +2996,8 @@ public final class FairPlayStreamParser: NSObject {
                 // counts is the one taken beside the thing it guards.
                 guard live <= Self.mediaDataLowWater else {
                     FairPlayStreamParser.shared.finishRelease(
-                        fragment.bytes, streamKey: streamKey,
-                        appended: false)
+                        fragment.bytes, at: fragment.at,
+                        streamKey: streamKey, appended: false)
                     Self.log("stream \(streamKey) held a fragment BACK - "
                              + "the queue was \(fragment.depth) when this "
                              + "was decided and \(live) by the time it "
@@ -2991,7 +3017,8 @@ public final class FairPlayStreamParser: NSObject {
                                                 with: fragment.bytes)
                 })
                 FairPlayStreamParser.shared.finishRelease(
-                    fragment.bytes, streamKey: streamKey, appended: true)
+                    fragment.bytes, at: fragment.at,
+                    streamKey: streamKey, appended: true)
                 if let failure {
                     Self.log("stream \(streamKey) the parser REFUSED a "
                              + "held fragment: \(failure)")
@@ -3022,13 +3049,18 @@ public final class FairPlayStreamParser: NSObject {
     /// them in survives the deferral. The next sample the layer takes
     /// calls releaseMediaDataIfDrained again, so a fragment put back
     /// here is never far from another try.
-    fileprivate func finishRelease(_ bytes: Data, streamKey: String,
-                                   appended: Bool) {
+    fileprivate func finishRelease(_ bytes: Data, at: Double,
+                                   streamKey: String, appended: Bool) {
         withState {
             guard let slot = streamParsers[streamKey] else { return }
             slot.releaseInFlight = false
             if !appended {
-                slot.heldSegments.insert(bytes, at: 0)
+                // With the position it was held at - see mse_fix_133's
+                // docstring. A fragment that goes back into the bin has
+                // to be as sweepable as it was before it came out.
+                slot.heldSegments.insert(
+                    StreamParser.HeldFragment(bytes: bytes, at: at),
+                    at: 0)
             }
         }
     }
@@ -3444,6 +3476,35 @@ public final class FairPlayStreamParser: NSObject {
                          + "\(authority) - refused. \(tally.dropped) "
                          + "stranded so far, \(tally.pruned) pruned "
                          + "from the queue here")
+            }
+            return
+        }
+
+        // MEDIA THE ELEMENT CANNOT REACH.
+        //
+        // ADDED - see mse_fix_133's docstring. The mirror of the block
+        // above, which has caught nothing in two captures while this
+        // direction ran a stream to teardown at drift -1944.59.
+        //
+        // Refused only, with no pruning: a queue holding media this far
+        // ahead has nothing in it that these samples belong with, and
+        // the sweep above is what empties it when the element moves.
+        if let authority = mediaAuthority(streamKey), authority.isFinite,
+           intakePTS.isFinite, intakePTS > authority + Self.strandedAhead {
+            let tally = withState { () -> (n: Int, first: Bool) in
+                guard let slot = streamParsers[streamKey] else {
+                    return (0, false)
+                }
+                slot.aheadDropped += 1
+                let first = slot.aheadDropped == 1
+                return (slot.aheadDropped, first)
+            }
+            if tally.first || tally.n % 100 == 0 {
+                Self.log("stream \(streamKey) sample at \(intakePTS) is "
+                         + "\(intakePTS - authority)s AHEAD of the media "
+                         + "at \(authority) - refused. \(tally.n) so far. "
+                         + "No page buffers this far; these bytes belong "
+                         + "to media the element has left.")
             }
             return
         }
@@ -6294,6 +6355,23 @@ public final class FairPlayStreamParser: NSObject {
     /// every stranded queue was over 360s.
     fileprivate static let strandedBehind: Double = 60.0
 
+    /// How far AHEAD of the element a sample may be and still be taken.
+    ///
+    /// ADDED - see mse_fix_133's docstring. The behind arm of this gate
+    /// has fired zero times in the last two captures, because the fault
+    /// has never been in that direction: in d655146f tv.apple.com left
+    /// a 4481-second timeline for a 2494-second one and held bytes from
+    /// the first were appended afterwards, so every sample was 1944
+    /// seconds AHEAD of the element and every gate in this file waved
+    /// it through.
+    ///
+    /// Ten minutes. The pages under test buffer up to 195 seconds - the
+    /// widest `MSE sb#2 buffered` range in these captures is
+    /// [4077.45-4272.02] - so this is three times the widest
+    /// legitimate lookahead and still catches a 1944 second miss on the
+    /// first sample rather than the thousandth.
+    fileprivate static let strandedAhead: Double = 600.0
+
     /// How far BEHIND the media a queued sample may be before the queue
     /// holding it is stale.
     ///
@@ -6383,28 +6461,54 @@ public final class FairPlayStreamParser: NSObject {
                 || (at >= authority - Self.staleBehind
                     && at <= authority + Self.strandedBehind)
         }
-        let swept = withState { () -> (gone: Int, left: Int) in
-            guard let slot = streamParsers[streamKey] else { return (0, 0) }
+        // AND THE BYTES BEHIND THEM - see mse_fix_133's docstring.
+        // Emptying the queue of a timeline the element has left, while
+        // leaving thirty-two fragments of that same timeline in the bin
+        // to be appended eighty-six seconds later, is how capture
+        // d655146f ends with every sample 1944s ahead of the clock.
+        //
+        // Judged by the stamp, not by the fact of being held: a sweep
+        // that follows the sound FORWARD leaves held bytes that are the
+        // continuation of the media it kept, and those must survive.
+        // A fragment with no stamp - the element never said where it
+        // was - is kept, because "cannot tell" is not "stale".
+        let heldNear = { (fragment: StreamParser.HeldFragment) -> Bool in
+            return !fragment.at.isFinite
+                || (fragment.at >= authority - Self.strandedBehind
+                    && fragment.at <= authority + Self.strandedBehind)
+        }
+        let swept = withState { () -> (gone: Int, left: Int, bins: Int) in
+            guard let slot = streamParsers[streamKey] else {
+                return (0, 0, 0)
+            }
             let keptGOP = slot.currentGOP.filter(near)
             let keptPending = slot.pending.filter(near)
             // ADDED - see mse_fix_110's docstring.
             let keptPrevious = slot.previousGOP.filter(near)
+            let keptHeld = slot.heldSegments.filter(heldNear)
+            let bins = slot.heldSegments.count - keptHeld.count
             let gone = (slot.currentGOP.count - keptGOP.count)
                 + (slot.pending.count - keptPending.count)
                 + (slot.previousGOP.count - keptPrevious.count)
-            if gone > 0 {
+            if gone > 0 || bins > 0 {
                 slot.previousGOP = keptPrevious
                 slot.currentGOP = keptGOP
                 slot.pending = keptPending
+                slot.heldSegments = keptHeld
                 slot.needsSyncSample = true
                 slot.strandedPruned += gone
             }
-            return (gone, slot.pending.count)
+            return (gone, slot.pending.count, bins)
         }
-        if swept.gone > 0 {
+        if swept.gone > 0 || swept.bins > 0 {
+            var bin = ""
+            if swept.bins > 0 {
+                bin = ", and \(swept.bins) held fragment(s) of the media "
+                    + "it left"
+            }
             Self.log("stream \(streamKey) \(why) \(authority) - swept "
                      + "\(swept.gone) samples that were not near it, "
-                     + "\(swept.left) left in the queue")
+                     + "\(swept.left) left in the queue" + bin)
         }
         return swept.gone
     }
