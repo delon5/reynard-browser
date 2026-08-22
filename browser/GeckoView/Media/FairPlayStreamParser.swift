@@ -5764,9 +5764,22 @@ public final class FairPlayStreamParser: NSObject {
                 sweepMediaAwayFrom(key, authority: seconds,
                                    why: "the element moved to")
             }
+            // WHICH CLOCK - see mse_fix_112's docstring. In capture
+            // e179d626 this read 3407.1 four times running while the
+            // drain read the same stream's timebase advancing from
+            // 3413 to 3421 at 1.000x, with no adoption between them and
+            // every write here reading back what it asked for. Two
+            // readings that cannot both be of one object, starting
+            // sixteen lines after 'pipLife: willStart'. The drift line
+            // has named its timebase since 108; this one never has.
+            let onTimebase = Unmanaged.passUnretained(timebase).toOpaque()
+            let onLayer = withState {
+                streamParsers[key]?.displayLayer
+            }.map { Unmanaged.passUnretained($0).toOpaque() }
             Self.log("stream \(key) clock put on the ELEMENT at "
                      + "\(seconds) - it read \(before), it now reads "
-                     + "\(after)")
+                     + "\(after) - timebase \(onTimebase) layer "
+                     + (onLayer.map { "\($0)" } ?? "none"))
         }
         if moved {
             realignAudioClock(sessionId: sessionId, to: onto)
