@@ -187,11 +187,11 @@ if let reynardRustLog = getenv("RUST_LOG") {
 } else {
     fputs("reynardWR: RUST_LOG is NOT SET\n", stderr)
 }
-// A second, independent route for the same warning: GeckoLogger tries
-// Gecko's own logging first and only falls back to env_logger.
-if getenv("MOZ_LOG") == nil {
-    setenv("MOZ_LOG", "webrender:4", 1)
-}
+// NOT a second route - see mse_fix_160e's docstring. This used to set
+// MOZ_LOG=webrender:4, and log_to_gecko RETURNS TRUE for any module
+// MOZ_LOG has registered, which takes the record away from env_logger
+// instead of duplicating it. Nothing is set here now; whatever the
+// environment already carries is left alone and reported below.
 if let reynardMozLog = getenv("MOZ_LOG") {
     fputs("reynardWR: MOZ_LOG=\(String(cString: reynardMozLog))\n", stderr)
 }
