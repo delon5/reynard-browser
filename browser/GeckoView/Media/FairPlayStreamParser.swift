@@ -3684,6 +3684,8 @@ public final class FairPlayStreamParser: NSObject {
                              // this file thinks or the clock being read
                              // is not the one being written.
                              + " | clock rate \(CMTimebaseGetRate(timebase))"
+                             // ADDED - see mse_fix_113's docstring.
+                             + " " + Self.layerShape(layer)
                              // ADDED - see mse_fix_108's docstring.
                              // CMTimebaseGetRate is the rate relative
                              // to the IMMEDIATE source; this is the one
@@ -5058,7 +5060,7 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("stream \(streamKey) the new layer starts "
                      + "\(firstUp - anchor.seconds)s after its clock - "
                      + "first frame at \(firstUp), clock at "
-                     + "\(anchor.seconds)")
+                     + "\(anchor.seconds) - " + Self.layerShape(sink))
         } else {
             Self.log("stream \(streamKey) the new layer has NO frame to "
                      + "start from - its clock is at \(anchor.seconds) "
@@ -5107,6 +5109,26 @@ public final class FairPlayStreamParser: NSObject {
     /// No attachments at all means nothing declared this sample to depend
     /// on another, which is a sync sample. Absence of the NotSync key
     /// means the same thing.
+    /// What the layer we are feeding actually looks like.
+    ///
+    /// ADDED - see mse_fix_113's docstring. A layer with no area, or
+    /// one that is not in a tree, or a hidden one, accepts every sample
+    /// and reports status 1 and ready true while showing nothing. This
+    /// file has had no way to tell that apart from working, and
+    /// "landscape controls show on screen, no video" is exactly what it
+    /// looks like from the outside.
+    ///
+    /// Read where the rest of the layer's properties are read. Rounded,
+    /// because the question is whether there is a picture-sized box,
+    /// not what its subpixel geometry is.
+    fileprivate static func layerShape(_ layer: CALayer) -> String {
+        let box = layer.bounds.size
+        return "box \(Int(box.width.rounded()))x"
+            + "\(Int(box.height.rounded()))"
+            + " super \(layer.superlayer != nil)"
+            + " hidden \(layer.isHidden)"
+    }
+
     fileprivate static func isSyncSample(_ sampleBuffer: CMSampleBuffer)
         -> Bool {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
