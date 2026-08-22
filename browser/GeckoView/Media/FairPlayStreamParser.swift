@@ -5117,8 +5117,12 @@ public final class FairPlayStreamParser: NSObject {
                 // NOT TAKE on every one of these and on nothing else,
                 // so acting on it cannot flush a write that would have
                 // worked.
+                // clockRefused, NOT clockLanded - see mse_fix_149's
+                // docstring. The read-back is taken after the clock has
+                // started running, so it is never exact, and flushing a
+                // renderer for that costs a minute of queued sound.
                 if reads.isFinite, time.seconds.isFinite,
-                   abs(reads - time.seconds) > Self.clockLanded {
+                   abs(reads - time.seconds) > Self.clockRefused {
                     let refused = withState {
                         () -> (renderer: AVSampleBufferAudioRenderer,
                                queue: DispatchQueue, dropped: Int)? in
@@ -6141,30 +6145,8 @@ public final class FairPlayStreamParser: NSObject {
             + "\(Int(box.height.rounded()))"
             + " super \(layer.superlayer != nil)"
             + " hidden \(layer.isHidden)"
-            // IS IT MARKED - see mse_fix_142's docstring. The whole
-            // read-back story needs this to be true, and nothing has
-            // ever confirmed it: the property is set in the compositor,
-            // on a layer this file is handed afterwards, and a cast
-            // that did not take would leave it false with no line
-            // anywhere saying so.
-            + Self.capturePolicy(layer)
             // WHO IS ABOVE IT - see mse_fix_138's docstring.
             + Self.layerChain(layer)
-    }
-
-    /// Whether this sink is excluded from capture.
-    ///
-    /// ADDED - see mse_fix_142's docstring. Guarded on the class as
-    /// well as the availability: layerShape is handed a CALayer, and
-    /// on the AVPlayer route it is not a display layer at all.
-    fileprivate static func capturePolicy(_ layer: CALayer) -> String {
-        guard let sink = layer as? AVSampleBufferDisplayLayer else {
-            return " capture n/a"
-        }
-        if #available(iOS 14.0, *) {
-            return " preventsCapture \(sink.preventsCapture)"
-        }
-        return " capture unknown"
     }
 
     /// Every ancestor of this layer, from its parent to the root.
@@ -6955,9 +6937,25 @@ public final class FairPlayStreamParser: NSObject {
     ///
     /// ADDED - see mse_fix_146's docstring. The same 0.05 writeAudioClock
     /// has used to decide whether to print DID NOT TAKE since it was
-    /// written, named here so the two cannot drift apart: this file must
-    /// act on exactly the condition it reports.
+    /// written.
     fileprivate static let clockLanded: Double = 0.05
+
+    /// And how far out it has to be before the renderer is flushed for
+    /// it.
+    ///
+    /// ADDED - see mse_fix_149's docstring. 146 acted on clockLanded,
+    /// which is right for a report and wrong for an action:
+    /// writeAudioClock writes at rate 1.0 and then reads back, so the
+    /// clock has been running for however long the call took, and a
+    /// tenth of a second is that and nothing else. In capture 5e206fda
+    /// it flushed four times for gaps of 0.565, 0.113, 0.118 and 0.087
+    /// seconds, throwing away 12, 135, 0 and 124 queued samples.
+    ///
+    /// Every genuine refusal this file has caught is seconds or worse -
+    /// 3.577 on HBO Max, 33.00 and 540.16 on Netflix - so 1.5 sits
+    /// between the widest read-back lag and the narrowest real refusal
+    /// with room on both sides.
+    fileprivate static let clockRefused: Double = 1.5
 
     /// How far the sound may fall behind the picture before it is put
     /// back.

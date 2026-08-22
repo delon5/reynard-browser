@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3758 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3581 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2410,6 +2410,8 @@ index 9ca6e15..18d37f0 100644
 +        try {
 +          reynardArm(this);
 +          this.reynardPlayCalled = true;
++          // Stamped for the tap line - see mse_fix_150's docstring.
++          reynardLastPlayAt = Date.now();
 +          debug("PLAY() " + reynardWho(this) + " by " + reynardCaller());
 +        } catch (e) {}
 +        return reynardNativePlay.apply(this, arguments);
@@ -2628,17 +2630,15 @@ index 9ca6e15..18d37f0 100644
 +          if (!t || !reynardTapPauseGuard) {
 +            return;
 +          }
-+          // BEFORE THE JUDGEMENT - see mse_fix_140's docstring, so this
-+          // sees the taps that are allowed through to a real control as
-+          // well as the ones that are swallowed. A real control press
-+          // is where the controls-are-down state comes from, and
-+          // without both there is nothing to compare.
++          // ONE LINE PER TAP - see mse_fix_150's docstring. Before the
++          // judgement, so it sees the taps allowed through to a real
++          // control as well as the ones that are swallowed.
 +          if (
 +            e.type === "click" ||
 +            e.type === "pointerup" ||
 +            e.type === "touchend"
 +          ) {
-+            reynardProbeControls(t);
++            reynardSayTap(e, t);
 +          }
 +          var judged = reynardJudgeTap(t);
 +          if (judged[0]) {
@@ -2712,253 +2712,74 @@ index 9ca6e15..18d37f0 100644
 +        debug("TAP SWALLOW armed");
 +      } catch (e) {}
 +
-+      // WHAT THE CONTROLS ARE DOING - see mse_fix_140's docstring.
++      // ONE LINE PER TAP - see mse_fix_150's docstring.
 +      //
-+      // 139 summons the controls and does not dismiss them, because
-+      // nothing logged so far says what dismissal is bound to. Either
-+      // the player's own auto-hide takes them away, in which case there
-+      // is nothing left to do, or it does not, in which case this says
-+      // exactly which attribute differs between up and down.
-+      var reynardProbes = 0;
-+      var reynardLastProbeAt = 0;
-+
-+      // Found from the play/pause button rather than by guessing a
-+      // class name: walk up until an ancestor covers half the video.
-+      // That is the overlay on every player under test, and it is the
-+      // same coverage test reynardJudgeTap already trusts.
-+      function reynardControlsBox(doc) {
-+        try {
-+          var btn = doc.querySelector(
-+            "[aria-label*=pause i], [aria-label*=play i]," +
-+              "[data-testid*=play i], [data-testid*=pause i]"
-+          );
-+          var v = doc.querySelector("video");
-+          if (!btn || !v) {
-+            return null;
-+          }
-+          var vb = v.getBoundingClientRect();
-+          if (!vb.width || !vb.height) {
-+            return null;
-+          }
-+          var here = btn;
-+          for (var i = 0; i < 8 && here.parentElement; i++) {
-+            here = here.parentElement;
-+            var r = here.getBoundingClientRect();
-+            var w = Math.min(r.right, vb.right) - Math.max(r.left, vb.left);
-+            var h = Math.min(r.bottom, vb.bottom) - Math.max(r.top, vb.top);
-+            if (w > 0 && h > 0 && (w * h) / (vb.width * vb.height) >= 0.5) {
-+              return here;
-+            }
-+          }
-+          return here;
-+        } catch (e) {
-+          return null;
-+        }
-+      }
-+
-+      // Everything a web player uses to mean "showing" or "hidden".
-+      // Printed together because which one a given player uses is the
-+      // question, and reading them one at a time over several captures
-+      // is how this file has wasted a week before.
-+      function reynardControlsState(el) {
-+        if (!el) {
-+          return "controls=notfound";
-+        }
-+        try {
-+          var doc = el.ownerDocument;
-+          var view = doc.defaultView || window;
-+          var cs = view.getComputedStyle(el);
-+          var r = el.getBoundingClientRect();
-+          return (
-+            "controls=" +
-+            reynardDescribeElement(el) +
-+            " opacity=" +
-+            cs.opacity +
-+            " visibility=" +
-+            cs.visibility +
-+            " display=" +
-+            cs.display +
-+            " pointer=" +
-+            cs.pointerEvents +
-+            " aria-hidden=" +
-+            (el.getAttribute("aria-hidden") || "-") +
-+            " box=" +
-+            Math.round(r.width) +
-+            "x" +
-+            Math.round(r.height) +
-+            " class=" +
-+            ((el.className && typeof el.className === "string"
-+              ? el.className.trim()
-+              : "-"
-+            ).slice(0, 160))
-+          );
-+        } catch (e) {
-+          return "controls=?";
-+        }
-+      }
-+
-+      // WHAT IS OVER THE PICTURE - see mse_fix_142's docstring.
++      // What replaced two probes that never worked. reynardControlsBox
++      // walked up from the first [aria-label*=play i] in the DOCUMENT,
++      // which on tv.apple.com is not the player's button, and reported
++      // div.body-container - the whole viewport - on all 24 lines it
++      // ever produced. The overlay walk answered its question once,
++      // in capture 5e206fda: nothing over the video reads the backdrop,
++      // in either orientation, across 2252 elements. Neither has
++      // anything left to say.
 +      //
-+      // The four properties below make the compositor render what is
-+      // behind an element into an offscreen buffer so the effect has
-+      // something to work on. A layer marked preventsCapture
-+      // contributes nothing to such a buffer, and the buffer is what
-+      // reaches the screen - so the picture is black for exactly as
-+      // long as the effect is over it.
-+      //
-+      // opacity and transform are printed too, because they promote
-+      // without reading back, and telling a promotion from a read-back
-+      // is the point.
-+      var reynardOverlayReports = 0;
-+      function reynardSayWhatIsOverTheVideo(doc) {
-+        try {
-+          if (reynardOverlayReports >= 8) {
-+            return;
-+          }
-+          reynardOverlayReports++;
-+          var view = doc.defaultView || window;
-+          var v = doc.querySelector("video");
-+          if (!v) {
-+            debug("OVER THE VIDEO: no video element");
-+            return;
-+          }
-+          var vb = v.getBoundingClientRect();
-+          if (!vb.width || !vb.height) {
-+            debug("OVER THE VIDEO: the video has no box");
-+            return;
-+          }
-+          var found = [];
-+          var all = doc.querySelectorAll("*");
-+          var looked = 0;
-+          for (var i = 0; i < all.length && looked < 4000; i++) {
-+            var el = all[i];
-+            looked++;
-+            if (el === v) {
-+              continue;
-+            }
-+            var r = el.getBoundingClientRect();
-+            if (!r.width || !r.height) {
-+              continue;
-+            }
-+            var w = Math.min(r.right, vb.right) - Math.max(r.left, vb.left);
-+            var h = Math.min(r.bottom, vb.bottom) - Math.max(r.top, vb.top);
-+            if (w <= 0 || h <= 0) {
-+              continue;
-+            }
-+            var cover = (w * h) / (vb.width * vb.height);
-+            if (cover < 0.05) {
-+              continue;
-+            }
-+            var cs = view.getComputedStyle(el);
-+            var backdrop =
-+              cs.backdropFilter || cs.webkitBackdropFilter || "none";
-+            var filter = cs.filter || "none";
-+            var blend = cs.mixBlendMode || "normal";
-+            var isolation = cs.isolation || "auto";
-+            var reads =
-+              (backdrop && backdrop !== "none") ||
-+              (filter && filter !== "none") ||
-+              (blend && blend !== "normal") ||
-+              (isolation && isolation !== "auto");
-+            if (!reads) {
-+              continue;
-+            }
-+            found.push(
-+              reynardDescribeElement(el) +
-+                " covers=" +
-+                cover.toFixed(2) +
-+                " backdrop=" +
-+                backdrop +
-+                " filter=" +
-+                filter +
-+                " blend=" +
-+                blend +
-+                " isolation=" +
-+                isolation +
-+                " opacity=" +
-+                cs.opacity +
-+                " transform=" +
-+                (cs.transform === "none" ? "none" : "set")
-+            );
-+            if (found.length >= 6) {
-+              break;
-+            }
-+          }
-+          if (!found.length) {
-+            debug(
-+              "OVER THE VIDEO: nothing overlapping it reads the backdrop " +
-+                "- video box " +
-+                Math.round(vb.width) +
-+                "x" +
-+                Math.round(vb.height) +
-+                ", " +
-+                looked +
-+                " elements checked"
-+            );
-+            return;
-+          }
-+          for (var j = 0; j < found.length; j++) {
-+            debug("OVER THE VIDEO: " + found[j]);
-+          }
-+        } catch (e) {}
-+      }
++      // This says what was tapped, how it was judged, whether it was
++      // stopped, and what the page did about it - which is the thing no
++      // capture has ever contained. The verdict has only ever been
++      // printed when a pause followed or a swallow fired, so a tap that
++      // was allowed and did nothing left no trace at all, and that is
++      // exactly the tap that tells "the button desynced" apart from
++      // "the scrim covers the button" apart from "the viewer meant
++      // tap-to-pause".
++      var reynardTaps = 0;
++      var reynardLastSaidTapAt = 0;
++      // Stamped by the play and pause wrappers below, read 400ms later.
++      var reynardLastPlayAt = 0;
++      var reynardLastPauseAt = 0;
 +
-+      // At the tap and then three times after it. 4s is past the
-+      // auto-hide on every player under test, so a run of four lines
-+      // that never changes is itself the answer.
-+      function reynardProbeControls(t) {
++      function reynardSayTap(e, t) {
 +        try {
-+          if (reynardProbes >= 6) {
-+            return;
-+          }
-+          // ONE TAP, ONE PROBE - see mse_fix_143's docstring. A tap
-+          // produces up to three of the events this is called from -
-+          // pointerup, touchend and click - so two taps on the browse
-+          // UI spent the whole budget in capture 37d82f28 before the
-+          // player page had loaded.
++          // One tap, not the three events it arrives as.
 +          var now = Date.now();
-+          if (now - reynardLastProbeAt < 500) {
++          if (now - reynardLastSaidTapAt < 500) {
 +            return;
 +          }
-+          var doc = (t && t.ownerDocument) || document;
-+          // AND A MEASUREMENT OF NOTHING IS NOT A MEASUREMENT. All
-+          // six probes in capture 37d82f28 reported controls=notfound
-+          // and no video element, because there was no player yet.
-+          // Those must not count against the budget or the real taps
-+          // never get one.
-+          //
-+          // NO BACKTICKS IN HERE - see mse_fix_145's docstring. This
-+          // comment is inside a template literal thirty-six hundred
-+          // lines long, so a backtick ends it and everything after is
-+          // parsed as code. The first version of this comment quoted
-+          // those two values and took the entire content script down.
-+          if (!doc.querySelector("video")) {
-+            return;
-+          }
-+          reynardLastProbeAt = now;
-+          reynardProbes++;
-+          var nth = reynardProbes;
-+          var view = doc.defaultView || window;
-+          var say = function (at) {
++          reynardLastSaidTapAt = now;
++          reynardTaps++;
++          var nth = reynardTaps;
++          var judged = reynardJudgeTap(t);
++          var stopped = !judged[0] && reynardSheetPauses > 0;
++          var head =
++            "TAP " +
++            nth +
++            " on " +
++            reynardDescribeElement(t) +
++            " via " +
++            e.type +
++            " verdict=" +
++            (judged[0] ? "control" : "sheet") +
++            " (" +
++            judged[1] +
++            ") swallowed=" +
++            (stopped ? "y" : "n");
++          debug(head);
++          var view = (t && t.ownerDocument && t.ownerDocument.defaultView) ||
++            window;
++          view.setTimeout(function () {
 +            try {
-+              debug(
-+                "TAP PROBE " +
-+                  nth +
-+                  " t+" +
-+                  at +
-+                  "ms " +
-+                  reynardControlsState(reynardControlsBox(doc))
-+              );
-+            } catch (e) {}
-+          };
-+          say(0);
-+          reynardSayWhatIsOverTheVideo(doc);
-+          [400, 1500, 4000].forEach(function (at) {
-+            view.setTimeout(function () {
-+              say(at);
-+            }, at);
-+          });
-+        } catch (e) {}
++              var did = "nothing";
++              if (reynardLastPlayAt >= now) {
++                did = "play() in " + (reynardLastPlayAt - now) + "ms";
++              }
++              if (reynardLastPauseAt >= now) {
++                did =
++                  (did === "nothing" ? "" : did + " then ") +
++                  "pause() in " + (reynardLastPauseAt - now) + "ms";
++              }
++              debug("TAP " + nth + " -> " + did);
++            } catch (e2) {}
++          }, 400);
++        } catch (e2) {}
 +      }
 +
 +      // What the guard saw, on every pause it lets through. Without
@@ -3003,6 +2824,8 @@ index 9ca6e15..18d37f0 100644
 +      window.HTMLMediaElement.prototype.pause = function () {
 +        try {
 +          reynardArm(this);
++          // Stamped for the tap line - see mse_fix_150's docstring.
++          reynardLastPauseAt = Date.now();
 +          // Only a pause that arrives in the shadow of a tap on
 +          // something that is not a control. Half a second: long enough
 +          // for a handler to run, far too short for a buffering pause,
@@ -3761,7 +3584,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3819,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3642,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4257,7 +4080,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4425,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4248,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4279,7 +4102,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4455,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4278,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
