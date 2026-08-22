@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3596 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3703 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2779,6 +2779,112 @@ index 9ca6e15..18d37f0 100644
 +        }
 +      }
 +
++      // WHAT IS OVER THE PICTURE - see mse_fix_142's docstring.
++      //
++      // The four properties below make the compositor render what is
++      // behind an element into an offscreen buffer so the effect has
++      // something to work on. A layer marked preventsCapture
++      // contributes nothing to such a buffer, and the buffer is what
++      // reaches the screen - so the picture is black for exactly as
++      // long as the effect is over it.
++      //
++      // opacity and transform are printed too, because they promote
++      // without reading back, and telling a promotion from a read-back
++      // is the point.
++      var reynardOverlayReports = 0;
++      function reynardSayWhatIsOverTheVideo(doc) {
++        try {
++          if (reynardOverlayReports >= 8) {
++            return;
++          }
++          reynardOverlayReports++;
++          var view = doc.defaultView || window;
++          var v = doc.querySelector("video");
++          if (!v) {
++            debug("OVER THE VIDEO: no video element");
++            return;
++          }
++          var vb = v.getBoundingClientRect();
++          if (!vb.width || !vb.height) {
++            debug("OVER THE VIDEO: the video has no box");
++            return;
++          }
++          var found = [];
++          var all = doc.querySelectorAll("*");
++          var looked = 0;
++          for (var i = 0; i < all.length && looked < 4000; i++) {
++            var el = all[i];
++            looked++;
++            if (el === v) {
++              continue;
++            }
++            var r = el.getBoundingClientRect();
++            if (!r.width || !r.height) {
++              continue;
++            }
++            var w = Math.min(r.right, vb.right) - Math.max(r.left, vb.left);
++            var h = Math.min(r.bottom, vb.bottom) - Math.max(r.top, vb.top);
++            if (w <= 0 || h <= 0) {
++              continue;
++            }
++            var cover = (w * h) / (vb.width * vb.height);
++            if (cover < 0.05) {
++              continue;
++            }
++            var cs = view.getComputedStyle(el);
++            var backdrop =
++              cs.backdropFilter || cs.webkitBackdropFilter || "none";
++            var filter = cs.filter || "none";
++            var blend = cs.mixBlendMode || "normal";
++            var isolation = cs.isolation || "auto";
++            var reads =
++              (backdrop && backdrop !== "none") ||
++              (filter && filter !== "none") ||
++              (blend && blend !== "normal") ||
++              (isolation && isolation !== "auto");
++            if (!reads) {
++              continue;
++            }
++            found.push(
++              reynardDescribeElement(el) +
++                " covers=" +
++                cover.toFixed(2) +
++                " backdrop=" +
++                backdrop +
++                " filter=" +
++                filter +
++                " blend=" +
++                blend +
++                " isolation=" +
++                isolation +
++                " opacity=" +
++                cs.opacity +
++                " transform=" +
++                (cs.transform === "none" ? "none" : "set")
++            );
++            if (found.length >= 6) {
++              break;
++            }
++          }
++          if (!found.length) {
++            debug(
++              "OVER THE VIDEO: nothing overlapping it reads the backdrop " +
++                "- video box " +
++                Math.round(vb.width) +
++                "x" +
++                Math.round(vb.height) +
++                ", " +
++                looked +
++                " elements checked"
++            );
++            return;
++          }
++          for (var j = 0; j < found.length; j++) {
++            debug("OVER THE VIDEO: " + found[j]);
++          }
++        } catch (e) {}
++      }
++
 +      // At the tap and then three times after it. 4s is past the
 +      // auto-hide on every player under test, so a run of four lines
 +      // that never changes is itself the answer.
@@ -2804,6 +2910,7 @@ index 9ca6e15..18d37f0 100644
 +            } catch (e) {}
 +          };
 +          say(0);
++          reynardSayWhatIsOverTheVideo(doc);
 +          [400, 1500, 4000].forEach(function (at) {
 +            view.setTimeout(function () {
 +              say(at);
@@ -3599,7 +3706,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3657,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3764,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4095,7 +4202,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4263,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4370,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4117,7 +4224,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4293,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4400,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

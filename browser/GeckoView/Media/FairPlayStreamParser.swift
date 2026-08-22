@@ -5969,8 +5969,30 @@ public final class FairPlayStreamParser: NSObject {
             + "\(Int(box.height.rounded()))"
             + " super \(layer.superlayer != nil)"
             + " hidden \(layer.isHidden)"
+            // IS IT MARKED - see mse_fix_142's docstring. The whole
+            // read-back story needs this to be true, and nothing has
+            // ever confirmed it: the property is set in the compositor,
+            // on a layer this file is handed afterwards, and a cast
+            // that did not take would leave it false with no line
+            // anywhere saying so.
+            + Self.capturePolicy(layer)
             // WHO IS ABOVE IT - see mse_fix_138's docstring.
             + Self.layerChain(layer)
+    }
+
+    /// Whether this sink is excluded from capture.
+    ///
+    /// ADDED - see mse_fix_142's docstring. Guarded on the class as
+    /// well as the availability: layerShape is handed a CALayer, and
+    /// on the AVPlayer route it is not a display layer at all.
+    fileprivate static func capturePolicy(_ layer: CALayer) -> String {
+        guard let sink = layer as? AVSampleBufferDisplayLayer else {
+            return " capture n/a"
+        }
+        if #available(iOS 14.0, *) {
+            return " preventsCapture \(sink.preventsCapture)"
+        }
+        return " capture unknown"
     }
 
     /// Every ancestor of this layer, from its parent to the root.
