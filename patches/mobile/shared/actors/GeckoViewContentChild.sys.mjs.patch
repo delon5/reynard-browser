@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3703 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3722 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2703,6 +2703,7 @@ index 9ca6e15..18d37f0 100644
 +      // is nothing left to do, or it does not, in which case this says
 +      // exactly which attribute differs between up and down.
 +      var reynardProbes = 0;
++      var reynardLastProbeAt = 0;
 +
 +      // Found from the play/pause button rather than by guessing a
 +      // class name: walk up until an ancestor covers half the video.
@@ -2893,9 +2894,27 @@ index 9ca6e15..18d37f0 100644
 +          if (reynardProbes >= 6) {
 +            return;
 +          }
++          // ONE TAP, ONE PROBE - see mse_fix_143's docstring. A tap
++          // produces up to three of the events this is called from -
++          // pointerup, touchend and click - so two taps on the browse
++          // UI spent the whole budget in capture 37d82f28 before the
++          // player page had loaded.
++          var now = Date.now();
++          if (now - reynardLastProbeAt < 500) {
++            return;
++          }
++          var doc = (t && t.ownerDocument) || document;
++          // AND A MEASUREMENT OF NOTHING IS NOT A MEASUREMENT. All six
++          // probes in that capture reported `controls=notfound` and
++          // `no video element`, because there was no player yet. Those
++          // must not count against the budget or the real taps never
++          // get one.
++          if (!doc.querySelector("video")) {
++            return;
++          }
++          reynardLastProbeAt = now;
 +          reynardProbes++;
 +          var nth = reynardProbes;
-+          var doc = (t && t.ownerDocument) || document;
 +          var view = doc.defaultView || window;
 +          var say = function (at) {
 +            try {
@@ -3706,7 +3725,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3764,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3783,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4202,7 +4221,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4370,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4389,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4224,7 +4243,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4400,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4419,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

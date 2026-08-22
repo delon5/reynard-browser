@@ -4977,7 +4977,22 @@ public final class FairPlayStreamParser: NSObject {
     }
 
     /// Move every started audio clock in this session onto the picture's.
-    fileprivate func realignAudioClock(sessionId: String, to time: CMTime) {
+    /// Move every started audio clock in this session onto the
+    /// picture's, optionally emptying the renderer first.
+    ///
+    /// CHANGED - see mse_fix_143's docstring. `flushing` is for a move
+    /// the queued sound cannot serve. A synchronizer will not put its
+    /// clock past media its renderer already holds, so after a seek
+    /// every write here is refused - nine of them in capture 37d82f28,
+    /// leaving the sound five thousand seconds from the picture - and
+    /// the only thing that makes the write take is emptying the
+    /// renderer before it.
+    ///
+    /// Off by default, because the ordinary caller is setPosition's
+    /// half-second correction several times a second. That sweeps
+    /// nothing and must flush nothing.
+    fileprivate func realignAudioClock(sessionId: String, to time: CMTime,
+                                       flushing: Bool = false) {
         let cutoff = Self.hostNow() - Self.livenessWindow
         let started = withState {
             () -> [(String, AVSampleBufferRenderSynchronizer)] in
@@ -4997,8 +5012,47 @@ public final class FairPlayStreamParser: NSObject {
             return out
         }
         for (key, synchronizer) in started {
-            writeAudioClock(synchronizer, to: time, rate: gatedRate(key),
-                            label: key, reason: "realignAudioClock")
+            // BOTH ON THE AUDIO QUEUE, IN THIS ORDER - see
+            // mse_fix_143's docstring, and resynchroniseAudio, which
+            // has done it this way since it was written. flush() and
+            // enqueue() must not race, and a write that runs before the
+            // flush is the refusal this exists to stop.
+            // Two steps rather than a ternary: this file's own note
+            // about not fighting the type checker applies, and a
+            // multi-statement closure against a bare nil is exactly
+            // that fight.
+            var emptying: (renderer: AVSampleBufferAudioRenderer,
+                           queue: DispatchQueue, dropped: Int)?
+            if flushing {
+                emptying = withState {
+                    () -> (renderer: AVSampleBufferAudioRenderer,
+                           queue: DispatchQueue, dropped: Int)? in
+                    guard let slot = streamParsers[key],
+                          let renderer = slot.audioRenderer,
+                          let queue = slot.audioQueue else { return nil }
+                    let dropped = slot.audioPending.count
+                    slot.audioPending.removeAll()
+                    return (renderer, queue, dropped)
+                }
+            }
+            if let emptying {
+                Self.log("stream \(key) the element moved somewhere the "
+                         + "queued sound cannot serve - dropping "
+                         + "\(emptying.dropped) samples and flushing the "
+                         + "renderer before the clock is written, or the "
+                         + "write is refused")
+                let rate = gatedRate(key)
+                emptying.queue.async {
+                    emptying.renderer.flush()
+                    FairPlayStreamParser.shared.writeAudioClock(
+                        synchronizer, to: time, rate: rate, label: key,
+                        reason: "realignAudioClock after a seek")
+                }
+            } else {
+                writeAudioClock(synchronizer, to: time,
+                                rate: gatedRate(key),
+                                label: key, reason: "realignAudioClock")
+            }
             Self.log("stream \(key) audio clock re-anchored to "
                      + "\(time.seconds) - following the video timebase")
         }
@@ -6699,6 +6753,8 @@ public final class FairPlayStreamParser: NSObject {
         }
         let onto = CMTime(seconds: seconds, preferredTimescale: 90_000)
         var moved = false
+        // Set by the sweep below - see mse_fix_143's docstring.
+        var swept = false
         for (key, timebase) in clocks {
             let before = CMTimebaseGetTime(timebase).seconds
             guard before.isFinite,
@@ -6735,8 +6791,14 @@ public final class FairPlayStreamParser: NSObject {
             // element now is. A small move can leave a queue a long way
             // off, and a large move need not.
             if queueStrays(key, from: seconds) {
-                sweepMediaAwayFrom(key, authority: seconds,
-                                   why: "the element moved to")
+                // REMEMBERED - see mse_fix_143's docstring. A sweep
+                // means the queue could not serve where the element has
+                // gone, and the sound's queue and renderer are in the
+                // same position.
+                if sweepMediaAwayFrom(key, authority: seconds,
+                                      why: "the element moved to") > 0 {
+                    swept = true
+                }
             }
             // WHICH CLOCK - see mse_fix_112's docstring. In capture
             // e179d626 this read 3407.1 four times running while the
@@ -6756,7 +6818,8 @@ public final class FairPlayStreamParser: NSObject {
                      + (onLayer.map { "\($0)" } ?? "none"))
         }
         if moved {
-            realignAudioClock(sessionId: sessionId, to: onto)
+            realignAudioClock(sessionId: sessionId, to: onto,
+                              flushing: swept)
         }
     }
 
