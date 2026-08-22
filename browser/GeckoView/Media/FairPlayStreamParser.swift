@@ -2233,6 +2233,12 @@ public final class FairPlayStreamParser: NSObject {
         /// layer is hungry, so it is stopped when the queue empties and
         /// re-armed when something arrives. Otherwise it spins.
         var drainArmed = false
+        /// How many times the feed has been held off for this stream.
+        ///
+        /// ADDED - see mse_fix_114's docstring. Said on the first and
+        /// then rarely: pacing is the normal state of a healthy stream
+        /// and a line per stop would be a line per second.
+        var pacedStops = 0
         var failObserver: NSObjectProtocol?
         var drainQueue: DispatchQueue?
         /// The independent decode probe - see runDecodeProbe.
@@ -2730,6 +2736,21 @@ public final class FairPlayStreamParser: NSObject {
     /// back that was needed was 11.2 seconds; 400 samples is about
     /// sixteen at 24fps.
     fileprivate static let keepBackSamples = 400
+
+    /// How far past the layer's clock the queue may be fed.
+    ///
+    /// ADDED - see mse_fix_114's docstring. drainPending has always run
+    /// `while layer.isReadyForMoreMediaData`, and that layer stays ready
+    /// long enough to swallow the whole queue: capture 16467831 has it
+    /// taking thirty-seven seconds of media in five seconds of wall
+    /// time, at up to 140,000 frames per second. Five seconds after
+    /// that the compositor replaced the layer and all of it went with
+    /// it, which is why the picture lasted five to seven seconds.
+    ///
+    /// Three seconds. The one healthy window in that capture ran at a
+    /// lead of 1.1 to 1.9s, so three is comfortably above what playback
+    /// needs and an order of magnitude below what it was doing.
+    fileprivate static let feedAhead: Double = 3.0
 
     fileprivate static let mediaDataHighWater = 300
     fileprivate static let mediaDataLowWater = 120
@@ -3457,6 +3478,58 @@ public final class FairPlayStreamParser: NSObject {
     fileprivate func drainPending(streamKey: String,
                                   layer: AVSampleBufferDisplayLayer) {
         while layer.isReadyForMoreMediaData {
+            // PACED - see mse_fix_114's docstring. The layer's readiness
+            // is not a measure of how much it should be given: it stays
+            // ready long enough to take the entire queue, and everything
+            // taken is inside the layer rather than in pending, so the
+            // next time the compositor replaces the layer it all goes.
+            //
+            // Only against a running clock. A stopped one never reaches
+            // the media, so pacing against it would hold the feed off
+            // for ever; at rate 0 this is exactly the old behaviour.
+            var holdFor: Double?
+            if let timebase = layer.controlTimebase,
+               CMTimebaseGetRate(timebase) != 0 {
+                let now = CMTimebaseGetTime(timebase).seconds
+                let head = withState { () -> Double? in
+                    guard let slot = streamParsers[streamKey],
+                          let first = slot.pending.first else { return nil }
+                    let at = CMSampleBufferGetPresentationTimeStamp(first)
+                        .seconds
+                    return at.isFinite ? at : nil
+                }
+                if now.isFinite, let head, head - now > Self.feedAhead {
+                    holdFor = head - now - Self.feedAhead
+                }
+            }
+            if let holdFor {
+                let told = withState { () -> (queue: DispatchQueue?,
+                                              nth: Int) in
+                    guard let slot = streamParsers[streamKey] else {
+                        return (nil, 0)
+                    }
+                    slot.drainArmed = false
+                    slot.pacedStops += 1
+                    return (slot.drainQueue, slot.pacedStops)
+                }
+                layer.stopRequestingMediaData()
+                if told.nth == 1 || told.nth % 200 == 0 {
+                    Self.log("stream \(streamKey) holding off - the queue "
+                             + "is \(holdFor + Self.feedAhead)s ahead of "
+                             + "the layer's clock. Hold \(told.nth).")
+                }
+                // AND COME BACK. armDrainIfNeeded is otherwise only
+                // reached from an append, so a page that has finished
+                // buffering would never ask this layer for anything
+                // again. Capped so a wild timestamp cannot park the
+                // stream for minutes.
+                told.queue?.asyncAfter(
+                    deadline: .now() + min(max(holdFor, 0.05), 2.0)) {
+                    FairPlayStreamParser.shared.armDrainIfNeeded(
+                        streamKey: streamKey)
+                }
+                return
+            }
             let next = withState { () -> CMSampleBuffer? in
                 guard let slot = streamParsers[streamKey],
                       !slot.pending.isEmpty else { return nil }

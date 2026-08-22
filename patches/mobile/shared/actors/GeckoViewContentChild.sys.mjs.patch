@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3138 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3216 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2418,10 +2418,88 @@ index 9ca6e15..18d37f0 100644
 +      // ADDED - see mse_fix_87's docstring. play() and load() have
 +      // carried a stack since they were wrapped; pause() never has, and
 +      // fifteen pauses on tv.apple.com went unattributed because of it.
++      // ONLY THE PAUSE BUTTON PAUSES - see mse_fix_115's docstring.
++      //
++      // Tapping the picture on tv.apple.com stops playback. The tap is
++      // wanted - it is how the controls are summoned - and the pause is
++      // not. The site's own handler calls pause(), so the only place
++      // that can tell the two apart is here, with the tap that caused
++      // it still in hand.
++      //
++      // Set to false to restore the old behaviour exactly.
++      var reynardTapPauseGuard = true;
++      var reynardLastTapAt = 0;
++      var reynardLastTapTarget = null;
++      var reynardLastTapWasControl = false;
++      var REYNARD_CONTROL_SELECTOR =
++        "button, [role=button], a, input, select, summary, label," +
++        "[aria-label*=play i], [aria-label*=pause i]," +
++        "[class*=control i], [class*=button i]," +
++        "[data-testid*=control i]";
++      // Capture phase, on the window: the page's own handler runs after
++      // this and calls pause(), so the tap has to be recorded before it
++      // gets there. Passive, so this cannot affect scrolling.
++      try {
++        window.addEventListener(
++          "pointerdown",
++          function (e) {
++            try {
++              reynardLastTapAt = Date.now();
++              reynardLastTapTarget = e.target;
++              reynardLastTapWasControl = !!(
++                e.target &&
++                typeof e.target.closest === "function" &&
++                e.target.closest(REYNARD_CONTROL_SELECTOR)
++              );
++            } catch (e2) {
++              reynardLastTapWasControl = true;
++            }
++          },
++          { capture: true, passive: true }
++        );
++      } catch (e) {}
++
++      function reynardDescribeTapTarget() {
++        var t = reynardLastTapTarget;
++        if (!t) {
++          return "nothing";
++        }
++        try {
++          return (
++            (t.tagName || "?").toLowerCase() +
++            (t.id ? "#" + t.id : "") +
++            (t.className && typeof t.className === "string"
++              ? "." + t.className.trim().split(" ").filter(Boolean).slice(0, 2).join(".")
++              : "")
++          );
++        } catch (e) {
++          return "?";
++        }
++      }
++
 +      var reynardNativePause = window.HTMLMediaElement.prototype.pause;
 +      window.HTMLMediaElement.prototype.pause = function () {
 +        try {
 +          reynardArm(this);
++          // Only a pause that arrives in the shadow of a tap on
++          // something that is not a control. Half a second: long enough
++          // for a handler to run, far too short for a buffering pause,
++          // an ad break, or the system taking the app away.
++          if (
++            reynardTapPauseGuard &&
++            !reynardLastTapWasControl &&
++            Date.now() - reynardLastTapAt < 500
++          ) {
++            debug(
++              "PAUSE() DECLINED - the tap was on " +
++                reynardDescribeTapTarget() +
++                ", not a control " +
++                reynardWho(this) +
++                " by " +
++                reynardCaller()
++            );
++            return undefined;
++          }
 +          debug("PAUSE() " + reynardWho(this) + " by " + reynardCaller());
 +        } catch (e) {}
 +        return reynardNativePause.apply(this, arguments);
@@ -3141,7 +3219,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3199,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3277,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3637,7 +3715,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +3805,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +3883,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -3659,7 +3737,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +3835,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +3913,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
