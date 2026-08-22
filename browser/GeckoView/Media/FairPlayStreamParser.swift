@@ -2192,6 +2192,22 @@ public final class FairPlayStreamParser: NSObject {
         /// new AVStreamDataParser to try again" - so this marks one for
         /// replacement rather than pretending it still works.
         var failed = false
+        /// The last initialisation segment this stream was given.
+        ///
+        /// ADDED - see mse_fix_159's docstring. A replacement parser
+        /// has never seen a moov, and media without one cannot be
+        /// parsed - so the rebuild that already existed here could not
+        /// work until there was something to bring the new parser up to
+        /// state with.
+        var initSegment: Data?
+        /// The last sign of life from this stream's parser, and how
+        /// many media segments have gone in since.
+        ///
+        /// ADDED - see mse_fix_159's docstring. Stamped when the parser
+        /// is built and again on every didProvideMediaData, so silence
+        /// is measurable without a delegate that never fires.
+        var lastMediaDataAt = 0.0
+        var appendsSinceMediaData = 0
         /// Tracks THIS parser reported, from its own
         /// didParseStreamDataAsAsset. Nothing is ever armed for a track
         /// that is not in here.
@@ -2618,8 +2634,24 @@ public final class FairPlayStreamParser: NSObject {
         }
         let key = sessionId + "|" + stream
         var slot = withState { streamParsers[key] }
-        if let existing = slot, existing.failed {
-            Self.log("stream \(stream) parser had failed - building a new one")
+        // AND STARVED COUNTS AS FAILED - see mse_fix_159's docstring.
+        //
+        // The didFailToParseStreamDataWithError: delegate has never
+        // fired: capture 50625b25 has 244 "Ignoring appendStreamData:
+        // because we're failed or expired" from AVFoundation and zero
+        // "parse FAILED" from this file. The parser dies without
+        // telling anyone, so the only way to know is that it stopped
+        // answering.
+        var carriedInit: Data?
+        if let existing = slot,
+           existing.failed || Self.parserHasStopped(existing) {
+            let why = existing.failed
+                ? "reported a parse failure"
+                : "stopped answering - \(existing.appendsSinceMediaData) "
+                    + "segments in and nothing back for "
+                    + "\(Self.hostNow() - existing.lastMediaDataAt)s"
+            Self.log("stream \(stream) parser \(why) - building a new one")
+            carriedInit = withState { existing.initSegment }
             entry.keySession.removeContentKeyRecipient(existing.recipient)
             withState { streamParsers[key] = nil }
             slot = nil
@@ -2638,6 +2670,28 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("stream \(stream) parser built and added to the key "
                      + "session - recipients "
                      + "\(entry.keySession.contentKeyRecipients.count)")
+            // UP TO STATE BEFORE ANYTHING ELSE - see mse_fix_159's
+            // docstring. A fresh parser has never seen a moov, and the
+            // segment that provoked this rebuild is media. Without this
+            // the replacement fails on its first append exactly as the
+            // one it replaced did.
+            if let carriedInit {
+                let replay = NSSelectorFromString("appendStreamData:")
+                if built.parser.responds(to: replay) {
+                    built.parser.perform(replay, with: carriedInit)
+                    withState { built.initSegment = carriedInit }
+                    Self.log("stream \(stream) replayed its "
+                             + "\(carriedInit.count)-byte init segment into "
+                             + "the new parser")
+                } else {
+                    Self.log("stream \(stream) has an init segment to "
+                             + "replay and no appendStreamData: to replay it "
+                             + "with - the new parser starts blind")
+                }
+            }
+            // Sign of life starts now, so a parser that dies before it
+            // ever produces is still caught.
+            withState { built.lastMediaDataAt = Self.hostNow() }
             slot = built
         }
         guard let slot else {
@@ -2663,6 +2717,10 @@ public final class FairPlayStreamParser: NSObject {
         // docstring. Not always the segment that just arrived: when the
         // bin has older bytes in it, the oldest of those goes instead
         // and this one takes its place at the back.
+        // KEPT FOR THE REPLACEMENT - see mse_fix_159's docstring.
+        if Self.isInitSegment(segment) {
+            withState { streamParsers[key]?.initSegment = segment }
+        }
         var outgoing = segment
         var sentFromTheBin = false
         if !Self.isInitSegment(segment) {
@@ -2778,6 +2836,13 @@ public final class FairPlayStreamParser: NSObject {
             }
         }
         slot.parser.perform(append, with: outgoing)
+        // COUNTED, SO SILENCE IS MEASURABLE - see mse_fix_159's
+        // docstring. Init segments are not counted: they produce an
+        // asset, not media data, so counting them would make every
+        // period boundary look like a stall.
+        if !Self.isInitSegment(outgoing) {
+            withState { slot.appendsSinceMediaData += 1 }
+        }
         // Keep the sinf the page's OWN init segment carries.
         //
         // The other harvest, in append(_:initSegment:), is on the
@@ -3235,6 +3300,34 @@ public final class FairPlayStreamParser: NSObject {
         }
         Self.drainMediaData(slot.parser, tracks: slot.trackIDs,
                             label: streamKey)
+    }
+
+    /// This parser is alive - it just handed something back.
+    ///
+    /// ADDED - see mse_fix_159's docstring. Matched by the parser
+    /// object rather than by session, because a session has one parser
+    /// per SourceBuffer and only the one that produced this sample has
+    /// proved anything.
+    fileprivate func noteMediaData(from parser: AnyObject) {
+        let now = Self.hostNow()
+        withState {
+            for (_, slot) in streamParsers where slot.parser === parser {
+                slot.lastMediaDataAt = now
+                slot.appendsSinceMediaData = 0
+            }
+        }
+    }
+
+    /// Has this stream's parser stopped answering?
+    ///
+    /// ADDED - see mse_fix_159's docstring. Read without the lock, the
+    /// same way the `failed` flag beside it has always been read: two
+    /// scalars on a class the caller is holding, and a torn read costs
+    /// one late or early rebuild rather than a wrong one.
+    fileprivate static func parserHasStopped(_ slot: StreamParser) -> Bool {
+        guard slot.appendsSinceMediaData >= starvedAppends,
+              slot.lastMediaDataAt > 0 else { return false }
+        return hostNow() - slot.lastMediaDataAt > starvedSeconds
     }
 
     fileprivate func noteStreamParseFailure(sessionId: String) {
@@ -6935,6 +7028,18 @@ public final class FairPlayStreamParser: NSObject {
     /// for no reason.
     fileprivate static let positionSlack: Double = 0.5
 
+    /// How much silence from a stream's parser counts as death.
+    ///
+    /// ADDED - see mse_fix_159's docstring. Both have to be true. Across
+    /// every stream in capture 50625b25 the 95th percentile gap between
+    /// a segment going in and media data coming back is one to five
+    /// segments, answered in milliseconds. Six segments over four
+    /// seconds with nothing back is not a working parser, and the cost
+    /// of being wrong is a re-parse from the kept init segment rather
+    /// than a broken stream.
+    fileprivate static let starvedAppends = 6
+    fileprivate static let starvedSeconds: Double = 4.0
+
     /// The least time between two recoveries of a failed layer.
     ///
     /// ADDED - see mse_fix_157's docstring. A flush that does not fix
@@ -8703,6 +8808,8 @@ private final class ParserDelegate: NSObject {
                           flags: UInt) {
         fputs("fpsParser: session \(sessionId) didProvideMediaData ENTERED\n",
               stderr)
+        // A SIGN OF LIFE - see mse_fix_159's docstring.
+        FairPlayStreamParser.shared.noteMediaData(from: parser as AnyObject)
         let samples = CMSampleBufferGetNumSamples(sampleBuffer)
         let ready = CMSampleBufferDataIsReady(sampleBuffer)
         let hasData = CMSampleBufferGetDataBuffer(sampleBuffer) != nil
