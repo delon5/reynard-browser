@@ -450,6 +450,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         topConstraint = nextTopConstraint
         bottomConstraint = nextBottomConstraint
         updateLayoutOffsets()
+        transform = focusedInputTransform
         updatePullToRefreshAvailability()
     }
     
@@ -477,10 +478,11 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     private func updateLayoutOffsets() {
-        topConstraint?.constant = layoutState.mode == .fullscreen ? 0 : -focusedInputOffset
+        let constraintOffset = layoutState.mode == .standard ? 0 : focusedInputOffset
+        topConstraint?.constant = layoutState.mode == .fullscreen ? 0 : -constraintOffset
         switch layoutState.mode {
         case .standard:
-            bottomConstraint?.constant = -focusedInputOffset
+            bottomConstraint?.constant = 0
         case .searchFocused:
             bottomConstraint?.constant = -UX.phoneSearchFocusedBottomInset
         case .fullscreen:
@@ -490,7 +492,21 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     private func updateContentBottomInset() {
-        webContentBottomConstraint?.constant = maxTopToolbarOffset - focusedInputOffset
+        // Upstream 8da4dfb8 subtracts here only outside .standard, where
+        // it now moves the view by transform instead. The offset it
+        // subtracts from is webContentBottomOffset upstream and
+        // maxTopToolbarOffset here - the dynamic toolbar work in 92aa7cf2
+        // replaced the one with the other - so the base stays ours and
+        // the mode test is theirs.
+        let constraintOffset = layoutState.mode == .standard ? 0 : focusedInputOffset
+        webContentBottomConstraint?.constant = maxTopToolbarOffset - constraintOffset
+    }
+    
+    private var focusedInputTransform: CGAffineTransform {
+        guard layoutState.mode == .standard else {
+            return .identity
+        }
+        return CGAffineTransform(translationX: 0, y: -focusedInputOffset)
     }
     
     // MARK: - Focused Input Relocation
@@ -555,7 +571,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             0,
             unshiftedFrame.height - keyboardOverlap - UX.focusedInputBottomClearance
         )
-        return min(keyboardOverlap, max(0, focusBottom - visibleBottom))
+        return max(0, focusBottom - visibleBottom)
     }
     
     func resetFocusedInputRelocation(
@@ -574,6 +590,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     
     private func animateLayout(duration: TimeInterval, options: UIView.AnimationOptions) {
         guard duration > 0 else {
+            transform = focusedInputTransform
             superview?.layoutIfNeeded()
             return
         }
@@ -583,6 +600,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             delay: 0,
             options: [options, .beginFromCurrentState, .allowUserInteraction]
         ) {
+            self.transform = self.focusedInputTransform
             self.superview?.layoutIfNeeded()
         }
     }
