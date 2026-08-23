@@ -142,16 +142,13 @@ final class AddressBar: UIView {
         return view
     }()
     
-    // Regular ADAPTIVE glass - the pill's exact material
-    // (CondensedAddressPill uses the same default). Clear-style glass
-    // has almost no material of its own: its look IS its backdrop,
-    // and in the expanded toolbar the backdrop is a flat dark field
-    // (the engine reserves the toolbar strip, so no page pixels
-    // render behind it) - which made a clear capsule read as a solid
-    // fill. Regular glass carries its own rim and specular
-    // highlights, so it reads as Liquid Glass even over the
-    // toolbar's flat frost.
-    private let addressBarGlassBackground = ToolbarGlassBackgroundView()
+    // Clear-style glass, permanently: maximally transparent, with
+    // nothing to adaptively latch. The v3 cutouts put the page's own
+    // composited pixels directly behind the capsule (a hole in both
+    // the OLED overlay and the toolbar's glass), so clear glass
+    // shows the page through the capsule - the see-through look, on
+    // every page, in every state.
+    private let addressBarGlassBackground = ToolbarGlassBackgroundView(prefersClearGlass: true)
     
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)
