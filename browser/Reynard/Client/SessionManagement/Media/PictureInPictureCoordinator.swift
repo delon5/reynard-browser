@@ -77,9 +77,37 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     private weak var delegate: PictureInPictureCoordinatorDelegate?
     private let mediaSession: SystemMediaSession
     private let sessionManager: SessionManager
+    /// Hold a swapped-out display layer for a moment.
+    ///
+    /// ADDED - see mse_fix_169's docstring. Three seconds is far longer
+    /// than a main-queue drain and far shorter than anything a viewer
+    /// would notice; the layer carries no frame memory once the parser
+    /// has stopped feeding it.
+    private func reynardRetire(_ layer: CALayer) {
+        reynardRetiredLayers.append(layer)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            if let index = self.reynardRetiredLayers.firstIndex(
+                where: { $0 === layer }) {
+                self.reynardRetiredLayers.remove(at: index)
+            }
+        }
+    }
+
     private var state = State.idle
     private weak var observedSession: GeckoSession?
     private var isAwaitingAutomaticStart = false
+    /// Display layers this coordinator has swapped away from, held
+    /// briefly so AVKit's in-flight observations do not land on freed
+    /// memory.
+    ///
+    /// ADDED - see mse_fix_169's docstring. Replacing contentSource
+    /// drops the only strong reference this app holds to the outgoing
+    /// layer, and Gecko has already released its own, so it dies while
+    /// AVKit still has a KVO block queued against it - which is the
+    /// EXC_BAD_ACCESS in objc_retain under
+    /// AVPictureInPicturePlatformAdapter.
+    private var reynardRetiredLayers: [CALayer] = []
     private var backgroundObservationToken: NSObjectProtocol?
     
     init?(
@@ -171,6 +199,7 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
                     return
                 }
                 if let playerLayer = displayLayer as? AVPlayerLayer {
+                    reynardRetire(presentation.displayLayer)
                     presentation.displayLayer = displayLayer
                     presentation.controller.contentSource =
                     AVPictureInPictureController.ContentSource(
@@ -184,6 +213,7 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
                         stopPresentation()
                         return
                     }
+                    reynardRetire(presentation.displayLayer)
                     presentation.displayLayer = displayLayer
                     presentation.controller.contentSource =
                     AVPictureInPictureController.ContentSource(
