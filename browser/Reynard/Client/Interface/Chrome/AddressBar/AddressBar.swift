@@ -142,13 +142,10 @@ final class AddressBar: UIView {
         return view
     }()
     
-    // Clear-style glass, permanently: maximally transparent, with
-    // nothing to adaptively latch. The v3 cutouts put the page's own
-    // composited pixels directly behind the capsule (a hole in both
-    // the OLED overlay and the toolbar's glass), so clear glass
-    // shows the page through the capsule - the see-through look, on
-    // every page, in every state.
-    private let addressBarGlassBackground = ToolbarGlassBackgroundView(prefersClearGlass: true)
+    // The pill's exact material - the identical initializer
+    // CondensedAddressPill uses - so pill, capsule and X all read as
+    // the same Liquid Glass, over the cutout's page pixels.
+    private let addressBarGlassBackground = ToolbarGlassBackgroundView()
     
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)

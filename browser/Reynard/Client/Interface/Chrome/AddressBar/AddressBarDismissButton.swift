@@ -21,10 +21,8 @@ final class AddressBarDismissButton: UIButton {
     /// masksToBounds=false for its shadow, so a dedicated clipped
     /// container hosts the glass and tracks the corner radius.
     private let glassContainer = UIView()
-    // Clear-style glass, matching the URL capsule - nothing in the
-    // address bar cluster reads frosted. The floating pill keeps its
-    // own regular glass.
-    private let glassBackground = ToolbarGlassBackgroundView(prefersClearGlass: true)
+    // The pill's exact material, matching the URL capsule.
+    private let glassBackground = ToolbarGlassBackgroundView()
     
     // MARK: - Lifecycle
     
