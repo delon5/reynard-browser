@@ -521,6 +521,40 @@ public final class FairPlayStreamParser: NSObject {
                            keySession: entry.keySession,
                            why: "its session was destroyed")
         }
+        // AND THE STATE KEYED ON THEM.
+        //
+        // ADDED - see fix 13's docstring. These dictionaries live
+        // outside Entry deliberately - a page can call play() before it
+        // sets media keys - and nothing ever removed from them. A
+        // `sessionPlaying[sessionId] = true` left behind pre-seeds the
+        // next stream of a recycled session id as PLAYING, which is
+        // the one direction that field's own comment forbids.
+        //
+        // Owner-keyed state goes only when no surviving stream still
+        // names that element: tv.apple.com runs a pre-roll element and
+        // a feature element in one content process, and destroying one
+        // session is not a reason to forget where the other one is.
+        withState {
+            sessionPlaying.removeValue(forKey: sessionId)
+            sessionVolume.removeValue(forKey: sessionId)
+            let prefix = sessionId + "|"
+            // Snapshotted before anything is removed, for the reason
+            // the doomed list above is.
+            for key in Array(pendingOwners.keys) where key.hasPrefix(prefix) {
+                pendingOwners.removeValue(forKey: key)
+            }
+            if let chosen = lastVideoClockKey, chosen.hasPrefix(prefix) {
+                lastVideoClockKey = nil
+            }
+            let living = Set(streamParsers.values.map { $0.owner })
+            for (_, slot) in orphans
+            where slot.owner != 0 && !living.contains(slot.owner) {
+                ownerPlaying.removeValue(forKey: slot.owner)
+                ownerVolume.removeValue(forKey: slot.owner)
+                ownerPosition.removeValue(forKey: slot.owner)
+                ownerPositionAt.removeValue(forKey: slot.owner)
+            }
+        }
         Self.log("session \(sessionId) destroyed")
     }
 
@@ -2745,8 +2779,16 @@ public final class FairPlayStreamParser: NSObject {
                 // seconds of the film unreachable behind it.
                 //
                 // appendStreamData: is a stream. A stream has an order.
+                //
+                // AND NOT WHILE ONE IS IN THE AIR - fix 132's flag,
+                // which the turnover below already respects. The bin
+                // reads empty from the moment
+                // releaseMediaDataIfDrained pops the last fragment on
+                // the drain queue until its main-queue block appends
+                // it, and an append taken during that window would go
+                // in front of bytes the page wrote first.
                 if depth < Self.mediaDataHighWater,
-                   slot.heldSegments.isEmpty {
+                   slot.heldSegments.isEmpty, !slot.releaseInFlight {
                     return (hold: false, depth: depth, held: 0,
                             forced: false, instead: nil, refused: false)
                 }
@@ -2759,7 +2801,13 @@ public final class FairPlayStreamParser: NSObject {
                 // the NEWEST bytes are refused: an ordered hole that the
                 // next sync sample closes, and never an out-of-order
                 // stream.
-                if slot.heldSegments.count >= Self.heldFragmentCap * 2 {
+                //
+                // EITHER ceiling. A fragment's size is the page's
+                // choice, so sixty-four of them is not a number of
+                // bytes; heldByteRefuse is.
+                let heldBytes = Self.heldByteTotal(slot.heldSegments)
+                if slot.heldSegments.count >= Self.heldFragmentCap * 2
+                    || heldBytes + segment.count > Self.heldByteRefuse {
                     slot.needsSyncSample = true
                     slot.binRefused += 1
                     return (hold: true, depth: depth,
@@ -2772,7 +2820,11 @@ public final class FairPlayStreamParser: NSObject {
                 // Bounded, and the cap no longer reorders either: it
                 // used to put the NEWEST segment in, which is the same
                 // overtake with a log line in front of it.
+                //
+                // heldBytes was read before this fragment went in, so
+                // the bin's total now is that plus its size.
                 let forced = slot.heldSegments.count > Self.heldFragmentCap
+                    || heldBytes + segment.count > Self.heldByteCap
                 // Not while one is already on its way from the drain
                 // queue - fix 132's flag. That fragment came off the
                 // front and lands on the main queue after this call, so
@@ -2800,7 +2852,7 @@ public final class FairPlayStreamParser: NSObject {
                 if nth == 1 || nth % 50 == 0 {
                     Self.log("stream \(stream) REFUSED the page's bytes - "
                              + "\(verdict.held) fragments already held with "
-                             + "\(verdict.depth) samples queued, twice the "
+                             + "\(verdict.depth) samples queued, past the "
                              + "cap. Refused \(nth) so far. The layer has "
                              + "stopped draining; this is a hole, not a "
                              + "reorder.")
@@ -2810,8 +2862,10 @@ public final class FairPlayStreamParser: NSObject {
                 return true
             }
             if verdict.forced {
-                Self.log("stream \(stream) held fragment cap reached "
-                         + "(\(Self.heldFragmentCap)) with \(verdict.depth) "
+                Self.log("stream \(stream) held bin cap reached "
+                         + "(\(Self.heldFragmentCap) fragments or "
+                         + "\(Self.heldByteCap >> 20)MB) with "
+                         + "\(verdict.depth) "
                          + "samples still queued - sending the OLDEST held "
                          + "fragment anyway. The layer is not draining and "
                          + "the cap is the only thing between that and "
@@ -3276,11 +3330,39 @@ public final class FairPlayStreamParser: NSObject {
     /// How many fragments may wait on our side before one is appended
     /// regardless.
     ///
-    /// 32 fragments is a minute or two of media and tens of megabytes.
-    /// Reaching it means the layer has stopped draining entirely, which
-    /// is a different fault, and the cap is what keeps that fault from
-    /// also being an out-of-memory.
+    /// 32 fragments is a minute or two of media. Reaching it means the
+    /// layer has stopped draining entirely, which is a different fault.
+    /// The SECONDARY bound, though: a fragment's size is the page's
+    /// choice, so a count is not a memory bound - see heldByteCap.
     fileprivate static let heldFragmentCap = 32
+
+    /// The same ceiling in bytes, which is the one that binds memory.
+    ///
+    /// The hard refuse in append() records these fragments at five to
+    /// nine megabytes each, so 32 of them is 160 to 288MB in ONE bin,
+    /// and a stream has one for audio and one for video. 96MB is more
+    /// lookahead than any stall this has been asked to ride out, and it
+    /// is a number the device has.
+    fileprivate static let heldByteCap = 96 * 1024 * 1024
+
+    /// Past this the page's newest bytes are refused outright.
+    ///
+    /// heldFragmentCap * 2's counterpart. The headroom above
+    /// heldByteCap is what a run of appends on the main queue can add
+    /// while the forced release ahead of them is still in flight.
+    fileprivate static let heldByteRefuse = 128 * 1024 * 1024
+
+    /// How many bytes the bin is carrying.
+    ///
+    /// Summed rather than kept as a running total. The bin is bounded
+    /// at twice heldFragmentCap, so this is at most sixty-four reads of
+    /// Data.count, and every site that adds to or takes from
+    /// heldSegments would otherwise have to keep a second number in
+    /// step with it.
+    fileprivate static func heldByteTotal(
+        _ fragments: [StreamParser.HeldFragment]) -> Int {
+        return fragments.reduce(0) { $0 + $1.bytes.count }
+    }
 
     /// Tracks a stream's parser reported, recorded and then acted on.
     ///
@@ -4482,7 +4564,11 @@ public final class FairPlayStreamParser: NSObject {
                              // is not the one being written.
                              + " | clock rate \(CMTimebaseGetRate(timebase))"
                              // ADDED - see mse_fix_113's docstring.
-                             + " " + Self.layerShape(layer)
+                             // Through the snapshot: this line is built
+                             // on the drain queue and the walk is only
+                             // safe on the main one.
+                             + Self.layerShapeCached(
+                                 layer, streamKey: streamKey)
                              // ADDED - see mse_fix_108's docstring.
                              // CMTimebaseGetRate is the rate relative
                              // to the IMMEDIATE source; this is the one
@@ -6283,6 +6369,12 @@ public final class FairPlayStreamParser: NSObject {
     /// Read where the rest of the layer's properties are read. Rounded,
     /// because the question is whether there is a picture-sized box,
     /// not what its subpixel geometry is.
+    ///
+    /// MAIN THREAD. This and the two walks below read the live layer
+    /// tree - superlayer, sublayers, frame, opacity, contents - and the
+    /// main thread and the compositor rebuild that tree while playback
+    /// runs. A caller that is not on the main thread reads it through
+    /// layerShapeCached instead.
     fileprivate static func layerShape(_ layer: CALayer) -> String {
         let box = layer.bounds.size
         return "box \(Int(box.width.rounded()))x"
@@ -6388,6 +6480,57 @@ public final class FairPlayStreamParser: NSObject {
         }
         if found == 0 { return " over nothing" }
         return " over \(found):" + out
+    }
+
+    /// Guards the layer snapshots below.
+    ///
+    /// A lock of its own, not the state lock: this is written from the
+    /// main queue and read from the drain queues, and neither of those
+    /// holds the state lock at the point it asks.
+    private static let layerShapeLock = NSLock()
+    /// layerShape's last answer for a stream, taken on the main queue.
+    private static var layerShapeText: [String: String] = [:]
+    /// Streams whose refresh is already on its way to the main queue.
+    private static var layerShapeRefreshing: Set<String> = []
+
+    /// layerShape, for a caller that is not on the main thread.
+    ///
+    /// The walk is a race everywhere else - see layerShape - and a
+    /// diagnostic must not be the thing that takes playback down. So it
+    /// runs on the main queue and this hands back whatever it last
+    /// produced: stale by at most one drift line, and never torn.
+    ///
+    /// One refresh in flight per stream. The drift line is periodic and
+    /// a queue of walks would describe the same tree several times over
+    /// on a thread that has a picture to composite.
+    ///
+    /// The leading space belongs to the answer. Before the first
+    /// snapshot lands the line carries no shape field at all, rather
+    /// than an empty one, so every shape a reader sees is layerShape's
+    /// own text in layerShape's own format.
+    fileprivate static func layerShapeCached(_ layer: CALayer,
+                                             streamKey: String) -> String {
+        layerShapeLock.lock()
+        let cached = layerShapeText[streamKey]
+        let refreshing = layerShapeRefreshing.contains(streamKey)
+        if !refreshing { layerShapeRefreshing.insert(streamKey) }
+        layerShapeLock.unlock()
+        if !refreshing {
+            DispatchQueue.main.async {
+                let text = Self.layerShape(layer)
+                layerShapeLock.lock()
+                // Bounded. Stream keys are minted per source buffer, so
+                // a long-lived content process mints more of them than
+                // it ever has live streams, and only the live one is
+                // ever asked about.
+                if layerShapeText.count >= 16 { layerShapeText.removeAll() }
+                layerShapeText[streamKey] = text
+                layerShapeRefreshing.remove(streamKey)
+                layerShapeLock.unlock()
+            }
+        }
+        guard let cached else { return "" }
+        return " " + cached
     }
 
     /// What the layer says it has actually put on the screen.
@@ -6888,8 +7031,21 @@ public final class FairPlayStreamParser: NSObject {
                 as? AVContentKeyRecipient {
                 keySession?.removeContentKeyRecipient(recipient)
             }
-            renderer.stopRequestingMediaData()
-            renderer.flush()
+            // On the audio queue, for the reason park() gives:
+            // drainAudioPending runs there and flush() must not race an
+            // enqueue(). A stream being torn down is no safer - the
+            // drain block can be mid-enqueue on that queue while this
+            // runs, and the caller here is whichever thread the append
+            // or the proxy came in on.
+            if let queue = slot.audioQueue {
+                queue.async {
+                    renderer.stopRequestingMediaData()
+                    renderer.flush()
+                }
+            } else {
+                renderer.stopRequestingMediaData()
+                renderer.flush()
+            }
         }
         slot.audioSynchronizer?.rate = 0
         slot.displayLayer?.stopRequestingMediaData()

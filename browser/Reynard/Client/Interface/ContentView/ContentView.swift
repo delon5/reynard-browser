@@ -70,6 +70,26 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private var dynamicToolbarMaxHeight: CGFloat = 0
     private var contentBottomOffset: CGFloat = 0
     private var toolbarBottomOffset: CGFloat = 0
+    /// Clearance for chrome that floats OVER the page instead of
+    /// reserving layout space - this fork's condensed pill.
+    ///
+    /// It rides the same channel the toolbar offsets use, because that
+    /// channel is a compositor fixed-layer margin, not a viewport change:
+    /// setContentBottomOffset -> nsWindow::UpdateDynamicToolbarOffset ->
+    /// UiCompositorControllerParent::SetFixedLayerMargins(0, offset), and
+    /// APZCTreeManager::ComputeFixedMarginsOffset then does
+    /// `translation.y -= effectiveMargin.bottom` for anything fixed to
+    /// the bottom. A POSITIVE margin therefore lifts position:fixed and
+    /// sticky-bottom content up by exactly that much, while the page
+    /// keeps its full height and still paints behind the pill - which is
+    /// the floating look, kept.
+    ///
+    /// The toolbar's own offsets are negative by the same rule: as it
+    /// slides away, fixed content follows it down into the strip the
+    /// layout viewport already reserved.
+    ///
+    /// Written only by setCondensedChrome(condensed:pillMargin:), which
+    /// sets it together with isChromeCondensed and syncs once.
     private var floatingChromeInset: CGFloat = 0
     private var safeAreaInsetBottom: CGFloat = 0
     private var toolbarTopOffset: CGFloat = 0
@@ -274,40 +294,6 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         )
         syncContentBottomOffset()
     }
-    
-    /// Clearance for chrome that floats OVER the page instead of
-    /// reserving layout space - this fork's condensed pill.
-    ///
-    /// It rides the same channel the toolbar offsets use, because that
-    /// channel is a compositor fixed-layer margin, not a viewport change:
-    /// setContentBottomOffset -> nsWindow::UpdateDynamicToolbarOffset ->
-    /// UiCompositorControllerParent::SetFixedLayerMargins(0, offset), and
-    /// APZCTreeManager::ComputeFixedMarginsOffset then does
-    /// `translation.y -= effectiveMargin.bottom` for anything fixed to
-    /// the bottom. A POSITIVE margin therefore lifts position:fixed and
-    /// sticky-bottom content up by exactly that much, while the page
-    /// keeps its full height and still paints behind the pill - which is
-    /// the floating look, kept.
-    ///
-    /// The toolbar's own offsets are negative by the same rule: as it
-    /// slides away, fixed content follows it down into the strip the
-    /// layout viewport already reserved.
-    func setFloatingChromeInset(_ inset: CGFloat) {
-        // No early-out, for the third time tonight and the same reason.
-        //
-        // The value this feeds - the compositor margin - is ALSO written
-        // by every scroll frame through applyToolbarOffsets, so our copy
-        // of the inset agreeing with the last inset says nothing about
-        // what the compositor currently holds. A capture caught exactly
-        // that: condensing computed margin=60 and emitted no send at all,
-        // leaving the compositor on the -107.2 a scroll frame had left
-        // there, so a floating pill lifted nothing.
-        //
-        // syncContentBottomOffset still de-duplicates against the value
-        // actually sent, which is the right place for that check.
-        floatingChromeInset = inset
-        syncContentBottomOffset()
-    }
 
     /// What the page is told to keep clear via env(safe-area-inset-bottom).
     ///
@@ -348,12 +334,6 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     /// Whether the chrome is condensed to the pill. Gates the fixed-layer
     /// margin, which belongs to the full toolbar alone.
     private var isChromeCondensed = false
-    
-    func setChromeCondensed(_ condensed: Bool) {
-        guard condensed != isChromeCondensed else { return }
-        isChromeCondensed = condensed
-        syncContentBottomOffset()
-    }
     
     /// Both at once, then ONE sync.
     ///

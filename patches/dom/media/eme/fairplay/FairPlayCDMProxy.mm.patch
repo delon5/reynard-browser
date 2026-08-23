@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,2191 @@
+@@ -0,0 +1,2207 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -705,8 +705,11 @@ index 000000000000..e859b69f6239
 +        entry = [(NSArray*)entry objectAtIndex:0];
 +      }
 +      if ([entry isKindOfClass:[NSString class]]) {
-+        sinf = [[NSData alloc] initWithBase64EncodedString:(NSString*)entry
-+                                                   options:0];
++        // Autoreleased: this file is MRR, and the fallback below may
++        // assign the autoreleased `raw` over this variable - both
++        // branches have to be owned the same way.
++        sinf = [[[NSData alloc] initWithBase64EncodedString:(NSString*)entry
++                                                    options:0] autorelease];
 +      }
 +    }
 +  } @catch (NSException* e) {
@@ -918,10 +921,12 @@ index 000000000000..e859b69f6239
 +  id identifier = nil;
 +  NSString* identifierKey = nil;
 +  if (initDataType.EqualsLiteral("skd")) {
++    // Autoreleased: this file is MRR, and nothing here owns the string
++    // past this call - the delegate's dictionary retains what it keeps.
 +    NSString* skd =
-+        [[NSString alloc] initWithBytes:aInitData.Elements()
-+                                 length:aInitData.Length()
-+                               encoding:NSUTF8StringEncoding];
++        [[[NSString alloc] initWithBytes:aInitData.Elements()
++                                  length:aInitData.Length()
++                                encoding:NSUTF8StringEncoding] autorelease];
 +    identifier = skd;
 +    identifierKey = skd;
 +  } else {
@@ -1204,6 +1209,17 @@ index 000000000000..e859b69f6239
 +    NSString* sessionId =
 +        [NSString stringWithUTF8String:NS_ConvertUTF16toUTF8(aSessionId).get()];
 +    [mDelegate forgetSession:sessionId];
++  }
++  // Session ids are NSUUIDs and never reused, so this entry can never
++  // be looked up again - see ReynardInitDataTypes, which is a file
++  // static and outlives the proxy.
++  //
++  // NS_ConvertUTF16toUTF8 declared directly rather than wrapped in an
++  // nsCString, for the most-vexing-parse reason UpdateSession spells
++  // out.
++  {
++    NS_ConvertUTF16toUTF8 sessionKey(aSessionId);
++    ReynardInitDataTypes().Remove(sessionKey);
 +  }
 +  OnSessionClosed(aSessionId, dom::MediaKeySessionClosedReason::Closed_by_application);
 +  ResolvePromise(aPromiseId);

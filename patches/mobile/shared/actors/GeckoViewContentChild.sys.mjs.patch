@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3582 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3656 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2438,13 +2438,69 @@ index 9ca6e15..18d37f0 100644
 +      // button is a tap on that button.
 +      var REYNARD_STRICT_SELECTOR =
 +        "button, [role=button], a[href], input, select, summary, label";
-+      // Names that SUGGEST a control. Not sufficient on their own -
-+      // see mse_fix_123's docstring. Everything over the picture lives
-+      // inside the player's container and inherits these from it.
-+      var REYNARD_NAMED_SELECTOR =
-+        "[aria-label*=play i], [aria-label*=pause i]," +
-+        "[class*=control i], [class*=button i]," +
-+        "[data-testid*=control i]";
++
++      // WHICH video the tap is about. The first one in DOM order is
++      // often a hero reel or a preview sitting above the real player,
++      // and a tap judged against that box is measured against the
++      // wrong picture. The video being watched is the one that is
++      // playing - the largest of them, when a muted preview plays
++      // alongside it - failing that the one the tap landed inside,
++      // failing that the first, which is what this used to take
++      // unconditionally.
++      function reynardTargetVideo(doc, t) {
++        var list;
++        try {
++          list = doc.querySelectorAll("video");
++        } catch (e) {
++          return null;
++        }
++        if (!list.length) {
++          return null;
++        }
++        var playing = null;
++        var playingArea = 0;
++        var under = null;
++        var x = 0;
++        var y = 0;
++        var havePoint = false;
++        try {
++          var r = t.getBoundingClientRect();
++          x = (r.left + r.right) / 2;
++          y = (r.top + r.bottom) / 2;
++          havePoint = true;
++        } catch (e) {}
++        for (var i = 0; i < list.length; i++) {
++          var v = list[i];
++          var box;
++          try {
++            box = v.getBoundingClientRect();
++          } catch (e) {
++            continue;
++          }
++          if (!box.width || !box.height) {
++            continue;
++          }
++          var live = false;
++          try {
++            live = !v.paused && !v.ended && v.readyState >= 2;
++          } catch (e) {}
++          if (live && box.width * box.height > playingArea) {
++            playingArea = box.width * box.height;
++            playing = v;
++          }
++          if (
++            !under &&
++            havePoint &&
++            x >= box.left &&
++            x <= box.right &&
++            y >= box.top &&
++            y <= box.bottom
++          ) {
++            under = v;
++          }
++        }
++        return playing || under || list[0];
++      }
 +
 +      // How much of the picture does this element cover? A control is
 +      // small; a click-through sheet is the video's own box, because
@@ -2453,7 +2509,7 @@ index 9ca6e15..18d37f0 100644
 +      function reynardCoverage(t) {
 +        try {
 +          var doc = t.ownerDocument || document;
-+          var v = doc.querySelector("video");
++          var v = reynardTargetVideo(doc, t);
 +          if (!v) {
 +            return 0;
 +          }
@@ -2557,8 +2613,9 @@ index 9ca6e15..18d37f0 100644
 +      // anything on the page can see it.
 +      //
 +      // Safe on exactly the elements this fires for: a target the judge
-+      // declines covers 60% or more of the video and matches nothing
-+      // interactive - div.scrim__clickable on tv.apple.com,
++      // declines covers a quarter or more of the video - the threshold
++      // reynardJudgeTap applies - and matches nothing interactive:
++      // div.scrim__clickable on tv.apple.com,
 +      // div.ProtectionLayerContainer on HBO Max - and catching taps on
 +      // the picture is the whole of what such an element does. There is
 +      // nothing else on it to swallow.
@@ -2795,29 +2852,11 @@ index 9ca6e15..18d37f0 100644
 +          "ms via " +
 +          reynardLastTapVia +
 +          " on " +
-+          reynardDescribeTapTarget() +
++          reynardDescribeElement(reynardLastTapTarget) +
 +          " control=" +
 +          (reynardLastTapWasControl ? "yes" : "no") +
 +          "(" + reynardLastTapWhy + ")"
 +        );
-+      }
-+
-+      function reynardDescribeTapTarget() {
-+        var t = reynardLastTapTarget;
-+        if (!t) {
-+          return "nothing";
-+        }
-+        try {
-+          return (
-+            (t.tagName || "?").toLowerCase() +
-+            (t.id ? "#" + t.id : "") +
-+            (t.className && typeof t.className === "string"
-+              ? "." + t.className.trim().split(" ").filter(Boolean).slice(0, 2).join(".")
-+              : "")
-+          );
-+        } catch (e) {
-+          return "?";
-+        }
 +      }
 +
 +      var reynardNativePause = window.HTMLMediaElement.prototype.pause;
@@ -2837,7 +2876,7 @@ index 9ca6e15..18d37f0 100644
 +          ) {
 +            debug(
 +              "PAUSE() DECLINED - the tap was on " +
-+                reynardDescribeTapTarget() +
++                reynardDescribeElement(reynardLastTapTarget) +
 +                ", not a control " +
 +                reynardWho(this) +
 +                " by " +
@@ -3037,12 +3076,37 @@ index 9ca6e15..18d37f0 100644
 +                  this.reynardHeldAudible = {};
 +                }
 +                this.reynardHeldAudible[name] = value;
-+                reynardAudiblePending.push({
++                // ONE RECORD PER ELEMENT AND PROPERTY. Nothing drains
++                // this until a gesture arrives, so a volume fade in a
++                // background tab - tens of writes a second, none of
++                // them released - grew the array without limit and
++                // would have replayed the same property over and over.
++                // Only the latest value for a property can matter: it
++                // is what reynardHeldAudible already keeps and what the
++                // getter already answers with. Replaced in place, so
++                // the order the page first asked in is the order the
++                // release applies in.
++                var pendingRecord = {
 +                  element: this,
 +                  name: name,
 +                  value: value,
 +                  apply: descriptor.set,
-+                });
++                };
++                var pendingAt = -1;
++                for (var i = 0; i < reynardAudiblePending.length; i++) {
++                  if (
++                    reynardAudiblePending[i].element === this &&
++                    reynardAudiblePending[i].name === name
++                  ) {
++                    pendingAt = i;
++                    break;
++                  }
++                }
++                if (pendingAt < 0) {
++                  reynardAudiblePending.push(pendingRecord);
++                } else {
++                  reynardAudiblePending[pendingAt] = pendingRecord;
++                }
 +                debug(
 +                  "AUDIBLE REFUSED " + reynardElementTag(this) + " " +
 +                  name + "=" + String(value) + " - playing, inaudible, " +
@@ -3575,17 +3639,27 @@ index 9ca6e15..18d37f0 100644
 +// actor is registered allFrames - and a sandbox eval per subframe
 +// across the whole web is not a cost worth paying for a handful of
 +// sites. Matched on exact host or any subdomain.
++//
++// The list gates the whole sandbox eval and not just prefixed EME:
++// the navigator identity, the tap-pause guard and the audible-write
++// gate are installed by the same script, so a host that is not on it
++// gets none of them. netflix.com and tv.apple.com are the two sites
++// most of the behaviour above is described in terms of, and the
++// extra-hosts pref that used to carry them is device-local - a clean
++// install would not reproduce any of it.
 +const WEBKIT_MEDIA_KEYS_SHIM_HOSTS = [
 +  "primevideo.com",
 +  "max.com",
 +  "hbomax.com",
 +  "disneyplus.com",
++  "netflix.com",
++  "tv.apple.com",
 +];
 +
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3643,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3717,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4081,7 +4155,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4249,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4323,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4103,7 +4177,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4279,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4353,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

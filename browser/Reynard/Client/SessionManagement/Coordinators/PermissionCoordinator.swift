@@ -90,7 +90,15 @@ final class PermissionCoordinator: NSObject, PermissionEmbedderDelegate {
             // contained one line of permission traffic. If this never
             // prints, the per-site half of the Autoplay setting is
             // decorative and the default pref is doing all the work.
-            print("[Reynard] autoplay: Gecko asked for \(host) - "
+            //
+            // Without the host, deliberately: stdout is redirected to
+            // Documents/reynard_stdout.txt, which persists across
+            // launches and is offered for file sharing, so a line per
+            // visited site here would be a browsing history on disk -
+            // the record loggableURL exists to keep out of these logs.
+            // Reachability, which is the question this line was added
+            // to answer, needs no host.
+            print("[Reynard] autoplay: Gecko asked - "
                   + "answering \(action) (value \(action.autoplayValue))")
             applyPermission(action, to: sitePermission, permission: permission)
             return ContentPermission.Value(rawValue: action.autoplayValue) ?? .deny

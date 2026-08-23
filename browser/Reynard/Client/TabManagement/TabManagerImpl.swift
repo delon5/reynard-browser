@@ -1281,6 +1281,18 @@ final class TabManagerImplementation: NSObject, TabManager {
             sessionManager.deactivate(removedTab.session)
         }
         cancelFaviconTask(for: removedTab.id)
+        // A closed tab has nothing left to recover: its pending work
+        // items would fire against a tab that is gone, and its entries
+        // in these tables have no other remover. Cancelled here rather
+        // than through cancelLoadRecovery, whose "recovery stood down"
+        // line would report a close as an engine signal.
+        if let watchdog = loadWatchdogs.removeValue(forKey: removedTab.id) {
+            watchdog.workItem.cancel()
+        }
+        if let wait = paintWaits.removeValue(forKey: removedTab.id) {
+            wait.workItem.cancel()
+        }
+        lastEscalatedURL.removeValue(forKey: removedTab.id)
         
         if tabs(for: mode).isEmpty {
             setSelectedIndex(-1, for: mode)
@@ -2434,17 +2446,25 @@ extension TabManagerImplementation: NavigationDelegate {
     private static var reservationByHost: [String: GeckoSession.BottomReservation] = loadReservations()
 
     /// Hosts whose verdict is known ahead of any visit.
-    /// tv.apple.com: the player is a full-viewport fixed overlay whose
-    /// bottom controls only env() can reach; its CSS is CDN-served, so
-    /// the stylesheet scan cannot prove it reads env, and the first
-    /// detection can run before the player exists. The overlay probe
+    ///
+    /// Every seed here is .needsViewportShrink - bottom UI that NO
+    /// overlay mechanism lifts, env(safe-area-inset-bottom) included,
+    /// so only shortening the layout viewport while condensed moves it.
+    /// Seeded rather than detected because both shapes are invisible to
+    /// the detectors until it is too late to matter.
+    /// tv.apple.com: the controls sit inside a full-viewport fixed
+    /// overlay, which is top-anchored and so cannot be margin-lifted,
+    /// and whose env() consumption is unknowable; its CSS is CDN-served,
+    /// so the stylesheet scan cannot read it, and the first detection
+    /// can run before the player exists at all. The overlay probe
     /// reaches the same verdict once playback starts - the seed just
     /// makes the very first player paint correct too.
-    /// m.twitch.tv: the documented env-reading page whose 'Open in App'
-    /// sheet is NOT a fixed root-content layer - only env() can reach
-    /// it (the pre-merge branch proved env at the pill height lifts
-    /// it), while its CDN CSS keeps the stylesheet scan blind and the
-    /// sheet's non-fixed position keeps the bottom-edge probe blind.
+    /// m.twitch.tv: the 'Open in App' sheet is an absolute-positioned
+    /// app-shell element, measured on device staying at the bottom edge
+    /// while the page resolved env(safe-area-inset-bottom) = 60px, so
+    /// reporting an inset moves nothing. Its CDN CSS keeps the
+    /// stylesheet scan blind, and being neither fixed nor root-content
+    /// keeps the bottom-edge probe blind.
     private static let seededReservations: [String: GeckoSession.BottomReservation] = [
         "tv.apple.com": .needsViewportShrink,
         "m.twitch.tv": .needsViewportShrink,
@@ -2475,22 +2495,60 @@ extension TabManagerImplementation: NavigationDelegate {
     /// overwritten by live detection - a pin is a decision, not a
     /// guess. Matches a listed host and its subdomains.
     static func pinnedShrinkVerdict(forHost host: String) -> GeckoSession.BottomReservation? {
+        let pinned = pinnedShrinkHostSet()
+        guard !pinned.isEmpty else {
+            return nil
+        }
         let needle = host.lowercased()
-        for entry in Prefs.CompatibilitySettings.pillClearanceSites.split(separator: ",") {
-            var trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if let schemeRange = trimmed.range(of: "://") {
-                trimmed = String(trimmed[schemeRange.upperBound...])
-            }
-            trimmed = String(trimmed.split(separator: "/").first ?? "")
-            trimmed = String(trimmed.split(separator: ":").first ?? "")
-            guard !trimmed.isEmpty else {
-                continue
-            }
-            if needle == trimmed || needle.hasSuffix("." + trimmed) {
+        // A listed host matches itself and its subdomains, so every
+        // label-boundary suffix of the visited host is a candidate.
+        var candidate = needle[...]
+        while true {
+            if pinned.contains(String(candidate)) {
                 return .needsViewportShrink
             }
+            guard let dot = candidate.firstIndex(of: ".") else {
+                return nil
+            }
+            candidate = candidate[candidate.index(after: dot)...]
         }
-        return nil
+    }
+
+    /// Separators accepted in the pill-clearance list. Commas are what
+    /// the Settings field asks for, but a list typed with newlines or
+    /// spaces is the same list and must not collapse into one entry
+    /// that matches nothing.
+    private static let pinnedShrinkSeparators =
+        CharacterSet(charactersIn: ",").union(.whitespacesAndNewlines)
+
+    /// The parsed pill-clearance list and the raw text it came from.
+    /// The preference is read live on every verdict decision, so the
+    /// parse is redone only when that text changes. Main-thread only,
+    /// like the rest of this static verdict state.
+    private static var pinnedShrinkHostsSource: String?
+    private static var pinnedShrinkHosts: Set<String> = []
+
+    /// One user-typed entry reduced to a bare host: scheme, path and
+    /// port dropped, lowercased. nil when the entry carries no host.
+    private static func normalizedPinnedHost(_ entry: String) -> String? {
+        var trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let schemeRange = trimmed.range(of: "://") {
+            trimmed = String(trimmed[schemeRange.upperBound...])
+        }
+        trimmed = String(trimmed.split(separator: "/").first ?? "")
+        trimmed = String(trimmed.split(separator: ":").first ?? "")
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func pinnedShrinkHostSet() -> Set<String> {
+        let raw = Prefs.CompatibilitySettings.pillClearanceSites
+        if pinnedShrinkHostsSource != raw {
+            pinnedShrinkHosts = Set(raw
+                .components(separatedBy: pinnedShrinkSeparators)
+                .compactMap { normalizedPinnedHost($0) })
+            pinnedShrinkHostsSource = raw
+        }
+        return pinnedShrinkHosts
     }
 
     private static func loadReservations() -> [String: GeckoSession.BottomReservation] {
