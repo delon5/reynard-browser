@@ -106,7 +106,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    UpdateType updateRequired =
        GetMaxUpdateRequired(aRepresentation, aSublayers, aMutatedLayerStructure);
    if (updateRequired == NativeLayerCA::UpdateType::OnlyVideo) {
-@@ -417,15 +487,150 @@
+@@ -417,11 +487,71 @@
    NSMutableArray<CALayer*>* sublayers =
        [NSMutableArray arrayWithCapacity:aSublayers.Length()];
    bool mustRebuild = updateRequired == UpdateType::All;
@@ -134,10 +134,6 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
                          &mustRebuild);
      if (CALayer* caLayer = layer->UnderlyingCALayer(aRepresentation)) {
        [sublayers addObject:caLayer];
--    }
--  }
--
--  if (mustRebuild) {
 +    } else {
 +      // REYNARD: a layer the compositor was given and is dropping, and
 +      // WHICH ONE.
@@ -179,89 +175,10 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +              reynardPos.y, reynardDrmDropped);
 +        }
 +      }
-+    }
-+  }
-+
-+  // REYNARD: do not tear the protected layer out of the tree for the
-+  // handful of frames WebRender stops submitting it.
-+  //
-+  // Captures f704f5cd and 3390a8d5 show the list going from twelve
-+  // layers with one protected to nine with none, the picture going
-+  // black, and the list coming back - three times in fifteen seconds,
-+  // each beside a tap on the controls scrim. Promotion was granted
-+  // every time; setup_compositor_surfaces_impl then took one of its
-+  // three early returns, which return Ok and make no surface, so the
-+  // layer is simply absent from the list for those frames.
-+  //
-+  // For ordinary content that is harmless: WebRender has the pixels
-+  // and paints them. On the protected route it is fatal, because the
-+  // decoded frames never pass through Gecko - the compositor only ever
-+  // sees a placeholder - so the moment the layer leaves the tree there
-+  // is nothing to draw and the picture is black.
-+  //
-+  // So when a protected layer was in the tree last commit and is not in
-+  // this one, the STRUCTURE is left alone for this frame. ApplyChanges
-+  // above has already run on every layer, so content and geometry still
-+  // update; only the root's child list is held. The sink keeps its
-+  // parent and keeps presenting the frames the parser feeds it.
-+  //
-+  // Bounded, so a genuine teardown is not held forever: after
-+  // kReynardHoldFrames consecutive frames without a protected layer the
-+  // removal is accepted. Two seconds at sixty frames a second, and the
-+  // longest black measured is 7.0s - so a real removal costs two
-+  // seconds of a stale structure and a transient one costs nothing.
-+  //
-+  // Function-local statics rather than members, to avoid a header
-+  // change: there is one compositor root per window and one window
-+  // here, and the two representations are kept apart by index.
-+  static const int kReynardHoldFrames = 120;
-+  static bool reynardHadProtected[2] = {false, false};
-+  static int reynardHeld[2] = {0, 0};
-+  int reynardIdx =
-+      (aRepresentation == WhichRepresentation::ONSCREEN) ? 0 : 1;
-+
-+  bool reynardHasProtected = false;
-+  for (const auto& reynardLayer : aSublayers) {
-+    if (reynardLayer->mIsDRM) {
-+      reynardHasProtected = true;
-+      break;
-+    }
-+  }
-+
-+  bool reynardHold = false;
-+  if (reynardHasProtected) {
-+    reynardHadProtected[reynardIdx] = true;
-+    reynardHeld[reynardIdx] = 0;
-+  } else if (reynardHadProtected[reynardIdx]) {
-+    if (reynardHeld[reynardIdx] < kReynardHoldFrames) {
-+      ++reynardHeld[reynardIdx];
-+      reynardHold = true;
-+      if (reynardHeld[reynardIdx] == 1 ||
-+          reynardHeld[reynardIdx] % 60 == 0) {
-+        printf_stderr(
-+            "reynardWR: HOLDING the layer structure - no protected layer "
-+            "this frame, %d held\n",
-+            reynardHeld[reynardIdx]);
-+      }
-+    } else {
-+      // Long enough. Accept the removal and stop holding, so a real
-+      // teardown is not kept alive by this.
-+      if (reynardHeld[reynardIdx] == kReynardHoldFrames) {
-+        ++reynardHeld[reynardIdx];
-+        printf_stderr(
-+            "reynardWR: giving up the hold after %d frames - taking the "
-+            "protected layer out\n",
-+            kReynardHoldFrames);
-+      }
-+      reynardHadProtected[reynardIdx] = false;
-+    }
-+  }
-+
-+  if (mustRebuild && !reynardHold) {
-     aRootCALayer.sublayers = sublayers;
+     }
    }
- }
-@@ -921,9 +1126,51 @@
+ 
+@@ -921,9 +1051,51 @@
  }
  
  bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
@@ -313,7 +230,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1539,17 @@
+@@ -1292,6 +1464,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -331,7 +248,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1469,7 +1727,8 @@
+@@ -1469,7 +1652,8 @@
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
@@ -341,7 +258,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-@@ -1521,12 +1780,38 @@
+@@ -1521,12 +1705,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -381,7 +298,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +1925,11 @@
+@@ -1640,6 +1850,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -393,7 +310,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +1970,11 @@
+@@ -1680,7 +1895,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -406,7 +323,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +1988,14 @@
+@@ -1694,13 +1913,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -422,7 +339,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +2012,23 @@
+@@ -1717,7 +1937,23 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -447,7 +364,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +2072,7 @@
+@@ -1761,7 +1997,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -456,7 +373,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2081,84 @@
+@@ -1770,6 +2006,84 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -541,7 +458,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2172,7 @@
+@@ -1783,6 +2097,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -549,7 +466,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2200,12 @@
+@@ -1810,8 +2125,12 @@
      }
    }
  
@@ -564,7 +481,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2390,7 @@
+@@ -1996,7 +2315,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -573,7 +490,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2406,7 @@
+@@ -2012,6 +2331,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;

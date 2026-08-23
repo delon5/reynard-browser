@@ -1,7 +1,25 @@
 diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_cache/mod.rs
 --- a/gfx/wr/webrender/src/tile_cache/mod.rs
 +++ b/gfx/wr/webrender/src/tile_cache/mod.rs
-@@ -1541,6 +1541,39 @@
+@@ -679,6 +679,17 @@
+     /// If true, the surface was used this frame. Used for a simple form
+     /// of GC to remove old surfaces.
+     pub used_this_frame: bool,
++    /// How many consecutive frames this surface has gone unused.
++    ///
++    /// REYNARD - see mse_fix_167's docstring. The GC below used to free
++    /// a surface after ONE unused frame, which upstream's own comment
++    /// calls out as the simple version: "In future, we might make this
++    /// more sophisticated - for example, retaining them for >1 frame if
++    /// unused". On the protected route freeing it destroys the
++    /// NativeLayerCA, and with it the AVSampleBufferDisplayLayer the
++    /// parser is feeding, so the picture is gone until a new layer is
++    /// built, adopted and given a keyframe - two to three seconds.
++    pub unused_frames: u32,
+     /// The native compositor surface handle
+     pub native_surface_id: NativeSurfaceId,
+     /// List of image keys, and current image generations, that are drawn in this surface.
+@@ -1541,6 +1552,39 @@
      ) -> Result<CompositorSurfaceKind, SurfacePromotionFailure> {
          use SurfacePromotionFailure::*;
  
@@ -41,7 +59,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -1830,14 +1863,42 @@
+@@ -1830,14 +1874,42 @@
              frame_context.spatial_tree,
          );
  
@@ -85,7 +103,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -1854,6 +1915,7 @@
+@@ -1854,6 +1926,7 @@
  
          let is_visible = world_clip_rect.intersects(&frame_context.global_screen_world_rect);
          if !is_visible {
@@ -93,7 +111,15 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -2162,6 +2224,38 @@
+@@ -2017,6 +2090,7 @@
+ 
+                         ExternalNativeSurface {
+                             used_this_frame: true,
++                            unused_frames: 0,
+                             native_surface_id,
+                             image_dependencies: [ImageDependency::INVALID; 3],
+                         }
+@@ -2162,6 +2236,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
@@ -132,3 +158,60 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          if !self.debug_flags.contains(DebugFlags::SURFACE_PROMOTION_LOGGING) || result.is_ok() {
              return;
          }
+@@ -2997,16 +3103,47 @@
+ 
+         // A simple GC of the native external surface cache, to remove and free any
+         // surfaces that were not referenced during the update_prim_dependencies pass.
++        // REYNARD - see mse_fix_167's docstring. A grace period instead
++        // of freeing after a single unused frame, which is the
++        // "retaining them for >1 frame if unused" the comment above
++        // this cache's reset already proposes.
++        //
++        // Capture 30bb65e3: sixteen "mIsDRM -> 1" and ten DRM layer
++        // builds in one session, the SetLayers protected count
++        // oscillating 1 -> 0 -> 1 a dozen times, and no refusal and no
++        // early return anywhere - because nothing was refused. The
++        // surface was simply collected the first frame its primitive
++        // was not referenced, and rebuilding it costs a new layer, a
++        // fresh adopt and a wait for a keyframe.
++        //
++        // Five seconds at sixty frames, which is beyond the longest gap
++        // measured. The cost of holding one unused compositor surface
++        // for that long is an allocation; the cost of not holding it is
++        // a black picture.
++        const REYNARD_SURFACE_GRACE_FRAMES: u32 = 300;
+         self.external_native_surface_cache.retain(|_, surface| {
+-            if !surface.used_this_frame {
+-                // If we removed an external surface, we need to mark the dirty rects as
+-                // invalid so a full composite occurs on the next frame.
+-                composite_state.dirty_rects_are_valid = false;
+-
+-                resource_cache.destroy_compositor_surface(surface.native_surface_id);
+-            }
+-
+-            surface.used_this_frame
++            if surface.used_this_frame {
++                surface.unused_frames = 0;
++                return true;
++            }
++
++            surface.unused_frames += 1;
++            if surface.unused_frames < REYNARD_SURFACE_GRACE_FRAMES {
++                if surface.unused_frames == 1 {
++                    eprintln!("reynardWR: external surface unused - holding it \
++rather than freeing it");
++                }
++                return true;
++            }
++
++            eprintln!("reynardWR: external surface unused for {} frames - freeing it",
++                      surface.unused_frames);
++            // If we removed an external surface, we need to mark the dirty rects as
++            // invalid so a full composite occurs on the next frame.
++            composite_state.dirty_rects_are_valid = false;
++
++            resource_cache.destroy_compositor_surface(surface.native_surface_id);
++            false
+         });
+ 
+         if !self.underlays.is_empty() && !self.deferred_dirty_tests.is_empty() {
