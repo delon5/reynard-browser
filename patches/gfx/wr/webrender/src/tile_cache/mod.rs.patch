@@ -19,7 +19,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
      /// The native compositor surface handle
      pub native_surface_id: NativeSurfaceId,
      /// List of image keys, and current image generations, that are drawn in this surface.
-@@ -1541,6 +1552,39 @@
+@@ -1541,6 +1552,48 @@
      ) -> Result<CompositorSurfaceKind, SurfacePromotionFailure> {
          use SurfacePromotionFailure::*;
  
@@ -50,7 +50,16 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +                eprintln!("reynardWR: tile_cache instrumented - attempts, \
 +refusals, and the three silent early returns (161a+164)");
 +            }
-+            if nth == 0 || nth % 600 == 0 {
++            // One in sixty, not one in six hundred - see mse_fix_168's
++            // docstring. can_promote_to_surface is only reached when the
++            // primitive carries PREFER_COMPOSITOR_SURFACE, so a STALL in
++            // this counter means the display list stopped asking for a
++            // compositor surface at all - which is upstream of every
++            // decision this file makes, and the one thing that would
++            // explain a picture lost with no refusal, no early return
++            // and no destroyed surface. At one in six hundred a five
++            // second stall is invisible.
++            if nth == 0 || nth % 60 == 0 {
 +                eprintln!("reynardWR: promotion considered {} times (kind {:?}, at {:?})",
 +                          nth + 1, surface_kind, pic_coverage_rect);
 +            }
@@ -59,7 +68,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -1830,14 +1874,42 @@
+@@ -1830,14 +1883,42 @@
              frame_context.spatial_tree,
          );
  
@@ -103,7 +112,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -1854,6 +1926,7 @@
+@@ -1854,6 +1935,7 @@
  
          let is_visible = world_clip_rect.intersects(&frame_context.global_screen_world_rect);
          if !is_visible {
@@ -111,7 +120,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -2017,6 +2090,7 @@
+@@ -2017,6 +2099,7 @@
  
                          ExternalNativeSurface {
                              used_this_frame: true,
@@ -119,7 +128,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
                              native_surface_id,
                              image_dependencies: [ImageDependency::INVALID; 3],
                          }
-@@ -2162,6 +2236,38 @@
+@@ -2162,6 +2245,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
@@ -158,7 +167,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          if !self.debug_flags.contains(DebugFlags::SURFACE_PROMOTION_LOGGING) || result.is_ok() {
              return;
          }
-@@ -2997,16 +3103,47 @@
+@@ -2997,16 +3112,47 @@
  
          // A simple GC of the native external surface cache, to remove and free any
          // surfaces that were not referenced during the update_prim_dependencies pass.
