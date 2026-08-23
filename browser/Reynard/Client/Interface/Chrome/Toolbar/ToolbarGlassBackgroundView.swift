@@ -73,19 +73,10 @@ final class ToolbarGlassBackgroundView: UIView {
         ])
     }
     
-    /// Rebuilds the effect view in place, re-evaluating the ADAPTIVE
-    /// glass against what is behind it right now. Adaptive glass
-    /// picks its light/dark appearance from the underlying content
-    /// at discrete moments - creation, visibility changes - not
-    /// continuously: glass evaluated while a page load's bright
-    /// initial canvas was composited behind the toolbar latches the
-    /// LIGHT appearance and keeps it over the settled dark page (the
-    /// frosted first-load capsule). Call when the backdrop has
-    /// meaningfully changed, e.g. at load end.
-    func refreshAdaptation() {
-        configureEffect()
-    }
-    
+    // No re-adapt hooks: with clear-style glass there is nothing to
+    // adaptively latch, and rebuilding the effect view at runtime was
+    // itself the last flicker source. The effect is built once and
+    // never touched during browsing. See fix_no_frost_no_flicker.py.
     private func configureEffect() {
         effectView?.removeFromSuperview()
         effectView = nil

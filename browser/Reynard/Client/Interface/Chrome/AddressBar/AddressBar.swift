@@ -301,6 +301,18 @@ final class AddressBar: UIView {
         return UX.addressBarBackgroundCornerRadius
     }
     
+    /// The dismiss X's frame, for the same overlay/glass cutout as
+    /// capsuleFrame(in:) - the X's clear glass needs the black
+    /// overlay and the toolbar's frost cut behind it too, or it
+    /// reads as a solid disc while editing. Zero while the button
+    /// is not visible.
+    func dismissButtonFrame(in view: UIView) -> CGRect {
+        guard !dismissButton.isHidden, dismissButton.alpha > 0.01 else {
+            return .zero
+        }
+        return dismissButton.convert(dismissButton.bounds, to: view)
+    }
+    
     override func becomeFirstResponder() -> Bool {
         return textField.becomeFirstResponder()
     }
@@ -412,6 +424,12 @@ final class AddressBar: UIView {
         if visible {
             dismissButton.isHidden = false
         }
+        // The toolbars rebuild their capsule/X cutout in THEIR
+        // layout pass; an addressBar-internal animation alone never
+        // dirties them, which left the X's hole missing until some
+        // unrelated toolbar layout. superview is the toolbar's
+        // contentView; its superview is the toolbar.
+        superview?.superview?.setNeedsLayout()
         let animations = {
             self.dismissButton.alpha = visible ? 1 : 0
             self.layoutIfNeeded()
@@ -419,6 +437,8 @@ final class AddressBar: UIView {
         let completion: (Bool) -> Void = { _ in
             if !visible {
                 self.dismissButton.isHidden = true
+                // Close the X's cutout hole now that it is gone.
+                self.superview?.superview?.setNeedsLayout()
             }
         }
         if animated {
@@ -501,23 +521,8 @@ final class AddressBar: UIView {
     // MARK: - Loading And Menu
     
     func setLoadingProgress(_ progress: Float, isLoading: Bool) {
-        let wasLoading: Bool
-        if case .loading = loadingState {
-            wasLoading = true
-        } else {
-            wasLoading = false
-        }
         loadingState = isLoading ? .loading(progress: progress) : .idle
         applyState()
-        // The capsule's adaptive glass latched whatever appearance it
-        // evaluated DURING the load - usually light, over the
-        // incoming page's bright initial canvas. One rebuild at the
-        // loading -> idle transition re-evaluates it over the page's
-        // real, settled content. Transition-gated, so repeated idle
-        // progress reports and steady-state scrolling cost nothing.
-        if wasLoading, !isLoading {
-            addressBarGlassBackground.refreshAdaptation()
-        }
     }
     
     func performAfterMenuDismissal(_ action: @escaping () -> Void) {
