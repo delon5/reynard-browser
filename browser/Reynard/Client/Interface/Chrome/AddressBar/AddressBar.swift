@@ -504,8 +504,23 @@ final class AddressBar: UIView {
     // MARK: - Loading And Menu
     
     func setLoadingProgress(_ progress: Float, isLoading: Bool) {
+        let wasLoading: Bool
+        if case .loading = loadingState {
+            wasLoading = true
+        } else {
+            wasLoading = false
+        }
         loadingState = isLoading ? .loading(progress: progress) : .idle
         applyState()
+        // The capsule's adaptive glass latched whatever appearance it
+        // evaluated DURING the load - usually light, over the
+        // incoming page's bright initial canvas. One rebuild at the
+        // loading -> idle transition re-evaluates it over the page's
+        // real, settled content. Transition-gated, so repeated idle
+        // progress reports and steady-state scrolling cost nothing.
+        if wasLoading, !isLoading {
+            addressBarGlassBackground.refreshAdaptation()
+        }
     }
     
     func performAfterMenuDismissal(_ action: @escaping () -> Void) {

@@ -73,6 +73,19 @@ final class ToolbarGlassBackgroundView: UIView {
         ])
     }
     
+    /// Rebuilds the effect view in place, re-evaluating the ADAPTIVE
+    /// glass against what is behind it right now. Adaptive glass
+    /// picks its light/dark appearance from the underlying content
+    /// at discrete moments - creation, visibility changes - not
+    /// continuously: glass evaluated while a page load's bright
+    /// initial canvas was composited behind the toolbar latches the
+    /// LIGHT appearance and keeps it over the settled dark page (the
+    /// frosted first-load capsule). Call when the backdrop has
+    /// meaningfully changed, e.g. at load end.
+    func refreshAdaptation() {
+        configureEffect()
+    }
+    
     private func configureEffect() {
         effectView?.removeFromSuperview()
         effectView = nil
