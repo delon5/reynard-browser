@@ -1,7 +1,7 @@
 diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_cache/mod.rs
 --- a/gfx/wr/webrender/src/tile_cache/mod.rs
 +++ b/gfx/wr/webrender/src/tile_cache/mod.rs
-@@ -1541,6 +1541,30 @@
+@@ -1541,6 +1541,39 @@
      ) -> Result<CompositorSurfaceKind, SurfacePromotionFailure> {
          use SurfacePromotionFailure::*;
  
@@ -23,6 +23,15 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +            use std::sync::atomic::{AtomicUsize, Ordering};
 +            static REYNARD_TRIED: AtomicUsize = AtomicUsize::new(0);
 +            let nth = REYNARD_TRIED.fetch_add(1, Ordering::Relaxed);
++            if nth == 0 {
++                // WHICH INSTRUMENTS ARE IN THIS BUILD - see
++                // mse_fix_166's docstring. Three captures in a row could
++                // not be read because a silent diagnostic and an absent
++                // one look identical. This says what is compiled in,
++                // once, on the first frame that considers a surface.
++                eprintln!("reynardWR: tile_cache instrumented - attempts, \
++refusals, and the three silent early returns (161a+164)");
++            }
 +            if nth == 0 || nth % 600 == 0 {
 +                eprintln!("reynardWR: promotion considered {} times (kind {:?}, at {:?})",
 +                          nth + 1, surface_kind, pic_coverage_rect);
@@ -32,7 +41,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -1830,14 +1854,42 @@
+@@ -1830,14 +1863,42 @@
              frame_context.spatial_tree,
          );
  
@@ -76,7 +85,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -1854,6 +1906,7 @@
+@@ -1854,6 +1915,7 @@
  
          let is_visible = world_clip_rect.intersects(&frame_context.global_screen_world_rect);
          if !is_visible {
@@ -84,7 +93,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -2162,6 +2215,38 @@
+@@ -2162,6 +2224,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
