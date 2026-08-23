@@ -64,11 +64,7 @@ final class BottomToolbar: UIView {
     private let backgroundView: UIVisualEffectView = {
         let effect: UIVisualEffect
         if #available(iOS 26.0, *) {
-            // The pill's material: plain adaptive UIGlassEffect, so the
-            // toolbars read as the same Liquid Glass as the pill, the
-            // capsule and the X rather than a flatter non-adaptive
-            // variant of it.
-            effect = UIGlassEffect()
+            effect = UIGlassEffect.nonAdaptive(style: .regular)
         } else {
             effect = UIBlurEffect(style: .systemChromeMaterial)
         }
