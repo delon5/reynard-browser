@@ -32,7 +32,59 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -2162,6 +2186,38 @@
+@@ -1830,14 +1854,42 @@
+             frame_context.spatial_tree,
+         );
+ 
++        // REYNARD: the three ways promotion succeeds and no surface is
++        // made - see mse_fix_164's docstring.
++        //
++        // can_promote_to_surface said yes, this function returns
++        // Ok(surface_kind), and yet nothing is pushed. Capture f704f5cd
++        // shows exactly that shape: no refusal anywhere, and
++        //
++        //   SetLayers 12 layers, 1 protected
++        //   SetLayers  9 layers, 0 protected   <- and the picture goes
++        //
++        // three times over. A refusal instrument can never see this,
++        // because these are not refusals.
++        macro_rules! reynard_no_surface {
++            ($why:expr) => {{
++                use std::sync::atomic::{AtomicUsize, Ordering};
++                static REYNARD_BAIL: AtomicUsize = AtomicUsize::new(0);
++                let nth = REYNARD_BAIL.fetch_add(1, Ordering::Relaxed);
++                if nth < 20 || nth % 60 == 0 {
++                    eprintln!("reynardWR: no surface - {} (local {:?}, {} so far)",
++                              $why, local_prim_rect, nth + 1);
++                }
++            }};
++        }
++
+         // Map the primitive local rect into picture space.
+         let prim_rect = match map_local_to_picture.map(&local_prim_rect) {
+             Some(rect) => rect,
+-            None => return Ok(surface_kind),
++            None => {
++                reynard_no_surface!("local rect does not map into picture space");
++                return Ok(surface_kind);
++            }
+         };
+ 
+         // If the rect is invalid, no need to create dependencies.
+         if prim_rect.is_empty() {
++            reynard_no_surface!("picture rect is empty");
+             return Ok(surface_kind);
+         }
+ 
+@@ -1854,6 +1906,7 @@
+ 
+         let is_visible = world_clip_rect.intersects(&frame_context.global_screen_world_rect);
+         if !is_visible {
++            reynard_no_surface!("clip does not intersect the screen");
+             return Ok(surface_kind);
+         }
+ 
+@@ -2162,6 +2215,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
