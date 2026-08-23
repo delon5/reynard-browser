@@ -24,6 +24,14 @@ final class ToolbarGlassBackgroundView: UIView {
     /// regular glass: stacking two frosted layers reads as a solid
     /// fill, one clear layer over one frosted layer reads as glass.
     private var prefersClearGlass = false
+    /// Regular glass with content-driven adaptation DISABLED (the
+    /// toolbars' own private constructor): it follows the system
+    /// appearance instead of the pixels behind it. Adaptive glass
+    /// kept latching its bright LIGHT variant over page loads'
+    /// initial canvases and holding it over the settled dark page -
+    /// the 'frosted' capsule. Non-adaptive is the settled dark
+    /// see-through look from first paint, deterministically.
+    private var usesNonAdaptiveGlass = false
     private var reduceTransparencyObserver: NSObjectProtocol?
     
     override init(frame: CGRect) {
@@ -44,6 +52,12 @@ final class ToolbarGlassBackgroundView: UIView {
     convenience init(prefersClearGlass: Bool) {
         self.init(frame: .zero)
         self.prefersClearGlass = prefersClearGlass
+        configureEffect()
+    }
+    
+    convenience init(usesNonAdaptiveGlass: Bool) {
+        self.init(frame: .zero)
+        self.usesNonAdaptiveGlass = usesNonAdaptiveGlass
         configureEffect()
     }
     
@@ -91,10 +105,17 @@ final class ToolbarGlassBackgroundView: UIView {
         
         let newEffectView: UIVisualEffectView
         if #available(iOS 26.0, *) {
-            let glass = prefersClearGlass ? UIGlassEffect(style: .clear) : UIGlassEffect()
+            let glass: UIGlassEffect
+            if usesNonAdaptiveGlass {
+                glass = UIGlassEffect.nonAdaptive(style: .regular)
+            } else if prefersClearGlass {
+                glass = UIGlassEffect(style: .clear)
+            } else {
+                glass = UIGlassEffect()
+            }
             newEffectView = UIVisualEffectView(effect: glass)
             NSLog("[ToolbarGlass] iOS 26 available — using real UIGlassEffect (%@)",
-                  prefersClearGlass ? "clear" : "regular")
+                  usesNonAdaptiveGlass ? "regular, non-adaptive" : (prefersClearGlass ? "clear" : "regular"))
         } else {
             newEffectView = UIVisualEffectView(
                 effect: UIBlurEffect(style: prefersClearGlass ? .systemUltraThinMaterial : .systemMaterial)

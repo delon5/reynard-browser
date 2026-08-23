@@ -142,10 +142,13 @@ final class AddressBar: UIView {
         return view
     }()
     
-    // The pill's exact material - the identical initializer
-    // CondensedAddressPill uses - so pill, capsule and X all read as
-    // the same Liquid Glass, over the cutout's page pixels.
-    private let addressBarGlassBackground = ToolbarGlassBackgroundView()
+    // Non-adaptive regular glass: the settled dark see-through look
+    // at all times. Adaptive glass kept latching its bright LIGHT
+    // variant over page loads' initial canvases ('frosted'); with
+    // adaptation disabled the capsule shows the post-condense
+    // 'correct' glass from first paint, over the cutout's page
+    // pixels, deterministically.
+    private let addressBarGlassBackground = ToolbarGlassBackgroundView(usesNonAdaptiveGlass: true)
     
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)

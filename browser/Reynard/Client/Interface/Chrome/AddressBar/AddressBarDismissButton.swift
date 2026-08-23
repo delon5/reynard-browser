@@ -21,8 +21,8 @@ final class AddressBarDismissButton: UIButton {
     /// masksToBounds=false for its shadow, so a dedicated clipped
     /// container hosts the glass and tracks the corner radius.
     private let glassContainer = UIView()
-    // The pill's exact material, matching the URL capsule.
-    private let glassBackground = ToolbarGlassBackgroundView()
+    // Non-adaptive regular glass, matching the URL capsule.
+    private let glassBackground = ToolbarGlassBackgroundView(usesNonAdaptiveGlass: true)
     
     // MARK: - Lifecycle
     
