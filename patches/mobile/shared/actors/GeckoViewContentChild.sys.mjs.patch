@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3656 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3677 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2547,6 +2547,27 @@ index 9ca6e15..18d37f0 100644
 +        if (t.closest(REYNARD_STRICT_SELECTOR)) {
 +          return [true, "button" + much];
 +        }
++        // A TAP ON THE VIDEO IS A PICTURE TAP - see mse_fix_163's
++        // docstring. Prime Video's surface measures 0.00 of the
++        // picture, twelve times across two captures:
++        //
++        //   TAP 7 on video#ATVWebPlayerHLSVideoSurface via touchend
++        //   verdict=control (allowed (covers 0.00 of the picture))
++        //
++        // and every one of those is a tap on the video element itself.
++        // Judged a control, it is never swallowed and never counted, so
++        // the pause veto's arming condition cannot be met on that page
++        // and fix 144 waits for a picture tap that never appears to
++        // arrive.
++        //
++        // Whatever the geometry says, a tap whose target IS a video
++        // cannot be a control: controls are drawn OVER the video, never
++        // inside it. After the strict selector, so a real button over
++        // the picture is unaffected; before the coverage test, so the
++        // 0.25 threshold never sees a tap that is already answered.
++        if (t.tagName === "VIDEO" || t.closest("video")) {
++          return [false, "the video itself" + much];
++        }
 +        // 0.25, NOT 0.6 - see mse_fix_141's docstring. The scrim
 +        // measures 0.95 of the picture in portrait and 0.60 in
 +        // landscape, because it excludes the top and bottom bars and
@@ -3659,7 +3680,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3717,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3738,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4155,7 +4176,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4323,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4344,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4177,7 +4198,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4353,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4374,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
