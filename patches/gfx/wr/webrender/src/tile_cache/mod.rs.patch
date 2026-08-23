@@ -1,28 +1,57 @@
 diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_cache/mod.rs
 --- a/gfx/wr/webrender/src/tile_cache/mod.rs
 +++ b/gfx/wr/webrender/src/tile_cache/mod.rs
-@@ -2162,6 +2162,34 @@
+@@ -1541,6 +1541,30 @@
+     ) -> Result<CompositorSurfaceKind, SurfacePromotionFailure> {
+         use SurfacePromotionFailure::*;
+ 
++        // REYNARD: proof of life, and of attempt.
++        //
++        // A patch that only speaks when something goes wrong cannot be
++        // told apart from a patch that is not in the build - which is
++        // exactly the trap the pref, the debug flag and RUST_LOG each
++        // fell into in turn. This line fires on the first call, so its
++        // presence proves the patch is live and its absence proves it is
++        // not.
++        //
++        // It also answers the question the failure line cannot. If these
++        // keep climbing while the picture is black and no failure is
++        // printed, promotion is being attempted AND GRANTED, and the
++        // video is losing its surface somewhere else entirely. If they
++        // stop, the video stopped being offered for promotion at all.
++        {
++            use std::sync::atomic::{AtomicUsize, Ordering};
++            static REYNARD_TRIED: AtomicUsize = AtomicUsize::new(0);
++            let nth = REYNARD_TRIED.fetch_add(1, Ordering::Relaxed);
++            if nth == 0 || nth % 600 == 0 {
++                eprintln!("reynardWR: promotion considered {} times (kind {:?}, at {:?})",
++                          nth + 1, surface_kind, pic_coverage_rect);
++            }
++        }
++
+         // Each strategy has different restrictions on whether we can promote
+         match surface_kind {
+             CompositorSurfaceKind::Overlay => {
+@@ -2162,6 +2186,32 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
 +        // REYNARD: say it whatever else is switched off.
 +        //
-+        // The line below is the only thing in this crate that can name
-+        // why a video stopped being a compositor surface, and on the
-+        // protected MSE route that is the difference between a picture
-+        // and a black rectangle: the decoded frames never pass through
-+        // Gecko, so a demoted video paints as nothing.
++        // This is the only thing in the crate that can name why a video
++        // stopped being a compositor surface, and on the protected MSE
++        // route that is the difference between a picture and a black
++        // rectangle: the decoded frames never pass through Gecko, so a
++        // demoted video paints as nothing.
 +        //
-+        // Reaching it needs a pref, a debug flag and a live log crate,
-+        // and three captures in a row came back empty without ever
-+        // establishing which of the three was missing. An unconditional
-+        // eprintln! has none of those dependencies, so silence here
-+        // means exactly one thing: no promotion was refused.
++        // Reaching the warn! below needs a pref, a debug flag and a live
++        // log crate. The log crate is not live - RUST_LOG=webrender=info
++        // was proved in force in capture 4599e1c8 and not one of the
++        // five ungated info! calls in Device::new appeared. eprintln!
++        // depends on none of it.
 +        //
-+        // Throttled rather than gated. The first twenty name the reason
-+        // - which is all this is for - and one in six hundred after
-+        // that keeps a stuck state visible at about a line every ten
-+        // seconds without turning a frame loop into a log flood.
++        // Throttled rather than gated: the first twenty name the reason,
++        // which is all this is for.
 +        if let Err(reason) = &result {
 +            use std::sync::atomic::{AtomicUsize, Ordering};
 +            static REYNARD_SEEN: AtomicUsize = AtomicUsize::new(0);
