@@ -32,7 +32,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -2162,6 +2186,32 @@
+@@ -2162,6 +2186,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
@@ -56,7 +56,13 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +            use std::sync::atomic::{AtomicUsize, Ordering};
 +            static REYNARD_SEEN: AtomicUsize = AtomicUsize::new(0);
 +            let nth = REYNARD_SEEN.fetch_add(1, Ordering::Relaxed);
-+            if nth < 20 || nth % 600 == 0 {
++            // One a second at sixty frames, not one every ten. Capture
++            // 6ef3129b printed refusals 1 to 20 in two tenths of a
++            // second on one element and then went quiet, and with the
++            // old one-in-six-hundred a later run of refusals on a
++            // different element would have stayed invisible for ten
++            // seconds - long enough to be mistaken for none at all.
++            if nth < 20 || nth % 60 == 0 {
 +                eprintln!("reynardWR: surface promotion {} with: {} (at {:?}, {} so far)",
 +                          if ignored { "failure ignored" } else { "failed" },
 +                          reason, rect, nth + 1);

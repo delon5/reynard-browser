@@ -1,5 +1,4 @@
 diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
-index 94efd9b6c370..9039890c772e 100644
 --- a/gfx/layers/NativeLayerCA.mm
 +++ b/gfx/layers/NativeLayerCA.mm
 @@ -39,6 +39,24 @@
@@ -35,19 +34,63 @@ index 94efd9b6c370..9039890c772e 100644
  }
  
  already_AddRefed<NativeLayer> NativeLayerRootCA::CreateLayer(
-@@ -320,6 +339,11 @@
+@@ -318,6 +337,11 @@
+     // Figure out if we are hitting video low power mode.
+     VideoLowPowerType videoLowPower = CheckVideoLowPower(lock);
      EmitTelemetryForVideoLowPower(videoLowPower);
-   }
- 
++  }
++
 +  if (UpdatePictureInPictureSource(lock)) {
 +    MutexAutoUnlock unlock(mMutex);
 +    DispatchPictureInPictureSourceChanged();
-+  }
-+
+   }
+ 
    return true;
+@@ -417,11 +441,40 @@
+   NSMutableArray<CALayer*>* sublayers =
+       [NSMutableArray arrayWithCapacity:aSublayers.Length()];
+   bool mustRebuild = updateRequired == UpdateType::All;
++  // REYNARD: how many layers the compositor was given, when it changes.
++  //
++  // The picture on the protected MSE route goes black while its layer
++  // is still attached, still promoted and still presenting - capture
++  // 6ef3129b has promotion attempts climbing straight through five
++  // black spells with no refusal - and the chain says the wrapper lost
++  // its superlayer. That is this assignment: a layer left out of
++  // `sublayers` is removed from the root by the line below.
++  //
++  // Two ways for it to be left out, and they need different fixes:
++  // it was not in aSublayers at all (WebRender stopped submitting it),
++  // or UnderlyingCALayer returned null (it was judged clipped out).
++  // These two lines tell them apart.
++  static size_t reynardLastCount = SIZE_MAX;
++  if (aSublayers.Length() != reynardLastCount) {
++    reynardLastCount = aSublayers.Length();
++    printf_stderr("reynardWR: root was given %zu sublayers\n",
++                  reynardLastCount);
++  }
+   for (const auto& layer : aSublayers) {
+     layer->ApplyChanges(aRepresentation, NativeLayerCA::UpdateType::All,
+                         &mustRebuild);
+     if (CALayer* caLayer = layer->UnderlyingCALayer(aRepresentation)) {
+       [sublayers addObject:caLayer];
++    } else {
++      // REYNARD: a layer the compositor was given and is dropping.
++      static int reynardDropped = 0;
++      ++reynardDropped;
++      if (reynardDropped <= 40 || reynardDropped % 300 == 0) {
++        printf_stderr(
++            "reynardWR: root DROPPED a layer - no underlying CALayer, %zu "
++            "kept of %zu, %d dropped so far\n",
++            (size_t)[sublayers count], aSublayers.Length(), reynardDropped);
++      }
+     }
+   }
+ 
+@@ -921,9 +974,51 @@
  }
  
-@@ -924,6 +948,48 @@
+ bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
 +  // PROTECTED FIRST - see mse_fix_116's docstring. Upstream asks
 +  // whether the surface looks like video before it asks whether it is
 +  // protected, and IsVideo is mTextureHostIsVideo, which is
@@ -96,7 +139,7 @@ index 94efd9b6c370..9039890c772e 100644
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1358,17 @@
+@@ -1292,6 +1387,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -114,7 +157,7 @@ index 94efd9b6c370..9039890c772e 100644
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1469,7 +1546,8 @@
+@@ -1469,7 +1575,8 @@
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
@@ -124,7 +167,7 @@ index 94efd9b6c370..9039890c772e 100644
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-@@ -1521,12 +1599,38 @@
+@@ -1521,12 +1628,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -164,7 +207,7 @@ index 94efd9b6c370..9039890c772e 100644
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +1744,11 @@
+@@ -1640,6 +1773,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -176,7 +219,7 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +1789,11 @@
+@@ -1680,7 +1818,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -189,7 +232,7 @@ index 94efd9b6c370..9039890c772e 100644
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +1807,14 @@
+@@ -1694,13 +1836,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -205,7 +248,7 @@ index 94efd9b6c370..9039890c772e 100644
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +1831,23 @@
+@@ -1717,7 +1860,23 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -230,7 +273,7 @@ index 94efd9b6c370..9039890c772e 100644
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +1891,7 @@
+@@ -1761,7 +1920,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -239,7 +282,7 @@ index 94efd9b6c370..9039890c772e 100644
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +1900,84 @@
+@@ -1770,6 +1929,84 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -324,7 +367,7 @@ index 94efd9b6c370..9039890c772e 100644
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +1991,7 @@
+@@ -1783,6 +2020,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -332,7 +375,7 @@ index 94efd9b6c370..9039890c772e 100644
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2019,12 @@
+@@ -1810,8 +2048,12 @@
      }
    }
  
@@ -347,7 +390,7 @@ index 94efd9b6c370..9039890c772e 100644
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2209,7 @@
+@@ -1996,7 +2238,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -356,7 +399,7 @@ index 94efd9b6c370..9039890c772e 100644
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2225,7 @@
+@@ -2012,6 +2254,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
