@@ -258,26 +258,11 @@ final class TopToolbar: UIView {
         }
         let path = UIBezierPath(rect: bounds)
         path.append(UIBezierPath(roundedRect: capsule, cornerRadius: AddressBar.capsuleCornerRadius))
-        // The dismiss X gets the same treatment as the capsule: its
-        // clear glass needs the overlay and the toolbar glass cut
-        // behind it too, or it reads as a solid disc while editing.
-        let dismiss = addressBar.dismissButtonFrame(in: backgroundView)
-        if dismiss.width > 0, bounds.intersects(dismiss) {
-            path.append(UIBezierPath(roundedRect: dismiss, cornerRadius: dismiss.height / 2))
-        }
         // Overlay mask. The overlay's final frame fills the effect
         // view's contentView, i.e. equals backgroundView.bounds with
         // a zero origin, so this geometry applies verbatim - and
         // stays correct even while the overlay's own layout lags a
         // pass behind.
-        // Standalone layers get Core Animation's implicit ~0.25s
-        // actions on frame/path changes - UIView.performWithoutAnimation
-        // does not gate them - which let the hole glide for a beat
-        // while the toolbar and capsule snapped. Masks must snap
-        // atomically with the geometry they were measured from.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
         let mask = (oledOverlayView.layer.mask as? CAShapeLayer) ?? CAShapeLayer()
         mask.fillRule = .evenOdd
         mask.frame = bounds

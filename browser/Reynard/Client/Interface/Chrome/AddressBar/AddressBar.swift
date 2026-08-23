@@ -298,18 +298,6 @@ final class AddressBar: UIView {
         return UX.addressBarBackgroundCornerRadius
     }
     
-    /// The dismiss X's frame, for the same overlay/glass cutout as
-    /// capsuleFrame(in:) - the X's clear glass needs the black
-    /// overlay and the toolbar's frost cut behind it too, or it
-    /// reads as a solid disc while editing. Zero while the button
-    /// is not visible.
-    func dismissButtonFrame(in view: UIView) -> CGRect {
-        guard !dismissButton.isHidden, dismissButton.alpha > 0.01 else {
-            return .zero
-        }
-        return dismissButton.convert(dismissButton.bounds, to: view)
-    }
-    
     override func becomeFirstResponder() -> Bool {
         return textField.becomeFirstResponder()
     }
@@ -421,12 +409,6 @@ final class AddressBar: UIView {
         if visible {
             dismissButton.isHidden = false
         }
-        // The toolbars rebuild their capsule/X cutout in THEIR
-        // layout pass; an addressBar-internal animation alone never
-        // dirties them, which left the X's hole missing until some
-        // unrelated toolbar layout. superview is the toolbar's
-        // contentView; its superview is the toolbar.
-        superview?.superview?.setNeedsLayout()
         let animations = {
             self.dismissButton.alpha = visible ? 1 : 0
             self.layoutIfNeeded()
@@ -434,8 +416,6 @@ final class AddressBar: UIView {
         let completion: (Bool) -> Void = { _ in
             if !visible {
                 self.dismissButton.isHidden = true
-                // Close the X's cutout hole now that it is gone.
-                self.superview?.superview?.setNeedsLayout()
             }
         }
         if animated {
