@@ -6381,10 +6381,160 @@ public final class FairPlayStreamParser: NSObject {
             + "\(Int(box.height.rounded()))"
             + " super \(layer.superlayer != nil)"
             + " hidden \(layer.isHidden)"
+            // WHERE IT LANDS - see mse_fix_171's docstring. Everything
+            // above this line has reported healthy through 48 samples
+            // of a black screen; none of it is geometry.
+            + Self.layerWhere(layer)
             // WHO IS ABOVE IT - see mse_fix_138's docstring.
             + Self.layerChain(layer)
             // AND WHAT IS OVER IT - see mse_fix_154's docstring.
             + Self.layersOver(layer)
+    }
+
+    /// WHERE the layer lands, and what takes it away.
+    ///
+    /// ADDED - see mse_fix_171's docstring. layerShape prints
+    /// `layer.bounds` and nothing else about geometry: a size, with no
+    /// origin, no transform, and no answer to whether the box it
+    /// describes is anywhere a person could see it. Every landscape
+    /// sample in captures 47fe9153 and 542f7cb6 reads `super true
+    /// hidden false` with a correct 640x267 box while the screen is
+    /// black, and layerChain and layersOver both come back clean.
+    ///
+    /// A layer moved off the window, scaled to nothing, clipped away by
+    /// an ancestor's bounds, or animated somewhere else by Core
+    /// Animation reads EXACTLY like that.
+    ///
+    /// So this walks the path layerChain walks and carries the
+    /// rectangle with it, in two copies: one that every clipping
+    /// ancestor is allowed to cut, and one that nothing cuts. Where
+    /// they disagree is the whole question, and reporting both is what
+    /// makes "clipped away" and "positioned somewhere else" different
+    /// words rather than the same silence.
+    ///
+    /// The model tree is not what the render server draws while an
+    /// animation is in flight, so the presentation layer is read too,
+    /// and reported only when it disagrees.
+    ///
+    /// MAIN THREAD, for the reason layerShape is: this reads the live
+    /// tree. Bounded at twelve, like the other two walks, so a cycle
+    /// cannot turn a log line into a hang.
+    fileprivate static func layerWhere(_ layer: CALayer) -> String {
+        var out = ""
+        // Never printed before. A sink at zero opacity accepts every
+        // sample and reports status 1 exactly like a visible one.
+        if layer.opacity < 0.999 { out += " OPACITY \(layer.opacity)" }
+        let transform = layer.transform
+        if !CATransform3DIsIdentity(transform) {
+            out += " scale \(Self.twoPlaces(transform.m11))"
+                + "x\(Self.twoPlaces(transform.m22))"
+        }
+
+        // `clipped` is cut by every ancestor that masks; `free` is not
+        // cut by anything. Both start as the sink's own bounds and end
+        // in root - window - coordinates.
+        var clipped = layer.bounds
+        var free = layer.bounds
+        var takenBy: String? = nil
+        var current: CALayer = layer
+        var root: CALayer = layer
+        var depth = 0
+        while let parent = current.superlayer, depth < 12 {
+            free = current.convert(free, to: parent)
+            // Once something has taken the rectangle, stop cutting it:
+            // converting an empty rect up the rest of the tree yields a
+            // travelling zero-sized box and says nothing.
+            if takenBy == nil {
+                clipped = current.convert(clipped, to: parent)
+                if parent.masksToBounds {
+                    let kept = clipped.intersection(parent.bounds)
+                    if kept.isNull || kept.width < 1 || kept.height < 1 {
+                        takenBy = "<\(type(of: parent))"
+                            + " \(Int(parent.bounds.width.rounded()))x"
+                            + "\(Int(parent.bounds.height.rounded()))"
+                            + " at depth \(depth + 1)>"
+                    } else {
+                        clipped = kept
+                    }
+                }
+            }
+            root = parent
+            current = parent
+            depth += 1
+        }
+
+        out += " at " + Self.rectText(free)
+        // No parent at all: layerChain already says `<none>`, and there
+        // is no root to be inside of.
+        if depth == 0 { return out + " of nothing" }
+        out += " of root \(Int(root.bounds.width.rounded()))x"
+            + "\(Int(root.bounds.height.rounded()))"
+
+        if let takenBy = takenBy {
+            out += " CLIPPED AWAY by " + takenBy
+        } else {
+            let onScreen = free.intersection(root.bounds)
+            if onScreen.isNull || onScreen.width < 1
+                || onScreen.height < 1 {
+                out += " OFF SCREEN"
+            } else if clipped.width < free.width - 1
+                || clipped.height < free.height - 1 {
+                out += " visible " + Self.rectText(clipped)
+            } else {
+                out += " visible whole"
+            }
+        }
+
+        // What the render server is drawing, when that is not what the
+        // model tree says. An animation that carries the sink off the
+        // window leaves every model-tree property correct.
+        if let live = layer.presentation() {
+            let model = layer.frame
+            let shown = live.frame
+            if shown.isNull || model.isNull || shown.isInfinite {
+                // Nothing to compare, and rectText would say so anyway.
+            } else if abs(shown.origin.x - model.origin.x) > 1
+                || abs(shown.origin.y - model.origin.y) > 1
+                || abs(shown.width - model.width) > 1
+                || abs(shown.height - model.height) > 1 {
+                out += " ANIMATING to " + Self.rectText(shown)
+            }
+            if abs(live.opacity - layer.opacity) > 0.01 {
+                out += " live opacity \(live.opacity)"
+            }
+        }
+        return out
+    }
+
+    /// A rectangle, rounded, for layerWhere.
+    ///
+    /// Rounded for the reason layerShape rounds: the question is where
+    /// a picture-sized box is, not what its subpixel geometry is.
+    ///
+    /// Guarded, for a reason specific to this probe. A layer scaled to
+    /// zero is one of the four faults layerWhere exists to catch, and
+    /// converting a rectangle up through a zero-scale transform is
+    /// exactly how CGRect acquires an infinity. `Int(Double.infinity)`
+    /// is a trap in Swift, not a large number - so the diagnostic that
+    /// went looking for the collapsed layer would be the thing that
+    /// took playback down with it.
+    fileprivate static func rectText(_ rect: CGRect) -> String {
+        if rect.isNull { return "nowhere" }
+        if rect.isInfinite { return "infinite" }
+        let parts = [rect.origin.x, rect.origin.y,
+                     rect.width, rect.height]
+        for part in parts where !part.isFinite || abs(part) > 1e7 {
+            return "unreadable"
+        }
+        return "\(Int(rect.origin.x.rounded())),"
+            + "\(Int(rect.origin.y.rounded())) "
+            + "\(Int(rect.width.rounded()))x"
+            + "\(Int(rect.height.rounded()))"
+    }
+
+    /// Two decimal places, without dragging in a formatter.
+    fileprivate static func twoPlaces(_ value: CGFloat) -> String {
+        return "\((value * 100).rounded() / 100)"
     }
 
     /// Every ancestor of this layer, from its parent to the root.
@@ -6419,6 +6569,9 @@ public final class FairPlayStreamParser: NSObject {
             if here.isHidden { out += " HIDDEN" }
             if here.opacity < 0.999 { out += " opacity \(here.opacity)" }
             if here.masksToBounds { out += " clips" }
+            // ADDED - see mse_fix_171's docstring. Whether the
+            // compositor's placeholder surface is being painted at all.
+            if here.contents != nil { out += " drawn" }
             if here.superlayer == nil { out += " ROOT" }
             out += ">"
             current = here.superlayer

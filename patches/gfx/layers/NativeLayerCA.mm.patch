@@ -96,9 +96,9 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +  // protected route that is a black picture, because the frames never
 +  // pass through Gecko and there is nothing else to draw.
 +  //
-+  // Bounded at 300 frames, five seconds, after which the removal is
-+  // accepted - so a real teardown costs five seconds of a stale frame
-+  // rather than being held forever. The reference is dropped with it.
++  // Bounded at 2 frames. Every genuine recovery in the captures
++  // took exactly ONE - seven of them - and the only holds that ran
++  // longer were a dead layer on a dead page. See mse_fix_172.
 +  static RefPtr<NativeLayerCA> reynardHeldProtected;
 +  static size_t reynardHeldIndex = 0;
 +  static int reynardHeldFrames = 0;
@@ -112,11 +112,11 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +    }
 +    reynardHeldFrames = 0;
 +  } else if (reynardHeldProtected) {
-+    if (reynardHeldFrames < 300) {
++    if (reynardHeldFrames < 2) {
 +      ++reynardHeldFrames;
 +      size_t at = std::min(reynardHeldIndex, layersCA.Length());
 +      layersCA.InsertElementAt(at, reynardHeldProtected);
-+      if (reynardHeldFrames == 1 || reynardHeldFrames % 60 == 0) {
++      if (reynardHeldFrames <= 2) {
 +        printf_stderr(
 +            "reynardWR: put the protected layer back at %zu of %zu (%d "
 +            "frames held)\n",
