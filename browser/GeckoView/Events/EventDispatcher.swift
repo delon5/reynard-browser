@@ -210,6 +210,12 @@ public class GeckoEventDispatcherWrapper: NSObject, SwiftEventDispatcher {
     }
     
     public func dispatch(toSwift type: String!, message: Any!, callback: EventCallback?) {
+        // scrollbarHaptic trace: prove the engine's thumb-grab event
+        // crossed the native bridge, and whether anyone is listening.
+        if type == "GeckoView:ScrollbarTouchBegin" {
+            NSLog("scrollbarHaptic: crossed the native bridge (listeners=%d)",
+                  listeners[type]?.count ?? 0)
+        }
         let typedMessage = message as? [String: Any?]
         if message != nil, typedMessage == nil {
             // The engine only ever sends a bundle (NSDictionary) or nil

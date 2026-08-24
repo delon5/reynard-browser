@@ -77,6 +77,8 @@ final class ScrollbarHapticCoordinator: NSObject {
         // one grab can never buzz twice.
         engineSignalObserved = true
         pendingActivationStart = nil
+        // scrollbarHaptic trace.
+        NSLog("scrollbarHaptic: engine signal -> haptic (heuristic now silenced)")
         // Usually already prepared by the touch-down below (a thumb grab
         // necessarily begins inside the strip); preparing again is a
         // cheap no-op that covers the remaining cases.
@@ -123,6 +125,9 @@ final class ScrollbarHapticCoordinator: NSObject {
                 return
             }
             pendingActivationStart = nil
+            // scrollbarHaptic trace: the position guess, not a real
+            // thumb hit - the buzz-without-grab source.
+            NSLog("scrollbarHaptic: heuristic haptic (edge-strip drag)")
             feedbackGenerator.impactOccurred()
 
         default:

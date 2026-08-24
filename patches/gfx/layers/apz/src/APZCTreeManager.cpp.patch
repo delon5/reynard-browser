@@ -1,12 +1,24 @@
 diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTreeManager.cpp
 --- a/gfx/layers/apz/src/APZCTreeManager.cpp
 +++ b/gfx/layers/apz/src/APZCTreeManager.cpp
-@@ -2171,6 +2171,29 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
+@@ -2171,6 +2171,41 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
          hitScrollbarNode->IsScrollThumbNode() &&
          hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable;
  
 +#ifdef MOZ_WIDGET_UIKIT
++    // scrollbarHaptic trace: one line per touch start showing every
++    // gate of thumb-grab detection, so a device log pinpoints which
++    // link of the haptic chain is dead. Remove once confirmed.
++    printf_stderr("scrollbarHaptic: touchStart drag=%d prefs=%d/%d hit=%d thumb=%d async=%d\n",
++                  mInScrollbarTouchDrag ? 1 : 0,
++                  StaticPrefs::apz_drag_enabled() ? 1 : 0,
++                  StaticPrefs::apz_drag_touch_enabled() ? 1 : 0,
++                  hitScrollbarNode ? 1 : 0,
++                  (hitScrollbarNode && hitScrollbarNode->IsScrollThumbNode()) ? 1 : 0,
++                  (hitScrollbarNode && hitScrollbarNode->IsScrollThumbNode() &&
++                   hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable) ? 1 : 0);
 +    if (mInScrollbarTouchDrag) {
++      printf_stderr("scrollbarHaptic: thumb grab -> notifying observers\n");
 +      // Reynard: the embedder fires a haptic the moment the user's
 +      // finger lands on the scrollbar thumb, and this is the only
 +      // place in the process that knows that happened - the hit test
