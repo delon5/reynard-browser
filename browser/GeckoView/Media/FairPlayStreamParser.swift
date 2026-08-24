@@ -6616,7 +6616,11 @@ public final class FairPlayStreamParser: NSObject {
                 guard box.intersects(mine) else { continue }
                 let hit = box.intersection(mine)
                 found += 1
-                guard found <= 6 else { continue }
+                // RAISED from 6 - see mse_fix_173's docstring. The
+                // header has been saying `over 11:` while printing six,
+                // so five covering layers a sample have never been
+                // looked at, and the one that paints could be any.
+                guard found <= 12 else { continue }
                 out += " <\(type(of: above))"
                     + " \(Int(box.width.rounded()))x"
                     + "\(Int(box.height.rounded()))"
@@ -6624,6 +6628,31 @@ public final class FairPlayStreamParser: NSObject {
                     + "\(Int(hit.height.rounded()))"
                 if above.opacity < 0.999 { out += " opacity \(above.opacity)" }
                 if above.isOpaque { out += " opaque" }
+                // WHAT IT PAINTS - see mse_fix_173's docstring. The
+                // word below has only ever meant `contents == nil`, and
+                // a layer with no contents and an opaque background
+                // paints solid colour while reporting exactly that. 168
+                // of 168 covering layers in capture dc1664e0 said
+                // `empty` while the screen was black.
+                if let paint = above.backgroundColor, paint.alpha > 0.004 {
+                    out += " BG a\(Self.twoPlaces(paint.alpha))"
+                    if let parts = paint.components {
+                        if parts.count >= 4 {
+                            out += " rgb \(Self.twoPlaces(parts[0]))"
+                                + "/\(Self.twoPlaces(parts[1]))"
+                                + "/\(Self.twoPlaces(parts[2]))"
+                        } else if parts.count >= 2 {
+                            out += " grey \(Self.twoPlaces(parts[0]))"
+                        }
+                    }
+                }
+                // WHICH LAYER. NativeLayerCA names the ones it builds -
+                // the MSE sink is "org.reynard.mse.sink" - so a name
+                // here is the difference between "something paints" and
+                // a place to go and change it.
+                if let named = above.name, !named.isEmpty {
+                    out += " \"\(named)\""
+                }
                 out += (above.contents != nil) ? " drawn" : " empty"
                 out += ">"
             }
