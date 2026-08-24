@@ -4170,6 +4170,22 @@ public final class FairPlayStreamParser: NSObject {
     /// layerAttached and supersededBy are reported and NOT touched. They
     /// say something about which stream this is, and forcing them would
     /// be guessing at the very point this exists to stop guessing.
+    /// Where a display layer's control timebase is, and how fast.
+    ///
+    /// ADDED - see mse_fix_181's docstring. A layer whose timebase sits
+    /// somewhere its queued samples are not will never ask for them, and
+    /// that reads identically from this side to a layer that is simply
+    /// full. One string, so the stall line can carry both and the
+    /// subtraction can be done by eye.
+    fileprivate func layerClock(_ layer: AVSampleBufferDisplayLayer)
+        -> String {
+        guard let timebase = layer.controlTimebase else { return "none" }
+        let at = CMTimebaseGetTime(timebase).seconds
+        let rate = CMTimebaseGetRate(timebase)
+        guard at.isFinite else { return "unreadable" }
+        return String(format: "%.3f@%.2fx", at, rate)
+    }
+
     fileprivate func nudgeStalledDrain(streamKey: String) {
         // PAUSED IS NOT STALLED - see mse_fix_179's docstring. In
         // capture 666e86e3 this reported "no drain for 135.9s" of which
@@ -4198,28 +4214,54 @@ public final class FairPlayStreamParser: NSObject {
         let look = withState { () -> (attached: Bool, armed: Bool,
                                       superseded: Bool, depth: Int,
                                       held: Int, since: Double,
-                                      say: Bool)? in
+                                      say: Bool,
+                                      layer: AVSampleBufferDisplayLayer,
+                                      head: Double)? in
             guard let slot = streamParsers[streamKey],
-                  slot.displayLayer != nil else { return nil }
+                  let layer = slot.displayLayer else { return nil }
             let since = slot.lastDrainAt > 0
                 ? now - slot.lastDrainAt : Double.infinity
             guard since > Self.drainStallSeconds else { return nil }
             let say = now - slot.stallSaidAt > 5.0
             if say { slot.stallSaidAt = now }
+            // THE FRONT OF THE QUEUE - see mse_fix_181's docstring. The
+            // sample the layer would take next, so clock-versus-head is
+            // arithmetic on the line rather than a guess about it.
+            let head = slot.pending.first.map {
+                CMSampleBufferGetPresentationTimeStamp($0).seconds
+            } ?? Double.nan
             return (slot.layerAttached, slot.drainArmed,
                     slot.supersededBy != nil, slot.pending.count,
-                    slot.heldSegments.count, since, say)
+                    slot.heldSegments.count, since, say, layer, head)
         }
         guard let look else { return }
         if look.say {
             let waited = look.since.isFinite
                 ? String(format: "%.1f", look.since) : "ever"
+            // AND WHAT THE LAYER THINKS - see mse_fix_181's docstring.
+            // Everything above this is what THIS FILE believes about the
+            // stream. In capture 1059b024 all of it read healthy through
+            // a stall that re-arming could not fix, twice, with the
+            // protected layer in the compositor's list the whole time.
+            //
+            // ready=false means the layer is full and not presenting,
+            // and the question becomes why. ready=true means it is
+            // asking and we are not feeding it, which is a bug on this
+            // side of the boundary. Those want completely different
+            // fixes and nothing has ever told them apart.
+            let clockAt = layerClock(look.layer)
+            let headAt = look.head.isFinite
+                ? String(format: "%.3f", look.head) : "none"
             Self.log("stream \(streamKey) THE DRAIN HAS STOPPED - no drain "
                      + "for \(waited)s with \(look.depth) samples queued "
                      + "and \(look.held) fragment(s) held. attached="
                      + "\(look.attached) armed=\(look.armed) superseded="
-                     + "\(look.superseded). The bin is waiting for a queue "
-                     + "nothing is emptying.")
+                     + "\(look.superseded) | the layer says ready="
+                     + "\(look.layer.isReadyForMoreMediaData) status="
+                     + "\(look.layer.status.rawValue) error="
+                     + (look.layer.error.map { String(describing: $0) }
+                        ?? "nil")
+                     + " clock=\(clockAt) head=\(headAt)")
         }
         // Only the belief, and only when nothing else explains it.
         guard look.attached, !look.superseded, look.armed else { return }
