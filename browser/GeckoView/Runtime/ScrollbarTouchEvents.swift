@@ -20,8 +20,6 @@ final class ScrollbarTouchListener: GeckoEventListenerInternal {
 
     @MainActor
     func handleMessage(type: String, message: [String: Any?]?) async throws -> Any? {
-        // scrollbarHaptic trace.
-        NSLog("scrollbarHaptic: reached Swift handler (installed=%d)", handler != nil ? 1 : 0)
         handler?()
         return nil
     }

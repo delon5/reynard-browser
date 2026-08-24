@@ -1,7 +1,7 @@
 diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTreeManager.cpp
 --- a/gfx/layers/apz/src/APZCTreeManager.cpp
 +++ b/gfx/layers/apz/src/APZCTreeManager.cpp
-@@ -2171,6 +2171,95 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
+@@ -2171,6 +2171,126 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
          hitScrollbarNode->IsScrollThumbNode() &&
          hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable;
  
@@ -27,13 +27,45 @@ diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTre
 +    // uses only the along-axis coordinate, and slider.snapMultiplier
 +    // is 0 off Windows so there is no lateral snap-back. Single-touch
 +    // only - a second finger means pinch, never a thumb grab.
++    //
++    // HOW WIDE, AND WHY IT SHRANK. This was a flat 72 DEVICE pixels,
++    // described as "24pt at 3x" - which it is only at 3x. On a 2x
++    // device the same constant is 36pt, and the corridor is not a
++    // free target: adopting a thumb commits mInScrollbarTouchDrag, and
++    // upstream's drag path then synthesises a mouse event and does not
++    // send the touch to content. So everything inside the corridor
++    // stops being page content - a tap on a link there buzzes and does
++    // nothing, and an ordinary vertical PAN there becomes a thumb drag,
++    // which scrolls with amplified gain in the opposite direction to
++    // the pan. That is the "wrong buzz while scrolling near the right
++    // edge" complaint this whole arc started from, upgraded to wrong
++    // scrolling.
++    //
++    // So: half the reach, and expressed the way the rest of APZ
++    // expresses its tolerances - in inches against GetDPI(), so it is
++    // the same physical distance on every device instead of the same
++    // pixel count. 0.075in is 12pt at the 160dpi reference APZ uses.
++    //
++    // This NARROWS the pan hijack; it does not close it. Closing it
++    // properly means two-phase adoption - mark the candidate at
++    // touch-down and only commit if the first move looks like a grab
++    // rather than a fling - which is real surgery on the block routing.
++    // Worth doing if it bites; not worth it while the corridor has
++    // never once been seen to fire (capture d4c5dd97: 92 touch starts,
++    // widened=0 on every one).
++    //
++    // Four steps instead of twelve, for the same reason: this ran up to
++    // 24 synchronous hit tests on virtually every touch start.
 +    bool widenedThumbHit = false;
 +    if (!mInScrollbarTouchDrag && StaticPrefs::apz_drag_enabled() &&
 +        StaticPrefs::apz_drag_touch_enabled() &&
 +        aInput.mTouches.Length() == 1) {
 +      const ScreenIntPoint touchPoint = aInput.mTouches[0].mScreenPoint;
-+      for (int32_t distance = 6; distance <= 72 && !widenedThumbHit;
-+           distance += 6) {
++      const int32_t reach =
++          std::max(4, int32_t(0.075f * GetDPI()));
++      const int32_t step = std::max(1, reach / 4);
++      for (int32_t distance = step; distance <= reach && !widenedThumbHit;
++           distance += step) {
 +        const ScreenIntPoint candidates[] = {
 +            touchPoint + ScreenIntPoint(distance, 0),
 +            touchPoint - ScreenIntPoint(distance, 0)};
@@ -83,7 +115,6 @@ diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTre
 +      // observer topic on the main thread, where the relay lives.
 +      // 1000 sits far above the Android animator codes in
 +      // UiCompositorControllerMessageTypes.h.
-+      printf_stderr("scrollbarHaptic: thumb grab -> UiCompositorController message\n");
 +      if (RefPtr<UiCompositorControllerParent> uiController =
 +              UiCompositorControllerParent::GetFromRootLayerTreeId(
 +                  mRootLayersId)) {

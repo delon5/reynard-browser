@@ -1,7 +1,7 @@
 diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
 --- a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
 +++ b/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs
-@@ -304,6 +304,21 @@ export class GeckoViewStartup {
+@@ -304,6 +304,16 @@ export class GeckoViewStartup {
            }
          );
  
@@ -9,12 +9,7 @@ diff --git a/mobile/shared/components/geckoview/GeckoViewStartup.sys.mjs b/mobil
 +        // scrollbar thumb (see the APZCTreeManager patch); relay it to
 +        // the embedder, which uses it for native haptic feedback the
 +        // moment the thumb is grabbed.
-+        // scrollbarHaptic trace: best-effort dumps for the device
-+        // log; their absence is only meaningful if dump output is
-+        // enabled on this build.
-+        dump("scrollbarHaptic: relay registered\n");
 +        Services.obs.addObserver(() => {
-+          dump("scrollbarHaptic: relay fired\n");
 +          lazy.EventDispatcher.instance.sendRequest(
 +            "GeckoView:ScrollbarTouchBegin"
 +          );

@@ -11,7 +11,7 @@ diff --git a/gfx/layers/ipc/UiCompositorControllerChild.cpp b/gfx/layers/ipc/UiC
 
  #if defined(MOZ_WIDGET_ANDROID)
  #  include "mozilla/layers/AndroidHardwareBuffer.h"
-@@ -241,8 +244,24 @@
+@@ -241,8 +244,22 @@
  #if defined(MOZ_WIDGET_ANDROID)
    if (mWidget) {
      mWidget->RecvToolbarAnimatorMessageFromCompositor(aMessage);
@@ -24,8 +24,6 @@ diff --git a/gfx/layers/ipc/UiCompositorControllerChild.cpp b/gfx/layers/ipc/UiC
 +  // the observer topic the GeckoViewStartup haptics relay listens to
 +  // can be notified directly - in the right process, at last.
 +  if (aMessage == 1000) {
-+    printf_stderr(
-+        "scrollbarHaptic: UI process received thumb-grab message\n");
 +    if (nsCOMPtr<nsIObserverService> obsSvc =
 +            mozilla::services::GetObserverService()) {
 +      obsSvc->NotifyObservers(nullptr, "reynard-scrollbar-touch-begin",

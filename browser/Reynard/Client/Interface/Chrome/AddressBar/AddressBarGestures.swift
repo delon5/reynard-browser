@@ -183,7 +183,7 @@ final class AddressBarGestures: NSObject {
     
     private func setupSourceContentPreview(delegate: AddressBarGestureDelegate) {
         guard horizontalSourceContentView == nil,
-              delegate.transitionContentView.transform.isIdentity,
+              !delegate.transitionContentView.hasTransitionTransform,
               let sourceTab = delegate.activeTabs[safe: delegate.selectedTabIndex],
               let previewImage = delegate.storedContentPreview(from: sourceTab),
               let captureGeometry = delegate.transitionContentView.thumbnailCaptureGeometry else {

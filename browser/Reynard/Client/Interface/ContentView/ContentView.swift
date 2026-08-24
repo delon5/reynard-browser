@@ -450,7 +450,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         topConstraint = nextTopConstraint
         bottomConstraint = nextBottomConstraint
         updateLayoutOffsets()
-        transform = focusedInputTransform
+        applyComposedTransform()
         updatePullToRefreshAvailability()
     }
     
@@ -593,7 +593,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     
     private func animateLayout(duration: TimeInterval, options: UIView.AnimationOptions) {
         guard duration > 0 else {
-            transform = focusedInputTransform
+            applyComposedTransform()
             superview?.layoutIfNeeded()
             return
         }
@@ -603,7 +603,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             delay: 0,
             options: [options, .beginFromCurrentState, .allowUserInteraction]
         ) {
-            self.transform = self.focusedInputTransform
+            self.applyComposedTransform()
             self.superview?.layoutIfNeeded()
         }
     }
@@ -1148,8 +1148,38 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     
     // MARK: - Presentation
     
+    /// What a presentation or gesture has asked the page to look like,
+    /// kept apart from the keyboard lift.
+    ///
+    /// ADDED after a review of e5bf4c9. Upstream moved the focused-input
+    /// lift out of constraints and into ContentView's own transform, and
+    /// this method has always written that same property, so the two
+    /// erased each other: a cancelled address-bar pan reset the
+    /// transform to identity and dropped the lift, leaving the focused
+    /// input behind the keyboard; and the tab overview's page-scale was
+    /// discarded by the next layout pass, because applyLayoutState
+    /// rewrote the transform from the lift alone.
+    private var transitionTransform: CGAffineTransform = .identity
+
+    /// Is a presentation or gesture currently posing the page?
+    ///
+    /// The horizontal tab-switch gesture used to ask this by testing
+    /// `transform.isIdentity`, which stopped being the same question the
+    /// moment a keyboard lift could put a translation there.
+    var hasTransitionTransform: Bool { !transitionTransform.isIdentity }
+
     func setTransitionTransform(_ transform: CGAffineTransform) {
-        self.transform = transform
+        transitionTransform = transform
+        applyComposedTransform()
+    }
+
+    /// The only place this view's transform is written.
+    ///
+    /// Transition first, lift second: the lift is a screen-space shift
+    /// to get an input clear of the keyboard and must not be scaled by
+    /// whatever pose a presentation has the page in.
+    private func applyComposedTransform() {
+        transform = transitionTransform.concatenating(focusedInputTransform)
     }
     
     func setTransitionHidden(_ hidden: Bool) {
