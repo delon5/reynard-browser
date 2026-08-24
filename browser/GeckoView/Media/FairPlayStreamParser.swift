@@ -2366,6 +2366,16 @@ public final class FairPlayStreamParser: NSObject {
         /// layer is hungry, so it is stopped when the queue empties and
         /// re-armed when something arrives. Otherwise it spins.
         var drainArmed = false
+        /// When drainPending last actually ran for this stream.
+        ///
+        /// ADDED - see mse_fix_178's docstring. drainArmed says a
+        /// callback is BELIEVED to be installed; this says whether one
+        /// ever arrived. The difference between those two is the
+        /// deadlock in capture ccce0736.
+        var lastDrainAt: Double = 0
+        /// When the stall was last reported, so it is said once and then
+        /// rarely rather than at the page's append rate.
+        var stallSaidAt: Double = 0
         /// How many times the feed has been held off for this stream.
         ///
         /// ADDED - see mse_fix_114's docstring. Said on the first and
@@ -2859,6 +2869,13 @@ public final class FairPlayStreamParser: NSObject {
                 }
                 withState { slot.lastAppendAt = Self.hostNow() }
                 reapSuperseded(sessionId: sessionId)
+                // ADDED - see mse_fix_178's docstring. Both of the
+                // bin's non-appending exits reach this - the hold and
+                // the refusal - and both mean the same thing: the queue
+                // this is waiting on is not moving. In capture ccce0736
+                // nothing moved it, and this return was taken for every
+                // video segment for the rest of the session.
+                nudgeStalledDrain(streamKey: key)
                 return true
             }
             if verdict.forced {
@@ -2886,6 +2903,13 @@ public final class FairPlayStreamParser: NSObject {
                 // skipped for every held fragment.
                 withState { slot.lastAppendAt = Self.hostNow() }
                 reapSuperseded(sessionId: sessionId)
+                // ADDED - see mse_fix_178's docstring. Both of the
+                // bin's non-appending exits reach this - the hold and
+                // the refusal - and both mean the same thing: the queue
+                // this is waiting on is not moving. In capture ccce0736
+                // nothing moved it, and this return was taken for every
+                // video segment for the rest of the session.
+                nudgeStalledDrain(streamKey: key)
                 return true
             }
         }
@@ -4111,6 +4135,79 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
+    /// The bin is holding and the queue is not moving. Why?
+    ///
+    /// ADDED - see mse_fix_178's docstring. After the seek in capture
+    /// ccce0736 the video queue stood at 337 with the bin refusing to
+    /// append until it fell to 120, and it never fell: no drain ran, the
+    /// layer went unfed for eleven seconds, and eight video segments -
+    /// about 55 MB - were held and never given to the parser while audio
+    /// played on. The stream said nothing at all for the rest of the
+    /// session.
+    ///
+    /// armDrainIfNeeded declines silently on six conditions and prints
+    /// none of them. This prints the three that can still be true here -
+    /// pending is 337, holdUntil is only ever assigned zero in this file,
+    /// and the layer is present - so one line names the latch.
+    ///
+    /// And it clears the ONE that is safe to clear. drainArmed is not a
+    /// state, it is a belief: "a requestMediaDataWhenReady block is
+    /// installed and will call us". It is cleared in exactly one place,
+    /// inside that callback - so if the belief is wrong, nothing can ever
+    /// correct it. Clearing it and re-arming is right under every cause
+    /// and costs one redundant requestMediaDataWhenReady if the belief
+    /// was true after all.
+    ///
+    /// layerAttached and supersededBy are reported and NOT touched. They
+    /// say something about which stream this is, and forcing them would
+    /// be guessing at the very point this exists to stop guessing.
+    fileprivate func nudgeStalledDrain(streamKey: String) {
+        let now = Self.hostNow()
+        let look = withState { () -> (attached: Bool, armed: Bool,
+                                      superseded: Bool, depth: Int,
+                                      held: Int, since: Double,
+                                      say: Bool)? in
+            guard let slot = streamParsers[streamKey],
+                  slot.displayLayer != nil else { return nil }
+            let since = slot.lastDrainAt > 0
+                ? now - slot.lastDrainAt : Double.infinity
+            guard since > Self.drainStallSeconds else { return nil }
+            let say = now - slot.stallSaidAt > 5.0
+            if say { slot.stallSaidAt = now }
+            return (slot.layerAttached, slot.drainArmed,
+                    slot.supersededBy != nil, slot.pending.count,
+                    slot.heldSegments.count, since, say)
+        }
+        guard let look else { return }
+        if look.say {
+            let waited = look.since.isFinite
+                ? String(format: "%.1f", look.since) : "ever"
+            Self.log("stream \(streamKey) THE DRAIN HAS STOPPED - no drain "
+                     + "for \(waited)s with \(look.depth) samples queued "
+                     + "and \(look.held) fragment(s) held. attached="
+                     + "\(look.attached) armed=\(look.armed) superseded="
+                     + "\(look.superseded). The bin is waiting for a queue "
+                     + "nothing is emptying.")
+        }
+        // Only the belief, and only when nothing else explains it.
+        guard look.attached, !look.superseded, look.armed else { return }
+        withState { streamParsers[streamKey]?.drainArmed = false }
+        if look.say {
+            Self.log("stream \(streamKey) clearing drainArmed and asking "
+                     + "the layer again - the callback that clears it is "
+                     + "the one that never came.")
+        }
+        armDrainIfNeeded(streamKey: streamKey)
+    }
+
+    /// How long the drain may be silent before that is a fault.
+    ///
+    /// Three seconds. A paced feed goes quiet for a frame interval at a
+    /// time and a held queue for as long as the layer takes to eat 217
+    /// samples, which at 25fps is under nine; three seconds with the bin
+    /// holding is not pacing, it is a stop.
+    fileprivate static let drainStallSeconds: Double = 3.0
+
     fileprivate func armDrainIfNeeded(streamKey: String) {
         let work = withState { () -> (layer: AVSampleBufferDisplayLayer,
                                       queue: DispatchQueue)? in
@@ -4141,6 +4238,10 @@ public final class FairPlayStreamParser: NSObject {
     /// Feed the layer while it is hungry, and stop asking when it is not.
     fileprivate func drainPending(streamKey: String,
                                   layer: AVSampleBufferDisplayLayer) {
+        // ADDED - see mse_fix_178's docstring. Stamped on entry rather
+        // than on a successful enqueue: the question this answers is
+        // whether the callback is arriving at all.
+        withState { streamParsers[streamKey]?.lastDrainAt = Self.hostNow() }
         while layer.isReadyForMoreMediaData {
             // NO LONGER A HOLD - see mse_fix_130's docstring. 114
             // paced the feed by calling stopRequestingMediaData and
