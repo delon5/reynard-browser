@@ -4278,36 +4278,69 @@ public final class FairPlayStreamParser: NSObject {
         //
         // KVC with a responds(to:) guard, the same way drainPending
         // reads it: the property is newer than this deployment target.
-        let flushed = withState { () -> (layer: AVSampleBufferDisplayLayer,
-                                         queue: DispatchQueue,
-                                         dropped: Int)? in
-            // ONCE PER REPORT, NOT ONCE PER APPEND. This runs from the
-            // bin's hold and refusal exits, which on a stalled stream is
-            // every segment the page appends - several a second. say is
-            // already the 5s rate limiter above and starts open, so the
-            // first flush is immediate and the next is five seconds
-            // later, which is time enough to know whether it worked.
+        // ONCE PER REPORT, NOT ONCE PER APPEND. This runs from the
+        // bin's hold and refusal exits, which on a stalled stream is
+        // every segment the page appends - several a second. say is
+        // already the 5s rate limiter above and starts open, so the
+        // first flush is immediate and the next is five seconds later,
+        // which is time enough to know whether it worked.
+        //
+        // AND THE LAYER IS ASKED OUTSIDE THE LOCK. The first version of
+        // this read requiresFlushToResumeDecoding by KVC from inside
+        // withState, which is the opposite of what the rest of this file
+        // does - armAudioDrainIfNeeded reads the renderer "OUTSIDE the
+        // lock, because both read the renderer or its clock", and
+        // livePictureLock exists because the state lock is already held
+        // across real work. An AVFoundation getter that blocks inside
+        // the framework would have stretched that hold for the append
+        // thread, every drain queue and the compositor's adopt() alike.
+        // So: snapshot under the lock, ask the layer outside it, and
+        // re-enter only to record what was decided.
+        let candidate = withState { () -> (layer: AVSampleBufferDisplayLayer,
+                                           queue: DispatchQueue)? in
             guard look.say,
                   let slot = streamParsers[streamKey],
                   let layer = slot.displayLayer,
                   let queue = slot.drainQueue else { return nil }
+            return (layer, queue)
+        }
+        var flushed: (layer: AVSampleBufferDisplayLayer,
+                      queue: DispatchQueue, dropped: Int)?
+        if let candidate {
             let key = "requiresFlushToResumeDecoding"
-            guard layer.responds(to: NSSelectorFromString(key)),
-                  let needs = layer.value(forKey: key) as? Bool,
-                  needs else { return nil }
-            // AND THE QUEUE GOES WITH IT, AS FAR AS THE NEXT KEYFRAME.
-            // needsSyncSample gates what comes IN and does not touch
-            // what is already pending, so on its own it would leave a
-            // flushed decoder being fed samples with no reference frame
-            // - resynchronise clears the whole queue for exactly this
-            // reason. Here the media is still wanted, so drop only the
-            // mid-GOP head: those samples decode to nothing either way.
-            slot.needsSyncSample = true
-            let before = slot.pending.count
-            while let head = slot.pending.first, !Self.isSyncSample(head) {
-                slot.pending.removeFirst()
+            let needsFlush =
+                candidate.layer.responds(to: NSSelectorFromString(key))
+                && (candidate.layer.value(forKey: key) as? Bool) == true
+            if needsFlush {
+                // AND THE QUEUE GOES WITH IT, AS FAR AS THE NEXT
+                // KEYFRAME. needsSyncSample gates what comes IN and does
+                // not touch what is already pending, so on its own it
+                // would leave a flushed decoder being fed samples with
+                // no reference frame - resynchronise clears the whole
+                // queue for exactly this reason. Here the media is still
+                // wanted, so drop only the mid-GOP head: those samples
+                // decode to nothing either way.
+                //
+                // Identity re-checked: the lock was let go to ask the
+                // layer, and an adopt() in that window would mean this
+                // is no longer the stream's sink.
+                let dropped = withState { () -> Int? in
+                    guard let slot = streamParsers[streamKey],
+                          slot.displayLayer === candidate.layer else {
+                        return nil
+                    }
+                    slot.needsSyncSample = true
+                    let before = slot.pending.count
+                    while let head = slot.pending.first,
+                          !Self.isSyncSample(head) {
+                        slot.pending.removeFirst()
+                    }
+                    return before - slot.pending.count
+                }
+                if let dropped {
+                    flushed = (candidate.layer, candidate.queue, dropped)
+                }
             }
-            return (layer, queue, before - slot.pending.count)
         }
         if let flushed {
             Self.log("stream \(streamKey) the layer needs a flush to "
@@ -4321,12 +4354,19 @@ public final class FairPlayStreamParser: NSObject {
             // two calls can have - the same rule resynchronise follows.
             flushed.queue.async { flushed.layer.flush() }
         }
+        // AT THE CADENCE IT REPORTS. Only the log line used to be behind
+        // say; the recovery itself ran on every nudge, which is every
+        // segment the page appends while stalled - several a second -
+        // each one a cross-thread requestMediaDataWhenReady against a
+        // layer whose drain queue may be executing the previous block.
+        // Replacing the handler is defined behaviour, so this was churn
+        // rather than breakage, but there is no reason to re-arm faster
+        // than the evidence that it is needed arrives.
+        guard look.say else { return }
         withState { streamParsers[streamKey]?.drainArmed = false }
-        if look.say {
-            Self.log("stream \(streamKey) clearing drainArmed and asking "
-                     + "the layer again - the callback that clears it is "
-                     + "the one that never came.")
-        }
+        Self.log("stream \(streamKey) clearing drainArmed and asking "
+                 + "the layer again - the callback that clears it is "
+                 + "the one that never came.")
         armDrainIfNeeded(streamKey: streamKey)
     }
 

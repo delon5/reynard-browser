@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3823 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3858 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2818,6 +2818,22 @@ index 9ca6e15..18d37f0 100644
 +      // HOW DO THE CONTROLS HIDE - see mse_fix_182's docstring.
 +      var reynardControlsWatched = false;
 +      var reynardControlsSaid = 0;
++      var reynardControlsStyleSaid = 0;
++
++      // These values come from the PAGE and land in a capture that gets
++      // shared. A newline in one would let a site write its own lines
++      // into evidence this project reads as its own. Control characters
++      // out, by code point - a character class would need a backslash,
++      // and a backslash inside this template literal never survives to
++      // the page.
++      function reynardSafeText(s) {
++        var out = "";
++        for (var i = 0; i < s.length; i++) {
++          var c = s.charCodeAt(i);
++          out += c < 32 || c === 127 ? " " : s.charAt(i);
++        }
++        return out;
++      }
 +
 +      // The full class list, not the two reynardDescribeElement keeps.
 +      // The state this is hunting for IS a class, so truncating to two
@@ -2907,13 +2923,30 @@ index 9ca6e15..18d37f0 100644
 +          var observer = new view.MutationObserver(function (records) {
 +            try {
 +              for (var i = 0; i < records.length; i++) {
-+                if (reynardControlsSaid >= 20) {
-+                  observer.disconnect();
-+                  debug("CONTROLS stopped watching - twenty changes said");
-+                  return;
-+                }
 +                var r = records[i];
-+                reynardControlsSaid++;
++                // TWO BUDGETS, NOT ONE. A player mutates inline style
++                // continuously while the controls are up - progress bar
++                // width, elapsed time - so a single budget is eaten by
++                // that churn within seconds of the tap and the auto-hide
++                // some seconds later, the one event this exists to name,
++                // is never reported. The hunted state is a CLASS, so
++                // class keeps the whole budget and style gets a small
++                // separate one, enough to show an opacity transition if
++                // that is what the hide turns out to be.
++                var isClass = r.attributeName === "class";
++                if (isClass) {
++                  if (reynardControlsSaid >= 20) {
++                    observer.disconnect();
++                    debug("CONTROLS stopped watching - twenty said");
++                    return;
++                  }
++                  reynardControlsSaid++;
++                } else {
++                  if (reynardControlsStyleSaid >= 5) {
++                    continue;
++                  }
++                  reynardControlsStyleSaid++;
++                }
 +                var was = r.oldValue === null ? "" : r.oldValue;
 +                var now2 = "";
 +                try {
@@ -2925,6 +2958,8 @@ index 9ca6e15..18d37f0 100644
 +                if (now2.length > 160) {
 +                  now2 = now2.slice(0, 160) + "...";
 +                }
++                was = reynardSafeText(was);
++                now2 = reynardSafeText(now2);
 +                debug(
 +                  "CONTROLS " +
 +                    r.attributeName +
@@ -3826,7 +3861,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3884,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3919,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4322,7 +4357,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4490,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4525,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4344,7 +4379,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4520,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4555,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
