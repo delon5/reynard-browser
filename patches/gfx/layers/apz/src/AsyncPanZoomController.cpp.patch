@@ -2,7 +2,31 @@ diff --git a/gfx/layers/apz/src/AsyncPanZoomController.cpp b/gfx/layers/apz/src/
 index e0c930d19dde..c75449ed84e6 100644
 --- a/gfx/layers/apz/src/AsyncPanZoomController.cpp
 +++ b/gfx/layers/apz/src/AsyncPanZoomController.cpp
-@@ -2523,6 +2523,23 @@ SideBits AsyncPanZoomController::ScrollableDirections() const {
+@@ -2421,9 +2421,23 @@ bool AsyncPanZoomController::CanScrollWithWheel(
+   return CanScroll(delta);
+ }
+ 
+ bool AsyncPanZoomController::BlocksPullToRefreshForOverflowHidden() const {
++#ifdef MOZ_WIDGET_UIKIT
++  // Reynard: Safari parity, not Chrome parity. Upstream blocks
++  // pull-to-refresh whenever the root document computes
++  // overflow-y:hidden (Bug 1902313) because Chrome behaves that
++  // way. But the app-shell pattern that trips it -
++  // body{overflow:hidden} with one inner overflow-y:auto
++  // scroller, tv.apple.com being the canonical case - is exactly
++  // where iOS users still expect pull-to-refresh, and Safari
++  // grants it. Sites that truly need to opt out keep the
++  // standard, still-honored switches: overscroll-behavior,
++  // touch-action, and preventDefault.
++  return false;
++#else
+   return IsRootContent() &&
+          GetScrollMetadata().GetOverflow().mOverflowY == StyleOverflow::Hidden;
++#endif
+ }
+ 
+ ScrollDirections AsyncPanZoomController::GetAllowedHandoffDirections(
+@@ -2523,6 +2537,23 @@ SideBits AsyncPanZoomController::ScrollableDirections() const {
      result = mX.ScrollableDirections() | mY.ScrollableDirections();
    }
  
@@ -26,7 +50,7 @@ index e0c930d19dde..c75449ed84e6 100644
    if (IsRootContent()) {
      if (APZCTreeManager* treeManagerLocal = GetApzcTreeManager()) {
        ScreenMargin fixedLayerMargins =
-@@ -2533,6 +2550,7 @@
+@@ -2533,6 +2564,7 @@
        }
      }
    }
@@ -34,7 +58,7 @@ index e0c930d19dde..c75449ed84e6 100644
  
    return result;
  }
-@@ -2809,6 +2827,7 @@ nsEventStatus AsyncPanZoomController::OnPanMayBegin(
+@@ -2809,6 +2841,7 @@ nsEventStatus AsyncPanZoomController::OnPanMayBegin(
    APZC_LOG_DETAIL("got a pan-maybegin in state %s\n", this,
                    ToString(mState).c_str());
  
@@ -42,7 +66,7 @@ index e0c930d19dde..c75449ed84e6 100644
    StartTouch(aEvent.mLocalPanStartPoint, aEvent.mTimeStamp);
    MOZ_ASSERT(GetCurrentPanGestureBlock());
    GetCurrentPanGestureBlock()->GetOverscrollHandoffChain()->CancelAnimations(
-@@ -2824,6 +2843,7 @@ nsEventStatus AsyncPanZoomController::OnPanCancelled(
+@@ -2824,6 +2857,7 @@ nsEventStatus AsyncPanZoomController::OnPanCancelled(
  
    mX.CancelGesture();
    mY.CancelGesture();
@@ -50,7 +74,7 @@ index e0c930d19dde..c75449ed84e6 100644
  
    MOZ_ASSERT(GetCurrentPanGestureBlock());
    GetCurrentPanGestureBlock()
-@@ -2845,6 +2865,14 @@ nsEventStatus AsyncPanZoomController::OnPanBegin(
+@@ -2845,6 +2879,14 @@ nsEventStatus AsyncPanZoomController::OnPanBegin(
    GetCurrentPanGestureBlock()->GetOverscrollHandoffChain()->CancelAnimations(
        ExcludeOverscroll);
  
@@ -65,7 +89,7 @@ index e0c930d19dde..c75449ed84e6 100644
    StartTouch(aEvent.mLocalPanStartPoint, aEvent.mTimeStamp);
  
    if (!UsingStatefulAxisLock()) {
-@@ -3105,6 +3133,13 @@ nsEventStatus AsyncPanZoomController::OnPan(
+@@ -3105,6 +3147,13 @@ nsEventStatus AsyncPanZoomController::OnPan(
                                      aEvent.mTimeStamp);
    }
  
@@ -79,7 +103,7 @@ index e0c930d19dde..c75449ed84e6 100644
    if (aFingersOnTouchpad == FingersOnTouchpad::No) {
      if (IsOverscrolled() && GetState() != OVERSCROLL_ANIMATION) {
        StartOverscrollAnimation(velocity, GetOverscrollSideBits());
-@@ -3146,6 +3181,9 @@ nsEventStatus AsyncPanZoomController::OnPanEnd(const PanGestureInput& aEvent) {
+@@ -3146,6 +3195,9 @@ nsEventStatus AsyncPanZoomController::OnPanEnd(const PanGestureInput& aEvent) {
    // Use HandleEndOfPan for fling on platforms that don't
    // emit momentum events (Gtk).
    if (aEvent.mSimulateMomentum) {
@@ -89,7 +113,7 @@ index e0c930d19dde..c75449ed84e6 100644
      return HandleEndOfPan();
    }
  
-@@ -3264,6 +3302,7 @@ nsEventStatus AsyncPanZoomController::OnPanInterrupted(
+@@ -3264,6 +3316,7 @@ nsEventStatus AsyncPanZoomController::OnPanInterrupted(
    APZC_LOG_DETAIL("got a pan-interrupted in state %s\n", this,
                    ToString(mState).c_str());
  
