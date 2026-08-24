@@ -536,8 +536,11 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
 
             // DIAGNOSTIC - the other half of the Twitch chat question.
             // A ratio can arrive and still produce no movement, because
-            // the offset is min(keyboardOverlap, focusBottom -
-            // visibleBottom) and either term can be zero. Logging the
+            // the offset is max(0, focusBottom - visibleBottom) and the
+            // input can already be above the keyboard. Upstream 8da4dfb8
+            // dropped the min(keyboardOverlap, ...) clamp this comment
+            // used to name - it was what stopped a bottom-docked input
+            // rising the whole way. Logging the
             // inputs distinguishes "the engine never told us where the
             // input is" from "we were told, and computed no shift".
             let unshifted = frame.offsetBy(dx: 0, dy: focusedInputOffset)
