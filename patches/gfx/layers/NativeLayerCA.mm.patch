@@ -431,7 +431,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2064,84 @@
+@@ -1770,6 +2064,121 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -474,23 +474,60 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +          printf_stderr("NativeLayerCA: DRM layer - mse=%d onscreen=%d\n",
 +                        isMSE ? 1 : 0, aIsOnscreen ? 1 : 0);
 +          if (isMSE) {
-+            mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
-+            ((AVSampleBufferDisplayLayer*)mContentCALayer).videoGravity =
-+                AVLayerVideoGravityResizeAspect;
-+            // Marked so EnqueueSurface keeps its hands off it: this layer
-+            // is fed by the parser, and the compositor's placeholder
-+            // surfaces must not be interleaved with real frames.
-+            mContentCALayer.name = @"org.reynard.mse.sink";
-+            // No control timebase here. The parser gives it one seeded
-+            // from the clock it was already running, so the handover does
-+            // not jump - and the audio renderer anchored to that clock
-+            // stays anchored.
++            // REUSE IT - see mse_fix_175's docstring. Capture 18ea1c94
++            // shows the media controls coming up and this branch
++            // building a brand new sink 2.1s and 1.0s before the
++            // picture came back, with the new layer's first frame
++            // landing 0.94s behind its clock. A new
++            // AVSampleBufferDisplayLayer shows nothing until its first
++            // frame, which is why every geometry, coverage and
++            // offscreen probe came back clean: they were describing the
++            // replacement, and it is genuinely perfect and genuinely
++            // empty.
++            //
++            // Nothing about this layer belongs to the compositor. The
++            // parser feeds it; NativeLayerCA only positions it. So it
++            // does not have to be born again every time WebRender
++            // rebuilds the layer around it.
++            //
++            // Safe across the rebuild, checked against pristine 153:
++            // ~NativeLayerCARepresentation releases it and does not
++            // removeFromSuperlayer, the scrap branch does the same, and
++            // a new representation re-parents it with addSublayer and
++            // re-applies position, anchorPoint and bounds. The static
++            // holds the reference that has to outlive the object; the
++            // retain below is balanced by that release.
++            //
++            // ONSCREEN ONLY. The offscreen representation exists for
++            // capture, which protected video must never feed - fix
++            // 116's rule - so it keeps building its own and keeps not
++            // being fed.
++            static AVSampleBufferDisplayLayer* reynardMSESink = nil;
 +            if (aIsOnscreen) {
++              bool reynardFresh = (reynardMSESink == nil);
++              if (reynardFresh) {
++                reynardMSESink = [[AVSampleBufferDisplayLayer layer] retain];
++                reynardMSESink.videoGravity =
++                    AVLayerVideoGravityResizeAspect;
++                // Marked so EnqueueSurface keeps its hands off it: this
++                // layer is fed by the parser, and the compositor's
++                // placeholder surfaces must not be interleaved with
++                // real frames.
++                reynardMSESink.name = @"org.reynard.mse.sink";
++                // No control timebase here. The parser gives it one
++                // seeded from the clock it was already running, so the
++                // handover does not jump - and the audio renderer
++                // anchored to that clock stays anchored.
++              }
++              mContentCALayer = [reynardMSESink retain];
++              printf_stderr("NativeLayerCA: %s the MSE sink\n",
++                            reynardFresh ? "built" : "REUSING");
 +              ReynardMSEAttachLayer(mContentCALayer);
 +            } else {
-+              // Same rule as the player route: the offscreen
-+              // representation exists for capture, which protected video
-+              // must not feed.
++              mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
++              ((AVSampleBufferDisplayLayer*)mContentCALayer).videoGravity =
++                  AVLayerVideoGravityResizeAspect;
++              mContentCALayer.name = @"org.reynard.mse.sink";
 +              printf_stderr("%s\n",
 +                            "NativeLayerCA: offscreen MSE layer, not fed");
 +            }
@@ -516,7 +553,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2155,7 @@
+@@ -1783,6 +2192,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -524,7 +561,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2183,12 @@
+@@ -1810,8 +2220,12 @@
      }
    }
  
@@ -539,7 +576,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2373,7 @@
+@@ -1996,7 +2410,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -548,7 +585,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2389,7 @@
+@@ -2012,6 +2426,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
