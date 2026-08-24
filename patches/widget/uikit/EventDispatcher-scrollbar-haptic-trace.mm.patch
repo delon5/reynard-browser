@@ -1,0 +1,38 @@
+diff --git a/widget/uikit/EventDispatcher.mm b/widget/uikit/EventDispatcher.mm
+--- a/widget/uikit/EventDispatcher.mm
++++ b/widget/uikit/EventDispatcher.mm
+@@ -10,6 +10,7 @@
+ #include "mozilla/dom/TypedArray.h"
+ #include "mozilla/widget/GeckoViewSupport.h"
+ #include "jsapi.h"
++#include "nsDebug.h"
+
+ using namespace mozilla;
+ using namespace mozilla::widget;
+@@ -490,8 +491,13 @@
+
+ namespace mozilla::widget {
+
+ bool EventDispatcher::HasEmbedderListener(const nsAString& aEvent) {
+   id<SwiftEventDispatcher> dispatcher = (id<SwiftEventDispatcher>)mDispatcher;
+-  return [dispatcher hasListener:XPCOMStringToNSString(aEvent)];
++  bool hasListener = [dispatcher hasListener:XPCOMStringToNSString(aEvent)];
++  if (aEvent.EqualsLiteral("GeckoView:ScrollbarTouchBegin")) {
++    printf_stderr("scrollbarHaptic: embedder gate hasListener=%d\n",
++                  hasListener ? 1 : 0);
++  }
++  return hasListener;
+ }
+
+@@ -498,8 +504,11 @@
+ nsresult EventDispatcher::DispatchToEmbedder(
+     JSContext* aCx, const nsAString& aEvent, JS::Handle<JS::Value> aData,
+     nsIGeckoViewEventCallback* aCallback) {
++  if (aEvent.EqualsLiteral("GeckoView:ScrollbarTouchBegin")) {
++    printf_stderr("scrollbarHaptic: DispatchToEmbedder -> Swift\n");
++  }
+   // Convert the data payload to CoreFoundation types
+   CFTypeRefPtr<CFTypeRef> data;
+   nsresult rv =
+       detail::BoxData(aEvent, aCx, aData, data, /* ObjectOnly */ true);
+   NS_ENSURE_SUCCESS(rv, rv);
