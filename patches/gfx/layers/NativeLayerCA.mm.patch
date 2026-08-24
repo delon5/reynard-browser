@@ -441,7 +441,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2074,121 @@
+@@ -1770,6 +2074,151 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -514,6 +514,36 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +            // being fed.
 +            static AVSampleBufferDisplayLayer* reynardMSESink = nil;
 +            if (aIsOnscreen) {
++              // NEVER HAND BACK A FAILED ONE - see mse_fix_183's
++              // docstring. This static outlives everything except the
++              // process, so a sink that fails once was being handed
++              // back for the rest of the app's life - which is why
++              // Netflix needed a force-quit to play again.
++              //
++              // status .failed means it has stopped decoding and will
++              // discard every sample until it is flushed, and on the
++              // -11800 "no content key present" path a flush does not
++              // help, because the next sample carries the same missing
++              // key. A NEW LAYER is what has always rescued that - fix
++              // 157's own docstring says Netflix "came back only
++              // because entering fullscreen made the compositor build a
++              // new layer" - and 175 is what took that away.
++              //
++              // The reuse is kept for the healthy case, which is what
++              // stopped the controls-up black. Only the failed case
++              // rebuilds.
++              if (reynardMSESink && reynardMSESink.status ==
++                      AVQueuedSampleBufferRenderingStatusFailed) {
++                printf_stderr(
++                    "NativeLayerCA: the MSE sink had FAILED - releasing it "
++                    "and building a fresh one\n");
++                // The static's own reference only. Whatever
++                // representation is using the layer holds its own from
++                // the retain below and keeps it alive until it is
++                // destroyed in the usual way.
++                [reynardMSESink release];
++                reynardMSESink = nil;
++              }
 +              bool reynardFresh = (reynardMSESink == nil);
 +              if (reynardFresh) {
 +                reynardMSESink = [[AVSampleBufferDisplayLayer layer] retain];
@@ -563,7 +593,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2202,7 @@
+@@ -1783,6 +2232,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -571,7 +601,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2230,12 @@
+@@ -1810,8 +2260,12 @@
      }
    }
  
@@ -586,7 +616,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2420,7 @@
+@@ -1996,7 +2450,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -595,7 +625,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2436,7 @@
+@@ -2012,6 +2466,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;

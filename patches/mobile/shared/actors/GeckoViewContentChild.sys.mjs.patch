@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3677 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3823 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -2815,6 +2815,139 @@ index 9ca6e15..18d37f0 100644
 +      var reynardLastPlayAt = 0;
 +      var reynardLastPauseAt = 0;
 +
++      // HOW DO THE CONTROLS HIDE - see mse_fix_182's docstring.
++      var reynardControlsWatched = false;
++      var reynardControlsSaid = 0;
++
++      // The full class list, not the two reynardDescribeElement keeps.
++      // The state this is hunting for IS a class, so truncating to two
++      // of them is exactly the wrong economy here. Capped so one
++      // Svelte element with forty hashed classes cannot own the line.
++      function reynardFullClass(el) {
++        try {
++          // classList, NOT a regex on className. This whole shim is a
++          // template literal, and a backslash inside one is eaten when
++          // the literal is evaluated - the whitespace regex 182 wrote
++          // here would have reached the page matching the LETTER s and
++          // split every class name on it. The existing 3,545 lines of
++          // shim contain no backslash at all, which is why. classList
++          // splits on whitespace already and needs no escape.
++          var parts = [];
++          var list = (el && el.classList) || [];
++          for (var ci = 0; ci < list.length; ci++) {
++            parts.push(list[ci]);
++          }
++          var name = parts.join(".");
++          if (name.length > 120) {
++            name = name.slice(0, 120) + "...";
++          }
++          return (el && el.tagName ? el.tagName.toLowerCase() : "?") +
++            (name ? "." + name : "");
++        } catch (e) {
++          return "?";
++        }
++      }
++
++      // The tap target and four ancestors, with what CSS actually
++      // resolves to on each. Controls that hide by class, by opacity,
++      // by display or by visibility all look different here, and this
++      // file has never printed any of them.
++      function reynardControlsState(t) {
++        try {
++          var view =
++            (t && t.ownerDocument && t.ownerDocument.defaultView) || window;
++          var out = [];
++          var here = t;
++          var depth = 0;
++          while (here && depth < 5) {
++            var css = null;
++            try {
++              css = view.getComputedStyle(here);
++            } catch (e3) {}
++            out.push(
++              reynardFullClass(here) +
++                "[op=" + (css ? css.opacity : "?") +
++                " vis=" + (css ? css.visibility : "?") +
++                " disp=" + (css ? css.display : "?") +
++                " pe=" + (css ? css.pointerEvents : "?") +
++                "]"
++            );
++            here = here.parentElement;
++            depth++;
++          }
++          return out.join(" < ");
++        } catch (e) {
++          return "unreadable";
++        }
++      }
++
++      // The auto-hide, as it happens. The controls put themselves away
++      // after a few seconds of not being touched, and that transition
++      // is the exact thing tap-to-dismiss has to reproduce. Watching
++      // for it is the only way to learn it without guessing.
++      //
++      // Once per page, twenty reports, then disconnected.
++      function reynardWatchControls(t) {
++        try {
++          if (reynardControlsWatched || !t) {
++            return;
++          }
++          var view = (t.ownerDocument && t.ownerDocument.defaultView) || window;
++          if (!view.MutationObserver) {
++            return;
++          }
++          var root = t.parentElement || t;
++          reynardControlsWatched = true;
++          debug(
++            "CONTROLS watching " +
++              reynardFullClass(root) +
++              " for class and style changes - the auto-hide will name " +
++              "whatever state the controls carry"
++          );
++          var observer = new view.MutationObserver(function (records) {
++            try {
++              for (var i = 0; i < records.length; i++) {
++                if (reynardControlsSaid >= 20) {
++                  observer.disconnect();
++                  debug("CONTROLS stopped watching - twenty changes said");
++                  return;
++                }
++                var r = records[i];
++                reynardControlsSaid++;
++                var was = r.oldValue === null ? "" : r.oldValue;
++                var now2 = "";
++                try {
++                  now2 = r.target.getAttribute(r.attributeName) || "";
++                } catch (e4) {}
++                if (was.length > 160) {
++                  was = was.slice(0, 160) + "...";
++                }
++                if (now2.length > 160) {
++                  now2 = now2.slice(0, 160) + "...";
++                }
++                debug(
++                  "CONTROLS " +
++                    r.attributeName +
++                    " on " +
++                    reynardDescribeElement(r.target) +
++                    " was [" +
++                    was +
++                    "] now [" +
++                    now2 +
++                    "]"
++                );
++              }
++            } catch (e2) {}
++          });
++          observer.observe(root, {
++            attributes: true,
++            attributeOldValue: true,
++            attributeFilter: ["class", "style"],
++            subtree: true,
++          });
++        } catch (e2) {}
++      }
++
 +      function reynardSayTap(e, t) {
 +        try {
 +          // One tap, not the three events it arrives as.
@@ -2841,6 +2974,12 @@ index 9ca6e15..18d37f0 100644
 +            ") swallowed=" +
 +            (stopped ? "y" : "n");
 +          debug(head);
++          // ONLY A PICTURE TAP - see mse_fix_182's docstring. A tap on
++          // a real control is as silent as it was.
++          var wasState = judged[0] ? "" : reynardControlsState(t);
++          if (!judged[0]) {
++            reynardWatchControls(t);
++          }
 +          var view = (t && t.ownerDocument && t.ownerDocument.defaultView) ||
 +            window;
 +          view.setTimeout(function () {
@@ -2855,6 +2994,13 @@ index 9ca6e15..18d37f0 100644
 +                  "pause() in " + (reynardLastPauseAt - now) + "ms";
 +              }
 +              debug("TAP " + nth + " -> " + did);
++              if (wasState) {
++                debug("TAP " + nth + " controls at the tap : " + wasState);
++                debug(
++                  "TAP " + nth + " controls 400ms later: " +
++                    reynardControlsState(t)
++                );
++              }
 +            } catch (e2) {}
 +          }, 400);
 +        } catch (e2) {}
@@ -3680,7 +3826,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3738,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3884,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4176,7 +4322,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4344,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4490,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4198,7 +4344,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4374,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4520,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
