@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2908 @@
+@@ -0,0 +0,2945 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -929,6 +929,43 @@ index 000000000000..b56efaa8479c
 +            "mseLayer: handed the compositor's layer to the stream parser\n");
 +        [retained release];
 +      }));
++}
++
++// Is the protected route still producing a picture?
++//
++// ADDED - see mse_fix_177's docstring. NativeLayerCA has to decide,
++// every commit, whether a protected layer missing from WebRender's list
++// is a gap to bridge or a teardown to accept, and nothing on its side
++// of the boundary knows. This asks the only thing that does.
++//
++// Reached by class name for the same reason ReynardMSEAttachLayer above
++// is, and failing the same way: if the parser cannot be resolved this
++// answers false and the caller behaves as it did before this existed.
++//
++// NO MAIN-THREAD HOP, unlike the attach above. This is called from the
++// compositor thread once a commit and must answer now; the parser side
++// is a lock around one Double, taken in one order only.
++//
++// The lookup is cached because a selector resolution at 60Hz is waste,
++// and it is announced once so that "no gap was bridged" can be told
++// from "the query never resolved" - which is the mistake fixes 160 and
++// 164 both made.
++bool ReynardMSEHasLivePicture() {
++  static bool looked = false;
++  static Class parser = nil;
++  static SEL selector = nullptr;
++  static BOOL (*answer)(Class, SEL) = nullptr;
++  if (!looked) {
++    looked = true;
++    parser = NSClassFromString(@"ReynardFairPlayStreamParser");
++    selector = NSSelectorFromString(@"hasLivePicture");
++    if (parser && [parser respondsToSelector:selector]) {
++      answer = (BOOL (*)(Class, SEL))[parser methodForSelector:selector];
++    }
++    printf_stderr("mseLayer: liveness query %s\n",
++                  answer ? "resolved" : "NOT AVAILABLE - holds disabled");
++  }
++  return answer ? answer(parser, selector) : false;
 +}
 +
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {

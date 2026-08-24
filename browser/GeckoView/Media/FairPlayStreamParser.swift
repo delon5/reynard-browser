@@ -3671,6 +3671,10 @@ public final class FairPlayStreamParser: NSObject {
         let jump = withState { () -> Double? in
             slot.videoSeen += 1
             slot.lastSampleAt = arrivedAt
+            // LIVENESS - see mse_fix_177's docstring. The compositor
+            // asks, once a frame, whether a picture is still being
+            // produced, and this is the moment that is true of.
+            Self.noteLivePicture(arrivedAt)
             // WHAT CAME IN, AND WHAT DID NOT - see mse_fix_137's
             // docstring. Measured here because this is the last point
             // where the sequence means what it says: after a handover
@@ -6758,6 +6762,52 @@ public final class FairPlayStreamParser: NSObject {
     /// A lock of its own, not the state lock: this is written from the
     /// main queue and read from the drain queues, and neither of those
     /// holds the state lock at the point it asks.
+    /// Guards livePictureAt, and nothing else.
+    ///
+    /// ADDED - see mse_fix_177's docstring. Its own lock rather than the
+    /// state lock, because the reader is the COMPOSITOR THREAD once a
+    /// frame and the state lock is held across real work. The write site
+    /// is inside withState, so the order is always state then this and
+    /// never the reverse.
+    private static let livePictureLock = NSLock()
+    /// When a protected video sample last reached a display layer.
+    private static var livePictureAt: Double = 0
+    /// How stale that may be and still count as a live picture.
+    ///
+    /// Two seconds. Samples arrive in bursts as segments are appended,
+    /// so a gap of a second is ordinary and anything under two is still
+    /// playback; the case this has to exclude is a page whose player is
+    /// gone, which in capture 7a010c1d had been silent for 7.8s.
+    private static let livePictureWindow: Double = 2.0
+
+    /// Record that the protected route just produced a picture.
+    fileprivate static func noteLivePicture(_ at: Double) {
+        livePictureLock.lock()
+        livePictureAt = at
+        livePictureLock.unlock()
+    }
+
+    /// Is the protected route producing a picture RIGHT NOW?
+    ///
+    /// ADDED - see mse_fix_177's docstring. Called from the compositor
+    /// thread through ReynardMSEHasLivePicture, once per commit, to
+    /// decide whether a protected layer missing from WebRender's list is
+    /// a gap to bridge or a teardown to accept. Capture f84dd12e has the
+    /// media controls removing that layer for 1.2s, 2.1s, 3.4s and 2.2s
+    /// while the parser is fed throughout; capture 7a010c1d has it gone
+    /// for good with the parser silent for 7.8s. No frame count tells
+    /// those apart. This does.
+    ///
+    /// An uncontended NSLock, which is what layerShapeLock below already
+    /// does for the same reason, and cheap enough at 60Hz.
+    @objc public static func hasLivePicture() -> Bool {
+        livePictureLock.lock()
+        let at = livePictureAt
+        livePictureLock.unlock()
+        guard at > 0 else { return false }
+        return Self.hostNow() - at < Self.livePictureWindow
+    }
+
     private static let layerShapeLock = NSLock()
     /// layerShape's last answer for a stream, taken on the main queue.
     private static var layerShapeText: [String: String] = [:]
