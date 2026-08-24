@@ -6569,6 +6569,29 @@ public final class FairPlayStreamParser: NSObject {
            let flag = layer.value(forKey: "preventsCapture") as? Bool {
             out += " preventsCapture \(flag ? 1 : 0)"
         }
+        // IS THE PICTURE BEING WITHHELD - see mse_fix_176's docstring.
+        // preventsCapture above is the flag this project SETS; it says
+        // the request was made and nothing about whether AVFoundation
+        // is acting on it. This is the one AVFoundation raises when it
+        // will not put protected pixels on the current output, and it
+        // produces exactly the reported symptom: the video plane blank,
+        // audio running, subtitles and controls compositing normally on
+        // top, and every layer property correct - because the layer is
+        // correct and the picture is being withheld from it.
+        let obscuredKey = "outputObscuredDueToInsufficientExternalProtection"
+        if layer.responds(to: NSSelectorFromString(obscuredKey)),
+           let withheld = layer.value(forKey: obscuredKey) as? Bool {
+            out += " obscured \(withheld ? 1 : 0)"
+        }
+        // AND WHAT THE OUTPUT LOOKS LIKE. Protected content is withheld
+        // when the picture would reach somewhere that cannot hold it: a
+        // second screen, or a recording or mirroring session. This
+        // device has had CarPlay in the picture before, and mirroring
+        // is precisely the condition a preventsCapture layer goes black
+        // under.
+        let screens = UIScreen.screens.count
+        if screens != 1 { out += " screens \(screens)" }
+        if UIScreen.main.isCaptured { out += " CAPTURED" }
         // The same offscreen-forcing set layerChain reads on ancestors.
         // On the sink itself these are rarer, and rarer still to be
         // right, which is exactly why they are worth one line.
