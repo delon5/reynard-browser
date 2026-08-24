@@ -1,22 +1,73 @@
 diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTreeManager.cpp
 --- a/gfx/layers/apz/src/APZCTreeManager.cpp
 +++ b/gfx/layers/apz/src/APZCTreeManager.cpp
-@@ -2171,6 +2171,44 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
+@@ -2171,6 +2171,95 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
          hitScrollbarNode->IsScrollThumbNode() &&
          hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable;
  
 +#ifdef MOZ_WIDGET_UIKIT
++    // Reynard fat-thumb probe: the visible thumb is only a few points
++    // wide and a device log showed 15 of 16 real grab attempts landing
++    // just beside it. When the direct hit is not an async-draggable
++    // thumb, re-run the hit test at points stepped SIDEWAYS from the
++    // touch, nearest first, and accept only a VERTICAL scrollbar's
++    // thumb. Sideways-only is deliberate, twice over: probing up/down
++    // would let a horizontal thumb - often nearly container-wide -
++    // hijack ordinary vertical pans from a band above and below it,
++    // and a sideways probe at the finger's own y can only find the
++    // vertical thumb while the finger is genuinely alongside it, so
++    // the grab zone grows only laterally, never along the track. The
++    // first thumb within 72 device pixels (24pt at 3x) wins and the
++    // whole hit result is swapped for that probe's, re-running the
++    // same clone/move/flag sequence the direct hit just ran above
++    // (the tree lock is still held), so the drag block, target APZC,
++    // haptic and trace behave exactly as if the finger had landed on
++    // the thumb. Visuals are untouched; only the touch target grows.
++    // The sideways offset cannot skew the drag: SetupScrollbarDrag
++    // uses only the along-axis coordinate, and slider.snapMultiplier
++    // is 0 off Windows so there is no lateral snap-back. Single-touch
++    // only - a second finger means pinch, never a thumb grab.
++    bool widenedThumbHit = false;
++    if (!mInScrollbarTouchDrag && StaticPrefs::apz_drag_enabled() &&
++        StaticPrefs::apz_drag_touch_enabled() &&
++        aInput.mTouches.Length() == 1) {
++      const ScreenIntPoint touchPoint = aInput.mTouches[0].mScreenPoint;
++      for (int32_t distance = 6; distance <= 72 && !widenedThumbHit;
++           distance += 6) {
++        const ScreenIntPoint candidates[] = {
++            touchPoint + ScreenIntPoint(distance, 0),
++            touchPoint - ScreenIntPoint(distance, 0)};
++        for (const ScreenIntPoint& candidate : candidates) {
++          HitTestResult probe = GetTargetAPZC(candidate);
++          if (probe.mScrollbarNode &&
++              probe.mScrollbarNode->IsScrollThumbNode() &&
++              probe.mScrollbarNode->GetScrollbarData()
++                  .mThumbIsAsyncDraggable &&
++              probe.mScrollbarNode->GetScrollbarData().mDirection ==
++                  Some(ScrollDirection::eVertical)) {
++            aState.mHit = std::move(probe);
++            mTouchBlockHitResult =
++                mHitTester->CloneHitTestResult(lock, aState.mHit);
++            hitScrollbarNode = std::move(aState.mHit.mScrollbarNode);
++            mInScrollbarTouchDrag = true;
++            widenedThumbHit = true;
++            break;
++          }
++        }
++      }
++    }
 +    // scrollbarHaptic trace: one line per touch start showing every
 +    // gate of thumb-grab detection, so a device log pinpoints which
 +    // link of the haptic chain is dead. Remove once confirmed.
-+    printf_stderr("scrollbarHaptic: touchStart drag=%d prefs=%d/%d hit=%d thumb=%d async=%d\n",
++    printf_stderr("scrollbarHaptic: touchStart drag=%d prefs=%d/%d hit=%d thumb=%d async=%d widened=%d\n",
 +                  mInScrollbarTouchDrag ? 1 : 0,
 +                  StaticPrefs::apz_drag_enabled() ? 1 : 0,
 +                  StaticPrefs::apz_drag_touch_enabled() ? 1 : 0,
 +                  hitScrollbarNode ? 1 : 0,
 +                  (hitScrollbarNode && hitScrollbarNode->IsScrollThumbNode()) ? 1 : 0,
 +                  (hitScrollbarNode && hitScrollbarNode->IsScrollThumbNode() &&
-+                   hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable) ? 1 : 0);
++                   hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable) ? 1 : 0,
++                  widenedThumbHit ? 1 : 0);
 +    if (mInScrollbarTouchDrag) {
 +      // Reynard: the embedder fires a haptic the moment the user's
 +      // finger lands on the scrollbar thumb, and this is the only
