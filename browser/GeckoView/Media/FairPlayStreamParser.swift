@@ -2627,6 +2627,15 @@ public final class FairPlayStreamParser: NSObject {
         /// Said once - see mse_fix_136's docstring.
         var audioHorizonLogged = false
         var audioLastReport = ""
+        /// When the audio renderer was last flushed out of .failed.
+        ///
+        /// ADDED - see mse_fix_180's docstring. Its own counters rather
+        /// than the video ones: "the picture recovered" and "the sound
+        /// recovered" are different facts and reading one as the other
+        /// is how a8bc28b1 would have been misread.
+        var audioLastFailRecoveryAt = 0.0
+        /// How many times that has been needed.
+        var audioFailRecoveries = 0
         /// Has the synchronizer been given a rate? Nothing is fed before
         /// it has, for fix 26's reason: a renderer clocked at a time the
         /// samples have already passed discards all of them and reports
@@ -5876,6 +5885,46 @@ public final class FairPlayStreamParser: NSObject {
             if changed || count == 1 {
                 Self.log("stream \(streamKey) audio enqueued \(count) - "
                          + report)
+            }
+            // AND RECOVER IT - see mse_fix_180's docstring. This is the
+            // audio half of fix 157, which was never written.
+            //
+            // status .failed is terminal for a renderer exactly as it is
+            // for a layer: it goes on accepting samples and discarding
+            // all of them until flush() resets it. In capture a8bc28b1
+            // the renderer failed on its FIRST sample with -11800 - no
+            // content key present, one millisecond after being made a
+            // key recipient - and then took 234 more audio samples
+            // without playing one of them, while video ran.
+            //
+            // Rate-limited by the same gap the video recovery uses, so a
+            // renderer that fails on every sample costs one flush a
+            // second rather than one per sample.
+            if renderer.status == .failed {
+                let recovery = withState { () -> Int? in
+                    guard let slot = streamParsers[streamKey] else {
+                        return nil
+                    }
+                    let now = Self.hostNow()
+                    guard now - slot.audioLastFailRecoveryAt
+                            > Self.failRecoveryGap else { return nil }
+                    slot.audioLastFailRecoveryAt = now
+                    slot.audioFailRecoveries += 1
+                    return slot.audioFailRecoveries
+                }
+                if let recovery {
+                    Self.log("stream \(streamKey) the audio renderer has "
+                             + "FAILED - "
+                             + (renderer.error.map { String(describing: $0) }
+                                ?? "no error given")
+                             + " - flushing it. Recovery \(recovery). "
+                             + "Without this it accepts every sample and "
+                             + "plays none of them.")
+                    // On this queue, which is where enqueue happens -
+                    // flush() racing an enqueue is the one collision
+                    // these two calls can have.
+                    renderer.flush()
+                }
             }
             // ADDED - see mse_fix_87's docstring. One line naming every
             // renderer in this session and how much each has taken. Two
