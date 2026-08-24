@@ -1,7 +1,7 @@
 diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTreeManager.cpp
 --- a/gfx/layers/apz/src/APZCTreeManager.cpp
 +++ b/gfx/layers/apz/src/APZCTreeManager.cpp
-@@ -2171,6 +2171,41 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
+@@ -2171,6 +2171,44 @@ void APZCTreeManager::ProcessTouchInput(InputHandlingState& aState,
          hitScrollbarNode->IsScrollThumbNode() &&
          hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable;
  
@@ -18,25 +18,28 @@ diff --git a/gfx/layers/apz/src/APZCTreeManager.cpp b/gfx/layers/apz/src/APZCTre
 +                  (hitScrollbarNode && hitScrollbarNode->IsScrollThumbNode() &&
 +                   hitScrollbarNode->GetScrollbarData().mThumbIsAsyncDraggable) ? 1 : 0);
 +    if (mInScrollbarTouchDrag) {
-+      printf_stderr("scrollbarHaptic: thumb grab -> notifying observers\n");
 +      // Reynard: the embedder fires a haptic the moment the user's
 +      // finger lands on the scrollbar thumb, and this is the only
-+      // place in the process that knows that happened - the hit test
-+      // against the scrollthumb node lives here in APZ. Relayed as an
-+      // observer topic from the main thread; GeckoViewStartup turns it
-+      // into the GeckoView:ScrollbarTouchBegin embedder event.
-+      // Fire-and-forget and off the input path, so touch handling
-+      // never waits on it.
-+      NS_DispatchToMainThread(NS_NewRunnableFunction(
-+          "reynard::NotifyScrollbarTouchBegin", []() {
-+            nsCOMPtr<nsIObserverService> obsSvc =
-+                mozilla::services::GetObserverService();
-+            if (obsSvc) {
-+              obsSvc->NotifyObservers(nullptr,
-+                                      "reynard-scrollbar-touch-begin",
-+                                      nullptr);
-+            }
-+          }));
++      // place that knows it happened. On iOS APZ runs in the GPU
++      // process (the BrowserEngineKit rendering extension), so
++      // notifying the observer service HERE reaches nobody - the
++      // GeckoViewStartup relay lives in the UI process. A device
++      // trace proved exactly that: six thumb grabs, six notifies,
++      // zero observer callbacks. Route over the
++      // UiCompositorController channel instead - the same channel
++      // the fixed-bottom-offset pill margin already uses in
++      // production - and the UI-process child re-notifies the
++      // observer topic on the main thread, where the relay lives.
++      // 1000 sits far above the Android animator codes in
++      // UiCompositorControllerMessageTypes.h.
++      printf_stderr("scrollbarHaptic: thumb grab -> UiCompositorController message\n");
++      if (RefPtr<UiCompositorControllerParent> uiController =
++              UiCompositorControllerParent::GetFromRootLayerTreeId(
++                  mRootLayersId)) {
++        uiController->ToolbarAnimatorMessageFromCompositor(1000);
++      } else {
++        printf_stderr("scrollbarHaptic: no UiCompositorControllerParent\n");
++      }
 +    }
 +#endif
 +

@@ -1,0 +1,38 @@
+diff --git a/gfx/layers/ipc/UiCompositorControllerChild.cpp b/gfx/layers/ipc/UiCompositorControllerChild.cpp
+--- a/gfx/layers/ipc/UiCompositorControllerChild.cpp
++++ b/gfx/layers/ipc/UiCompositorControllerChild.cpp
+@@ -16,6 +16,9 @@
+ #include "nsIWidget.h"
+ #include "nsProxyRelease.h"
+ #include "nsThreadUtils.h"
++#include "mozilla/Services.h"
++#include "nsDebug.h"
++#include "nsIObserverService.h"
+
+ #if defined(MOZ_WIDGET_ANDROID)
+ #  include "mozilla/layers/AndroidHardwareBuffer.h"
+@@ -241,8 +244,24 @@
+ #if defined(MOZ_WIDGET_ANDROID)
+   if (mWidget) {
+     mWidget->RecvToolbarAnimatorMessageFromCompositor(aMessage);
+   }
+ #endif  // defined(MOZ_WIDGET_ANDROID)
++#if defined(MOZ_WIDGET_UIKIT)
++  // Reynard: message 1000 = a touch landed on a scrollbar thumb, sent
++  // by APZ from the GPU process (see the APZCTreeManager patch). This
++  // Recv runs on the Ui thread, which is the MAIN thread on iOS, so
++  // the observer topic the GeckoViewStartup haptics relay listens to
++  // can be notified directly - in the right process, at last.
++  if (aMessage == 1000) {
++    printf_stderr(
++        "scrollbarHaptic: UI process received thumb-grab message\n");
++    if (nsCOMPtr<nsIObserverService> obsSvc =
++            mozilla::services::GetObserverService()) {
++      obsSvc->NotifyObservers(nullptr, "reynard-scrollbar-touch-begin",
++                              nullptr);
++    }
++  }
++#endif
+
+   return IPC_OK();
+ }
