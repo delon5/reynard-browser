@@ -4162,6 +4162,29 @@ public final class FairPlayStreamParser: NSObject {
     /// say something about which stream this is, and forcing them would
     /// be guessing at the very point this exists to stop guessing.
     fileprivate func nudgeStalledDrain(streamKey: String) {
+        // PAUSED IS NOT STALLED - see mse_fix_179's docstring. In
+        // capture 666e86e3 this reported "no drain for 135.9s" of which
+        // 132 were a deliberate pause with the app in the background. A
+        // paused layer does not ask for data and is right not to.
+        guard gatedRate(streamKey) != 0 else {
+            // AND THE PAUSED SECONDS DO NOT COUNT. Returning alone only
+            // silences the report while the pause LASTS: lastDrainAt goes
+            // on ageing, so the first tick after the resume prints the
+            // whole pause as a stall. That is literally what 666e86e3
+            // did - "no drain for 135.9s" was logged at 195449.313, 3.3s
+            // AFTER the rate went back to 1.0, with this guard open. So
+            // hold the clock here and the window starts at the resume.
+            //
+            // Only once it has drained at all: lastDrainAt of 0 is what
+            // makes the report say "ever", and a stream that has never
+            // fed the layer should keep saying so.
+            withState {
+                guard let slot = streamParsers[streamKey],
+                      slot.lastDrainAt > 0 else { return }
+                slot.lastDrainAt = Self.hostNow()
+            }
+            return
+        }
         let now = Self.hostNow()
         let look = withState { () -> (attached: Bool, armed: Bool,
                                       superseded: Bool, depth: Int,
@@ -4191,6 +4214,62 @@ public final class FairPlayStreamParser: NSObject {
         }
         // Only the belief, and only when nothing else explains it.
         guard look.attached, !look.superseded, look.armed else { return }
+        // AND FLUSH IT IF THAT IS WHAT IT IS WAITING FOR - see
+        // mse_fix_179's docstring. A layer that has been through app
+        // backgrounding loses its decode session and will not dequeue
+        // until it is flushed. This file has printed
+        // requiresFlushToResumeDecoding since fix 113 and never acted on
+        // it, and the only place it reads it is inside drainPending -
+        // which runs when the layer asks for data, which it will not do
+        // until it is flushed. In capture 666e86e3 that left the layer
+        // attached, submitted, timebase running and 300 samples deep,
+        // waiting on code that could not run.
+        //
+        // KVC with a responds(to:) guard, the same way drainPending
+        // reads it: the property is newer than this deployment target.
+        let flushed = withState { () -> (layer: AVSampleBufferDisplayLayer,
+                                         queue: DispatchQueue,
+                                         dropped: Int)? in
+            // ONCE PER REPORT, NOT ONCE PER APPEND. This runs from the
+            // bin's hold and refusal exits, which on a stalled stream is
+            // every segment the page appends - several a second. say is
+            // already the 5s rate limiter above and starts open, so the
+            // first flush is immediate and the next is five seconds
+            // later, which is time enough to know whether it worked.
+            guard look.say,
+                  let slot = streamParsers[streamKey],
+                  let layer = slot.displayLayer,
+                  let queue = slot.drainQueue else { return nil }
+            let key = "requiresFlushToResumeDecoding"
+            guard layer.responds(to: NSSelectorFromString(key)),
+                  let needs = layer.value(forKey: key) as? Bool,
+                  needs else { return nil }
+            // AND THE QUEUE GOES WITH IT, AS FAR AS THE NEXT KEYFRAME.
+            // needsSyncSample gates what comes IN and does not touch
+            // what is already pending, so on its own it would leave a
+            // flushed decoder being fed samples with no reference frame
+            // - resynchronise clears the whole queue for exactly this
+            // reason. Here the media is still wanted, so drop only the
+            // mid-GOP head: those samples decode to nothing either way.
+            slot.needsSyncSample = true
+            let before = slot.pending.count
+            while let head = slot.pending.first, !Self.isSyncSample(head) {
+                slot.pending.removeFirst()
+            }
+            return (layer, queue, before - slot.pending.count)
+        }
+        if let flushed {
+            Self.log("stream \(streamKey) the layer needs a flush to "
+                     + "resume decoding - it has been through app "
+                     + "backgrounding and will not take a sample until "
+                     + "it gets one. Flushing, and dropping "
+                     + "\(flushed.dropped) queued sample(s) to reach the "
+                     + "next keyframe.")
+            // On the drain queue, because that is where enqueue happens
+            // and flush() racing an enqueue is the one collision these
+            // two calls can have - the same rule resynchronise follows.
+            flushed.queue.async { flushed.layer.flush() }
+        }
         withState { streamParsers[streamKey]?.drainArmed = false }
         if look.say {
             Self.log("stream \(streamKey) clearing drainArmed and asking "
@@ -4314,6 +4393,15 @@ public final class FairPlayStreamParser: NSObject {
             // Guarded: enqueue RAISES on a sample it dislikes rather than
             // returning an error, and this route has already had one
             // AVFoundation SPI take the process down.
+            // THE PICTURE IS MOVING - see mse_fix_179's docstring.
+            // Fix 177 stamped liveness where samples ARRIVE FROM THE
+            // PARSER, which is bursty and stops completely once the page
+            // has buffered ahead: in capture 813b4835 the last append
+            // was at 195308.952 and frames went on displaying to
+            // 195313.414, so 177 declared the picture dead twice while
+            // it ran at a steady 25fps. A sample being handed to the
+            // layer happens once a frame and cannot say that.
+            Self.noteLivePicture(Self.hostNow())
             if let failure = GeckoRuntimeBridge.catchException(from: {
                 layer.enqueue(sample)
             }) {
@@ -6867,19 +6955,22 @@ public final class FairPlayStreamParser: NSObject {
     ///
     /// ADDED - see mse_fix_177's docstring. Its own lock rather than the
     /// state lock, because the reader is the COMPOSITOR THREAD once a
-    /// frame and the state lock is held across real work. The write site
-    /// is inside withState, so the order is always state then this and
-    /// never the reverse.
+    /// frame and the state lock is held across real work. One write site
+    /// is inside withState and the other - 179's, at the enqueue - holds
+    /// nothing, so the order is state then this or this alone, and never
+    /// the reverse.
     private static let livePictureLock = NSLock()
     /// When a protected video sample last reached a display layer.
     private static var livePictureAt: Double = 0
     /// How stale that may be and still count as a live picture.
     ///
-    /// Two seconds. Samples arrive in bursts as segments are appended,
-    /// so a gap of a second is ordinary and anything under two is still
-    /// playback; the case this has to exclude is a page whose player is
-    /// gone, which in capture 7a010c1d had been silent for 7.8s.
-    private static let livePictureWindow: Double = 2.0
+    /// Three seconds - CHANGED from two, see mse_fix_179's docstring.
+    /// Now that the stamp is taken where a sample is handed to the layer
+    /// rather than where bytes arrive from the parser, it moves once a
+    /// frame while the picture runs, so the window is margin rather than
+    /// the thing doing the work. It still separates the case this exists
+    /// to exclude: the dead page in 7a010c1d was silent for 7.8s.
+    private static let livePictureWindow: Double = 3.0
 
     /// Record that the protected route just produced a picture.
     fileprivate static func noteLivePicture(_ at: Double) {
