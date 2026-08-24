@@ -45,7 +45,15 @@ final class TopToolbar: UIView {
     private let backgroundView: UIVisualEffectView = {
         let effect: UIVisualEffect
         if #available(iOS 26.0, *) {
-            effect = UIGlassEffect.nonAdaptive(style: .regular)
+            // THE SAME GLASS THE PILL USES. Every other chrome element -
+            // the pill, the address bar capsule, its dismiss button -
+            // goes through ToolbarGlassBackgroundView, which builds a
+            // plain UIGlassEffect(). This built its own through
+            // UIGlassEffect.nonAdaptive instead, which reaches into the
+            // private glass object and turns adaptivity off, so the two
+            // toolbars were the only chrome that did not respond to what
+            // was behind them. Matching them means they now do.
+            effect = UIGlassEffect()
         } else {
             effect = UIBlurEffect(style: .systemChromeMaterial)
         }
