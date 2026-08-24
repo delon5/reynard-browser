@@ -6381,6 +6381,8 @@ public final class FairPlayStreamParser: NSObject {
             + "\(Int(box.height.rounded()))"
             + " super \(layer.superlayer != nil)"
             + " hidden \(layer.isHidden)"
+            // AND THE SINK'S OWN - see mse_fix_174's docstring.
+            + Self.layerPlane(layer)
             // WHERE IT LANDS - see mse_fix_171's docstring. Everything
             // above this line has reported healthy through 48 samples
             // of a black screen; none of it is geometry.
@@ -6537,6 +6539,51 @@ public final class FairPlayStreamParser: NSObject {
         return "\((value * 100).rounded() / 100)"
     }
 
+    /// Whether this layer can be composited at all, and on what.
+    ///
+    /// ADDED - see mse_fix_174's docstring. Capture 508bf50e excluded
+    /// the whole CALayer tree: with the report cap raised and
+    /// backgroundColor read, not one covering layer paints, not one
+    /// ancestor hides or fades, and the sink is `visible whole` at
+    /// correct geometry and scale with `status 1 ready true` - while
+    /// the screen is black.
+    ///
+    /// What has never been read is the one property this project sets
+    /// on this layer for this content: preventsCapture. A layer that
+    /// carries it holds its pixels on a protected plane, which the
+    /// render server can scan out to the display and cannot copy into
+    /// an intermediate buffer. Anything that forces the subtree through
+    /// such a buffer therefore renders black with every property this
+    /// file prints still perfectly correct.
+    ///
+    /// Read by KVC rather than by casting: preventsCapture is declared
+    /// on AVSampleBufferDisplayLayer behind an availability annotation,
+    /// and a diagnostic should not be the reason a build stops
+    /// compiling on a different SDK. responds(to:) makes the absence
+    /// silent rather than fatal.
+    ///
+    /// MAIN THREAD, for the reason layerShape is.
+    fileprivate static func layerPlane(_ layer: CALayer) -> String {
+        var out = ""
+        if layer.responds(to: NSSelectorFromString("preventsCapture")),
+           let flag = layer.value(forKey: "preventsCapture") as? Bool {
+            out += " preventsCapture \(flag ? 1 : 0)"
+        }
+        // The same offscreen-forcing set layerChain reads on ancestors.
+        // On the sink itself these are rarer, and rarer still to be
+        // right, which is exactly why they are worth one line.
+        if layer.shouldRasterize { out += " RASTERIZES" }
+        if layer.mask != nil { out += " MASK" }
+        if layer.compositingFilter != nil { out += " FILTER" }
+        if let effects = layer.filters, !effects.isEmpty {
+            out += " FILTERS \(effects.count)"
+        }
+        if let backdrop = layer.backgroundFilters, !backdrop.isEmpty {
+            out += " BACKDROP \(backdrop.count)"
+        }
+        return out
+    }
+
     /// Every ancestor of this layer, from its parent to the root.
     ///
     /// ADDED - see mse_fix_138's docstring. layerShape has described
@@ -6572,6 +6619,25 @@ public final class FairPlayStreamParser: NSObject {
             // ADDED - see mse_fix_171's docstring. Whether the
             // compositor's placeholder surface is being painted at all.
             if here.contents != nil { out += " drawn" }
+            // WHAT FORCES AN OFFSCREEN PASS - see mse_fix_174's
+            // docstring. The sink carries preventsCapture, so its
+            // pixels can be scanned out to the display and cannot be
+            // copied into a buffer. Any ancestor that makes Core
+            // Animation render this subtree into one turns the picture
+            // black while leaving every property above correct.
+            if here.shouldRasterize { out += " RASTERIZES" }
+            if here.mask != nil { out += " MASK" }
+            if here.compositingFilter != nil { out += " FILTER" }
+            if let effects = here.filters, !effects.isEmpty {
+                out += " FILTERS \(effects.count)"
+            }
+            if let backdrop = here.backgroundFilters, !backdrop.isEmpty {
+                out += " BACKDROP \(backdrop.count)"
+            }
+            if here.cornerRadius > 0.01 && here.masksToBounds {
+                out += " ROUNDED"
+            }
+            if here.shadowOpacity > 0.01 { out += " SHADOW" }
             if here.superlayer == nil { out += " ROOT" }
             out += ">"
             current = here.superlayer
