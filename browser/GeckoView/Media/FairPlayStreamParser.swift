@@ -2553,6 +2553,17 @@ public final class FairPlayStreamParser: NSObject {
         /// whether the picture moved.
         var lastShown: Int = -1
         var lastDropped: Int = -1
+        /// The corrupt count at the last report.
+        ///
+        /// ADDED - see mse_fix_192's docstring.
+        var lastCorrupt: Int = -1
+        /// Samples the decode probe still owes an answer for.
+        ///
+        /// Counted down rather than a flag, so one corruption arms one
+        /// bounded probe instead of a probe a frame.
+        var decodeProbeOwed: Int = 0
+        /// Whether this stream has already had its one armed probe.
+        var decodeProbeUsed = false
         /// Which layer those counts belong to, and how much has been
         /// enqueued into it.
         ///
@@ -4787,6 +4798,7 @@ public final class FairPlayStreamParser: NSObject {
                     slot.enqueuedIntoLayer = 1
                     slot.lastShown = -1
                     slot.lastDropped = -1
+                    slot.lastCorrupt = -1
                     return true
                 }
                 if changed || count % 300 == 0 {
@@ -4803,8 +4815,25 @@ public final class FairPlayStreamParser: NSObject {
                                     + "\(metrics.dropped - slot.lastDropped)"
                                     + " dropped)"
                             }
+                            // THE MOMENT IT STARTS - see mse_fix_192's
+                            // docstring. Capture e8468989 ran a hundred
+                            // and ten clean seconds and then corrupted
+                            // every frame for the rest of the session,
+                            // with nothing else in the log to say why.
+                            // This is where that first rise is visible.
+                            if !slot.decodeProbeUsed, slot.lastCorrupt == 0,
+                               metrics.corrupt > 0 {
+                                slot.decodeProbeUsed = true
+                                slot.decodeProbeOwed = Self.decodeProbeBurst
+                                out += " - CORRUPTION STARTS HERE, arming "
+                                    + "the decode probe for the next "
+                                    + "\(Self.decodeProbeBurst) samples to "
+                                    + "find out whether these samples "
+                                    + "decode at all outside the layer"
+                            }
                             slot.lastShown = metrics.shown
                             slot.lastDropped = metrics.dropped
+                            slot.lastCorrupt = metrics.corrupt
                             out += changed
                                 ? " - NEW LAYER, \(slot.enqueuedIntoLayer) "
                                     + "enqueued into it so far"
@@ -4941,6 +4970,14 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
+    /// How many samples one self-armed decode probe covers.
+    ///
+    /// ADDED - see mse_fix_192's docstring. Two hundred and forty is
+    /// about ten seconds at this content's frame rate - long enough to
+    /// be sure of the answer and short enough that a stream which
+    /// corrupts for two minutes still costs one probe.
+    fileprivate static let decodeProbeBurst = 240
+
     /// Does VideoToolbox decode these samples, independently of the layer?
     ///
     /// The display layer can be starved, misclocked or unattached, and all
@@ -4953,7 +4990,18 @@ public final class FairPlayStreamParser: NSObject {
     /// because this is a measurement and not a decode path.
     private func runDecodeProbe(streamKey: String,
                                 sampleBuffer: CMSampleBuffer) {
-        guard Self.showLayerMarkerPresent() else { return }
+        // OR ARMED BY A CORRUPTION - see mse_fix_192's docstring. The
+        // marker file stays exactly as it was for the manual path; this
+        // adds the one case that arms itself, because the corruption in
+        // capture e8468989 happened on a device with no marker on it and
+        // left nothing to attribute it with.
+        let armed = withState { () -> Bool in
+            guard let slot = streamParsers[streamKey],
+                  slot.decodeProbeOwed > 0 else { return false }
+            slot.decodeProbeOwed -= 1
+            return true
+        }
+        guard Self.showLayerMarkerPresent() || armed else { return }
         // Every sample in, every fortieth reported.
         //
         // Feeding every sample is what makes the later reports mean
@@ -7373,8 +7421,8 @@ public final class FairPlayStreamParser: NSObject {
     /// of those are handled here rather than at the call site.
     fileprivate static func pictureMetrics(
         _ layer: AVSampleBufferDisplayLayer
-    ) -> (text: String, shown: Int, dropped: Int)? {
-        var found: (String, Int, Int)?
+    ) -> (text: String, shown: Int, dropped: Int, corrupt: Int)? {
+        var found: (String, Int, Int, Int)?
         let failure = GeckoRuntimeBridge.catchException(from: {
             let key = "videoPerformanceMetrics"
             guard layer.responds(to: NSSelectorFromString(key)),
@@ -7400,14 +7448,17 @@ public final class FairPlayStreamParser: NSObject {
             let dropped = read("numberOfDroppedVideoFrames") ?? -1
             let corrupt = read("numberOfCorruptedVideoFrames") ?? -1
             let delay = readDouble("totalFrameDelay") ?? Double.nan
+            // CORRUPT COMES BACK TOO - see mse_fix_192's docstring. It
+            // has always been in the text and never in the numbers, so
+            // nothing could act on it rising.
             found = ("shown \(shown) dropped \(dropped) corrupt "
-                     + "\(corrupt) delay \(delay)", shown, dropped)
+                     + "\(corrupt) delay \(delay)", shown, dropped, corrupt)
         })
         if let failure {
-            return ("metrics REFUSED - " + failure, -1, -1)
+            return ("metrics REFUSED - " + failure, -1, -1, -1)
         }
         guard let found else { return nil }
-        return (found.0, found.1, found.2)
+        return (found.0, found.1, found.2, found.3)
     }
 
     fileprivate static func isSyncSample(_ sampleBuffer: CMSampleBuffer)
