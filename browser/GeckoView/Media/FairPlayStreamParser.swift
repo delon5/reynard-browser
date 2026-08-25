@@ -119,6 +119,22 @@ public final class FairPlayStreamParser: NSObject {
         /// open once", which is the distinction batchedMessage was
         /// missing when it swallowed the next title's challenge.
         var batchDispatched = false
+        /// WHICH assembly the batch fields above describe - a
+        /// process-wide serial, stamped when batchContentIds is
+        /// populated.
+        ///
+        /// ADDED - see mse_fix_195_the_batch_that_never_fills.py's
+        /// docstring. The flush timer armed on a batch's first SPC is
+        /// not cancelled; it decides at fire time, the way this file's
+        /// other timers do. So it has to be able to tell the batch it
+        /// was armed for from a batch that merely lives at the same
+        /// session id afterwards - entries are replaced whole by
+        /// recycleSession and batches whole by the next pssh, and a
+        /// stale timer must flush neither. Zero means no batch was
+        /// ever assembled here, and no timer is ever armed against
+        /// zero. Read and written only under the state lock, like
+        /// every other field of this class.
+        var batchEpoch = 0
         /// Whether requestKey drives this session's key requests.
         ///
         /// True for anything parserAppendInitData opened, false for the
@@ -231,6 +247,17 @@ public final class FairPlayStreamParser: NSObject {
     private var audioSessionPrepared = false
     /// Stream parsers by "<sessionId>|<stream>". See append(_:stream:).
     fileprivate var streamParsers: [String: StreamParser] = [:]
+    /// How many challenge batches this process has ever assembled -
+    /// the source of Entry.batchEpoch.
+    ///
+    /// ADDED - see mse_fix_195_the_batch_that_never_fills.py's
+    /// docstring. Process-wide rather than per entry so an epoch can
+    /// never repeat across a recycled session: recycleSession replaces
+    /// the Entry whole, a fresh Entry would count from zero again, and
+    /// a per-entry counter could hand a stale flush timer the very
+    /// number the new entry's first batch gets. Guarded by the state
+    /// lock below, like the dictionaries above it.
+    private var batchesBuilt = 0
     private let lock = NSLock()
 
     private func withState<T>(_ body: () -> T) -> T {
@@ -989,6 +1016,13 @@ public final class FairPlayStreamParser: NSObject {
                     entry.batchKeyIds = keys
                     entry.batchSPCs = [:]
                     entry.batchDispatched = false
+                    // ADDED - see mse_fix_195_the_batch_that_never_fills.py's
+                    // docstring. A new assembly gets a new epoch, so a
+                    // flush timer still pending for the ids this just
+                    // overwrote finds a number it was not armed against
+                    // and stands down.
+                    batchesBuilt += 1
+                    entry.batchEpoch = batchesBuilt
                 }
                 Self.log("session \(sessionId) batching \(ids.count) "
                          + "challenges into one key message")
@@ -1575,15 +1609,27 @@ public final class FairPlayStreamParser: NSObject {
                      + "for a message that will never be assembled")
             return (contentId, spc)
         }
-        let staged = withState { () -> ([String], [Data], [String: Data])? in
+        let staged = withState {
+            () -> ([String], [Data], [String: Data], Int, Bool)? in
             guard let entry = entries[sessionId],
-                  entry.batchContentIds.count > 1 else {
+                  entry.batchContentIds.count > 1,
+                  // CHANGED - see mse_fix_195_the_batch_that_never_fills.py's
+                  // docstring. Re-checked in THIS take of the lock as
+                  // well as the one above: the flush timer can spend
+                  // the batch between the two, and an SPC staged into
+                  // a spent batch would be held forever - the exact
+                  // defect again, through a race window. Spent means
+                  // the flush already sent everything it found staged,
+                  // so this challenge goes out on its own below.
+                  !entry.batchDispatched else {
                 return nil
             }
+            let firstHeld = entry.batchSPCs.isEmpty
             entry.batchSPCs[contentId] = spc
-            return (entry.batchContentIds, entry.batchKeyIds, entry.batchSPCs)
+            return (entry.batchContentIds, entry.batchKeyIds,
+                    entry.batchSPCs, entry.batchEpoch, firstHeld)
         }
-        guard let (ids, keys, held) = staged else {
+        guard let (ids, keys, held, epoch, firstHeld) = staged else {
             return (contentId, spc)
         }
         let missing = ids.filter { held[$0] == nil }
@@ -1591,6 +1637,71 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("session \(sessionId) batch holding "
                      + "\(held.count) of \(ids.count) challenges - "
                      + "still waiting for \(missing.count)")
+            // ADDED - see mse_fix_195_the_batch_that_never_fills.py's
+            // docstring. The first SPC into the batch starts the flush
+            // clock. Scheduled OUTSIDE the state lock - the staging
+            // closure above has returned - and decided again under one
+            // take of it at fire time: the same schedule-outside,
+            // decide-inside discipline as the 5s key request watchdog
+            // and the 3s licence fallback. Armed once per assembly and
+            // never cancelled: flushHeldBatch's fire-time guards make
+            // a timer for a batch that filled normally, was spent by
+            // its reply, or died with its session a silent no-op,
+            // which is how this file's other timers already behave.
+            if firstHeld {
+                KeySessionDelegate.fallbackQueue.asyncAfter(
+                    deadline: .now() + Self.batchFlushGap
+                ) {
+                    FairPlayStreamParser.shared.flushHeldBatch(
+                        sessionId: sessionId, epoch: epoch)
+                }
+            }
+            return nil
+        }
+        // CHANGED - see mse_fix_195_the_batch_that_never_fills.py's
+        // docstring. The batch is CLAIMED - marked dispatched, its
+        // staging emptied - BEFORE the JSON is built, in one take of
+        // the lock that also proves nobody spent it first. The rival
+        // is the flush timer, which can fire between the staging above
+        // and this line; whoever writes batchDispatched first owns the
+        // send, so no challenge can ever go out twice. The epoch guard
+        // keeps this from claiming a DIFFERENT batch: a rebuild can
+        // replace the assembly mid-flight, and mse_fix_193's ids-are-
+        // a-record contract belongs to the reply that batch is still
+        // waiting for. The ids themselves stay, exactly as before -
+        // provideResponse matches the page's reply against them.
+        let claim = withState { () -> (won: Bool, superseded: Bool) in
+            guard let entry = entries[sessionId],
+                  entry.batchEpoch == epoch else {
+                // AMENDED after review. The assembly this challenge was
+                // staged into is GONE - a rebuild replaced it and reset
+                // batchSPCs, so the SPC staged a moment ago went with
+                // it and no flush snapshot ever held it. Returning nil
+                // here would drop a produced challenge on the floor,
+                // which is the exact failure this fix exists to end, so
+                // it goes out on its own instead.
+                return (false, true)
+            }
+            guard !entry.batchDispatched else {
+                return (false, false)
+            }
+            entry.batchSPCs = [:]
+            entry.batchDispatched = true
+            return (true, false)
+        }
+        if !claim.won {
+            if claim.superseded {
+                Self.log("session \(sessionId) the batch this challenge "
+                         + "was staged into was replaced while it was "
+                         + "being staged - sending it on its own rather "
+                         + "than letting it go down with an assembly "
+                         + "that no longer exists")
+                return (contentId, spc)
+            }
+            Self.log("session \(sessionId) batch was spent while its "
+                     + "last challenge was being staged - the flush "
+                     + "timer took everything held, this challenge "
+                     + "included - nothing further to send")
             return nil
         }
         var entriesJSON: [[String: String]] = []
@@ -1609,28 +1720,179 @@ public final class FairPlayStreamParser: NSObject {
                      + "key message - sending the first challenge alone")
             return (ids[0], held[ids[0]] ?? spc)
         }
-        // ADDED - see mse_fix_193's docstring. The ids stay, because
-        // the reply is matched against them; the flag is what tells
-        // the next challenge they are a record rather than a queue.
-        withState {
-            entries[sessionId]?.batchSPCs = [:]
-            entries[sessionId]?.batchDispatched = true
-        }
         Self.log("session \(sessionId) batched \(entriesJSON.count) "
                  + "challenges into \(document.count) bytes of JSON")
         return (ids[0], document)
     }
 
-    /// The licences inside a batched response, in challenge order.
+    /// How long a partly-filled batch may hold its first SPC before
+    /// what is held is sent anyway.
     ///
-    /// ADDED - see mse_fix_84's docstring. Netflix labels each challenge
-    /// with an index and sorts its RESPONSES by that label, so the label
-    /// is the authority and array order is only the fallback. Nil when
-    /// these bytes are not a batch at all, which is every response this
-    /// path saw before now.
+    /// ADDED - see mse_fix_195_the_batch_that_never_fills.py's
+    /// docstring. A healthy batch fills in the time AVFoundation takes
+    /// to mint its SPCs back to back: capture beaeb610 has a batch
+    /// staged, filled and on its way inside the same logged
+    /// millisecond (254015.115 on both lines), and in capture fa05a590
+    /// all three of the second title's batches were assembled and sent
+    /// within the same second (273466). A second and a half is orders
+    /// of magnitude above any observed fill, and far inside
+    /// AVFoundation's own budget - the held request in fa05a590 was
+    /// raised at 273494.020 and timed out -19152 at 273514.057, twenty
+    /// seconds later - so a flushed challenge still leaves the page
+    /// ~18s to answer before its request dies. Same spirit as
+    /// fallbackGap's three seconds, and shorter, because there is no
+    /// network round trip in filling a batch: this clock races only
+    /// the local key session.
+    fileprivate static let batchFlushGap: Double = 1.5
+
+    /// Send whatever a partly-filled batch is still holding, each
+    /// challenge on its own.
+    ///
+    /// ADDED - see mse_fix_195_the_batch_that_never_fills.py's
+    /// docstring. mse_fix_193 closed the hold where a SENT batch
+    /// swallowed the next title's challenge; this is its sibling, the
+    /// batch that never FILLS. A batch is sized from the pssh - one
+    /// challenge per key it names - but a key session only raises a
+    /// request for a key it does not already hold, and
+    /// processContentKeyRequest says nothing when it declines, so the
+    /// pssh's count is a ceiling, not a promise. Capture fa05a590,
+    /// Netflix second title, session child-15: the pssh named two
+    /// keys, exactly one real AVContentKeyRequest arrived, and its
+    /// 8016-byte SPC sat at "batch holding 1 of 2 challenges - still
+    /// waiting for 1" from 273494.029 until the request failed -19152
+    /// at 273514.057 - twenty seconds in which the challenge never
+    /// reached the page, the display layer cycled four -11800
+    /// recoveries, and the screen stayed black until the app was quit.
+    ///
+    /// SOLO, deliberately, not as a smaller batch. Solo is the shape
+    /// whose reply already matches: batchedMessage's own "sending it
+    /// on its own" path ships one SPC under its own content id, and
+    /// provide() finds the request by exactly that id in outstanding.
+    /// A pruned batch under ids[0] would be answered against
+    /// batchContentIds, whose count the reply could no longer match -
+    /// provideResponse refuses a batch whose entry count differs - and
+    /// rewriting the ids to fit is the positional guesswork that filed
+    /// a 099ed4xx licence under a 09d921cx id in this very capture.
+    ///
+    /// Sizing the batch from RAISED requests instead - counting only
+    /// challenges whose AVContentKeyRequest actually arrived - was
+    /// considered and left out: the requests arrive asynchronously
+    /// after processContentKeyRequest, which is void and silent when
+    /// it declines, so the true count is unknowable except by waiting
+    /// - which is this timer - and any early snapshot would undercount
+    /// a healthy batch still mid-raise and split a message the page
+    /// answers as a unit.
+    ///
+    /// Decides AND claims in one take of the state lock, acts outside
+    /// it - batchedMessage's own pattern, because withState's lock is
+    /// plain and non-recursive. The guards are what stands a stale
+    /// timer down: an entry gone to destroySession or replaced by
+    /// recycleSession, an epoch this timer was not armed against, a
+    /// batch already dispatched (it filled normally, or a rival timer
+    /// won - so nothing is ever sent twice), or nothing held any more
+    /// (the reply spent the batch). Every one of those returns in
+    /// silence: a batch that filled normally never logs a timer it
+    /// never needed. Nothing here captures an Entry or a layer - only
+    /// the session id and the epoch, both values - so a timer
+    /// outliving its session holds nothing alive and resurrects
+    /// nothing, the same looked-up-late doctrine as liveSession.
+    private func flushHeldBatch(sessionId: String, epoch: Int) {
+        let flush = withState {
+            () -> ([(String, Data)], Int, KeySessionDelegate)? in
+            guard let entry = entries[sessionId],
+                  entry.batchEpoch == epoch,
+                  !entry.batchDispatched,
+                  entry.batchContentIds.count > 1,
+                  !entry.batchSPCs.isEmpty else {
+                return nil
+            }
+            // In batch order, so the capture reads the way the batch
+            // was declared.
+            let held = entry.batchContentIds.compactMap {
+                id -> (String, Data)? in
+                guard let spc = entry.batchSPCs[id] else { return nil }
+                return (id, spc)
+            }
+            entry.batchSPCs = [:]
+            // Spent, exactly as if it had gone out whole: a challenge
+            // that arrives after this flush takes the send-it-solo
+            // path in batchedMessage, and the ids stay behind as the
+            // record the reply is matched against - mse_fix_193's
+            // contract, unchanged.
+            entry.batchDispatched = true
+            return (held, entry.batchContentIds.count, entry.keyDelegate)
+        }
+        guard let (held, expected, delegate) = flush else {
+            return
+        }
+        // Outside the lock from here down: logging is not what a lock
+        // is for, and send() hops to the main queue.
+        Self.log("session \(sessionId) batch flush: still holding "
+                 + "\(held.count) of \(expected) challenges after "
+                 + "\(Self.batchFlushGap)s - the missing requests were "
+                 + "never raised (a key session asks for no key it "
+                 + "already holds) - sending what is held on its own "
+                 + "rather than waiting out the twenty-second timeout")
+        for (id, spc) in held {
+            delegate.send(spc: spc, contentId: id)
+        }
+    }
+
+    /// One entry of a batched licence response: the payload, plus what
+    /// the entry itself says about WHICH challenge it answers.
+    ///
+    /// ADDED - see mse_fix_196_the_label_is_the_only_authority.py's
+    /// docstring. splitLicenceBatch used to flatten a response into a
+    /// reordered [Data], which threw the labels away the moment they
+    /// had finished sorting - so the caller could not tell "these
+    /// entries name keys we are not asking about" from "these entries
+    /// name nothing", and fell back to array order for both. Capture
+    /// fa05a590, session child-15, 273494.002: the page's LATE answer
+    /// to the 099ed4xx challenge batch arrived after those requests
+    /// had timed out and the player had rebuilt, was split against the
+    /// rebuilt 09d921cx batch record, matched none of it, and "matched
+    /// by array order" filed its entries against the current ids - 0
+    /// of 2 applied, and one 972-byte licence cached under
+    /// reynard-keyid:...09d921cb, a key it does not decrypt for. The
+    /// caller can only refuse that if it can see the labels, so now it
+    /// gets them whole.
+    fileprivate struct LicenceBatchEntry {
+        /// The licence bytes.
+        let payload: Data
+        /// The slot in the expected key list that a key-naming label
+        /// (keyID, or DHB's eight-byte stamp) matched. nil when the
+        /// entry matched no expected key.
+        let slot: Int?
+        /// The full 16-byte key id the entry named for ITSELF. keyID
+        /// carries all sixteen bytes; DHB carries only the first
+        /// eight, so a DHB entry has this only when a match against an
+        /// expected key supplied the rest.
+        let ownKeyId: Data?
+        /// Whether the entry carried ANY key-naming label at all,
+        /// matched or not. This is the bit array order destroyed: an
+        /// entry that NAMES a foreign key is a misdelivery to file
+        /// under its own name, not a blank to guess at.
+        let keyLabelled: Bool
+        /// A numeric ID label - a challenge INDEX. Positional in
+        /// nature: it says "answer to challenge #n of the message you
+        /// sent" without saying which message, so it can never prove
+        /// which group a reply answers and earns no more trust than
+        /// array order does.
+        let indexLabel: Int?
+    }
+
+    /// The licences inside a batched response, with their labels.
+    ///
+    /// ADDED - see mse_fix_84's docstring; the return shape CHANGED -
+    /// see mse_fix_196_the_label_is_the_only_authority.py's. Netflix
+    /// labels each entry and the label is the authority - so the
+    /// caller now receives the labels and decides, instead of
+    /// receiving payloads silently pre-attributed by a fallback it
+    /// cannot see. Nil when these bytes are not a batch at all, which
+    /// is every response this path saw before now.
     fileprivate static func splitLicenceBatch(_ response: Data,
                                               expecting keyIds: [Data])
-        -> [Data]? {
+        -> [LicenceBatchEntry]? {
         guard let first = response.first,
               first == UInt8(ascii: "["), let parsed = try? JSONSerialization
                 .jsonObject(with: response, options: []) else {
@@ -1654,7 +1916,7 @@ public final class FairPlayStreamParser: NSObject {
         return decodeLicenceEntries(list, expecting: keyIds)
     }
 
-    /// One base64 payload per entry, put back in challenge order.
+    /// One labelled entry per response item, labels intact.
     ///
     /// CHANGED - see mse_fix_86_match_the_licence_to_its_key.py's
     /// docstring. Array order was wrong and both licences were applied
@@ -1671,9 +1933,15 @@ public final class FairPlayStreamParser: NSObject {
     /// and these ids are eight significant bytes followed by eight
     /// zeroes, so that is all of them. Exact, and immune to whatever
     /// order the server answers in.
+    ///
+    /// CHANGED AGAIN - see mse_fix_196's docstring. The matching logic
+    /// is untouched; what changed is that a label which matches
+    /// NOTHING is no longer erased. It travels back to the caller,
+    /// which is the only place that knows whether the outstanding
+    /// requests are the group this reply answers.
     private static func decodeLicenceEntries(_ list: [[String: Any]],
                                              expecting keyIds: [Data])
-        -> [Data]? {
+        -> [LicenceBatchEntry]? {
         // What the entries look like, once, because nothing has ever
         // printed one and the ID labels are still unknown.
         if let first = list.first {
@@ -1682,15 +1950,11 @@ public final class FairPlayStreamParser: NSObject {
             log("licence batch entry 0 keys: " + names
                 + ", ID=" + (label.map { "\"" + $0 + "\"" } ?? "absent"))
         }
-        var payloads: [Data] = []
-        var positions: [Int] = []
-        var howMatched = "array order"
+        var entries: [LicenceBatchEntry] = []
         // Which field did the matching, so a capture never has to guess
         // whether keyID or DHB was the one present.
         var matchedField = "keyID"
-        var allByKey = !keyIds.isEmpty
-        var allById = true
-        for (index, item) in list.enumerated() {
+        for item in list {
             var payload: Data?
             for name in ["PAYLOAD", "payload", "CKC", "ckc", "DATA", "data"] {
                 if let text = item[name] as? String,
@@ -1702,7 +1966,6 @@ public final class FairPlayStreamParser: NSObject {
             guard let payload else {
                 return nil
             }
-            payloads.append(payload)
 
             // 1. the key this entry answers.
             //
@@ -1718,15 +1981,24 @@ public final class FairPlayStreamParser: NSObject {
             // inference at all. Compared as sixteen bytes rather than as
             // text, because base64 of the same bytes is not guaranteed
             // to be the same string.
-            var byKey: Int?
+            var slot: Int?
+            var ownKeyId: Data?
+            var keyLabelled = false
             for name in ["keyID", "keyId", "keyid", "KEYID"] {
                 guard let text = item[name] as? String,
                       let raw = Data(base64Encoded: text), !raw.isEmpty else {
                     continue
                 }
-                for (slot, keyId) in keyIds.enumerated()
+                // The entry NAMES a key. Whether or not it is one of
+                // ours, that name is authoritative for this entry -
+                // see mse_fix_196's docstring.
+                keyLabelled = true
+                if raw.count == 16 {
+                    ownKeyId = raw
+                }
+                for (index, keyId) in keyIds.enumerated()
                 where Array(keyId) == Array(raw) {
-                    byKey = slot
+                    slot = index
                     matchedField = "keyID"
                     break
                 }
@@ -1735,55 +2007,52 @@ public final class FairPlayStreamParser: NSObject {
             // DHB, for a packaging that names the key that way instead -
             // which is what getDrmKeyMapping in the same player reads,
             // bytes 4 through 12 being the key id's first eight.
-            if byKey == nil {
+            if slot == nil {
                 for name in ["DHB", "dhb"] {
                     guard let text = item[name] as? String,
                           let raw = Data(base64Encoded: text),
                           raw.count >= 12 else {
                         continue
                     }
+                    keyLabelled = true
                     let stamp = Array(raw)[4..<12]
-                    for (slot, keyId) in keyIds.enumerated()
+                    for (index, keyId) in keyIds.enumerated()
                     where keyId.count >= 8
                             && Array(keyId.prefix(8)) == Array(stamp) {
-                        byKey = slot
+                        slot = index
+                        // The label names only eight bytes; the match
+                        // supplies the whole id.
+                        ownKeyId = keyId
                         matchedField = "DHB"
                         break
                     }
                     break
                 }
             }
-            if byKey == nil {
-                allByKey = false
-            }
 
             // 2. an ID that is a number.
-            var byId: Int?
+            var indexLabel: Int?
             if let text = (item["ID"] as? String) ?? (item["id"] as? String),
                let parsed = Int(text) {
-                byId = parsed
-            } else {
-                allById = false
+                indexLabel = parsed
             }
-
-            positions.append(byKey ?? byId ?? index)
+            entries.append(LicenceBatchEntry(payload: payload,
+                                             slot: slot,
+                                             ownKeyId: ownKeyId,
+                                             keyLabelled: keyLabelled,
+                                             indexLabel: indexLabel))
         }
-        guard !payloads.isEmpty else {
+        guard !entries.isEmpty else {
             return nil
         }
-        if allByKey {
-            howMatched = matchedField
-        } else if allById {
-            howMatched = "ID"
-        } else {
-            // A partial match orders nothing reliably - fall all the way
-            // back rather than half-sort.
-            positions = Array(0..<payloads.count)
-        }
-        log("licence batch: \(payloads.count) entries, matched by "
-            + howMatched)
-        let paired = zip(positions, payloads).sorted { $0.0 < $1.0 }
-        return paired.map { $0.1 }
+        let matched = entries.filter { $0.slot != nil }.count
+        let foreign = entries.filter { $0.keyLabelled && $0.slot == nil }
+            .count
+        let bare = entries.count - matched - foreign
+        log("licence batch: \(entries.count) entries - \(matched) matched "
+            + "by " + matchedField + ", \(foreign) labelled for keys this "
+            + "batch never asked about, \(bare) carrying no key label")
+        return entries
     }
 
     /// EVERY key the FairPlay pssh names, in the order it names them.
@@ -7375,6 +7644,24 @@ public final class FairPlayStreamParser: NSObject {
     /// identifier rather than per session, so a title with eight keys
     /// gets three attempts at each of them.
     fileprivate static let keyRetryCap = 3
+
+    /// The smallest number of bytes that will be believed to be a
+    /// licence.
+    ///
+    /// ADDED - see mse_fix_197_no_licence_is_five_bytes.py's docstring.
+    /// Capture fa05a590, session child-15, 273499.011: a 5-BYTE page
+    /// message was applied as a licence to a request the page had
+    /// abandoned, cached, and replayed 6.7 seconds later into a second
+    /// request. A CKC is a signed, encrypted container; the smallest
+    /// genuine one in any capture is 828 bytes, and the junk shapes -
+    /// EME acks, status echoes - are a few bytes. Sixty-four is an
+    /// order of magnitude under every real licence ever seen here and
+    /// comfortably above every ack, so it cannot refuse a licence and
+    /// cannot admit an ack. Checked before EVERY apply and every cache
+    /// insert. Refusals log the SIZE and the key id only - licence
+    /// bytes never appear in a log, same as everywhere else in this
+    /// file.
+    fileprivate static let licenceFloorBytes = 64
     /// Guards the retry counts.
     private static let keyRetryLock = NSLock()
     /// Attempts so far, by key identifier, and when the last one was.
@@ -9048,33 +9335,180 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("CKC for unknown session \(sessionId)")
             return false
         }
+        // NOT EVERY PAGE MESSAGE IS A LICENCE - see
+        // mse_fix_197_no_licence_is_five_bytes.py's docstring. Capture
+        // fa05a590, 273499.011: a 5-byte message was "applied" as a
+        // licence, cached, and replayed at 273505.733 into another
+        // request. The floor is checked here at the door AS WELL AS in
+        // provide(), because a refusal in provide() falls through to
+        // the parser apply path at the bottom of this function, which
+        // would hand the junk to processContentKeyResponseData
+        // instead. The size is logged; the bytes never are.
+        guard ckc.count >= Self.licenceFloorBytes else {
+            Self.log("session \(sessionId) response for id "
+                     + String(contentId.prefix(48)) + " is \(ckc.count) "
+                     + "bytes - smaller than any licence (floor "
+                     + "\(Self.licenceFloorBytes)) - dropped, not applied "
+                     + "and not kept")
+            return false
+        }
         // ADDED - see mse_fix_84's docstring. A batched exchange is
         // answered in kind: one entry per challenge, which the licence
-        // server labels and may return in any order. Each is applied to
-        // its own request through the same provide() a single exchange
-        // uses.
+        // server labels and may return in any order.
+        //
+        // REWRITTEN - see mse_fix_196_the_label_is_the_only_authority
+        // .py's docstring. The old loop applied split[index] to
+        // ids[index] whatever the entries said, so a LATE reply - one
+        // answering a batch whose requests had already timed out - was
+        // filed against whatever batch record exists NOW. Capture
+        // fa05a590, 273494.002: 0 of 2 applied and 972 bytes of a
+        // 099ed4xx licence cached under reynard-keyid:...09d921cb.
+        // Correlation must never cross groups:
+        //
+        //   - an entry carrying a key label is applied by that label
+        //     ONLY; one that names a key with no outstanding request
+        //     is kept under ITS OWN key id, never under a current id
+        //     it does not name;
+        //   - entries carrying no key label can only be trusted
+        //     positionally, and position only means anything when the
+        //     DISPATCHED group they would be laid against is exactly
+        //     the set of requests still outstanding - otherwise the
+        //     reply is DROPPED, loudly.
         let expectedKeys = withState { entry.batchKeyIds }
         if let split = Self.splitLicenceBatch(ckc, expecting: expectedKeys),
            split.count > 1 {
-            let ids = withState { entry.batchContentIds }
-            guard ids.count == split.count else {
-                Self.log("session \(sessionId) licence batch has "
-                         + "\(split.count) entries for \(ids.count) "
-                         + "challenges - not applying any of them")
+            // One take for the whole record, then a consistency check:
+            // the split above ran against expectedKeys OUTSIDE any
+            // lock - batchedMessage's read-decide pattern, withState's
+            // lock being plain and non-recursive - so a record that
+            // changed in between must not be matched against.
+            let (ids, keysNow, dispatched) = withState {
+                (entry.batchContentIds, entry.batchKeyIds,
+                 entry.batchDispatched)
+            }
+            guard keysNow == expectedKeys else {
+                Self.log("session \(sessionId) batch record changed while "
+                         + "a \(split.count)-entry reply was being parsed "
+                         + "- dropped rather than matched against ids it "
+                         + "was not split for")
                 return false
             }
+            if split.contains(where: { $0.keyLabelled }) {
+                // THE LABEL IS THE ONLY AUTHORITY. An entry that names
+                // its key is applied to the challenge recorded for
+                // that key or filed under its own name - array order
+                // contributes nothing once any entry has spoken.
+                var applied = 0
+                var kept = 0
+                var dropped = 0
+                for item in split {
+                    if let slot = item.slot, slot < ids.count,
+                       entry.keyDelegate.provide(response: item.payload,
+                                                 contentId: ids[slot]) {
+                        applied += 1
+                    } else if let own = item.ownKeyId,
+                              entry.keyDelegate.keep(
+                                licence: item.payload,
+                                forKeyHex: Self.hexBytes(own)) {
+                        // Named, but no request for it is outstanding
+                        // - the generalisation of mse_fix_190's
+                        // keep-early-licence, under the entry's OWN
+                        // id. At 273494.002 this is where both late
+                        // 099ed4xx licences go: kept under 099ed474
+                        // and 099ed477, applied to nothing, poisoning
+                        // nothing.
+                        kept += 1
+                    } else {
+                        // Labelled, unmatched, and unnameable: a DHB
+                        // stamp that matched no expected key names
+                        // only eight of sixteen bytes, and half an id
+                        // is not a cache key - or the payload sat
+                        // below the size floor and keep() refused it.
+                        dropped += 1
+                        Self.log("session \(sessionId) licence batch "
+                                 + "entry (\(item.payload.count) bytes) "
+                                 + "answers no outstanding challenge and "
+                                 + "names no whole key id - dropped")
+                    }
+                }
+                Self.log("session \(sessionId) licence batch: \(applied) "
+                         + "of \(split.count) applied by label, \(kept) "
+                         + "kept under their own key ids, \(dropped) "
+                         + "dropped")
+                // ADDED - see mse_fix_193's docstring. A batch that has
+                // been answered in full is spent. Keeping its ids lets
+                // a later single reply be split against them and
+                // applied to requests that are already gone.
+                if applied == split.count {
+                    withState {
+                        entries[sessionId]?.batchContentIds = []
+                        entries[sessionId]?.batchKeyIds = []
+                        entries[sessionId]?.batchSPCs = [:]
+                        entries[sessionId]?.batchDispatched = false
+                    }
+                }
+                return applied > 0
+            }
+            // No entry names a key. Position is all there is, and
+            // position is only meaningful against the exact exchange
+            // this reply answers.
+            guard ids.count == split.count else {
+                Self.log("session \(sessionId) licence batch has "
+                         + "\(split.count) unlabelled entries for "
+                         + "\(ids.count) challenges - not applying any "
+                         + "of them")
+                return false
+            }
+            // THE GATE - see mse_fix_196's docstring. The recorded
+            // group must have been DISPATCHED - a message never sent
+            // has no reply, and mse_fix_195's timed flush marks its
+            // partial sends dispatched too, so those groups gate
+            // identically, no special case - and the requests still
+            // outstanding must be EXACTLY the group's ids. At
+            // 273494.002 neither held: the rebuilt batch was not yet
+            // dispatched and neither of its requests was outstanding,
+            // so even stripped of its labels that reply would have
+            // been dropped here.
+            let outstandingNow = entry.keyDelegate.outstandingContentIds
+            guard dispatched, Set(ids) == outstandingNow else {
+                Self.log("session \(sessionId) DROPPING an unlabelled "
+                         + "licence batch of \(split.count) - "
+                         + (dispatched
+                             ? "the \(outstandingNow.count) outstanding "
+                               + "request(s) are not exactly the group "
+                               + "this reply would be laid against"
+                             : "the recorded batch was never dispatched, "
+                               + "so no reply can be answering it")
+                         + " - positional attribution would cross groups")
+                return false
+            }
+            // Numeric ID labels order the entries within the group;
+            // array order is the last resort. Both only ever run
+            // behind the gate above.
+            let allIndexed = split.allSatisfy { $0.indexLabel != nil }
+            let orderedPayloads: [Data]
+            if allIndexed {
+                orderedPayloads = split.enumerated()
+                    .sorted { ($0.element.indexLabel ?? $0.offset)
+                            < ($1.element.indexLabel ?? $1.offset) }
+                    .map { $0.element.payload }
+            } else {
+                orderedPayloads = split.map { $0.payload }
+            }
+            Self.log("licence batch: \(split.count) entries, matched by "
+                     + (allIndexed ? "ID" : "array order")
+                     + " - the outstanding set is exactly this group")
             var applied = 0
-            for (index, licence) in split.enumerated()
-            where entry.keyDelegate.provide(response: licence,
-                                            contentId: ids[index]) {
+            for (index, licence) in orderedPayloads.enumerated()
+            where index < ids.count
+                && entry.keyDelegate.provide(response: licence,
+                                             contentId: ids[index]) {
                 applied += 1
             }
             Self.log("session \(sessionId) licence batch: \(applied) of "
                      + "\(split.count) applied")
-            // ADDED - see mse_fix_193's docstring. A batch that has been
-            // answered in full is spent. Keeping its ids lets a later
-            // single reply be split against them and applied to
-            // requests that are already gone.
+            // ADDED - see mse_fix_193's docstring. A batch that has
+            // been answered in full is spent.
             if applied == split.count {
                 withState {
                     entries[sessionId]?.batchContentIds = []
@@ -9350,6 +9784,25 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     /// Requests whose SPC has gone out, by EME content id, waiting for a
     /// licence addressed to that id.
     private var outstanding: [String: AVContentKeyRequest] = [:]
+    /// One kept licence: the bytes, and the key id hex they were kept
+    /// FOR.
+    ///
+    /// ADDED - see mse_fix_198_replay_only_the_requests_own_key.py's
+    /// docstring. licenceByKeyId's dictionary key SAYS which key an
+    /// entry serves, but nothing used to prove it: capture fa05a590
+    /// had 972 bytes of a 099ed4xx licence filed under
+    /// reynard-keyid:...09d921cb, and the replay fed the poisoned
+    /// cache straight into a request at 273505.733. Carrying the id
+    /// INSIDE the entry lets every read cross-check the key it is
+    /// about to serve against the key the bytes were kept for, and
+    /// treat a disagreement as a MISS instead of a licence.
+    /// Belt-and-braces once mse_fix_196 stops the mis-filing at the
+    /// source: every insert now writes forKeyHex equal to its storage
+    /// key, so this is a tripwire - and tripwires are cheap.
+    private struct KeptLicence {
+        let bytes: Data
+        let forKeyHex: String
+    }
     /// Licences already applied, by the key id they were applied for.
     ///
     /// The page answers one message per session and no more. When the
@@ -9358,7 +9811,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     /// kept and replayed into it. Keyed by the request's own 16-byte
     /// identifier, which both routes carry and which is the only thing
     /// the two have in common.
-    private var licenceByKeyId: [String: Data] = [:]
+    private var licenceByKeyId: [String: KeptLicence] = [:]
     /// Key ids whose cached licence has been served BACK OUT of that
     /// cache - by the replay in makeSPC or by the three-second fallback
     /// - since it was last stored.
@@ -9444,7 +9897,7 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             guard replayedKeyIds.remove(hex) != nil else {
                 return nil
             }
-            return licenceByKeyId.removeValue(forKey: hex)?.count
+            return licenceByKeyId.removeValue(forKey: hex)?.bytes.count
         }
         // Outside the lock: logging is not what a lock is for.
         guard let evictedBytes else { return }
@@ -9453,6 +9906,59 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             + "\(hex) (\(evictedBytes) bytes) on \(occasion) - it was "
             + "served from the cache and has now failed, so the next "
             + "request for this key asks the page instead")
+    }
+
+    /// The content ids with a live outstanding request, as one set.
+    ///
+    /// ADDED - see mse_fix_196_the_label_is_the_only_authority.py's
+    /// docstring. provideResponse's positional gate needs to know
+    /// whether the requests still waiting are EXACTLY the dispatched
+    /// group an unlabelled reply would be laid against. Takes the
+    /// delegate's own lock alone, with nothing called under it; the
+    /// caller holds no lock when it asks, so the state lock and this
+    /// one are never nested.
+    var outstandingContentIds: Set<String> {
+        return withLock { Set(outstanding.keys) }
+    }
+
+    /// Keep a licence under the key id the LICENCE ITSELF names.
+    ///
+    /// ADDED - see mse_fix_196_the_label_is_the_only_authority.py's
+    /// docstring. The generalisation of mse_fix_190's
+    /// keep-early-licence: a labelled batch entry that answers no
+    /// outstanding request is a licence for a request that has not
+    /// been raised yet - or was raised, timed out and will be raised
+    /// again - and its own label is the only id it may be filed under.
+    /// Filing it under a CURRENT id is what poisoned capture
+    /// fa05a590's cache at 273494.002 (972 bytes of a 099ed4xx licence
+    /// under reynard-keyid:...09d921cb). Size-floored like every other
+    /// insert - see mse_fix_197's docstring - and provenance-stamped
+    /// like every other entry - see mse_fix_198's. The delegate lock
+    /// is taken for the insert alone; the logs run outside it, and
+    /// they carry sizes and key ids, never licence bytes.
+    func keep(licence ckc: Data, forKeyHex hex: String) -> Bool {
+        guard ckc.count >= FairPlayStreamParser.licenceFloorBytes else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) NOT keeping \(ckc.count) bytes for "
+                + "key \(hex) - smaller than any licence (floor "
+                + "\(FairPlayStreamParser.licenceFloorBytes))")
+            return false
+        }
+        guard hex.count == 32, hex.allSatisfy({ $0.isHexDigit }) else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) NOT keeping \(ckc.count) bytes - "
+                + "\"\(hex.prefix(48))\" is not a whole key id")
+            return false
+        }
+        withLock { () -> Void in
+            licenceByKeyId[hex] = KeptLicence(bytes: ckc, forKeyHex: hex)
+        }
+        FairPlayStreamParser.log(
+            "session \(sessionId) KEPT \(ckc.count) bytes under the "
+            + "reply's own key id \(hex) - it answers no outstanding "
+            + "challenge, and the request for this key may not have been "
+            + "raised yet")
+        return true
     }
 
     /// The FPS application certificate. Assigning one releases every
@@ -9756,8 +10262,37 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                     return false
                 }
                 let hex = identifier.map { String(format: "%02x", $0) }.joined()
+                // STRICTLY THE REQUEST'S OWN KEY - see
+                // mse_fix_198_replay_only_the_requests_own_key.py's
+                // docstring. Two checks in the same lock take that
+                // decides to serve: the entry must have been kept FOR
+                // this key (a poisoned entry disagrees with its own
+                // storage key), and the request the bytes would be
+                // routed to through `outstanding` must be THIS
+                // request. Capture fa05a590, 273505.733: bytes looked
+                // up under one request's key were applied to the
+                // request outstanding under
+                // reynard-keyid:...09d921cb - a crossed FIFO claim
+                // (the origination-mismatch WARNING at 273494.02) had
+                // put a different key's content id on this request.
+                // Either disagreement is a MISS, logged, and the SPC
+                // below goes to the page instead - the pre-cache
+                // behaviour, always safe.
+                var mismatch: String?
                 let held: Data? = self.withLock { () -> Data? in
                     guard let kept = self.licenceByKeyId[hex] else {
+                        return nil
+                    }
+                    guard kept.forKeyHex == hex else {
+                        mismatch = "the bytes held under \(hex) were kept "
+                            + "for key \(kept.forKeyHex)"
+                        return nil
+                    }
+                    guard self.outstanding[origination.contentId]
+                            === keyRequest else {
+                        mismatch = "the request outstanding under "
+                            + String(origination.contentId.prefix(48))
+                            + " is not this request"
                         return nil
                     }
                     // Marked as CACHE-SERVED in the same take of the
@@ -9768,7 +10303,14 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                     // the page instead of going around again on the
                     // same dead bytes.
                     self.replayedKeyIds.insert(hex)
-                    return kept
+                    return kept.bytes
+                }
+                if let mismatch {
+                    FairPlayStreamParser.log(
+                        "session \(self.sessionId) replay MISS for key "
+                        + "\(hex) - " + mismatch + " - asking the page "
+                        + "instead")
+                    return false
                 }
                 guard let held else {
                     FairPlayStreamParser.log(
@@ -9811,11 +10353,32 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 let waitingFor = origination.contentId
                 KeySessionDelegate.fallbackQueue.asyncAfter(
                     deadline: .now() + KeySessionDelegate.fallbackGap
-                ) { [weak self] in
+                ) { [weak self, weak keyRequest] in
                     guard let self else { return }
+                    // STRICTLY THE REQUEST'S OWN KEY - see
+                    // mse_fix_198_replay_only_the_requests_own_key
+                    // .py's docstring. The same two checks as the
+                    // replay above, in the same single lock take: the
+                    // request still outstanding under this content id
+                    // must be the very request this fallback was armed
+                    // for - not one re-raised since - and the held
+                    // entry must have been kept FOR this key. Either
+                    // disagreement is a miss, and a miss here simply
+                    // leaves the request to the page, whose message
+                    // already went out before this timer was armed.
+                    var mismatch: String?
                     let held: Data? = self.withLock { () -> Data? in
-                        guard self.outstanding[waitingFor] != nil,
-                              let kept = self.licenceByKeyId[hex] else {
+                        guard let keyRequest,
+                              self.outstanding[waitingFor] === keyRequest
+                        else {
+                            return nil
+                        }
+                        guard let kept = self.licenceByKeyId[hex] else {
+                            return nil
+                        }
+                        guard kept.forKeyHex == hex else {
+                            mismatch = "the bytes held under \(hex) were "
+                                + "kept for key \(kept.forKeyHex)"
                             return nil
                         }
                         // Marked as cache-served, same as the replay
@@ -9827,7 +10390,14 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                         // nothing, so the fallback can never resurrect
                         // bytes the retry path has thrown out.
                         self.replayedKeyIds.insert(hex)
-                        return kept
+                        return kept.bytes
+                    }
+                    if let mismatch {
+                        FairPlayStreamParser.log(
+                            "session \(self.sessionId) fallback MISS for "
+                            + "key \(hex) - " + mismatch + " - leaving "
+                            + "the request to the page")
+                        return
                     }
                     guard let held else { return }
                     FairPlayStreamParser.log(
@@ -9879,6 +10449,25 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     /// moment two exchanges are in flight - and the content id that
     /// disambiguates it has been crossing both IPC legs all along.
     func provide(response ckc: Data, contentId: String) -> Bool {
+        // NOT EVERY PAGE MESSAGE IS A LICENCE - see
+        // mse_fix_197_no_licence_is_five_bytes.py's docstring. Capture
+        // fa05a590, 273499.011: a 5-byte message was applied to a
+        // request the page had abandoned, then cached, then replayed
+        // at 273505.733 into another request. Every door bytes can
+        // enter this delegate through lands here - the page's answer,
+        // the replay, the three-second fallback - so the floor at this
+        // door covers the apply AND the keep below it, and covers junk
+        // cached before this fix landed. The size is logged; the bytes
+        // never are.
+        guard ckc.count >= FairPlayStreamParser.licenceFloorBytes else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) response for id "
+                + "\(contentId.prefix(48)) is \(ckc.count) bytes - "
+                + "smaller than any licence (floor "
+                + "\(FairPlayStreamParser.licenceFloorBytes)) - not "
+                + "applied and not kept")
+            return false
+        }
         let request = withLock { () -> AVContentKeyRequest? in
             guard let found = outstanding.removeValue(forKey: contentId) else {
                 return nil
@@ -9901,12 +10490,20 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             // Only the parser's own content id, which is the key id in
             // text and is what the replay looks up. A pssh content id
             // names no key by itself and the replay would never find it.
+            //
+            // Provenance-stamped - see mse_fix_198's docstring: the
+            // hex this entry is filed under is the hex it was kept
+            // FOR, and the replay checks the two still agree before
+            // serving it.
             var reynardKept = false
             let reynardMarker = "reynard-keyid:"
             if contentId.hasPrefix(reynardMarker) {
                 let hex = String(contentId.dropFirst(reynardMarker.count))
                 if hex.count == 32, hex.allSatisfy({ $0.isHexDigit }) {
-                    withLock { () -> Void in licenceByKeyId[hex] = ckc }
+                    withLock { () -> Void in
+                        licenceByKeyId[hex] = KeptLicence(bytes: ckc,
+                                                          forKeyHex: hex)
+                    }
                     reynardKept = true
                 }
             }
@@ -9930,11 +10527,15 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         // own specifier arrives afterwards, asks for the same key, and
         // is met with silence - both of its SPCs reached the page in the
         // last capture and neither was ever answered. This is what the
-        // replay below serves.
+        // replay below serves. Provenance-stamped - see mse_fix_198's
+        // docstring.
         if let identifier = request.identifier as? Data,
            identifier.count == 16 {
             let hex = identifier.map { String(format: "%02x", $0) }.joined()
-            withLock { () -> Void in licenceByKeyId[hex] = ckc }
+            withLock { () -> Void in
+                licenceByKeyId[hex] = KeptLicence(bytes: ckc,
+                                                  forKeyHex: hex)
+            }
         }
         // THE RENDER QUESTION, asked for the first time with a real key.
         //
@@ -9952,15 +10553,11 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
 
     /// The SPC's way back to the content process that asked for it.
     ///
-    /// Main thread, because ReynardFairPlayNotifyParserKeyMessage
-    /// asserts it and everything it touches on the Gecko side is
-    /// main-thread-only; this delegate runs on its own queue.
-    ///
     /// Reported under the id the request ARRIVED with, which is now the
     /// id of the origination this particular request answers rather than
     /// whatever the session last recorded.
     private func report(spc: Data, contentId: String) {
-        guard let childId = Self.childId(ofSession: sessionId) else {
+        guard Self.childId(ofSession: sessionId) != nil else {
             FairPlayStreamParser.log(
                 "session \(sessionId) is not a child session - "
                 + "SPC produced but not routed")
@@ -9974,8 +10571,34 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 sessionId: sessionId, contentId: contentId, spc: spc) else {
             return
         }
-        let contentId = outgoing.0
-        let spc = outgoing.1
+        send(spc: outgoing.1, contentId: outgoing.0)
+    }
+
+    /// The hop itself: one message to the content process, with no
+    /// batching decision in front of it.
+    ///
+    /// SPLIT OUT of report - see
+    /// mse_fix_195_the_batch_that_never_fills.py's docstring. The
+    /// flush timer sends challenges the batch machinery is already
+    /// done with, so it must not go back through batchedMessage: the
+    /// batch is marked dispatched by then and the re-entry would log a
+    /// misleading "not part of the open batch" line for every flushed
+    /// challenge. fileprivate so flushHeldBatch can call it; every
+    /// ordinary SPC still goes through report, so the batching
+    /// decision stays in one place.
+    ///
+    /// Main thread, because ReynardFairPlayNotifyParserKeyMessage
+    /// asserts it and everything it touches on the Gecko side is
+    /// main-thread-only; this delegate runs on its own queue. Takes no
+    /// locks at all, so any caller may hold none and call from any
+    /// queue - the flush timer calls it outside the state lock.
+    fileprivate func send(spc: Data, contentId: String) {
+        guard let childId = Self.childId(ofSession: sessionId) else {
+            FairPlayStreamParser.log(
+                "session \(sessionId) is not a child session - "
+                + "SPC produced but not routed")
+            return
+        }
         FairPlayStreamParser.log(
             "session \(sessionId) SPC on its way to child \(childId), "
             + "\(spc.count) bytes under id \(contentId)")
