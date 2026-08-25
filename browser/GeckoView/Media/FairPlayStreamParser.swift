@@ -110,6 +110,15 @@ public final class FairPlayStreamParser: NSObject {
         var batchKeyIds: [Data] = []
         /// SPCs collected so far, by content id.
         var batchSPCs: [String: Data] = [:]
+        /// Whether the batch those ids describe has already been sent.
+        ///
+        /// ADDED - see mse_fix_193's docstring. batchContentIds and
+        /// batchKeyIds outlive the message they assembled, because
+        /// provideResponse matches the page's reply against them. This
+        /// flag is what separates "a batch is open" from "a batch was
+        /// open once", which is the distinction batchedMessage was
+        /// missing when it swallowed the next title's challenge.
+        var batchDispatched = false
         /// Whether requestKey drives this session's key requests.
         ///
         /// True for anything parserAppendInitData opened, false for the
@@ -979,6 +988,7 @@ public final class FairPlayStreamParser: NSObject {
                     entry.batchContentIds = ids
                     entry.batchKeyIds = keys
                     entry.batchSPCs = [:]
+                    entry.batchDispatched = false
                 }
                 Self.log("session \(sessionId) batching \(ids.count) "
                          + "challenges into one key message")
@@ -1528,6 +1538,43 @@ public final class FairPlayStreamParser: NSObject {
     /// session that is not batched at all.
     fileprivate func batchedMessage(sessionId: String, contentId: String,
                                     spc: Data) -> (String, Data)? {
+        // ADDED - see mse_fix_193's docstring. batchContentIds is not
+        // cleared when a batch is sent - provideResponse needs it to
+        // match the reply - so the count test below stays true for the
+        // rest of the session and files every later challenge into a
+        // message that has already gone out. Netflix, capture
+        // beaeb610, one session and two titles:
+        //
+        //   254015.115  batched 2 challenges into 21437 bytes of JSON
+        //   254015.115  SPC on its way to child 16
+        //   254015.487  SPC PRODUCED ... reynard-keyid:...099ed477
+        //   254015.488  batch holding 1 of 2 - still waiting for 2
+        //
+        // One held against two missing out of two: the held SPC is
+        // under an id the batch never named. Nothing was sent for it,
+        // no licence came back, and every sample of the second title
+        // enqueued -11800 "no content key present".
+        //
+        // Read and decided outside the staging closure so the reason
+        // can be logged - withState takes a plain non-recursive lock.
+        let openBatch = withState { () -> ([String], Bool)? in
+            guard let entry = entries[sessionId],
+                  entry.batchContentIds.count > 1 else {
+                return nil
+            }
+            return (entry.batchContentIds, entry.batchDispatched)
+        }
+        if let (batchIds, dispatched) = openBatch,
+           dispatched || !batchIds.contains(contentId) {
+            Self.log("session \(sessionId) challenge for "
+                     + String(contentId.prefix(48)) + " is not part of the open "
+                     + "batch of \(batchIds.count)"
+                     + (dispatched ? " - that batch has already been sent"
+                                   : " - the batch does not name this id")
+                     + " - sending it on its own rather than holding it "
+                     + "for a message that will never be assembled")
+            return (contentId, spc)
+        }
         let staged = withState { () -> ([String], [Data], [String: Data])? in
             guard let entry = entries[sessionId],
                   entry.batchContentIds.count > 1 else {
@@ -1562,7 +1609,13 @@ public final class FairPlayStreamParser: NSObject {
                      + "key message - sending the first challenge alone")
             return (ids[0], held[ids[0]] ?? spc)
         }
-        withState { entries[sessionId]?.batchSPCs = [:] }
+        // ADDED - see mse_fix_193's docstring. The ids stay, because
+        // the reply is matched against them; the flag is what tells
+        // the next challenge they are a record rather than a queue.
+        withState {
+            entries[sessionId]?.batchSPCs = [:]
+            entries[sessionId]?.batchDispatched = true
+        }
         Self.log("session \(sessionId) batched \(entriesJSON.count) "
                  + "challenges into \(document.count) bytes of JSON")
         return (ids[0], document)
@@ -9018,6 +9071,18 @@ public final class FairPlayStreamParser: NSObject {
             }
             Self.log("session \(sessionId) licence batch: \(applied) of "
                      + "\(split.count) applied")
+            // ADDED - see mse_fix_193's docstring. A batch that has been
+            // answered in full is spent. Keeping its ids lets a later
+            // single reply be split against them and applied to
+            // requests that are already gone.
+            if applied == split.count {
+                withState {
+                    entries[sessionId]?.batchContentIds = []
+                    entries[sessionId]?.batchKeyIds = []
+                    entries[sessionId]?.batchSPCs = [:]
+                    entries[sessionId]?.batchDispatched = false
+                }
+            }
             return applied > 0
         }
         if entry.keyDelegate.provide(response: ckc, contentId: contentId) {
