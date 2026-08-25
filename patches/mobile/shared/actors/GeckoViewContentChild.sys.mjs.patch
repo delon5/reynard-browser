@@ -3861,7 +3861,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3919,555 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3919,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3903,28 +3903,60 @@ index 9ca6e15..18d37f0 100644
 +    return bounds;
 +  }
 +
-+  // IS THIS INPUT INSIDE A BAR THE COMPOSITOR HAS ALREADY LIFTED?
++  // WHICH WAY HAS THE COMPOSITOR ALREADY MOVED THIS INPUT'S BAR?
 +  //
 +  // The embedder sends a fixed-layer bottom margin so a page's fixed
 +  // bars clear the condensed pill, and APZ applies it as a pure
 +  // compositor translation - layout never sees it, so the rect above
-+  // reports a bottom-pinned bar lower than it visually sits, by exactly
-+  // that margin. An input inside such a bar is the archetypal mobile
-+  // input (a compose or chat field), so this is the everyday case of
-+  // the lift landing too high.
++  // reports a lifted bar lower than it visually sits. An input inside
++  // a bottom compose bar is the archetypal mobile input, so this is
++  // the everyday case of the lift landing too high, and the embedder
++  // subtracts the translation back out. But HOW FAR a layer moves
++  // depends on which edges it is anchored to (APZ's
++  // ComputeFixedMarginsOffset): anchored to the bottom alone, the
++  // whole bottom margin; anchored to both edges - an inset:0 modal -
++  // half, because it is centred between the margins; anchored to the
++  // top, or never a root fixed/sticky layer at all, nothing.
 +  //
-+  // Only bottom-anchored ones: the margin is a bottom margin, and a
-+  // fixed element pinned to the top is not moved by it. "bottom is not
-+  // auto" is the CSS-level form of the side bit APZ tests.
-+  // Unbounded, like the bounds walk above it. A twelve-level cap was
-+  // the first form and it was too shallow to trust: in a component
-+  // framework the input can sit far deeper than that inside its own
-+  // fixed footer, and a miss here is not a missing feature, it is a
-+  // 60pt over-lift - the exact error this exists to remove. The cost is
-+  // one getComputedStyle per ancestor, once per focus, next to a
-+  // getBoundingClientRect walk in the same query that forces layout at
-+  // every step and is already unbounded.
-+  isInBottomFixedBar(element, win) {
++  // The first form of this gate tested computed "bottom" against
++  // "auto", meant as the CSS-level form of the side bit APZ tests,
++  // and it was a no-op: getComputedStyle on a rendered fixed element
++  // resolves the USED offset, a pixel length, never "auto"
++  // (nsComputedDOMStyle::GetAbsoluteOffset), so every fixed ancestor
++  // passed and an input in a full-screen modal had the whole margin
++  // subtracted from a rect the compositor had only half-moved. The
++  // side bits are built from SPECIFIED auto-ness, which resolved
++  // style cannot recover, so the anchoring is read GEOMETRICALLY
++  // instead: an unlifted layout rect hugging the viewport's bottom
++  // edge is bottom-anchored, and one that also reaches the top edge
++  // is anchored to both. The one shape this misreads is a bar parked
++  // at the bottom edge via a specified top ("top: calc(100% - 56px)"),
++  // which the margin does not move; accepted, because no resolved
++  // style tells it apart from bottom-anchoring, and mobile compose
++  // bars are bottom-positioned.
++  //
++  // Nearest pinned ancestor only: a descendant rides its ancestor's
++  // layer, so the first fixed/sticky ancestor is the layer whose
++  // translation the input inherits. The walk is unbounded for the
++  // same reason as the bounds walk above it: in a component framework
++  // the input can sit far deeper than any fixed cap inside its own
++  // fixed footer, and a miss here is a 60pt error. The cost is one
++  // getComputedStyle per ancestor, once per focus, next to a
++  // getBoundingClientRect walk in the same query that forces layout
++  // at every step and is already unbounded.
++  getFixedBarAnchor(element, win) {
++    // The margin translates fixed/sticky layers of the ROOT content
++    // document only; a bar fixed inside an iframe is pinned to the
++    // iframe's viewport and never moves. (An iframe that is ITSELF
++    // inside a root fixed bar does move, but this walk cannot cross
++    // the frame boundary - under Fission the parent document may not
++    // even be in this process - and subframe geometry is already
++    // best-effort, flagged by isSubframe.) The early-out also pins
++    // win to this.contentWindow, which isPinnedElementLiftable below
++    // reads.
++    if (win.top !== win) {
++      return "none";
++    }
 +    let node = element;
 +    while (node && node.parentElement) {
 +      let style = null;
@@ -3935,16 +3967,39 @@ index 9ca6e15..18d37f0 100644
 +      }
 +      if (style) {
 +        const position = style.position;
-+        if (
-+          (position === "fixed" || position === "sticky") &&
-+          style.bottom !== "auto"
-+        ) {
-+          return true;
++        if (position === "fixed" || position === "sticky") {
++          // The same verdict the pill cutout already trusts for
++          // whether the margin reaches a layer at all: a transformed
++          // or filtered ancestor re-parents "fixed" onto itself, an
++          // intermediate scroller keeps its own sticky, and a layer
++          // the margin never moved must not have the margin
++          // subtracted from its rect. Its accepted coarse case rides
++          // along: an overflow-x:hidden body flags every STICKY bar
++          // and returns such pages to the over-lift, which leaves the
++          // input high but visible; fixed bars - the dominant compose
++          // bar shape - are unaffected.
++          if (!this.isPinnedElementLiftable(node, position)) {
++            return "none";
++          }
++          const rect = node.getBoundingClientRect();
++          // Generous below, strict above. A bottom bar legitimately
++          // sits up to env(safe-area-inset-bottom) (~34px) plus its
++          // own clearance off the edge, and misreading it as
++          // unanchored re-creates the over-lift this gate exists to
++          // remove. "Reaches the top" stands in for inset:0, and a
++          // sloppy top band would demote a tall bottom sheet -
++          // bottom-anchored, top auto - to half a lift.
++          const bottomBand = 64;
++          const topBand = 8;
++          if (rect.bottom < win.innerHeight - bottomBand) {
++            return "none";
++          }
++          return rect.top <= topBand ? "topBottom" : "bottom";
 +        }
 +      }
 +      node = node.parentElement;
 +    }
-+    return false;
++    return "none";
 +  }
 +
 +  // Detects whether this page's CSS uses env(safe-area-inset-bottom),
@@ -4329,6 +4384,7 @@ index 9ca6e15..18d37f0 100644
 +    }
 +
 +    const bounds = this.getFocusedInputBounds(focusedElement, viewportHeight);
++    const fixedBarAnchor = this.getFixedBarAnchor(focusedElement, win);
 +    // The extra fields are diagnostic. bounds and viewportHeight both
 +    // come from the FOCUSED element's own window, so for an input inside
 +    // an iframe the ratio describes its position within that frame - a
@@ -4351,7 +4407,12 @@ index 9ca6e15..18d37f0 100644
 +      visualOffsetTopCss:
 +        vv && Number.isFinite(vv.offsetTop) ? vv.offsetTop : 0,
 +      isSubframe: win.top !== win,
-+      isInBottomFixedBar: this.isInBottomFixedBar(focusedElement, win),
++      fixedBarAnchor,
++      // Derived, kept so an embedder that predates fixedBarAnchor
++      // still gets the field it reads. There the boolean meant
++      // "subtract the whole margin", which is exactly the "bottom"
++      // verdict and nothing else.
++      isInBottomFixedBar: fixedBarAnchor === "bottom",
 +      tag: focusedElement.localName,
 +      contentEditable: String(focusedElement.isContentEditable),
 +      inSubframe: String(win.top !== win),
@@ -4417,7 +4478,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4585,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4646,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4439,7 +4500,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4615,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4676,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

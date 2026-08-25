@@ -497,11 +497,25 @@ public class GeckoSession {
         public let visualWidthCss: CGFloat?
         public let visualOffsetTopCss: CGFloat
         public let isSubframe: Bool
-        /// The input sits inside a position:fixed/sticky bar
-        /// pinned to the bottom - one the compositor has
-        /// already lifted by the fixed-layer margin, which
-        /// layout (and therefore boundsBottomCss) cannot see.
-        public let isInBottomFixedBar: Bool
+        /// Which edges the input's pinned bar is anchored to, as the
+        /// actor read them - i.e. how far the compositor's fixed-layer
+        /// margin has already lifted the bar, which layout (and
+        /// therefore boundsBottomCss) cannot see. APZ moves a
+        /// bottom-anchored layer by the whole bottom margin, one
+        /// anchored to both edges (an inset:0 modal, centred between
+        /// the margins) by half, and everything else - top-anchored,
+        /// or a layer the margin never reaches - not at all. Raw
+        /// values are the wire strings the actor sends.
+        public enum FixedBarAnchor: String {
+            case bottom
+            case topBottom
+            case none
+        }
+        public let fixedBarAnchor: FixedBarAnchor
+        /// The old boolean, derived: true only for the verdict that
+        /// subtracts the whole margin. Kept so existing callers keep
+        /// compiling; new code should switch on fixedBarAnchor.
+        public var isInBottomFixedBar: Bool { fixedBarAnchor == .bottom }
     }
 
     // Keyboard
@@ -527,6 +541,21 @@ public class GeckoSession {
         let number = { (key: String) -> CGFloat? in
             values[key].flatMap { PayloadValue.cgFloat($0) }
         }
+        // The anchor verdict replaced isInBottomFixedBar, whose
+        // anchoring gate was a no-op - resolved style never says "auto"
+        // for a rendered fixed element; see getFixedBarAnchor in the
+        // actor. An engine older than the string still sends only the
+        // boolean, and there it meant "subtract the whole margin":
+        // exactly .bottom.
+        let anchor: FocusedInputMetrics.FixedBarAnchor
+        if let rawAnchor = values["fixedBarAnchor"] as? String,
+           let parsed = FocusedInputMetrics.FixedBarAnchor(rawValue: rawAnchor) {
+            anchor = parsed
+        } else if (values["isInBottomFixedBar"] as? Bool) ?? false {
+            anchor = .bottom
+        } else {
+            anchor = .none
+        }
         let metrics = FocusedInputMetrics(
             bottomRatio: ratio,
             boundsBottomCss: number("boundsBottomCss"),
@@ -534,14 +563,15 @@ public class GeckoSession {
             visualWidthCss: number("visualWidthCss"),
             visualOffsetTopCss: number("visualOffsetTopCss") ?? 0,
             isSubframe: (values["isSubframe"] as? Bool) ?? false,
-            isInBottomFixedBar: (values["isInBottomFixedBar"] as? Bool) ?? false
+            fixedBarAnchor: anchor
         )
-        NSLog("focusedInput: ratio=%@ tag=%@ editable=%@ frame=%@ vh=%@ bottom=%@ | vvW=%@ offTop=%.1f",
+        NSLog("focusedInput: ratio=%@ tag=%@ editable=%@ frame=%@ vh=%@ bottom=%@ | vvW=%@ offTop=%.1f anchor=%@",
               ratio.map { String(format: "%.3f", $0) } ?? "nil",
               describe("tag"), describe("contentEditable"),
               describe("inSubframe"), describe("viewportHeight"), describe("boundsBottom"),
               metrics.visualWidthCss.map { String(format: "%.1f", $0) } ?? "nil",
-              metrics.visualOffsetTopCss)
+              metrics.visualOffsetTopCss,
+              metrics.fixedBarAnchor.rawValue)
         return metrics
     }
     

@@ -620,13 +620,29 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // about the pill height" case, and it is entirely independent of
         // the ratio arithmetic fixed above.
         //
+        // HOW MUCH to take back is the actor's anchoring verdict. APZ
+        // moves a bottom-anchored layer by the whole bottom margin, a
+        // layer anchored to both edges - an inset:0 modal - by half,
+        // because it is centred between the margins, and a top-anchored
+        // or re-parented layer not at all. The first form of this
+        // subtraction took the whole margin for ANY pinned ancestor,
+        // which under-lifted an input inside a full-screen modal by the
+        // half the compositor never gave it.
+        //
         // Taken off our own side rather than by zeroing the margin while
         // the keyboard is up: that would change what the engine is told
         // about every fixed bar on every page, and the pill and dynamic
         // toolbar are not code to perturb for an arithmetic error that
         // is ours.
-        if inputMetrics.isInBottomFixedBar, isChromeCondensed {
-            focusBottom -= max(0, contentBottomOffset)
+        if isChromeCondensed {
+            switch inputMetrics.fixedBarAnchor {
+            case .bottom:
+                focusBottom -= max(0, contentBottomOffset)
+            case .topBottom:
+                focusBottom -= max(0, contentBottomOffset) / 2
+            case .none:
+                break
+            }
         }
 
         let visibleBottom = max(
