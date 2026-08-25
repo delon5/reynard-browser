@@ -273,6 +273,8 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
                 chromeMode: self.browserLayout.chromeMode,
                 isToolbarEnabled: !self.isShowingFullscreenMedia
             )
+            // AFTER the engine has been told, not before.
+            self.resampleFocusedInputIfChromeMoved()
         }
         
         Task { @MainActor [weak self] in
@@ -638,7 +640,6 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         applyTabOverviewLayout()
         applyBrowserChromeLayout(animated: animated)
         updateNavigationButtons()
-        resampleFocusedInputIfChromeMoved()
     }
 
     private func forgetKeyboardLift() {
@@ -650,11 +651,12 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
 
     /// The chrome moved under a live keyboard - measure again.
     ///
-    /// ADDED for KBD-03, see visibleKeyboardFrame. Only on a condense
-    /// FLIP, because that is what resizes the engine's viewport and makes
-    /// a page reflow its bottom-docked bar; an ordinary layout pass moves
-    /// nothing the lift depends on and re-querying on each one would put
-    /// a dispatcher round trip on every frame of a toolbar slide.
+    /// ADDED for KBD-03, see visibleKeyboardFrame. Called from
+    /// onScrollCondensedChange, which is the one signal for the state
+    /// actually changing, and from the tail of that closure rather than
+    /// from applyBrowserLayout so the engine has already been given the
+    /// new max/env/margin when the first sample goes out. The condensed
+    /// != last guard stays as a cheap belt on top of that.
     ///
     /// Twice, the second time late. The viewport change and this query
     /// travel different paths - the dynamic-toolbar IPC on the session,
