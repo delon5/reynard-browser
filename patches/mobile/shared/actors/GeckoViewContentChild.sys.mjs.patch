@@ -3861,7 +3861,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3919,549 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3919,555 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3916,10 +3916,17 @@ index 9ca6e15..18d37f0 100644
 +  // Only bottom-anchored ones: the margin is a bottom margin, and a
 +  // fixed element pinned to the top is not moved by it. "bottom is not
 +  // auto" is the CSS-level form of the side bit APZ tests.
++  // Unbounded, like the bounds walk above it. A twelve-level cap was
++  // the first form and it was too shallow to trust: in a component
++  // framework the input can sit far deeper than that inside its own
++  // fixed footer, and a miss here is not a missing feature, it is a
++  // 60pt over-lift - the exact error this exists to remove. The cost is
++  // one getComputedStyle per ancestor, once per focus, next to a
++  // getBoundingClientRect walk in the same query that forces layout at
++  // every step and is already unbounded.
 +  isInBottomFixedBar(element, win) {
 +    let node = element;
-+    let depth = 0;
-+    while (node && node.parentElement && depth < 12) {
++    while (node && node.parentElement) {
 +      let style = null;
 +      try {
 +        style = win.getComputedStyle(node);
@@ -3936,7 +3943,6 @@ index 9ca6e15..18d37f0 100644
 +        }
 +      }
 +      node = node.parentElement;
-+      depth++;
 +    }
 +    return false;
 +  }
@@ -4411,7 +4417,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4579,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4585,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4433,7 +4439,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4609,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4615,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
