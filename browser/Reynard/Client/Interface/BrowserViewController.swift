@@ -15,6 +15,9 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         static let fallbackTopInset: CGFloat = 24
         static let keyboardAnimationDuration: TimeInterval = 0.25
         static let keyboardAnimationCurve: UInt = 7
+        /// How long the re-lift takes when the chrome settles under a
+        /// live keyboard - see resampleFocusedInputIfChromeMoved.
+        static let chromeSettleRelift: TimeInterval = 0.2
     }
     
     private struct KeyboardAnimation {
@@ -635,6 +638,55 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         applyTabOverviewLayout()
         applyBrowserChromeLayout(animated: animated)
         updateNavigationButtons()
+        resampleFocusedInputIfChromeMoved()
+    }
+
+    private func forgetKeyboardLift() {
+        visibleKeyboardFrame = nil
+        liftChromeCondensed = nil
+        chromeSettleResampleTask?.cancel()
+        chromeSettleResampleTask = nil
+    }
+
+    /// The chrome moved under a live keyboard - measure again.
+    ///
+    /// ADDED for KBD-03, see visibleKeyboardFrame. Only on a condense
+    /// FLIP, because that is what resizes the engine's viewport and makes
+    /// a page reflow its bottom-docked bar; an ordinary layout pass moves
+    /// nothing the lift depends on and re-querying on each one would put
+    /// a dispatcher round trip on every frame of a toolbar slide.
+    ///
+    /// Twice, the second time late. The viewport change and this query
+    /// travel different paths - the dynamic-toolbar IPC on the session,
+    /// the metrics query through the dispatcher - so the first sample can
+    /// reach the content process before the reflow does and come back
+    /// describing the state we just left. relocateFocusedInput cancels
+    /// its own task on every call and re-derives from unshifted geometry,
+    /// so the second sample costs a query and always wins.
+    private func resampleFocusedInputIfChromeMoved() {
+        guard let keyboardFrame = visibleKeyboardFrame,
+              !searchOverlayCoordinator.isFocused,
+              !tabOverview.isPresented else { return }
+        let condensed = browserChrome.isScrollCondensed
+        guard condensed != liftChromeCondensed else { return }
+        liftChromeCondensed = condensed
+
+        contentView.relocateFocusedInput(
+            above: keyboardFrame,
+            animationDuration: UX.chromeSettleRelift,
+            animationOptions: .curveEaseInOut
+        )
+        chromeSettleResampleTask?.cancel()
+        chromeSettleResampleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, let self,
+                  let frame = self.visibleKeyboardFrame else { return }
+            self.contentView.relocateFocusedInput(
+                above: frame,
+                animationDuration: UX.chromeSettleRelift,
+                animationOptions: .curveEaseInOut
+            )
+        }
     }
     
     private func applyFullscreenLayout() {
@@ -1009,6 +1061,22 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         return nil
     }
     
+    /// The keyboard the user is still looking at, so a chrome
+    /// transition can re-run the lift against it.
+    ///
+    /// ADDED for KBD-03. Capture 2026-08-25 17:36:59: the composer is
+    /// lifted correctly at 197 while expanded, the toolbar then
+    /// scroll-dismisses under the live keyboard, the engine viewport
+    /// grows 670 -> 812 and Facebook reflows the composer to the new
+    /// bottom - and nothing re-samples. Three condense/expand cycles,
+    /// zero focusedInput lines, the composer left ~70pt behind the
+    /// keyboard. The lift was right for a chrome state that no longer
+    /// existed.
+    private var visibleKeyboardFrame: CGRect?
+    /// The condense state the standing lift was measured against.
+    private var liftChromeCondensed: Bool?
+    private var chromeSettleResampleTask: Task<Void, Never>?
+
     @objc private func keyboardFrameWillChange(_ notification: Notification) {
         guard let frameValue = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else {
             return
@@ -1035,12 +1103,15 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             && !tabOverview.isPresented
             && keyboardInset > 0
             && !isInHardwareKeyboardMode {
+            visibleKeyboardFrame = keyboardFrame
+            liftChromeCondensed = browserChrome.isScrollCondensed
             contentView.relocateFocusedInput(
                 above: keyboardFrame,
                 animationDuration: animation.duration,
                 animationOptions: animation.curve
             )
         } else {
+            forgetKeyboardLift()
             contentView.resetFocusedInputRelocation(
                 animationDuration: animation.duration,
                 animationOptions: animation.curve
@@ -1057,6 +1128,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     
     @objc private func keyboardWillHide(_ notification: Notification) {
         let animation = keyboardAnimation(from: notification)
+        forgetKeyboardLift()
         contentView.resetFocusedInputRelocation(
             animationDuration: animation.duration,
             animationOptions: animation.curve
