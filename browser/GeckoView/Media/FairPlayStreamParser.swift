@@ -1095,6 +1095,21 @@ public final class FairPlayStreamParser: NSObject {
                 + " - it keeps whatever content protection it has already "
                 + "established. This is not fatal; it was, before it was "
                 + "guarded.")
+            // AND ASK FOR A FRESH ONE - see mse_fix_185's docstring. A
+            // DISPLAY LAYER refused this way is the compositor's shared
+            // sink, still carrying the content protection of the site
+            // that had the tab before this one. It will never decrypt
+            // anything for this session, so the compositor is asked to
+            // build another. Only a display layer: an audio renderer is
+            // built per stream and never shared, so a refusal there
+            // means something else and must not throw the sink away.
+            if label.contains("display layer") {
+                freshSinkLock.lock()
+                freshSinkWanted = true
+                freshSinkLock.unlock()
+                log("\(label) - asking the compositor for a sink this "
+                    + "session can actually claim")
+            }
             return false
         }
         return true
@@ -7123,6 +7138,35 @@ public final class FairPlayStreamParser: NSObject {
     ///
     /// An uncontended NSLock, which is what layerShapeLock below already
     /// does for the same reason, and cheap enough at 60Hz.
+    /// Guards freshSinkWanted, and nothing else.
+    ///
+    /// ADDED - see mse_fix_185's docstring. Written from whichever
+    /// thread the refusal happens on and read from the compositor
+    /// thread, the same arrangement livePictureLock has.
+    private static let freshSinkLock = NSLock()
+    /// A display layer was refused as a content key recipient.
+    private static var freshSinkWanted = false
+
+    /// Does the compositor need to build a NEW sink?
+    ///
+    /// ADDED - see mse_fix_185's docstring. True exactly once after a
+    /// display layer has been refused as a content key recipient, which
+    /// is what happens when the shared sink still carries the content
+    /// protection of the site that had the tab before this one. Capture
+    /// 37c95f72 has Netflix adopting Apple TV's sink and playing sound
+    /// with no picture for the rest of the session.
+    ///
+    /// Cleared as it is read, because one refusal wants one rebuild and
+    /// a flag that stayed raised would rebuild the sink on every commit
+    /// - which is the churn 175 exists to prevent.
+    @objc public static func wantsFreshSink() -> Bool {
+        freshSinkLock.lock()
+        let wanted = freshSinkWanted
+        freshSinkWanted = false
+        freshSinkLock.unlock()
+        return wanted
+    }
+
     @objc public static func hasLivePicture() -> Bool {
         livePictureLock.lock()
         let at = livePictureAt

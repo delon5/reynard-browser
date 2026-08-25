@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2945 @@
+@@ -0,0 +0,2975 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -964,6 +964,36 @@ index 000000000000..b56efaa8479c
 +    }
 +    printf_stderr("mseLayer: liveness query %s\n",
 +                  answer ? "resolved" : "NOT AVAILABLE - holds disabled");
++  }
++  return answer ? answer(parser, selector) : false;
++}
++
++// Does the compositor need to build a NEW sink?
++//
++// ADDED - see mse_fix_185's docstring. The sink is a process-wide
++// static, so it outlives the content key session that first claimed it,
++// and AVFoundation will not let a second session claim it back:
++// "Can't add object as an AVContentKeyRecipient after it has
++// established its own content protection". The parser is the only thing
++// that sees that refusal. This asks it.
++//
++// Same shape as the liveness query above, and the same failure rule: if
++// the parser cannot be resolved this answers false and the caller keeps
++// the behaviour it had before this existed.
++bool ReynardMSEWantsFreshSink() {
++  static bool looked = false;
++  static Class parser = nil;
++  static SEL selector = nullptr;
++  static BOOL (*answer)(Class, SEL) = nullptr;
++  if (!looked) {
++    looked = true;
++    parser = NSClassFromString(@"ReynardFairPlayStreamParser");
++    selector = NSSelectorFromString(@"wantsFreshSink");
++    if (parser && [parser respondsToSelector:selector]) {
++      answer = (BOOL (*)(Class, SEL))[parser methodForSelector:selector];
++    }
++    printf_stderr("mseLayer: fresh-sink query %s\n",
++                  answer ? "resolved" : "NOT AVAILABLE - sink never rebuilt");
 +  }
 +  return answer ? answer(parser, selector) : false;
 +}
