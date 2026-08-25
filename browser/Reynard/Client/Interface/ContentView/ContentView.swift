@@ -95,7 +95,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     private var toolbarTopOffset: CGFloat = 0
     private var maxTopToolbarOffset: CGFloat = 0
     private var focusedInputTask: Task<Void, Never>?
-    private var inputBottomRatio: CGFloat?
+    private var inputMetrics: GeckoSession.FocusedInputMetrics?
     private var focusedInputOffset: CGFloat = 0
     
     private var canGoBack = false
@@ -527,10 +527,10 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         
         focusedInputTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let bottomRatio = await session.focusedInputBottomRatio()
+            let metrics = await session.focusedInputMetrics()
             guard !Task.isCancelled else { return }
             
-            inputBottomRatio = bottomRatio
+            inputMetrics = metrics
             superview?.layoutIfNeeded()
             let newOffset = calculateFocusedInputOffset(keyboardFrame: keyboardFrame)
 
@@ -546,7 +546,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             let unshifted = frame.offsetBy(dx: 0, dy: focusedInputOffset)
             NSLog("focusedInput: offset %.1f -> %.1f (ratio=%@ viewH=%.1f kbTop=%.1f overlap=%.1f)",
                   focusedInputOffset, newOffset,
-                  bottomRatio.map { String(format: "%.3f", $0) } ?? "nil",
+                  metrics?.bottomRatio.map { String(format: "%.3f", $0) } ?? "nil",
                   unshifted.height, keyboardFrame.minY,
                   max(0, unshifted.maxY - keyboardFrame.minY))
 
@@ -561,20 +561,70 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     }
     
     private func calculateFocusedInputOffset(keyboardFrame: CGRect) -> CGFloat {
-        guard let inputBottomRatio else { return 0 }
-        
+        guard let inputMetrics else { return 0 }
+
         let unshiftedFrame = frame.offsetBy(dx: 0, dy: focusedInputOffset)
         guard unshiftedFrame.height > 1 else { return 0 }
-        
+
         let keyboardOverlap = max(0, unshiftedFrame.maxY - keyboardFrame.minY)
         guard keyboardOverlap > 0 else { return 0 }
-        
-        let focusBottom = unshiftedFrame.height * inputBottomRatio
+
+        // WHERE THE INPUT IS, NOT WHAT FRACTION OF A DIFFERENT BOX IT
+        // SITS AT. This used to be unshiftedFrame.height * ratio, which
+        // re-bases a fraction the content process measured against ITS
+        // viewport onto this view's height. Those are not the same box:
+        // webContentView's top is pinned to our top, so the origin does
+        // agree, but its bottom is pinned past ours by
+        // maxTopToolbarOffset, and our own height moves with chrome
+        // state while the engine's viewport does not follow it. A ratio
+        // cannot express pinch-zoom at all either, because bounds.bottom
+        // is layout-viewport relative and the visual viewport is what
+        // moves.
+        //
+        // So take the absolute number instead: re-base the rect into the
+        // visual viewport with offsetTop, convert CSS px to points with
+        // surfaceWidth / visualWidth - the quotient the find bar already
+        // uses - and the result is measured from the surface top, which
+        // IS our top. No height of ours appears in it.
+        let surfaceWidth = webContentView.bounds.width
+        let focusBottom: CGFloat
+        if let bottomCss = inputMetrics.boundsBottomCss,
+           let vvWidth = inputMetrics.visualWidthCss,
+           vvWidth > 0, surfaceWidth > 0 {
+            let pointsPerCssPx = surfaceWidth / vvWidth
+            focusBottom =
+                (bottomCss - inputMetrics.visualOffsetTopCss) * pointsPerCssPx
+        } else if let ratio = inputMetrics.bottomRatio,
+                  let vvHeight = inputMetrics.visualHeightCss,
+                  let vvWidth = inputMetrics.visualWidthCss,
+                  vvWidth > 0, surfaceWidth > 0 {
+            // Numeric height but no rect: apply the ratio to the
+            // VIEWPORT's height in points rather than to ours.
+            focusBottom = ratio * vvHeight * (surfaceWidth / vvWidth)
+        } else if let ratio = inputMetrics.bottomRatio {
+            // An engine older than the numeric fields. The pre-fix
+            // behaviour, kept only so a mismatched pair still lifts.
+            focusBottom = unshiftedFrame.height * ratio
+        } else {
+            return 0
+        }
+
         let visibleBottom = max(
             0,
             unshiftedFrame.height - keyboardOverlap - UX.focusedInputBottomClearance
         )
-        return max(0, focusBottom - visibleBottom)
+        // AND A CAP THAT CANNOT TRUNCATE. 8da4dfb8 removed the old
+        // min(keyboardOverlap, ...) because it cut legitimate lifts
+        // short. Something should still bound a bad rect, but not
+        // keyboardOverlap + clearance: that is only enough when the
+        // page's bottom edge is our bottom edge, and it is not - the
+        // surface is pinned past us, so an input in that strip needs
+        // more and would be under-lifted by exactly the case this fix
+        // is for. The deepest an input can legitimately sit is the
+        // bottom of the surface, so cap there and nowhere higher.
+        let surfaceBottom = webContentView.frame.maxY
+        return min(max(0, surfaceBottom - visibleBottom),
+                   max(0, focusBottom - visibleBottom))
     }
     
     func resetFocusedInputRelocation(
@@ -583,7 +633,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
     ) {
         focusedInputTask?.cancel()
         focusedInputTask = nil
-        inputBottomRatio = nil
+        inputMetrics = nil
         guard focusedInputOffset != 0 else { return }
         
         focusedInputOffset = 0

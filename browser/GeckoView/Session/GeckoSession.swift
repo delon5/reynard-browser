@@ -481,8 +481,26 @@ public class GeckoSession {
         return GeckoSessionState(state: sessionStateCache)
     }
     
+    /// Where the focused editable element is, as the content process
+    /// measured it.
+    ///
+    /// All CSS px. Convert to points with
+    /// surfaceWidthPoints / visualWidthCss - the same quotient the find
+    /// bar takes through visualViewportCSSWidth. bottomRatio is the old
+    /// shape, kept as the fallback for an engine that predates the
+    /// numeric fields; nothing new should divide by a height the
+    /// embedder chose.
+    public struct FocusedInputMetrics {
+        public let bottomRatio: CGFloat?
+        public let boundsBottomCss: CGFloat?
+        public let visualHeightCss: CGFloat?
+        public let visualWidthCss: CGFloat?
+        public let visualOffsetTopCss: CGFloat
+        public let isSubframe: Bool
+    }
+
     // Keyboard
-    public func focusedInputBottomRatio() async -> CGFloat? {
+    public func focusedInputMetrics() async -> FocusedInputMetrics? {
         let response = try? await dispatcher.query(type: "GeckoView:GetFocusedInputMetrics")
         guard let values = response as? [AnyHashable: Any],
               let bottomRatioValue = values["bottomRatio"] else {
@@ -493,7 +511,7 @@ public class GeckoSession {
             // silent nil as "nothing focused". The actor sends back what
             // it decided in the same payload, so a refusal says WHY.
             let reason = (response as? [AnyHashable: Any])?["reason"] as? String
-            NSLog("focusedInput: no ratio (%@)", reason ?? (response == nil ? "query failed" : "no bottomRatio in payload"))
+            NSLog("focusedInput: no metrics (%@)", reason ?? (response == nil ? "query failed" : "no bottomRatio in payload"))
             return nil
         }
 
@@ -501,11 +519,24 @@ public class GeckoSession {
         let describe = { (key: String) -> String in
             (values[key] as? String) ?? String(describing: values[key] ?? "?")
         }
-        NSLog("focusedInput: ratio=%@ tag=%@ editable=%@ frame=%@ vh=%@ bottom=%@",
+        let number = { (key: String) -> CGFloat? in
+            values[key].flatMap { PayloadValue.cgFloat($0) }
+        }
+        let metrics = FocusedInputMetrics(
+            bottomRatio: ratio,
+            boundsBottomCss: number("boundsBottomCss"),
+            visualHeightCss: number("visualHeightCss"),
+            visualWidthCss: number("visualWidthCss"),
+            visualOffsetTopCss: number("visualOffsetTopCss") ?? 0,
+            isSubframe: (values["isSubframe"] as? Bool) ?? false
+        )
+        NSLog("focusedInput: ratio=%@ tag=%@ editable=%@ frame=%@ vh=%@ bottom=%@ | vvW=%@ offTop=%.1f",
               ratio.map { String(format: "%.3f", $0) } ?? "nil",
               describe("tag"), describe("contentEditable"),
-              describe("inSubframe"), describe("viewportHeight"), describe("boundsBottom"))
-        return ratio
+              describe("inSubframe"), describe("viewportHeight"), describe("boundsBottom"),
+              metrics.visualWidthCss.map { String(format: "%.1f", $0) } ?? "nil",
+              metrics.visualOffsetTopCss)
+        return metrics
     }
     
     /// Whether this page's CSS uses env(safe-area-inset-bottom),

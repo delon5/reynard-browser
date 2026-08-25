@@ -3861,7 +3861,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3919,495 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3919,510 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4290,8 +4290,23 @@ index 9ca6e15..18d37f0 100644
 +    // an iframe the ratio describes its position within that frame - a
 +    // different thing from the position on screen, which is what the
 +    // embedder applies it to. inSubframe is what distinguishes that case.
++    const vv = win.visualViewport;
 +    return {
 +      bottomRatio: Math.max(0, Math.min(2, bounds.bottom / viewportHeight)),
++      // ABSOLUTE GEOMETRY, all CSS px, so the embedder does not have to
++      // re-base a ratio onto a height that is not the one it was
++      // measured against. boundsBottomCss is layout-viewport relative,
++      // as getBoundingClientRect gives it; visualOffsetTopCss re-bases
++      // it into the visual viewport, which is what pinch-zoom moves and
++      // a ratio cannot express; visualWidthCss is the denominator for
++      // the px-to-point conversion, the same quotient the find bar
++      // already takes through visualViewportCSSWidth.
++      boundsBottomCss: bounds.bottom,
++      visualHeightCss: viewportHeight,
++      visualWidthCss: (vv && vv.width > 0 ? vv.width : win.innerWidth) || 0,
++      visualOffsetTopCss:
++        vv && Number.isFinite(vv.offsetTop) ? vv.offsetTop : 0,
++      isSubframe: win.top !== win,
 +      tag: focusedElement.localName,
 +      contentEditable: String(focusedElement.isContentEditable),
 +      inSubframe: String(win.top !== win),
@@ -4357,7 +4372,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4525,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4540,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4379,7 +4394,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4555,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4570,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
