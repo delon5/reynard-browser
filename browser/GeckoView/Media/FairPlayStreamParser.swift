@@ -9612,9 +9612,36 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             return found
         }
         guard let request else {
+            // KEEP IT ANYWAY - see mse_fix_190's docstring. The keep
+            // below this guard only ever runs on a hit, so a licence
+            // that arrives BEFORE its request was being discarded by the
+            // one path built to hold licences.
+            //
+            // Capture 9fc42787: two entries thrown away at 249666.609,
+            // and the request for the very key one of them carried
+            // raised 809ms later at 249667.418. Netflix answered early
+            // because it already had the key - the title had been
+            // playing a moment before.
+            //
+            // Only the parser's own content id, which is the key id in
+            // text and is what the replay looks up. A pssh content id
+            // names no key by itself and the replay would never find it.
+            var reynardKept = false
+            let reynardMarker = "reynard-keyid:"
+            if contentId.hasPrefix(reynardMarker) {
+                let hex = String(contentId.dropFirst(reynardMarker.count))
+                if hex.count == 32, hex.allSatisfy({ $0.isHexDigit }) {
+                    withLock { () -> Void in licenceByKeyId[hex] = ckc }
+                    reynardKept = true
+                }
+            }
             FairPlayStreamParser.log(
                 "session \(sessionId) has no key request outstanding for id "
-                + "\(contentId) - licence not applied")
+                + "\(contentId) - licence not applied"
+                + (reynardKept
+                    ? ", but KEPT (\(ckc.count) bytes) for the request that "
+                        + "has not been raised yet"
+                    : " and not kept - that id names no key on its own"))
             return false
         }
         request.processContentKeyResponse(
