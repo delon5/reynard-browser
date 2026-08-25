@@ -156,6 +156,14 @@ public final class FairPlayStreamParser: NSObject {
         /// is swapped for the one being asked about, so one template
         /// serves every key in the presentation.
         var templateSinf: Data?
+        /// The stream key that harvested templateSinf.
+        ///
+        /// ADDED - see mse_fix_189's docstring. A template outlives its
+        /// title otherwise, and sinfInitialisationJSON prefers a
+        /// template over the pssh's key id on the grounds that it is
+        /// "the media's own KID" - which stops being true the moment
+        /// that media is gone.
+        var templateFrom: String?
         /// The parser's own specifier for each key, by the tenc KID its
         /// sinf names.
         ///
@@ -3005,6 +3013,8 @@ public final class FairPlayStreamParser: NSObject {
             let verdict = withState { () -> String? in
                 guard let held = entry.templateSinf else {
                     entry.templateSinf = sinf
+                    // WHOSE TEMPLATE - see mse_fix_189's docstring.
+                    entry.templateFrom = key
                     return "kept"
                 }
                 guard let harvested,
@@ -3012,6 +3022,7 @@ public final class FairPlayStreamParser: NSObject {
                     return nil
                 }
                 entry.templateSinf = sinf
+                entry.templateFrom = key
                 return "REPLACED"
             }
             if let verdict {
@@ -7900,6 +7911,28 @@ public final class FairPlayStreamParser: NSObject {
         // arrives seconds before that site's layer is built rather than
         // milliseconds after.
         Self.noteSinkOwnerGone(slot.displayLayer, owner: key)
+        // AND THE KEY REQUEST TEMPLATE GOES WITH IT - see mse_fix_189's
+        // docstring. In capture 339c986e the template harvested here at
+        // 247357.198 addressed the NEXT title's key request at
+        // 247369.068, which timed out twenty seconds later and left the
+        // page without a licence, without a source buffer and without a
+        // picture.
+        let droppedTemplate = withState { () -> Data? in
+            guard let entry = entries[sessionOf(key)],
+                  entry.templateFrom == key,
+                  let going = entry.templateSinf else { return nil }
+            entry.templateSinf = nil
+            entry.templateFrom = nil
+            return going
+        }
+        if let droppedTemplate {
+            Self.log("stream \(key) took the key request template with it "
+                     + "- tenc KID "
+                     + (Self.keyIdentifier(inTenc: droppedTemplate)
+                        .map { Self.hexBytes($0) } ?? "absent")
+                     + ". The next title synthesises from its own pssh "
+                     + "rather than inheriting this one's key.")
+        }
         Self.log("stream \(key) torn down - \(why)"
                  + " - \(slot.pending.count) video and "
                  + "\(slot.audioPending.count) audio samples went with it, "
