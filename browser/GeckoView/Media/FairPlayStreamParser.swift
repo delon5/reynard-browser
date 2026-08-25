@@ -6497,6 +6497,27 @@ public final class FairPlayStreamParser: NSObject {
             let observer = slot.failObserver
             slot.timebaseFrom = "adopt"
             slot.displayLayer = sink
+            // WHOSE SINK THIS IS - see mse_fix_186's docstring. The
+            // compositor's sink is one object shared across the whole
+            // process, and the session that adopts it establishes
+            // content protection on it. Remembering which stream took it
+            // is what lets the teardown below know the next site will
+            // need a different one.
+            //
+            // State lock then this one, never the other way, which is
+            // the order livePictureLock is used in too.
+            //
+            // WHICH stream, not just which object. Two streams can hold
+            // the same sink at once - in capture bd67f27c child-6 and
+            // child-9 both did - so identity alone would let the FIRST
+            // one's teardown throw away a sink the SECOND is still
+            // playing through, which is the 1-2s of black 175 exists to
+            // prevent. The last adopter owns it; anyone else tearing
+            // down leaves it alone.
+            Self.freshSinkLock.lock()
+            Self.compositorSink = sink
+            Self.compositorSinkOwner = streamKey
+            Self.freshSinkLock.unlock()
             slot.failObserver = nil
             slot.drainArmed = false
             slot.layerAttached = true
@@ -7159,6 +7180,44 @@ public final class FairPlayStreamParser: NSObject {
     /// Cleared as it is read, because one refusal wants one rebuild and
     /// a flag that stayed raised would rebuild the sink on every commit
     /// - which is the churn 175 exists to prevent.
+    /// The layer the compositor last handed over.
+    ///
+    /// ADDED - see mse_fix_186's docstring. Not for rendering - the slot
+    /// holds that - but so a teardown can tell whether the stream dying
+    /// is the one that established content protection on the shared
+    /// sink. Weak-by-identity in effect: it is only ever compared with
+    /// ===, and cleared when its owner goes.
+    private static var compositorSink: AVSampleBufferDisplayLayer?
+    /// And the stream that took it - see the adopt site for why identity
+    /// alone is not enough.
+    private static var compositorSinkOwner: String?
+
+    /// The stream holding the compositor's sink has been torn down.
+    ///
+    /// ADDED - see mse_fix_186's docstring. In capture 72319e13 Apple
+    /// TV's stream died at 243195.278 and Netflix's layer was built at
+    /// 243211.568 - sixteen seconds later, and still handed the sink
+    /// Apple TV's key session had claimed. This is the sixteen seconds.
+    fileprivate static func noteSinkOwnerGone(
+        _ layer: AVSampleBufferDisplayLayer?, owner: String) {
+        guard let layer else { return }
+        var wasOurs = false
+        freshSinkLock.lock()
+        if compositorSink === layer, compositorSinkOwner == owner {
+            compositorSink = nil
+            compositorSinkOwner = nil
+            freshSinkWanted = true
+            wasOurs = true
+        }
+        freshSinkLock.unlock()
+        // Outside the lock: logging is not what a lock is for.
+        if wasOurs {
+            log("the compositor's sink went with the stream that owned it "
+                + "- the next site gets a fresh one rather than a layer it "
+                + "cannot claim")
+        }
+    }
+
     @objc public static func wantsFreshSink() -> Bool {
         freshSinkLock.lock()
         let wanted = freshSinkWanted
@@ -7762,6 +7821,11 @@ public final class FairPlayStreamParser: NSObject {
         // ADDED - see mse_fix_105's docstring. A torn-down slot takes
         // its queues with it, and until now that was the largest of
         // Netflix's unreported losses.
+        // AND THE SHARED SINK GOES WITH IT - see mse_fix_186's
+        // docstring. This is the moment the next site needs, and it
+        // arrives seconds before that site's layer is built rather than
+        // milliseconds after.
+        Self.noteSinkOwnerGone(slot.displayLayer, owner: key)
         Self.log("stream \(key) torn down - \(why)"
                  + " - \(slot.pending.count) video and "
                  + "\(slot.audioPending.count) audio samples went with it, "
