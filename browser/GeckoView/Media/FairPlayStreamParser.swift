@@ -768,14 +768,32 @@ public final class FairPlayStreamParser: NSObject {
         // request JSON than anything reconstructible from a PSSH - it
         // has the actual sample format and constant IV.
         if let sinf = Self.sinfBox(in: initSegment) {
-            let isNew = withState { () -> Bool in
-                guard entry.templateSinf == nil else { return false }
+            // OR REPLACE IT WHEN THE TITLE CHANGES - see mse_fix_188's
+            // docstring. A session is a content process, not a title, so
+            // taking this once meant the second video on a page asked
+            // Netflix for the first video's key for the rest of the
+            // session.
+            let verdict = withState { () -> String? in
+                guard let held = entry.templateSinf else {
+                    entry.templateSinf = sinf
+                    return "kept"
+                }
+                // Only on a real change: the same title's segments carry
+                // the same sinf over and over, and re-taking it on every
+                // one would be work for nothing.
+                guard let fresh = Self.keyIdentifier(inTenc: sinf),
+                      fresh != Self.keyIdentifier(inTenc: held) else {
+                    return nil
+                }
                 entry.templateSinf = sinf
-                return true
+                return "REPLACED"
             }
-            if isNew {
-                Self.log("session \(sessionId) kept a \(sinf.count)-byte sinf "
-                         + "from this segment as the key request template")
+            if let verdict {
+                Self.log("session \(sessionId) \(verdict) a "
+                         + "\(sinf.count)-byte sinf from this segment as the "
+                         + "key request template - tenc KID "
+                         + (Self.keyIdentifier(inTenc: sinf)
+                            .map { Self.hexBytes($0) } ?? "absent"))
             }
         }
         Self.log("session \(sessionId) appended \(initSegment.count) bytes")
@@ -2964,7 +2982,10 @@ public final class FairPlayStreamParser: NSObject {
         // gated on the session having no template: that gate meant the
         // SECOND stream of a session never scanned at all, and each
         // stream has to know about its own track. The template half is
-        // still session-wide and still taken only once.
+        // still session-wide, and NO LONGER taken only once - see
+        // mse_fix_188. It is replaced whenever a sinf names a different
+        // tenc KID, because a session is a content process and not a
+        // title.
         if segment.count <= 65536, let sinf = Self.sinfBox(in: segment) {
             let firstForStream = withState { () -> Bool in
                 guard !slot.trackIsProtected else { return false }
@@ -2976,11 +2997,26 @@ public final class FairPlayStreamParser: NSObject {
                          + "its init segment, so this route renders it even "
                          + "when the parser hands back clear bytes")
             }
-            if withState({ entry.templateSinf == nil }) {
-                let harvested = Self.keyIdentifier(inTenc: sinf)
-                withState { entry.templateSinf = sinf }
-                Self.log("stream \(stream) kept a \(sinf.count)-byte sinf "
-                         + "as the key request template - tenc KID "
+            // OR REPLACE IT WHEN THE TITLE CHANGES - see mse_fix_188's
+            // docstring. This is the site that took 09d921cb from the
+            // first video in capture bc046d79 and then addressed every
+            // request the second video raised with it.
+            let harvested = Self.keyIdentifier(inTenc: sinf)
+            let verdict = withState { () -> String? in
+                guard let held = entry.templateSinf else {
+                    entry.templateSinf = sinf
+                    return "kept"
+                }
+                guard let harvested,
+                      harvested != Self.keyIdentifier(inTenc: held) else {
+                    return nil
+                }
+                entry.templateSinf = sinf
+                return "REPLACED"
+            }
+            if let verdict {
+                Self.log("stream \(stream) \(verdict) a \(sinf.count)-byte "
+                         + "sinf as the key request template - tenc KID "
                          + (harvested.map { Self.hexBytes($0) } ?? "absent"))
             }
         }
