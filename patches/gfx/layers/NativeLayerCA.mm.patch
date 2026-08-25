@@ -467,7 +467,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2100,160 @@
+@@ -1770,6 +2100,200 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -598,6 +598,46 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +              printf_stderr("NativeLayerCA: %s the MSE sink\n",
 +                            reynardFresh ? "built" : "REUSING");
 +              ReynardMSEAttachLayer(mContentCALayer);
++              // AND IF THE PARSER COULD NOT CLAIM IT, SWAP IT NOW.
++              //
++              // The check above runs BEFORE the attach, and the attach
++              // is where the refusal happens - synchronously, inside
++              // this call. So the flag it raises is always set just
++              // after this pass has read it, and capture bd67f27c is
++              // that exactly: REUSING at 243211.568, refused at .571,
++              // and no further rebuild for the remaining 3,800 lines of
++              // the session. Zero pictures after it, and the stall line
++              // reads "ready=false status=1 error=nil clock=2366.359
++              // head=2359.816" - a healthy layer, full of samples it
++              // cannot decrypt, its clock 6.5s past the head it will
++              // never show.
++              //
++              // Waiting for the next rebuild was never going to work
++              // here. Ask again on the way out instead.
++              //
++              // Not when the sink was just built: a brand new layer has
++              // established no content protection, so a refusal on one
++              // means something other than ownership and another
++              // rebuild would not fix it. Asked unconditionally so the
++              // flag is consumed either way and cannot linger into the
++              // next rebuild.
++              bool reynardRefused = ReynardMSEWantsFreshSink();
++              if (reynardRefused && !reynardFresh) {
++                printf_stderr("%s\n",
++                              "NativeLayerCA: the sink was refused by this "
++                              "session - swapping it before it is parented");
++                // Both references this frame owns. The parser has taken
++                // its own by now, so the old layer outlives this and is
++                // retired the way any superseded sink is.
++                [reynardMSESink release];
++                [mContentCALayer release];
++                reynardMSESink = [[AVSampleBufferDisplayLayer layer] retain];
++                reynardMSESink.videoGravity =
++                    AVLayerVideoGravityResizeAspect;
++                reynardMSESink.name = @"org.reynard.mse.sink";
++                mContentCALayer = [reynardMSESink retain];
++                ReynardMSEAttachLayer(mContentCALayer);
++              }
 +            } else {
 +              mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
 +              ((AVSampleBufferDisplayLayer*)mContentCALayer).videoGravity =
@@ -628,7 +668,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2267,7 @@
+@@ -1783,6 +2307,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -636,7 +676,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2295,12 @@
+@@ -1810,8 +2335,12 @@
      }
    }
  
@@ -651,7 +691,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2485,7 @@
+@@ -1996,7 +2525,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -660,7 +700,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2501,7 @@
+@@ -2012,6 +2541,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
