@@ -1,7 +1,7 @@
 diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 --- a/gfx/layers/NativeLayerCA.mm
 +++ b/gfx/layers/NativeLayerCA.mm
-@@ -39,6 +39,35 @@
+@@ -39,6 +39,59 @@
  @end
  
  namespace mozilla {
@@ -34,10 +34,34 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +// the next, and only the parser sees that refusal.
 +bool ReynardMSEWantsFreshSink();
 +
++// COMPOSITOR-SIDE STATE FOR THE REFUSAL POLL - see the poll in
++// NativeLayerCA::ApplyChanges and the sink block in
++// NativeLayerCARepresentation::ApplyChanges. File-scope rather than
++// function-local because the poll that raises them and the block that
++// acts on them are two functions apart. Touched only from commit
++// passes, which is the same exposure every reynard static in this
++// file already accepts.
++//
++// The latch: a refusal has been consumed from the parser and the
++// rebuild it demands has not built the fresh sink yet. The parser's
++// flag clears on read - whoever asks owns the answer - and the asker
++// (the poll) and the actor (the sink block) run a scrap apart, so the
++// consumed answer is parked here in between.
++static bool reynardMSESinkRefused = false;
++
++// Whether the last sink the block handed out was BUILT rather than
++// reused. A refusal against a freshly built sink cannot be an
++// ownership problem - a brand new layer has established no content
++// protection - so the poll leaves the flag alone in that state,
++// exactly as the swap this replaces declined to swap on a fresh one:
++// rebuilding on such a refusal is how a persistent non-ownership
++// failure becomes a rebuild on every commit.
++static bool reynardMSESinkWasFresh = false;
++
  namespace layers {
  
  using gfx::DataSourceSurface;
-@@ -167,6 +196,7 @@
+@@ -167,6 +220,7 @@
  
    [mOnscreenRootCALayer release];
    [mOffscreenRootCALayer release];
@@ -45,7 +69,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  }
  
  already_AddRefed<NativeLayer> NativeLayerRootCA::CreateLayer(
-@@ -236,6 +266,122 @@
+@@ -236,6 +290,122 @@
      layerCA->SetBackingScale(mBackingScale);
      layerCA->SetRootWindowIsFullscreen(mWindowIsFullscreen);
      layersCA.AppendElement(std::move(layerCA));
@@ -168,7 +192,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    if (layersCA != mSublayers) {
-@@ -320,6 +466,11 @@
+@@ -320,6 +490,11 @@
      EmitTelemetryForVideoLowPower(videoLowPower);
    }
  
@@ -180,7 +204,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    return true;
  }
  
-@@ -389,6 +540,19 @@
+@@ -389,6 +564,19 @@
      WhichRepresentation aRepresentation, CALayer* aRootCALayer,
      const nsTArray<RefPtr<NativeLayerCA>>& aSublayers,
      bool aMutatedLayerStructure, bool aWindowIsFullscreen) {
@@ -200,7 +224,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    UpdateType updateRequired =
        GetMaxUpdateRequired(aRepresentation, aSublayers, aMutatedLayerStructure);
    if (updateRequired == NativeLayerCA::UpdateType::OnlyVideo) {
-@@ -417,11 +581,71 @@
+@@ -417,11 +605,71 @@
    NSMutableArray<CALayer*>* sublayers =
        [NSMutableArray arrayWithCapacity:aSublayers.Length()];
    bool mustRebuild = updateRequired == UpdateType::All;
@@ -272,7 +296,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      }
    }
  
-@@ -921,9 +1145,51 @@
+@@ -921,9 +1169,51 @@
  }
  
  bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
@@ -324,7 +348,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1558,17 @@
+@@ -1292,6 +1582,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -342,7 +366,65 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1469,7 +1746,8 @@
+@@ -1462,15 +1763,67 @@
+   }
+ 
+   auto& r = GetRepresentation(aRepresentation);
++  // REYNARD: did the parser refuse the sink AFTER it was attached?
++  //
++  // CORRECTS mse_fix_185's post-attach re-read, which believed the
++  // refusal happens synchronously inside ReynardMSEAttachLayer. It
++  // cannot: the attach hops to the main thread with
++  // NS_DispatchToMainThread, which queues the runnable even when the
++  // caller is already main, and the refusal is raised inside
++  // adopt -> joinKeySession -> addRecipient within that runnable -
++  // strictly after the commit pass that attached has returned. The
++  // teardown case still worked, because there the flag went up
++  // seconds before the next build consumed it; the no-teardown case
++  // - a second tab claiming the sink while the first stream is still
++  // live - stayed black until an unrelated rebuild happened by luck,
++  // because the sink block only runs inside a rebuild.
++  //
++  // So ask on the way IN, on every commit that reaches this layer.
++  // The gate keeps the ask free where it cannot apply: only the
++  // onscreen representation, only a DRM layer, and only while its
++  // content layer IS the shared MSE sink - the one object a refusal
++  // can be about. A non-DRM layer pays one bool test; the sink's
++  // layer pays one uncontended NSLock, the price the liveness query
++  // already pays per commit. Nothing below mutates anything unless
++  // the parser really was refused, so the healthy path cannot churn.
++  //
++  // NOT when the sink was BUILT by the last pass rather than reused:
++  // a brand new layer has established no content protection, so a
++  // refusal against one is not an ownership problem and another
++  // rebuild would not fix it. The test sits before the ask, so in
++  // that state the flag is not consumed here at all and the next
++  // real rebuild's own check drains it, as it always has.
++  //
++  // A consumed refusal is parked in the latch - the parser's flag
++  // clears on read, and the sink block that acts runs a scrap later
++  // - and turned into mMutatedSpecializeVideo, the same "rebuild the
++  // video layer on the next update" lever the enqueue-failure paths
++  // already pull. An OnlyVideo pass cannot carry that flag - the
++  // representation asserts !mMutatedSpecializeVideo on that path -
++  // so the pass is failed instead, which makes CommitRepresentation
++  // fall through to the full update in this same commit.
++  if (aRepresentation == WhichRepresentation::ONSCREEN && mIsDRM &&
++      [r.mContentCALayer.name isEqualToString:@"org.reynard.mse.sink"] &&
++      !reynardMSESinkWasFresh && ReynardMSEWantsFreshSink()) {
++    reynardMSESinkRefused = true;
++    r.mMutatedSpecializeVideo = true;
++    printf_stderr("%s\n",
++                  "NativeLayerCA: the parser refused the sink it was "
++                  "handed - rebuilding the video layer for a fresh one");
++    if (aUpdate == UpdateType::OnlyVideo) {
++      return false;
++    }
++  }
+   if (r.mMutatedSpecializeVideo) {
+     *aMustRebuild = true;
+   }
+   bool hadExtentBeforeUpdate = r.UnderlyingCALayer() != nullptr;
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
@@ -352,7 +434,8 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-@@ -1521,12 +1799,38 @@
+   }
+@@ -1521,12 +1874,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -392,7 +475,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +1944,11 @@
+@@ -1640,6 +2019,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -404,7 +487,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +1989,11 @@
+@@ -1680,7 +2064,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -417,7 +500,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +2007,14 @@
+@@ -1694,13 +2082,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -433,7 +516,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +2031,23 @@
+@@ -1717,7 +2106,23 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -458,7 +541,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +2091,7 @@
+@@ -1761,7 +2166,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -467,7 +550,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2100,200 @@
+@@ -1770,6 +2175,203 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -562,7 +645,25 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +              // docstring. 183's test is the layer having FAILED. This
 +              // one is healthy and simply belongs to the site that had
 +              // the tab before, which reads as sound with no picture.
-+              bool reynardStale = ReynardMSEWantsFreshSink();
++              //
++              // TWO SOURCES, ONE ANSWER, AND EACH IS ACTED ON. When a
++              // refusal lands while a sink is on screen, the poll in
++              // NativeLayerCA::ApplyChanges consumes the parser's
++              // flag - that consumption is what forced this rebuild -
++              // and parks it in the latch read first here. The direct
++              // ask stays for a flag raised while NO sink was on
++              // screen to poll through: a teardown (noteSinkOwnerGone)
++              // followed by the next site's first build, which is the
++              // case this check was born for. Latch first, and the
++              // parser only when the latch was clear, so a flag
++              // re-raised between the poll and this rebuild stays up
++              // for the next poll to act on rather than draining into
++              // a build that is already making a fresh sink.
++              bool reynardStale = reynardMSESinkRefused;
++              reynardMSESinkRefused = false;
++              if (!reynardStale) {
++                reynardStale = ReynardMSEWantsFreshSink();
++              }
 +              if (reynardMSESink &&
 +                  (reynardStale ||
 +                   reynardMSESink.status ==
@@ -580,6 +681,13 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +                reynardMSESink = nil;
 +              }
 +              bool reynardFresh = (reynardMSESink == nil);
++              // For the refusal poll: a refusal against a sink BUILT
++              // fresh for this attach is not an ownership problem - a
++              // brand new layer has established no content protection
++              // - and a rebuild would not fix it. Recording which
++              // kind this build was is how the poll knows to leave
++              // the flag alone in that state.
++              reynardMSESinkWasFresh = reynardFresh;
 +              if (reynardFresh) {
 +                reynardMSESink = [[AVSampleBufferDisplayLayer layer] retain];
 +                reynardMSESink.videoGravity =
@@ -598,46 +706,24 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +              printf_stderr("NativeLayerCA: %s the MSE sink\n",
 +                            reynardFresh ? "built" : "REUSING");
 +              ReynardMSEAttachLayer(mContentCALayer);
-+              // AND IF THE PARSER COULD NOT CLAIM IT, SWAP IT NOW.
-+              //
-+              // The check above runs BEFORE the attach, and the attach
-+              // is where the refusal happens - synchronously, inside
-+              // this call. So the flag it raises is always set just
-+              // after this pass has read it, and capture bd67f27c is
-+              // that exactly: REUSING at 243211.568, refused at .571,
-+              // and no further rebuild for the remaining 3,800 lines of
-+              // the session. Zero pictures after it, and the stall line
-+              // reads "ready=false status=1 error=nil clock=2366.359
-+              // head=2359.816" - a healthy layer, full of samples it
-+              // cannot decrypt, its clock 6.5s past the head it will
-+              // never show.
-+              //
-+              // Waiting for the next rebuild was never going to work
-+              // here. Ask again on the way out instead.
-+              //
-+              // Not when the sink was just built: a brand new layer has
-+              // established no content protection, so a refusal on one
-+              // means something other than ownership and another
-+              // rebuild would not fix it. Asked unconditionally so the
-+              // flag is consumed either way and cannot linger into the
-+              // next rebuild.
-+              bool reynardRefused = ReynardMSEWantsFreshSink();
-+              if (reynardRefused && !reynardFresh) {
-+                printf_stderr("%s\n",
-+                              "NativeLayerCA: the sink was refused by this "
-+                              "session - swapping it before it is parented");
-+                // Both references this frame owns. The parser has taken
-+                // its own by now, so the old layer outlives this and is
-+                // retired the way any superseded sink is.
-+                [reynardMSESink release];
-+                [mContentCALayer release];
-+                reynardMSESink = [[AVSampleBufferDisplayLayer layer] retain];
-+                reynardMSESink.videoGravity =
-+                    AVLayerVideoGravityResizeAspect;
-+                reynardMSESink.name = @"org.reynard.mse.sink";
-+                mContentCALayer = [reynardMSESink retain];
-+                ReynardMSEAttachLayer(mContentCALayer);
-+              }
++              // AND NOTHING RE-ASKS ON THE WAY OUT. A post-attach
++              // re-read of ReynardMSEWantsFreshSink sat here, built
++              // on the belief that the refusal happens synchronously
++              // inside the attach. It does not: ReynardMSEAttachLayer
++              // hops to the main thread with NS_DispatchToMainThread,
++              // which queues the runnable even when the caller is
++              // already main, and the refusal is raised inside
++              // adopt -> joinKeySession -> addRecipient within that
++              // runnable - strictly after this whole commit pass has
++              // returned. So the re-read ran before the flag could
++              // possibly be up and consumed nothing, and capture
++              // bd67f27c's "REUSING at 243211.568, refused at .571"
++              // is the queue's delay, not a synchronous call - which
++              // is why that session never swapped and never showed a
++              // picture again. The refusal is caught by the per-commit
++              // poll in NativeLayerCA::ApplyChanges instead, which
++              // forces this block to run again with the latch set
++              // within a frame or two of the flag going up.
 +            } else {
 +              mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
 +              ((AVSampleBufferDisplayLayer*)mContentCALayer).videoGravity =
@@ -668,7 +754,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2307,7 @@
+@@ -1783,6 +2385,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -676,7 +762,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2335,12 @@
+@@ -1810,8 +2413,12 @@
      }
    }
  
@@ -691,7 +777,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2525,7 @@
+@@ -1996,7 +2603,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -700,7 +786,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2541,7 @@
+@@ -2012,6 +2619,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
