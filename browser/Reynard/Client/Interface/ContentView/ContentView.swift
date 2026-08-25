@@ -584,26 +584,47 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // So take the absolute number instead: re-base the rect into the
         // visual viewport with offsetTop, convert CSS px to points with
         // surfaceWidth / visualWidth - the quotient the find bar already
-        // uses - and the result is measured from the surface top, which
-        // IS our top. No height of ours appears in it.
+        // uses - and the result is measured from the surface top. No
+        // height of ours appears in it.
+        //
+        // BUT THE SURFACE TOP IS NOT ALWAYS OUR TOP. webContentView's
+        // layout pins it to our top, and toolbarAlignedTransform then
+        // slides it up by toolbarTopOffset - zero in phone mode, where
+        // the chrome is all at the bottom, but the slid or condensed
+        // top chrome in compact and pad modes. visibleBottom and the
+        // cap below are measured from OUR top, so comparing a
+        // surface-relative focusBottom against them overstates the
+        // input's position by toolbarTopOffset: an over-lift of up to
+        // the top-chrome height, invisible to the phone captures only
+        // because their mode never sets a top offset. The transform is
+        // a pure translation (x is only ever the history-swipe pan), so
+        // frame.minY IS the slid origin - the cap already trusts
+        // frame.maxY for exactly this reason - and one snapshot both
+        // re-bases focusBottom into our coordinates and keeps the
+        // surface's two edges from the same read.
+        let surfaceFrame = webContentView.frame
         let surfaceWidth = webContentView.bounds.width
         var focusBottom: CGFloat
         if let bottomCss = inputMetrics.boundsBottomCss,
            let vvWidth = inputMetrics.visualWidthCss,
            vvWidth > 0, surfaceWidth > 0 {
             let pointsPerCssPx = surfaceWidth / vvWidth
-            focusBottom =
-                (bottomCss - inputMetrics.visualOffsetTopCss) * pointsPerCssPx
+            focusBottom = surfaceFrame.minY
+                + (bottomCss - inputMetrics.visualOffsetTopCss) * pointsPerCssPx
         } else if let ratio = inputMetrics.bottomRatio,
                   let vvHeight = inputMetrics.visualHeightCss,
                   let vvWidth = inputMetrics.visualWidthCss,
                   vvWidth > 0, surfaceWidth > 0 {
             // Numeric height but no rect: apply the ratio to the
-            // VIEWPORT's height in points rather than to ours.
-            focusBottom = ratio * vvHeight * (surfaceWidth / vvWidth)
+            // VIEWPORT's height in points rather than to ours. Surface
+            // relative like the rect above, so re-based the same way.
+            focusBottom = surfaceFrame.minY
+                + ratio * vvHeight * (surfaceWidth / vvWidth)
         } else if let ratio = inputMetrics.bottomRatio {
             // An engine older than the numeric fields. The pre-fix
             // behaviour, kept only so a mismatched pair still lifts.
+            // Deliberately NOT re-based: this one is a fraction of OUR
+            // height and never referenced the surface.
             focusBottom = unshiftedFrame.height * ratio
         } else {
             return 0
@@ -657,8 +678,10 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // surface is pinned past us, so an input in that strip needs
         // more and would be under-lifted by exactly the case this fix
         // is for. The deepest an input can legitimately sit is the
-        // bottom of the surface, so cap there and nowhere higher.
-        let surfaceBottom = webContentView.frame.maxY
+        // bottom of the surface, so cap there and nowhere higher -
+        // read from the same frame snapshot focusBottom's origin came
+        // from, so the surface's two edges cannot disagree mid-slide.
+        let surfaceBottom = surfaceFrame.maxY
         return min(max(0, surfaceBottom - visibleBottom),
                    max(0, focusBottom - visibleBottom))
     }

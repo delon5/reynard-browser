@@ -9359,6 +9359,30 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     /// identifier, which both routes carry and which is the only thing
     /// the two have in common.
     private var licenceByKeyId: [String: Data] = [:]
+    /// Key ids whose cached licence has been served BACK OUT of that
+    /// cache - by the replay in makeSPC or by the three-second fallback
+    /// - since it was last stored.
+    ///
+    /// ADDED - see mse_fix_194's docstring. The replay has no freshness
+    /// test: a kept CKC can outlive its lease - 190 says so outright -
+    /// and when it does, 187's accepted retry raises a fresh request,
+    /// that request claims no origination, takes the reynard-keyid path
+    /// and is fed the SAME expired bytes, around again until the cap is
+    /// spent, with the page never asked. This set is how the retry path
+    /// knows the failing bytes were the cache's own: on a retry offer
+    /// or an outright failure for a key marked here, the entry is
+    /// evicted so the retried request falls through the replay check to
+    /// report(spc:) and the page is asked for a fresh licence. The mark
+    /// goes with the entry, so one cache-served answer buys exactly one
+    /// eviction and nothing cycles.
+    ///
+    /// Keyed by the same 32-character lowercase hex as licenceByKeyId,
+    /// deliberately NOT the way keyRetries is keyed: String(describing:)
+    /// renders every 16-byte Data identifier as "Optional(16 bytes)",
+    /// and a collision in a retry COUNTER is merely conservative where
+    /// a collision here would evict the wrong key's licence. Guarded by
+    /// the one lock above, like everything else per-request.
+    private var replayedKeyIds: Set<String> = []
     /// Whether any key request has ever arrived for this session.
     private var requestArrived = false
     /// How many have. The watchdog needs the COUNT, not the flag: a
@@ -9394,6 +9418,41 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         lock.lock()
         defer { lock.unlock() }
         return body()
+    }
+
+    /// Drop a cached licence that has just been proven bad.
+    ///
+    /// ADDED - see mse_fix_194's docstring. Only for a request this
+    /// delegate answered FROM THE CACHE - the replay in makeSPC or the
+    /// three-second fallback - which is the one case where the failing
+    /// bytes and licenceByKeyId's entry are known to be the same bytes.
+    /// A page-served licence that fails is the page's answer failing,
+    /// and the cached copy may still be the only thing able to answer a
+    /// later request the page will ignore, so it is left alone.
+    ///
+    /// The mark is consumed with the entry: one cache-served answer
+    /// buys exactly one eviction, so no eviction loop can form. Takes
+    /// the delegate's own lock, alone, with nothing called under it.
+    private func evictReplayedLicence(for keyRequest: AVContentKeyRequest,
+                                      on occasion: String) {
+        guard let identifier = keyRequest.identifier as? Data,
+              identifier.count == 16 else {
+            return
+        }
+        let hex = identifier.map { String(format: "%02x", $0) }.joined()
+        let evictedBytes: Int? = withLock { () -> Int? in
+            guard replayedKeyIds.remove(hex) != nil else {
+                return nil
+            }
+            return licenceByKeyId.removeValue(forKey: hex)?.count
+        }
+        // Outside the lock: logging is not what a lock is for.
+        guard let evictedBytes else { return }
+        FairPlayStreamParser.log(
+            "session \(sessionId) evicting the cached licence for key "
+            + "\(hex) (\(evictedBytes) bytes) on \(occasion) - it was "
+            + "served from the cache and has now failed, so the next "
+            + "request for this key asks the page instead")
     }
 
     /// The FPS application certificate. Assigning one releases every
@@ -9451,6 +9510,14 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             "session \(sessionId) key request FAILED - status="
             + "\(keyRequest.status.rawValue) identifier="
             + "\(String(describing: keyRequest.identifier)) error=\(err)")
+        // A request that dies holding cache-served bytes must not
+        // leave them behind - see mse_fix_194's docstring. shouldRetry
+        // evicts on the offer, but AVFoundation does not promise an
+        // offer before every failure, and a marked entry that survives
+        // to here would be replayed into the very next request for
+        // this key. Costs nothing when the offer already evicted: the
+        // mark went with the entry.
+        evictReplayedLicence(for: keyRequest, on: "an outright failure")
     }
 
     func contentKeySession(
@@ -9482,6 +9549,20 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 : "declining - \(nth - 1) attempts already spent on this "
                     + "key, and a server that keeps minting expired "
                     + "leases must not be asked forever"))
+        // AND EVICT WHAT THE RETRY WOULD BE FED - see mse_fix_194's
+        // docstring. Saying yes is only half an answer when the bytes
+        // this request choked on came out of licenceByKeyId: the
+        // retried request claims no origination, takes the
+        // reynard-keyid path, finds the same entry and is fed the same
+        // expired bytes - around again until the cap is spent, with the
+        // page never asked. Dropping the entry now means the retry
+        // falls through the replay check to report(spc:), and the page
+        // - which keeps first refusal everywhere else - is asked for a
+        // fresh licence. Gated on provenance, so a page-served failure
+        // changes nothing here. Done whether or not the retry is
+        // allowed: a declined offer still ends in failure, and the
+        // entry must not sit there to poison the next request.
+        evictReplayedLicence(for: keyRequest, on: "a retry offer")
         return allowed
     }
 
@@ -9676,7 +9757,18 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 }
                 let hex = identifier.map { String(format: "%02x", $0) }.joined()
                 let held: Data? = self.withLock { () -> Data? in
-                    self.licenceByKeyId[hex]
+                    guard let kept = self.licenceByKeyId[hex] else {
+                        return nil
+                    }
+                    // Marked as CACHE-SERVED in the same take of the
+                    // lock that decides to serve it - see mse_fix_194's
+                    // docstring. If this licence's lease has expired in
+                    // the meantime, the retry offer reads this mark,
+                    // evicts the entry, and the retried request asks
+                    // the page instead of going around again on the
+                    // same dead bytes.
+                    self.replayedKeyIds.insert(hex)
+                    return kept
                 }
                 guard let held else {
                     FairPlayStreamParser.log(
@@ -9722,10 +9814,20 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 ) { [weak self] in
                     guard let self else { return }
                     let held: Data? = self.withLock { () -> Data? in
-                        guard self.outstanding[waitingFor] != nil else {
+                        guard self.outstanding[waitingFor] != nil,
+                              let kept = self.licenceByKeyId[hex] else {
                             return nil
                         }
-                        return self.licenceByKeyId[hex]
+                        // Marked as cache-served, same as the replay
+                        // above - see mse_fix_194's docstring. This is
+                        // the other door cached bytes leave through,
+                        // and an expired lease served here must be
+                        // evictable on the retry offer it provokes.
+                        // After an eviction this very read finds
+                        // nothing, so the fallback can never resurrect
+                        // bytes the retry path has thrown out.
+                        self.replayedKeyIds.insert(hex)
+                        return kept
                     }
                     guard let held else { return }
                     FairPlayStreamParser.log(
