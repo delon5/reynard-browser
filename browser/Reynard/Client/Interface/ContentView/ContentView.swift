@@ -587,7 +587,7 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
         // uses - and the result is measured from the surface top, which
         // IS our top. No height of ours appears in it.
         let surfaceWidth = webContentView.bounds.width
-        let focusBottom: CGFloat
+        var focusBottom: CGFloat
         if let bottomCss = inputMetrics.boundsBottomCss,
            let vvWidth = inputMetrics.visualWidthCss,
            vvWidth > 0, surfaceWidth > 0 {
@@ -607,6 +607,26 @@ final class ContentView: UIView, UIGestureRecognizerDelegate {
             focusBottom = unshiftedFrame.height * ratio
         } else {
             return 0
+        }
+
+        // AND TAKE BACK THE LIFT THE COMPOSITOR ALREADY GAVE IT.
+        // syncContentBottomOffset sends a fixed-layer bottom margin so a
+        // page's bottom-pinned bars clear the condensed pill, and APZ
+        // applies it as a pure translation: the bar is drawn that far
+        // above where layout says it is, and getBoundingClientRect -
+        // which is where the rect above came from - reports the unlifted
+        // position. An input inside such a bar is the archetypal mobile
+        // compose field, so this is the everyday "lifted too high, by
+        // about the pill height" case, and it is entirely independent of
+        // the ratio arithmetic fixed above.
+        //
+        // Taken off our own side rather than by zeroing the margin while
+        // the keyboard is up: that would change what the engine is told
+        // about every fixed bar on every page, and the pill and dynamic
+        // toolbar are not code to perturb for an arithmetic error that
+        // is ours.
+        if inputMetrics.isInBottomFixedBar, isChromeCondensed {
+            focusBottom -= max(0, contentBottomOffset)
         }
 
         let visibleBottom = max(

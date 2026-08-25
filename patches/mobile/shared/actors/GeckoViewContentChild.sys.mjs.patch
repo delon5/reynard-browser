@@ -3861,7 +3861,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3919,510 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +3919,549 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -3901,6 +3901,44 @@ index 9ca6e15..18d37f0 100644
 +    }
 +
 +    return bounds;
++  }
++
++  // IS THIS INPUT INSIDE A BAR THE COMPOSITOR HAS ALREADY LIFTED?
++  //
++  // The embedder sends a fixed-layer bottom margin so a page's fixed
++  // bars clear the condensed pill, and APZ applies it as a pure
++  // compositor translation - layout never sees it, so the rect above
++  // reports a bottom-pinned bar lower than it visually sits, by exactly
++  // that margin. An input inside such a bar is the archetypal mobile
++  // input (a compose or chat field), so this is the everyday case of
++  // the lift landing too high.
++  //
++  // Only bottom-anchored ones: the margin is a bottom margin, and a
++  // fixed element pinned to the top is not moved by it. "bottom is not
++  // auto" is the CSS-level form of the side bit APZ tests.
++  isInBottomFixedBar(element, win) {
++    let node = element;
++    let depth = 0;
++    while (node && node.parentElement && depth < 12) {
++      let style = null;
++      try {
++        style = win.getComputedStyle(node);
++      } catch (e) {
++        style = null;
++      }
++      if (style) {
++        const position = style.position;
++        if (
++          (position === "fixed" || position === "sticky") &&
++          style.bottom !== "auto"
++        ) {
++          return true;
++        }
++      }
++      node = node.parentElement;
++      depth++;
++    }
++    return false;
 +  }
 +
 +  // Detects whether this page's CSS uses env(safe-area-inset-bottom),
@@ -4307,6 +4345,7 @@ index 9ca6e15..18d37f0 100644
 +      visualOffsetTopCss:
 +        vv && Number.isFinite(vv.offsetTop) ? vv.offsetTop : 0,
 +      isSubframe: win.top !== win,
++      isInBottomFixedBar: this.isInBottomFixedBar(focusedElement, win),
 +      tag: focusedElement.localName,
 +      contentEditable: String(focusedElement.isContentEditable),
 +      inSubframe: String(win.top !== win),
@@ -4372,7 +4411,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4540,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4579,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4394,7 +4433,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4570,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4609,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 

@@ -497,6 +497,11 @@ public class GeckoSession {
         public let visualWidthCss: CGFloat?
         public let visualOffsetTopCss: CGFloat
         public let isSubframe: Bool
+        /// The input sits inside a position:fixed/sticky bar
+        /// pinned to the bottom - one the compositor has
+        /// already lifted by the fixed-layer margin, which
+        /// layout (and therefore boundsBottomCss) cannot see.
+        public let isInBottomFixedBar: Bool
     }
 
     // Keyboard
@@ -528,7 +533,8 @@ public class GeckoSession {
             visualHeightCss: number("visualHeightCss"),
             visualWidthCss: number("visualWidthCss"),
             visualOffsetTopCss: number("visualOffsetTopCss") ?? 0,
-            isSubframe: (values["isSubframe"] as? Bool) ?? false
+            isSubframe: (values["isSubframe"] as? Bool) ?? false,
+            isInBottomFixedBar: (values["isInBottomFixedBar"] as? Bool) ?? false
         )
         NSLog("focusedInput: ratio=%@ tag=%@ editable=%@ frame=%@ vh=%@ bottom=%@ | vvW=%@ offTop=%.1f",
               ratio.map { String(format: "%.3f", $0) } ?? "nil",
