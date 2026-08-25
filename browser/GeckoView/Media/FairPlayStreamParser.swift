@@ -9259,6 +9259,21 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         super.init()
     }
 
+    /// Where the licence fallback waits.
+    ///
+    /// ADDED - see mse_fix_191's docstring. Its own queue: the delegate
+    /// queue serves AVFoundation's callbacks and must not be parked on.
+    fileprivate static let fallbackQueue =
+        DispatchQueue(label: "org.reynard.fps.licence-fallback")
+
+    /// How long the page gets before a held licence is used instead.
+    ///
+    /// Three seconds. Every exchange that worked in these captures
+    /// completed in under 600ms - 250617.132 to 250617.668, 250627.627
+    /// to 250628.158 - and the alternative is AVFoundation's
+    /// twenty-second timeout, which is what the picture waits out today.
+    fileprivate static let fallbackGap: Double = 3.0
+
     private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
@@ -9565,6 +9580,48 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 return
             }
             self.report(spc: spc, contentId: origination.contentId)
+            // AND IF THE PAGE NEVER ANSWERS - see mse_fix_191's
+            // docstring. The guard above deliberately leaves a
+            // page-originated request to the page, and that is right:
+            // replaying into a genuine renewal would be a stale key
+            // answering a fresh question. But on a switch BACK to a
+            // title this session already played, the page has answered
+            // for that key once and will not answer again - capture
+            // 010281b9 has the request raised at 250640.909 and nothing
+            // after it - so the picture waits out AVFoundation's
+            // twenty-second timeout for a licence that is already in
+            // hand.
+            //
+            // The page keeps first refusal. This only looks again after
+            // it has had three seconds, only when the request is STILL
+            // outstanding, and only when a licence for this exact key id
+            // is already held.
+            if let identifier = keyRequest.identifier as? Data,
+               identifier.count == 16 {
+                let hex = identifier
+                    .map { String(format: "%02x", $0) }.joined()
+                let waitingFor = origination.contentId
+                KeySessionDelegate.fallbackQueue.asyncAfter(
+                    deadline: .now() + KeySessionDelegate.fallbackGap
+                ) { [weak self] in
+                    guard let self else { return }
+                    let held: Data? = self.withLock { () -> Data? in
+                        guard self.outstanding[waitingFor] != nil else {
+                            return nil
+                        }
+                        return self.licenceByKeyId[hex]
+                    }
+                    guard let held else { return }
+                    FairPlayStreamParser.log(
+                        "session \(self.sessionId) the page has not answered "
+                        + "for \(waitingFor) in "
+                        + "\(KeySessionDelegate.fallbackGap)s - applying the "
+                        + "licence already held for key \(hex) "
+                        + "(\(held.count) bytes) rather than waiting out the "
+                        + "twenty-second timeout")
+                    _ = self.provide(response: held, contentId: waitingFor)
+                }
+            }
         }
     }
 
