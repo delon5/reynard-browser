@@ -7218,6 +7218,44 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
+    /// How many times one key identifier may be retried.
+    ///
+    /// ADDED - see mse_fix_187's docstring. Three, per identifier: a
+    /// lease that is expired on arrival is usually expired by a moment
+    /// and asking again works, and a server that keeps minting expired
+    /// ones should cost three round trips rather than a loop. Per
+    /// identifier rather than per session, so a title with eight keys
+    /// gets three attempts at each of them.
+    fileprivate static let keyRetryCap = 3
+    /// Guards the retry counts.
+    private static let keyRetryLock = NSLock()
+    /// Attempts so far, by key identifier, and when the last one was.
+    private static var keyRetries: [String: (n: Int, at: Double)] = [:]
+
+    /// How long a spent attempt counts against a key.
+    ///
+    /// Sixty seconds. Without a window the cap is permanent for the life
+    /// of the process: three expired leases early on would decline every
+    /// later retry for that same key, including a genuinely new one an
+    /// hour into a long watch. The hazard the cap exists for is a server
+    /// minting expired leases in a tight loop, and that is a burst - it
+    /// is fully contained by a window this short, which then lets an
+    /// unrelated retry much later start fresh.
+    private static let keyRetryWindow: Double = 60.0
+
+    /// Count this retry offer and say which attempt it is.
+    fileprivate static func noteKeyRetry(_ identifier: String) -> Int {
+        let now = hostNow()
+        keyRetryLock.lock()
+        var nth = 1
+        if let seen = keyRetries[identifier], now - seen.at < keyRetryWindow {
+            nth = seen.n + 1
+        }
+        keyRetries[identifier] = (nth, now)
+        keyRetryLock.unlock()
+        return nth
+    }
+
     @objc public static func wantsFreshSink() -> Bool {
         freshSinkLock.lock()
         let wanted = freshSinkWanted
@@ -9219,12 +9257,32 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         _ session: AVContentKeySession,
         shouldRetry keyRequest: AVContentKeyRequest,
         reason retryReason: AVContentKeyRequest.RetryReason) -> Bool {
+        // SAY YES - see mse_fix_187's docstring. This declined because
+        // the delegate went in as a diagnostic, to find out whether
+        // these callbacks fire at all. In capture 57cf9bf1 one fired
+        // with reason ReceivedKeyResponseWithExpiredLease, was declined,
+        // and the key request failed two milliseconds later - after
+        // which the third Netflix video fed 843 samples into a layer
+        // that could not decrypt any of them.
+        //
+        // Every reason this enum has - timedOut,
+        // receivedResponseWithExpiredLease, receivedObsoleteContentKey -
+        // means ask again. There is no value in it for which declining
+        // is the right answer.
+        let reynardKey = String(describing: keyRequest.identifier)
+        let nth = FairPlayStreamParser.noteKeyRetry(reynardKey)
+        let allowed = nth <= FairPlayStreamParser.keyRetryCap
         FairPlayStreamParser.log(
             "session \(sessionId) asked whether to retry a key request - "
             + "reason \(retryReason.rawValue), status "
-            + "\(keyRequest.status.rawValue) - declining, which is what "
-            + "happens today with this method absent")
-        return false
+            + "\(keyRequest.status.rawValue) - "
+            + (allowed
+                ? "RETRYING, attempt \(nth) of "
+                    + "\(FairPlayStreamParser.keyRetryCap)"
+                : "declining - \(nth - 1) attempts already spent on this "
+                    + "key, and a server that keeps minting expired "
+                    + "leases must not be asked forever"))
+        return allowed
     }
 
     func contentKeySession(
