@@ -9435,6 +9435,14 @@ public final class FairPlayStreamParser: NSObject {
                          + "of \(split.count) applied by label, \(kept) "
                          + "kept under their own key ids, \(dropped) "
                          + "dropped")
+                // CHANGED - see mse_fix_199's docstring. A reply whose
+                // entries were all KEPT is this branch's designed-for
+                // good outcome, not a failure, and returning false for
+                // it made AVPlayerHost print "parser CKC for child N
+                // was NOT applied" directly under "2 kept under their
+                // own key ids". The caller only logs the result, so
+                // this is a diagnostic correction, but it is on the
+                // path these fixes create.
                 // ADDED - see mse_fix_193's docstring. A batch that has
                 // been answered in full is spent. Keeping its ids lets
                 // a later single reply be split against them and
@@ -9447,7 +9455,7 @@ public final class FairPlayStreamParser: NSObject {
                         entries[sessionId]?.batchDispatched = false
                     }
                 }
-                return applied > 0
+                return applied > 0 || kept > 0
             }
             // No entry names a key. Position is all there is, and
             // position is only meaningful against the exact exchange
@@ -10246,18 +10254,53 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
             }
             // A licence we already hold beats a message nobody answers.
             //
-            // Only for the requests fix 66 addressed by key id - the
-            // ones the parser raised, which the page did not ask for and
-            // will not answer. Everything the page originated still gets
-            // the page's own licence; replaying one into a genuine
-            // renewal would be a stale key answering a fresh question.
+            // CHANGED - see mse_fix_199's docstring. This used to
+            // require origination.contentId to start with
+            // "reynard-keyid:", which reads as "a request the parser
+            // raised, which the page will not answer" and is not what
+            // it tests. Only the EXTRA keys of a batch carry that
+            // prefix - requestKey's fan-out builds them - while the
+            // PRIMARY key keeps the page's own pssh content id. The
+            // primary key of a batch could therefore never be served
+            // from the cache, whatever the cache held.
+            //
+            // That was harmless while the only way into
+            // licenceByKeyId was through a reynard-keyid: id. It
+            // stopped being harmless when mse_fix_196's keep() began
+            // filing under the hex the REPLY's own label names, with
+            // no content id involved. Capture efd1146e, session
+            // child-10, second Netflix title:
+            //
+            //   292683.065  KEPT 860 bytes under the reply's own key
+            //               id 00000000099ed4770000000000000000
+            //   292683.155  REAL AVContentKeyRequest arrived -
+            //               identifier <099ed477>, claimed id
+            //               AAAAyHBzc2gAAAAAlM6G+wf/T0Ot...
+            //   292683.093  sb-5460273472 the display layer has FAILED
+            //               - -11800 "no content key present"
+            //
+            // No replay line, and no "no licence held" line either:
+            // the lookup never ran. The licence was in the cache and
+            // the request ninety milliseconds later never looked.
+            //
+            // The request's own identifier is the whole decision now.
+            // What keeps that safe is downstream and unchanged:
+            // mse_fix_198 requires the entry to have been kept FOR
+            // this key and the request outstanding under this
+            // origination to BE this request, mse_fix_197 keeps
+            // anything under 64 bytes out of the cache, and the
+            // cache-served mark below means an expired licence is
+            // evicted on the retry offer it provokes and the page is
+            // asked for a fresh one. A renewal cannot reach here to be
+            // answered staler: this file logs
+            // didProvideRenewingContentKeyRequest and does not route
+            // it.
             //
             // The SPC is made either way, because a request has to be
             // loaded before a response can be processed. It simply is
             // not sent.
             let replayed: Bool = { () -> Bool in
-                guard origination.contentId.hasPrefix("reynard-keyid:"),
-                      let identifier = keyRequest.identifier as? Data,
+                guard let identifier = keyRequest.identifier as? Data,
                       identifier.count == 16 else {
                     return false
                 }
