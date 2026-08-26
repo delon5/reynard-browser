@@ -1,7 +1,7 @@
 diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 --- a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
 +++ b/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp
-@@ -16,15 +16,179 @@
+@@ -16,15 +16,229 @@
  #include "MP4Decoder.h"
 +#include "MediaData.h"
 +#include "ReynardAVPlayerDecoderModule.h"  // the protected placeholder
@@ -58,18 +58,66 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +    //
 +    // The +1 microsecond is its rounding guard, kept so the frame counts
 +    // match what the element was already being given.
++    // ADDED - see mse_fix_205's docstring. Before every rejection, so
++    // "this decoder was asked" and "this decoder refused" stop looking
++    // identical from outside. The floor line below is printed only on
++    // the path that succeeds, and reading its absence as "never
++    // called" is a mistake this line exists to prevent.
++    //
++    // Once per decoder instance. Six instances in a 25-minute capture,
++    // so this is six lines.
++    if (!mAsked) {
++      mAsked = true;
++      printf_stderr(
++          "mseDecoderRoute: silent audio decoder ASKED - duration %lld us, "
++          "%u ch @ %u Hz\n",
++          (long long)aSample->mDuration.ToMicroseconds(), mChannels, mRate);
++    }
 +    if (!mChannels || !mRate) {
++      printf_stderr(
++          "mseDecoderRoute: silent audio decoder REFUSING - %u ch @ %u Hz, "
++          "one of them zero\n",
++          mChannels, mRate);
 +      return DecodePromise::CreateAndReject(
 +          MediaResult(NS_ERROR_FAILURE, __func__), __func__);
 +    }
 +    const int64_t usecs = aSample->mDuration.ToMicroseconds() + 1;
-+    const int64_t frames = (usecs * static_cast<int64_t>(mRate)) / 1000000;
-+    if (frames < 0 || frames > (UINT32_MAX / mChannels)) {
++    // CHANGED - see mse_fix_205's docstring. At 24000 Hz any sample
++    // shorter than 41 microseconds - a zero duration included - makes
++    // this zero, AlignedAudioBuffer allocates nothing, and the old
++    // !samples branch REJECTED. A rejected decode fails the audio
++    // track, and a failed audio track pins the element at
++    // HAVE_METADATA, which is where HBO Max sits for a whole session.
++    //
++    // One frame of silence instead. Silence is available at any
++    // length; the one thing this decoder must never do is fail.
++    int64_t frames = (usecs * static_cast<int64_t>(mRate)) / 1000000;
++    if (frames <= 0) {
++      static bool reynardShortAnnounced = false;
++      if (!reynardShortAnnounced) {
++        reynardShortAnnounced = true;
++        printf_stderr(
++            "mseDecoderRoute: silent audio sample of %lld us is under one "
++            "frame at %u Hz - giving it one frame of silence rather than "
++            "failing the track\n",
++            (long long)aSample->mDuration.ToMicroseconds(), mRate);
++      }
++      frames = 1;
++    }
++    if (frames > (UINT32_MAX / mChannels)) {
++      printf_stderr(
++          "mseDecoderRoute: silent audio decoder REFUSING - %lld frames x "
++          "%u ch overflows\n",
++          (long long)frames, mChannels);
 +      return DecodePromise::CreateAndReject(
 +          MediaResult(NS_ERROR_FAILURE, __func__), __func__);
 +    }
 +    AlignedAudioBuffer samples(frames * mChannels);
 +    if (!samples) {
++      printf_stderr(
++          "mseDecoderRoute: silent audio decoder REFUSING - no buffer for "
++          "%lld frames x %u ch\n",
++          (long long)frames, mChannels);
 +      return DecodePromise::CreateAndReject(
 +          MediaResult(NS_ERROR_OUT_OF_MEMORY, __func__), __func__);
 +    }
@@ -179,9 +227,11 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
 +
 +  const uint32_t mChannels;
 +  const uint32_t mRate;
++  /// Whether the first Decode has been reported - see mse_fix_205.
++  bool mAsked = false;
 +};
  
-@@ -402,13 +402,54 @@ EMEDecoderModule::CreateVideoDecoder(
+@@ -402,13 +616,54 @@ EMEDecoderModule::CreateVideoDecoder(
    }
  
    if (aParams.mConfig.IsVideo()) {
@@ -239,7 +289,7 @@ diff --git a/dom/media/platforms/agnostic/eme/EMEDecoderModule.cpp b/dom/media/p
      }
  
      const bool gmpSupported =
-@@ -470,6 +470,30 @@ EMEDecoderModule::CreateAudioDecoder(
+@@ -470,6 +725,30 @@ EMEDecoderModule::CreateAudioDecoder(
      return EMEDecoderModule::CreateDecoderPromise::CreateAndResolve(decoder,
                                                                      __func__);
    }
