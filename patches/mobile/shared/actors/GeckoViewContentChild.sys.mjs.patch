@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3949 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3969 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -3608,8 +3608,28 @@ index 9ca6e15..18d37f0 100644
 +      // leave the in-check true; each document has its own global, so
 +      // this reaches no page but this one.
 +      try {
-+        if ("ontouchstart" in window) {
-+          delete window.Window.prototype.ontouchstart;
++        // CHANGED - see mse_fix_204's docstring. This deleted from
++        // window.Window.prototype, which is not where the property
++        // lives in this engine: delete on an object that does not have
++        // it succeeds and removes nothing, so capture 71b9b6cd read
++        // back ontouchstart=yes with every other field desktop. The
++        // owner is found rather than assumed.
++        var reynardTouchNames = ["ontouchstart", "ontouchend",
++                                 "ontouchmove"];
++        for (var reynardT = 0; reynardT < reynardTouchNames.length;
++             reynardT++) {
++          var reynardTouchName = reynardTouchNames[reynardT];
++          var reynardTouchOwner = window;
++          while (reynardTouchOwner &&
++                 !Object.prototype.hasOwnProperty.call(
++                   reynardTouchOwner, reynardTouchName)) {
++            reynardTouchOwner = Object.getPrototypeOf(reynardTouchOwner);
++          }
++          if (reynardTouchOwner) {
++            try {
++              delete reynardTouchOwner[reynardTouchName];
++            } catch (e) {}
++          }
 +        }
 +      } catch (e) {}
 +      }
@@ -3952,7 +3972,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +4010,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +4030,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4569,7 +4589,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4737,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4757,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4591,7 +4611,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4767,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4787,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
