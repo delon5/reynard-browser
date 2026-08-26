@@ -1,0 +1,23 @@
+diff --git a/dom/ipc/PreallocatedProcessManager.cpp b/dom/ipc/PreallocatedProcessManager.cpp
+index 36c854222207..e41eb6a0fb47 100644
+--- a/dom/ipc/PreallocatedProcessManager.cpp
++++ b/dom/ipc/PreallocatedProcessManager.cpp
+@@ -171,9 +171,15 @@ void PreallocatedProcessManagerImpl::RereadPrefs() {
+       number = StaticPrefs::dom_ipc_processPrelaunch_fission_number();
+       // limit preallocated processes on low-mem machines
+       PRUint64 bytes = PR_GetPhysicalMemorySize();
+-      if (bytes > 0 &&
+-          bytes <=
+-              StaticPrefs::dom_ipc_processPrelaunch_lowmem_mb() * 1024 * 1024) {
++      // Widened to uint64_t deliberately. The pref is uint32_t and its
++      // default is 4096, so `lowmem_mb() * 1024 * 1024` was evaluated in
++      // 32-bit unsigned arithmetic and wrapped to exactly 0 (2^32). The
++      // guard below then read `bytes > 0 && bytes <= 0`, which is never
++      // true, so the clamp never fired on any device.
++      const uint64_t lowMemThreshold =
++          uint64_t(StaticPrefs::dom_ipc_processPrelaunch_lowmem_mb()) * 1024 *
++          1024;
++      if (bytes > 0 && bytes <= lowMemThreshold) {
+         number = 1;
+       }
+     }
