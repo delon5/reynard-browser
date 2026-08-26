@@ -258,6 +258,17 @@ public final class FairPlayStreamParser: NSObject {
     /// number the new entry's first batch gets. Guarded by the state
     /// lock below, like the dictionaries above it.
     private var batchesBuilt = 0
+    /// Rebuilds spent per session id.
+    ///
+    /// ADDED - see mse_fix_200's docstring. The comment above the
+    /// recycle branch says it cannot loop, because a rebuilt session's
+    /// delegate has seen nothing and seenBefore is zero next time.
+    /// Capture ada4702e disproves it: "is deaf - rebuilding" at
+    /// 294437.663, 294450.056 and 294484.444, because each rebuild is
+    /// followed by real requests that push requestsSeen back above
+    /// zero. Monotonic per content process on purpose - a session that
+    /// has needed rebuilding twice will not be fixed by a third.
+    private var recyclesBySession: [String: Int] = [:]
     private let lock = NSLock()
 
     private func withState<T>(_ body: () -> T) -> T {
@@ -643,6 +654,58 @@ public final class FairPlayStreamParser: NSObject {
     /// would hold the request rather than produce an SPC, and the page
     /// only sends a certificate while handling an 'encrypted' event -
     /// which this is trying to answer.
+    /// How many times one session id may be rebuilt.
+    ///
+    /// ADDED - see mse_fix_200's docstring.
+    fileprivate static let recycleCap = 2
+
+    /// The key of a stream on this session whose display layer is
+    /// rendering right now, or nil.
+    ///
+    /// ADDED - see mse_fix_200's docstring. A key session raises no
+    /// request for a key it already holds, and the recycle branch
+    /// reads that silence as deafness. It is only deafness when
+    /// nothing is using the key: in capture ada4702e sb-5328897824 had
+    /// enqueued 133 samples at status=1 and shown its first frame when
+    /// the session under it was destroyed, and the display layer could
+    /// not rejoin the replacement - a layer that has established
+    /// content protection with one AVContentKeySession is refused by
+    /// another - so every frame after that was -11821 "Cannot Decode".
+    ///
+    /// The layers are snapshotted under the lock and asked for their
+    /// status outside it, because nothing in this file calls out under
+    /// a lock.
+    fileprivate func renderingStreamKey(inSession sessionId: String)
+        -> String? {
+        let layers = withState {
+            () -> [(String, AVSampleBufferDisplayLayer)] in
+            var out: [(String, AVSampleBufferDisplayLayer)] = []
+            for key in Array(streamParsers.keys).sorted()
+            where key.hasPrefix(sessionId + "|") {
+                if let layer = streamParsers[key]?.displayLayer {
+                    out.append((key, layer))
+                }
+            }
+            return out
+        }
+        for (key, layer) in layers where layer.status == .rendering {
+            return key
+        }
+        return nil
+    }
+
+    /// Spend one of this session's rebuilds, or refuse.
+    ///
+    /// ADDED - see mse_fix_200's docstring.
+    fileprivate func claimRecycle(sessionId: String) -> Bool {
+        return withState { () -> Bool in
+            let spent = recyclesBySession[sessionId, default: 0]
+            guard spent < Self.recycleCap else { return false }
+            recyclesBySession[sessionId] = spent + 1
+            return true
+        }
+    }
+
     fileprivate func recycleSession(_ sessionId: String, contentId: String,
                                     initData: Data) {
         let certificate = withState { entries[sessionId]?.keyDelegate }?
@@ -1080,6 +1143,39 @@ public final class FairPlayStreamParser: NSObject {
             // delegate has seen nothing, so seenBefore is 0 next time and
             // this branch is not taken.
             if seenBefore > 0 {
+                // ADDED - see mse_fix_200's docstring. Silence from
+                // processContentKeyRequest means the session already
+                // holds the key. That is fatal when nothing is using
+                // it - the HBO case this branch was written for, where
+                // the content process waits for a licence only a
+                // request could produce - and it is CORRECT when
+                // something is. Capture ada4702e, 294437.66:
+                // sb-5328897824 was 133 samples in at status=1 with
+                // its first frame shown, and rebuilding under it cost
+                // the display layer its recipient status and every
+                // frame after that to -11821.
+                if let working = FairPlayStreamParser.shared
+                        .renderingStreamKey(inSession: sessionId) {
+                    Self.log("session \(sessionId) raised no request for "
+                             + "this key and does not need to - \(working) "
+                             + "is rendering on this session right now, so "
+                             + "the key it went quiet about is a key it "
+                             + "already holds and is already using. Standing "
+                             + "down rather than rebuilding a session that "
+                             + "is working.")
+                    return
+                }
+                guard FairPlayStreamParser.shared
+                        .claimRecycle(sessionId: sessionId) else {
+                    Self.log("session \(sessionId) is deaf again, and has "
+                             + "already been rebuilt "
+                             + "\(FairPlayStreamParser.recycleCap) times - "
+                             + "not rebuilding it again. A rebuild costs "
+                             + "every display layer its recipient status, "
+                             + "and a session that has needed two is not "
+                             + "going to be fixed by a third.")
+                    return
+                }
                 FairPlayStreamParser.shared.recycleSession(
                     sessionId, contentId: askedFor, initData: initData)
                 return
@@ -1176,9 +1272,19 @@ public final class FairPlayStreamParser: NSObject {
             if label.contains("display layer") {
                 freshSinkLock.lock()
                 freshSinkWanted = true
+                // ADDED - see mse_fix_201's docstring. Recorded so the
+                // check below can tell an answered request from one
+                // that was never even read.
+                freshSinkAskedBy = label
+                freshSinkAskedAt = hostNow()
                 freshSinkLock.unlock()
                 log("\(label) - asking the compositor for a sink this "
                     + "session can actually claim")
+                keyDelegateQueue.asyncAfter(
+                    deadline: .now() + freshSinkGap
+                ) {
+                    reportUnansweredSinkRequest()
+                }
             }
             return false
         }
@@ -6934,6 +7040,11 @@ public final class FairPlayStreamParser: NSObject {
             Self.freshSinkLock.lock()
             Self.compositorSink = sink
             Self.compositorSinkOwner = streamKey
+            // ADDED - see mse_fix_201's docstring. An adoption is the
+            // answer to the ask, whoever made it: the sink is one slot,
+            // so one arriving satisfies whatever was waiting for one.
+            Self.freshSinkAskedBy = nil
+            Self.freshSinkAskedAt = 0
             Self.freshSinkLock.unlock()
             slot.failObserver = nil
             slot.drainArmed = false
@@ -7584,6 +7695,24 @@ public final class FairPlayStreamParser: NSObject {
     private static let freshSinkLock = NSLock()
     /// A display layer was refused as a content key recipient.
     private static var freshSinkWanted = false
+    /// Who last asked for a fresh sink, and when.
+    ///
+    /// ADDED - see mse_fix_201's docstring. The ask used to be a single
+    /// log line with nothing watching it, so a request the compositor
+    /// never answered was indistinguishable from one it did. Capture
+    /// ada4702e, 294437.668: sb-5328897824 asked, nothing came, and the
+    /// stream spent the rest of the session enqueueing into a layer
+    /// nothing was showing. One slot, because the sink is one slot.
+    /// Cleared by adopt, which is the event that answers the ask.
+    private static var freshSinkAskedBy: String?
+    private static var freshSinkAskedAt: Double = 0
+    /// How long a fresh sink may take before it is worth saying so.
+    ///
+    /// A rebuild takes a commit or two; three seconds is two orders of
+    /// magnitude past that and well short of the twenty-second key
+    /// timeout, so the line lands while the capture still has context
+    /// around it.
+    fileprivate static let freshSinkGap: Double = 3.0
 
     /// Does the compositor need to build a NEW sink?
     ///
@@ -7689,6 +7818,45 @@ public final class FairPlayStreamParser: NSObject {
         keyRetries[identifier] = (nth, now)
         keyRetryLock.unlock()
         return nth
+    }
+
+    /// Say so when a fresh sink was asked for and never arrived.
+    ///
+    /// ADDED - see mse_fix_201's docstring. Which of the two failures
+    /// it was is carried by the flag itself, and the two need opposite
+    /// fixes:
+    ///
+    ///   * still wanted means ReynardMSEWantsFreshSink() was never
+    ///     called, so no commit reached a DRM layer carrying the MSE
+    ///     sink - this element has no protected layer for a sink to be
+    ///     built into, and the fault is upstream of the compositor;
+    ///
+    ///   * cleared, with nothing adopted since, means the compositor
+    ///     read the request and rebuilt, and the rebuild did not
+    ///     produce a claimable sink.
+    ///
+    /// Silent when the sink arrived: adopt clears the record, so a
+    /// healthy handover logs nothing here.
+    fileprivate static func reportUnansweredSinkRequest() {
+        freshSinkLock.lock()
+        let asker = freshSinkAskedBy
+        let at = freshSinkAskedAt
+        let stillWanted = freshSinkWanted
+        freshSinkLock.unlock()
+        guard let asker, at > 0 else { return }
+        let waited = String(format: "%.1f", hostNow() - at)
+        log("\(asker) asked the compositor for a fresh sink \(waited)s "
+            + "ago and none has arrived - "
+            + (stillWanted
+                ? "the compositor has not even read the request, so no "
+                  + "commit has reached a DRM layer holding the MSE sink. "
+                  + "This element has no protected layer for a sink to be "
+                  + "built into"
+                : "the compositor read the request but nothing has been "
+                  + "adopted since, so the rebuild produced no sink this "
+                  + "session can claim")
+            + ". Until one arrives this stream is decoding into a layer "
+            + "nothing is showing.")
     }
 
     @objc public static func wantsFreshSink() -> Bool {
