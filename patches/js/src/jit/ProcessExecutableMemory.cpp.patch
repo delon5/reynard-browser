@@ -1,5 +1,5 @@
 diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutableMemory.cpp
-index cea7d764ca96..f4304e4f8536 100644
+index cea7d764ca96..fc6c61676403 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
 @@ -14,6 +14,15 @@
@@ -26,7 +26,7 @@ index cea7d764ca96..f4304e4f8536 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +57,489 @@
+@@ -47,6 +57,490 @@
  using namespace js;
  using namespace js::jit;
  
@@ -259,6 +259,7 @@ index cea7d764ca96..f4304e4f8536 100644
 +#define REYNARD_CS_DEBUGGED 0x10000000
 +
 +#include <notify.h>
++#include <os/log.h>
 +
 +extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr,
 +                     size_t usersize);
@@ -516,7 +517,7 @@ index cea7d764ca96..f4304e4f8536 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +956,342 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +957,364 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -809,6 +810,18 @@ index cea7d764ca96..f4304e4f8536 100644
 +  // arena size a function of the ASLR draw. The hint is kept as the first
 +  // attempt at every rung because it is ASLR for the JIT region and worth
 +  // preserving whenever it can be honoured.
++  // Reported through os_log, not stderr. The Helper appex has no stream
++  // redirect of its own - redirectStandardStreamsToFile() is the main app's
++  // main.swift, and it sends the streams to /dev/null when its toggle is off
++  // - so a write(2) here would land nowhere. os_log is what the rest of the
++  // Helper uses and what a syslog capture will show.
++  //
++  // The outcome line is unconditional. Logging only the reduced case leaves
++  // "full size succeeded" and "every rung failed" indistinguishable from
++  // "this build does not contain the ladder at all", which is precisely the
++  // question that needs answering when the app still will not start.
++  // Per-attempt lines are emitted only for attempts that fail, so a device
++  // that satisfies the full request logs exactly one line.
 +  void* p = MAP_FAILED;
 +  size_t chosen = 0;
 +  for (size_t rung : kReserveLadder) {
@@ -818,7 +831,15 @@ index cea7d764ca96..f4304e4f8536 100644
 +
 +    p = reynard_mmap(randomAddr, rung, protection, flags, -1, 0);
 +    if (p == MAP_FAILED) {
++      os_log(OS_LOG_DEFAULT,
++             "[jit] reserve: %llu MB with hint %p refused, errno %d",
++             (unsigned long long)(rung >> 20), randomAddr, errno);
++
 +      p = reynard_mmap(nullptr, rung, protection, flags, -1, 0);
++      if (p == MAP_FAILED) {
++        os_log(OS_LOG_DEFAULT, "[jit] reserve: %llu MB with no hint refused, errno %d",
++               (unsigned long long)(rung >> 20), errno);
++      }
 +    }
 +
 +    if (p != MAP_FAILED) {
@@ -827,28 +848,30 @@ index cea7d764ca96..f4304e4f8536 100644
 +    }
 +  }
 +
-+  if (p != MAP_FAILED) {
-+    sReservedExecutableBytes = chosen;
++  if (p == MAP_FAILED) {
++    os_log(OS_LOG_DEFAULT,
++           "[jit] reserve: FAILED - no rung down to %llu MB could be mapped; "
++           "JS engine init will now fail and this process will MOZ_CRASH",
++           (unsigned long long)(kReserveLadder[
++               sizeof(kReserveLadder) / sizeof(kReserveLadder[0]) - 1] >> 20));
 +
-+    if (chosen != bytes) {
-+      // Never step down silently. An arena a fraction of the intended size
-+      // changes JIT capacity and exhaustion behaviour, and without a line here
-+      // the only symptom is "that device feels slow" with nothing to correlate
-+      // it against. Same write(2) style as the handlers below; stderr is
-+      // captured to the app's log across launches.
-+      char digits[24];
-+      size_t at = sizeof(digits);
-+      digits[--at] = '\n';
-+      uint64_t mb = uint64_t(chosen) >> 20;
-+      do {
-+        digits[--at] = char('0' + (mb % 10));
-+        mb /= 10;
-+      } while (mb);
-+      static const char kReducedMessage[] =
-+          "[jit] executable region reduced, MB = ";
-+      (void)write(STDERR_FILENO, kReducedMessage, sizeof(kReducedMessage) - 1);
-+      (void)write(STDERR_FILENO, digits + at, sizeof(digits) - at);
-+    }
++    // Store a marker to a low, guaranteed-unmapped address so the reason
++    // reaches the crash report without any log capture. __PAGEZERO covers the
++    // low 4GB on arm64 iOS, so this always faults, and the address appears
++    // verbatim in "Exception Subtype: KERN_INVALID_ADDRESS at ...".
++    //
++    // 0x4a4a0010 means specifically "the reservation ladder could map nothing
++    // at all". Without it this path returns nullptr and the process dies a few
++    // frames later in nsXPConnect::InitJSContext with 0x4a490010, which says
++    // only that jit::InitializeJit() failed - true of several other causes
++    // too. Crashing here rather than there loses nothing: JS engine init has
++    // already failed unrecoverably and MOZ_CRASH is the next stop either way.
++    *reinterpret_cast<volatile uint32_t*>(uintptr_t(0x4a4a0010)) = 0x4a4a;
++  } else {
++    sReservedExecutableBytes = chosen;
++    os_log(OS_LOG_DEFAULT, "[jit] reserve: settled on %llu MB of %llu MB requested",
++           (unsigned long long)(chosen >> 20),
++           (unsigned long long)(bytes >> 20));
 +  }
 +
 +  if (p == MAP_FAILED) {
@@ -859,7 +882,7 @@ index cea7d764ca96..f4304e4f8536 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +1336,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +1359,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -887,7 +910,7 @@ index cea7d764ca96..f4304e4f8536 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -559,10 +1389,85 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -559,10 +1412,85 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    MOZ_CRASH();
  }
  
@@ -974,7 +997,7 @@ index cea7d764ca96..f4304e4f8536 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +1475,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +1498,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -992,7 +1015,7 @@ index cea7d764ca96..f4304e4f8536 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +1492,54 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +1515,54 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -1051,7 +1074,7 @@ index cea7d764ca96..f4304e4f8536 100644
  #  endif
  }
  #endif
-@@ -699,6 +1630,13 @@ class ProcessExecutableMemory {
+@@ -699,6 +1653,13 @@ class ProcessExecutableMemory {
    // Page where we should try to allocate next.
    size_t cursor_;
  
@@ -1065,7 +1088,7 @@ index cea7d764ca96..f4304e4f8536 100644
    mozilla::Maybe<mozilla::non_crypto::XorShift128PlusRNG> rng_;
    PageBitSet<MaxCodePages> pages_;
  
-@@ -708,6 +1646,7 @@ class ProcessExecutableMemory {
+@@ -708,6 +1669,7 @@ class ProcessExecutableMemory {
          lock_(mutexid::ProcessExecutableRegion),
          pagesAllocated_(0),
          cursor_(0),
@@ -1073,7 +1096,7 @@ index cea7d764ca96..f4304e4f8536 100644
          pages_() {}
  
    [[nodiscard]] bool init() {
-@@ -722,8 +1661,56 @@ class ProcessExecutableMemory {
+@@ -722,8 +1684,56 @@ class ProcessExecutableMemory {
        return false;
      }
  
@@ -1130,7 +1153,7 @@ index cea7d764ca96..f4304e4f8536 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -735,7 +1722,7 @@ class ProcessExecutableMemory {
+@@ -735,7 +1745,7 @@ class ProcessExecutableMemory {
    bool initialized() const { return base_ != nullptr; }
  
    size_t bytesAllocated() const {
@@ -1139,7 +1162,7 @@ index cea7d764ca96..f4304e4f8536 100644
      return pagesAllocated_ * ExecutableCodePageSize;
    }
  
-@@ -743,7 +1730,21 @@ class ProcessExecutableMemory {
+@@ -743,7 +1753,21 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -1162,7 +1185,7 @@ index cea7d764ca96..f4304e4f8536 100644
      base_ = nullptr;
      rng_.reset();
      MOZ_ASSERT(!initialized());
-@@ -752,12 +1753,12 @@ class ProcessExecutableMemory {
+@@ -752,12 +1776,12 @@ class ProcessExecutableMemory {
    void assertValidAddress(void* p, size_t bytes) const {
      MOZ_RELEASE_ASSERT(p >= base_ &&
                         uintptr_t(p) + bytes <=
@@ -1177,7 +1200,7 @@ index cea7d764ca96..f4304e4f8536 100644
    }
  
    void* allocate(size_t bytes, ProtectionSetting protection,
-@@ -779,21 +1780,21 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
+@@ -779,21 +1803,21 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
    void* p = nullptr;
    {
      LockGuard<Mutex> guard(lock_);
@@ -1204,7 +1227,7 @@ index cea7d764ca96..f4304e4f8536 100644
          page = 0;
        }
  
-@@ -815,7 +1816,7 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
+@@ -815,7 +1839,7 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
        }
  
        pagesAllocated_ += numPages;
@@ -1213,7 +1236,7 @@ index cea7d764ca96..f4304e4f8536 100644
  
        // If we allocated a small number of pages, move cursor_ to the
        // next page. We don't do this for larger allocations to avoid
-@@ -901,9 +1902,20 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,9 +1925,20 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -1235,7 +1258,7 @@ index cea7d764ca96..f4304e4f8536 100644
           AlignBytes(execMemory.bytesAllocated(), 0x100000U);
  }
  
-@@ -911,15 +1923,28 @@ bool js::jit::CanLikelyAllocateMoreExecutableMemory() {
+@@ -911,15 +1946,28 @@ bool js::jit::CanLikelyAllocateMoreExecutableMemory() {
    // Use a 8 MB buffer.
    static const size_t BufferSize = 8 * 1024 * 1024;
  
@@ -1266,7 +1289,7 @@ index cea7d764ca96..f4304e4f8536 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +1994,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +2017,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  

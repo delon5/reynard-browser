@@ -1,0 +1,76 @@
+diff --git a/js/xpconnect/src/nsXPConnect.cpp b/js/xpconnect/src/nsXPConnect.cpp
+index fc50c3260009..158d9b2655af 100644
+--- a/js/xpconnect/src/nsXPConnect.cpp
++++ b/js/xpconnect/src/nsXPConnect.cpp
+@@ -5,6 +5,12 @@
+ /* High level class and public functions implementation. */
+ 
+ #include "js/Transcoding.h"
++
++#ifdef XP_IOS
++#  include <os/log.h>
++#  include <stdint.h>
++#  include <string.h>
++#endif
+ #include "mozilla/Assertions.h"
+ #include "mozilla/Base64.h"
+ #include "mozilla/Likely.h"
+@@ -119,6 +125,58 @@ static void InitJSEngine() {
+ 
+   const char* jsInitFailureReason = JS_InitWithFailureDiagnostic();
+   if (jsInitFailureReason) {
++#ifdef XP_IOS
++    // Report the failing step through the FAULT ADDRESS, because on iOS
++    // nothing else survives to where anyone can read it.
++    //
++    // MOZ_CRASH_UNSAFE carries the reason as a Breakpad annotation and iOS
++    // .ips reports do not include those. MOZ_CRASH itself writes the line
++    // number to NULL (MOZ_CrashSequence, mfbt/Assertions.h), so every one of
++    // InitWithFailureDiagnostic's RETURN_IF_FAIL steps produces an identical
++    // EXC_BAD_ACCESS / KERN_INVALID_ADDRESS at 0x0 in this function -
++    // InitJSEngine is static and inlines into it. And a content process
++    // cannot leave a log file anyone can find: the Helper appex is launched
++    // by launchd with its own stdio, so it does not inherit the main app's
++    // redirect to Documents/reynard_stdout.txt, and os_log needs a syslog
++    // capture that is not always available on an iOS 13 device.
++    //
++    // __PAGEZERO covers the low 4GB on arm64 iOS - a real report from this
++    // app shows the first mapped region at 4.01GB - so any address below it
++    // is guaranteed to fault. Storing to a chosen low address puts the answer
++    // straight into "Exception Subtype: KERN_INVALID_ADDRESS at ...", which
++    // needs no log capture at all:
++    //
++    //   0x4a490010  js::jit::InitializeJit()  - executable memory reservation
++    //   0x4a490020  js::wasm::Init()
++    //   0x4a490030  js::TlsContext.init()
++    //   0x4a490040  js::oom::InitThreadType()
++    //   0x4a490050  js::Mutex::Init()
++    //   0x4a4900f0  none of the above - read the os_log line for the string
++    //
++    // (0x4a49 is 'JI'. Addresses are 16-byte aligned so the fault is a clean
++    // KERN_INVALID_ADDRESS and not an alignment fault.)
++    //
++    // A companion marker, 0x4a4a0010, is stored by the reservation ladder in
++    // ProcessExecutableMemory.cpp when it cannot map any size at all. Seeing
++    // that one instead of 0x4a490010 distinguishes "the reservation is what
++    // failed" from "InitializeJit failed for some other reason".
++    os_log(OS_LOG_DEFAULT, "[jit] JS_Init failed: %{public}s",
++           jsInitFailureReason);
++
++    uintptr_t marker = 0x4a4900f0;
++    if (strstr(jsInitFailureReason, "InitializeJit")) {
++      marker = 0x4a490010;
++    } else if (strstr(jsInitFailureReason, "wasm::Init")) {
++      marker = 0x4a490020;
++    } else if (strstr(jsInitFailureReason, "TlsContext")) {
++      marker = 0x4a490030;
++    } else if (strstr(jsInitFailureReason, "InitThreadType")) {
++      marker = 0x4a490040;
++    } else if (strstr(jsInitFailureReason, "Mutex::Init")) {
++      marker = 0x4a490050;
++    }
++    *reinterpret_cast<volatile uint32_t*>(marker) = 0x4a49;
++#endif
+     MOZ_CRASH_UNSAFE(jsInitFailureReason);
+   }
+ 
