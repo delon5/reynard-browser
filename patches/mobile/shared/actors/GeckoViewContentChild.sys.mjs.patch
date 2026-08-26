@@ -2,7 +2,7 @@ diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/
 index 9ca6e15..18d37f0 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3858 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,3949 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
 
@@ -3510,24 +3510,109 @@ index 9ca6e15..18d37f0 100644
 +      reynardDefine("appVersion", reynardAppVersion);
 +      reynardDefine("vendor", reynardIdentity.vendor);
 +      reynardDefine("vendorSub", reynardIdentity.vendorSub);
-+      // NOT maxTouchPoints - see mse_fix_158's docstring. Fix 147
-+      // tells every document (pointer: coarse) and (hover: none)
-+      // through nsLookAndFeel, and forcing this to 0 contradicted it:
++      // AND maxTouchPoints, AND the media queries with it - CHANGED,
++      // see mse_fix_202's docstring. mse_fix_158 left this native and
++      // its reasoning was right about the constraint and wrong about
++      // which way to resolve it. Its objection was that
 +      //
 +      //   platform MacIntel  vendor Apple Computer, Inc.
 +      //   maxTouchPoints 0   (pointer: coarse)  (hover: none)
 +      //
-+      // is a combination no shipping device produces. A real Mac is
-+      // fine and hover with 0 touch points; iPadOS Safari is MacIntel
-+      // with 5, coarse and no hover.
++      // is a combination no shipping device produces - true - and it
++      // chose to keep the touch points so navigator and the media
++      // queries would agree. What they then agree on is iPadOS Safari,
++      // and MacIntel with more than one touch point is not an
++      // ambiguous signal: it is the canonical test every
++      // mobile-detection library runs to catch an iPad claiming to be
++      // a Mac,
 +      //
-+      // Left native - 5 on this device, as the "identity not applied"
-+      // line has printed in every capture - so navigator and the media
-+      // queries agree, and what they agree on is iPadOS Safari, which
-+      // is what a desktop-class user agent on a touch device IS.
++      //   navigator.platform === "MacIntel" && maxTouchPoints > 1
 +      //
-+      // The value stays on the identity objects above rather than
-+      // being deleted, so what this used to do stays legible.
++      // which the identity installed above satisfies exactly. Capture
++      // cfc0f699: the shim applies 61 times, reports platform=MacIntel
++      // vendor=Apple Computer, Inc. safari=yes maxTouchPoints=5, and
++      // HBO Max serves intercept/mobile to all 64 navigations.
++      //
++      // So the combination is made impossible in the OTHER direction
++      // instead. The touch points come off, and the pointer and hover
++      // queries move with them, which answers 158's objection rather
++      // than ignoring it - what navigator and CSS now agree on is a
++      // desktop Mac.
++      //
++      // Only inside this branch, so it reaches documents that are
++      // already being given a desktop user agent and nothing else.
++      // HOST-GATED - see mse_fix_203's docstring. The identity itself
++      // follows the UA everywhere, as it has since 2cbc7a5f; only the
++      // TOUCH picture is scoped, because netflix.com and tv.apple.com
++      // are on the same allowlist, are given the same desktop UA, and
++      // play today with maxTouchPoints 5 and a coarse pointer. A
++      // player told there is no touch may bind mouse handlers instead
++      // of touch ones, and those two are the paths that work.
++      //
++      // The matcher is the one the identity itself used while it was
++      // host-gated in bfc1ec5f - exact host or any subdomain.
++      var reynardTouchHosts = ["hbomax.com", "max.com"];
++      var reynardDesktopTouch = reynardTouchHosts.some(function (domain) {
++        return (
++          reynardIdentityHost === domain ||
++          reynardIdentityHost.slice(-(domain.length + 1)) === "." + domain
++        );
++      });
++      if (reynardDesktopTouch) {
++      reynardDefine("maxTouchPoints", reynardIdentity.maxTouchPoints);
++
++      // The queries fix 147 sets through nsLookAndFeel, which is
++      // widget-wide and has no per-document notion - so they are
++      // answered here instead, for this document only. Keys are
++      // matched with the spaces removed rather than by regular
++      // expression: this whole shim is a template literal and a
++      // backslash class is one more thing to get wrong.
++      try {
++        var reynardRealMatchMedia = window.matchMedia;
++        if (typeof reynardRealMatchMedia === "function") {
++          var reynardPointerAnswer = {
++            "(pointer:coarse)": false,
++            "(any-pointer:coarse)": false,
++            "(pointer:fine)": true,
++            "(any-pointer:fine)": true,
++            "(hover:none)": false,
++            "(any-hover:none)": false,
++            "(hover:hover)": true,
++            "(any-hover:hover)": true,
++          };
++          window.matchMedia = function (query) {
++            var list = reynardRealMatchMedia.call(window, query);
++            try {
++              var flat = String(query).toLowerCase().split(" ").join("");
++              if (Object.prototype.hasOwnProperty.call(
++                    reynardPointerAnswer, flat)) {
++                var wanted = reynardPointerAnswer[flat];
++                if (list.matches !== wanted) {
++                  Object.defineProperty(list, "matches", {
++                    configurable: true,
++                    get: function () {
++                      return wanted;
++                    },
++                  });
++                }
++              }
++            } catch (e) {}
++            return list;
++          };
++        }
++      } catch (e) {}
++
++      // The third member of the same family: 'ontouchstart' in window
++      // is what a great many scripts test before either of the above.
++      // Removed from the prototype, because an own property would
++      // leave the in-check true; each document has its own global, so
++      // this reaches no page but this one.
++      try {
++        if ("ontouchstart" in window) {
++          delete window.Window.prototype.ontouchstart;
++        }
++      } catch (e) {}
++      }
 +
 +      // window.safari is Safari-only and some players test for it by
 +      // name. The shape is the one detection actually reads: Safari
@@ -3553,7 +3638,13 @@ index 9ca6e15..18d37f0 100644
 +        " appVersion=" + String(navigator.appVersion).slice(0, 60) +
 +        " vendor=" + navigator.vendor +
 +        " maxTouchPoints=" + navigator.maxTouchPoints +
-+        " safari=" + (window.safari ? "yes" : "no")
++        " safari=" + (window.safari ? "yes" : "no") +
++        " coarse=" + (window.matchMedia("(pointer: coarse)").matches
++                        ? "yes" : "no") +
++        " hover=" + (window.matchMedia("(hover: hover)").matches
++                        ? "yes" : "no") +
++        " ontouchstart=" + ("ontouchstart" in window ? "yes" : "no") +
++        " touch=" + (reynardDesktopTouch ? "desktop" : "native")
 +      );
 +    }
 +  } catch (e) {}
@@ -3861,7 +3952,7 @@ index 9ca6e15..18d37f0 100644
  const lazy = {};
 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +3919,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +4010,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
 
@@ -4478,7 +4569,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4646,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +4737,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4500,7 +4591,7 @@ index 9ca6e15..18d37f0 100644
      }
 
      return null;
-@@ -199,11 +4676,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +4767,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
 
