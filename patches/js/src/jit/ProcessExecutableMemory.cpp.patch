@@ -1,5 +1,5 @@
 diff --git a/js/src/jit/ProcessExecutableMemory.cpp b/js/src/jit/ProcessExecutableMemory.cpp
-index cea7d764ca96..fc6c61676403 100644
+index cea7d764ca96..f9c569cdcb6a 100644
 --- a/js/src/jit/ProcessExecutableMemory.cpp
 +++ b/js/src/jit/ProcessExecutableMemory.cpp
 @@ -14,6 +14,15 @@
@@ -26,26 +26,20 @@ index cea7d764ca96..fc6c61676403 100644
  
  #ifdef XP_WIN
  #  include "mozilla/StackWalk_windows.h"
-@@ -47,6 +57,490 @@
+@@ -47,6 +57,429 @@
  using namespace js;
  using namespace js::jit;
  
-+// Bytes actually reserved for the executable region.
++// Bytes actually reserved for the executable region. On every platform except
++// iOS this is MaxCodeBytesPerProcess and nothing ever writes it. On iOS
++// ReserveProcessExecutableMemory steps down a ladder until the kernel accepts
++// a size and records the winner here. MaxCodeBytesPerProcess itself cannot
++// carry this: it is static_assert-ed and it sizes PageBitSet<MaxCodePages>,
++// so it stays the compile-time ceiling while this is what was mapped.
 +//
-+// On every platform except iOS this is MaxCodeBytesPerProcess and nothing
-+// ever writes it, so those platforms are bit-for-bit unaffected by the
-+// ladder below. On iOS ReserveProcessExecutableMemory steps down a ladder
-+// until the kernel accepts a size and records the winner here.
-+//
-+// MaxCodeBytesPerProcess itself cannot carry this: it is static_assert-ed
-+// and it sizes PageBitSet<MaxCodePages>, so it has to stay a compile-time
-+// constant. It therefore remains the ceiling - the largest reservation that
-+// will ever be attempted and the size everything compile-time is dimensioned
-+// for - while this is the amount actually mapped.
 +// Atomic because the SIGBUS handler and the JS compile threads both read it.
-+// It is written exactly once, inside ReserveProcessExecutableMemory, before
-+// base_ is set and therefore before any of those readers can observe a live
-+// region - so Relaxed is sufficient and no ordering is implied or needed.
++// Written exactly once, before base_ is set and therefore before any of those
++// readers can observe a live region, so Relaxed is sufficient.
 +static mozilla::Atomic<size_t, mozilla::Relaxed> sReservedExecutableBytes(
 +    MaxCodeBytesPerProcess);
 +
@@ -127,65 +121,9 @@ index cea7d764ca96..fc6c61676403 100644
 +// appeared to help - it was not improving Ion's compilation, it was
 +// reducing Ion's allocation count so it stayed inside an undersized
 +// cache. See fix_chunk_coverage_and_dead_connection_detach.py.
-+//
-+// SIZED TO THE REGION, not to one word. The mask used to be a single
-+// uint64_t, so it described the first kMaxPrepareChunks = 64 chunks and
-+// nothing else - 4MB x 64 = 256MB, against a MaxCodeBytesPerProcess of
-+// 2044MB on this build. It covered 12.5% of the region.
-+//
-+// Any request whose chunk index landed past 63 - which is every address
-+// beyond 256MB - took the `lastChunk >= kMaxPrepareChunks` bail below:
-+// prepared at exactly the caller's size, no bit set, uncached, every time
-+// it was touched. The allocator can return such an address: allocate()
-+// scans pages_ from cursor_ for a free run and wraps at MaxCodePages, and
-+// deallocate() pulls cursor_ back to the freed page, so where allocation
-+// lands is decided by fragmentation, not confined to a prefix. The
-+// measurement that prompted the 1MB -> 4MB raise recorded exactly this
-+// shape at the smaller setting: 917 of 1031 requests bypassing the cache
-+// with a 64MB ceiling. That raise moved the ceiling from 64MB to 256MB; it
-+// did not remove it.
-+//
-+// Deriving the chunk count from MaxCodeBytesPerProcess removes it: every
-+// address the allocator can return now has a bit, the bail is unreachable
-+// for in-region addresses, and coalescing stops depending on where the
-+// cursor happens to be. At 4MB chunks over 2044MB that is 511 chunks, so
-+// eight 64-bit words - 64 bytes of static storage.
-+//
-+// kPrepareChunkBytes is now a free tuning knob: coverage follows it
-+// automatically, so it can be lowered to trade more traps for less wasted
-+// preparation per trap (1MB would be 2044 chunks in 32 words) without
-+// reintroducing a ceiling. It is left at 4MB here because that is the value
-+// this branch has actually measured.
 +static constexpr size_t kPrepareChunkBytes = 4 * 1024 * 1024;
-+static constexpr size_t kMaxPrepareChunks =
-+    (MaxCodeBytesPerProcess + kPrepareChunkBytes - 1) / kPrepareChunkBytes;
-+static constexpr size_t kPrepareMaskWords = (kMaxPrepareChunks + 63) / 64;
-+static mozilla::Atomic<uint64_t, mozilla::Relaxed>
-+    sPreparedChunkMask[kPrepareMaskWords];
-+
-+// Accessors for the multi-word mask. Each is a single atomic op on one word,
-+// so they keep the properties the one-word version relied on: the compound
-+// forms stay atomic (a plain load/modify/store would let two compile threads
-+// lose one another's bit), and Clear stays async-signal-safe for the SIGBUS
-+// handler - array indexing adds no allocation and takes no lock. The array
-+// is constant-initialised into .bss, so there is no dynamic initialiser for
-+// a signal to race.
-+//
-+// Every caller is already bounds-checked against kMaxPrepareChunks; the
-+// checks are kept at the call sites rather than duplicated here so the two
-+// callers that must not silently no-op stay visibly guarded.
-+static bool PreparedChunkIsSet(size_t aChunk) {
-+  return (sPreparedChunkMask[aChunk / 64] & (uint64_t(1) << (aChunk % 64))) !=
-+         0;
-+}
-+
-+static void PreparedChunkSet(size_t aChunk) {
-+  sPreparedChunkMask[aChunk / 64] |= uint64_t(1) << (aChunk % 64);
-+}
-+
-+static void PreparedChunkClear(size_t aChunk) {
-+  sPreparedChunkMask[aChunk / 64] &= ~(uint64_t(1) << (aChunk % 64));
-+}
++static constexpr size_t kMaxPrepareChunks = 64;
++static mozilla::Atomic<uint64_t, mozilla::Relaxed> sPreparedChunkMask(0);
 +
 +// Saved so a foreign fault can be handed back to whoever was
 +// installed before us instead of being forced to SIG_DFL.
@@ -455,7 +393,8 @@ index cea7d764ca96..fc6c61676403 100644
 +  }
 +
 +  for (size_t chunk = firstChunk; chunk <= lastChunk; chunk++) {
-+    if (PreparedChunkIsSet(chunk)) {
++    uint64_t bit = uint64_t(1) << chunk;
++    if (sPreparedChunkMask & bit) {
 +      sPrepareCachedChunk++;
 +      continue;
 +    }
@@ -477,7 +416,7 @@ index cea7d764ca96..fc6c61676403 100644
 +    // compound form atomic; spelling it out defeats that, and two
 +    // compile threads can lose one another's bit - costing an extra brk
 +    // round trip later. See fix_sigbus_and_chunk_mask.py.
-+    PreparedChunkSet(chunk);
++    sPreparedChunkMask |= bit;
 +  }
 +}
 +
@@ -517,7 +456,7 @@ index cea7d764ca96..fc6c61676403 100644
  #ifdef XP_WIN
  #  if defined(HAVE_64BIT_BUILD)
  #    define NEED_JIT_UNWIND_HANDLING
-@@ -463,6 +957,364 @@ static void* ComputeRandomAllocationAddress() {
+@@ -463,6 +896,364 @@ static void* ComputeRandomAllocationAddress() {
  static void DecommitPages(void* addr, size_t bytes);
  
  static void* ReserveProcessExecutableMemory(size_t bytes) {
@@ -635,7 +574,7 @@ index cea7d764ca96..fc6c61676403 100644
 +      const size_t faultChunk =
 +          static_cast<size_t>(fault - regionBase) / kPrepareChunkBytes;
 +      if (faultChunk < kMaxPrepareChunks) {
-+        PreparedChunkClear(faultChunk);
++        sPreparedChunkMask &= ~(uint64_t(1) << faultChunk);
 +      }
 +
 +      // CAPPED. Skipping exists for a rare W^X quirk on an otherwise
@@ -882,7 +821,7 @@ index cea7d764ca96..fc6c61676403 100644
    // On most Unix platforms our strategy is as follows:
    //
    // * Reserve:  mmap with PROT_NONE
-@@ -507,21 +1359,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
+@@ -507,21 +1298,22 @@ static void* ReserveProcessExecutableMemory(size_t bytes) {
    void* randomAddr = ComputeRandomAllocationAddress();
    unsigned protection = PROT_NONE;
    unsigned flags = MAP_NORESERVE | MAP_PRIVATE | MAP_ANON;
@@ -910,66 +849,11 @@ index cea7d764ca96..fc6c61676403 100644
  }
  
  static void DeallocateProcessExecutableMemory(void* addr, size_t bytes) {
-@@ -559,10 +1412,85 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
-   MOZ_CRASH();
- }
+@@ -561,8 +1353,30 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
  
-+#  ifdef XP_IOS
-+// Hand the physical pages backing [addr, addr+bytes) back to the kernel, and
-+// take them back again on commit.
-+//
-+// mprotect(PROT_NONE) does NOT do this on XNU. It changes protection only:
-+// the pages stay resident and dirty, and dirty pages are what phys_footprint
-+// counts - the number jetsam kills a process on. Only MADV_FREE_REUSABLE
-+// decrements it; MADV_FREE_REUSE is its counterpart when the range is used
-+// again.
-+//
-+// The generic Darwin path below has always paired its mprotect with these
-+// two calls (see the comment above ReserveProcessExecutableMemory). The iOS
-+// branch never did, so a page this process frees stays charged to it for the
-+// rest of the process's life.
-+//
-+// This is NOT an unbounded leak, and it is worth being precise about that:
-+// ProcessExecutableMemory::allocate scans pages_ for a free run, and
-+// deallocate() pulls cursor_ back to the freed page specifically so the
-+// region gets reused rather than fragmented. The cost is therefore bounded
-+// by the high-water mark of concurrently live JIT pages - it is the
-+// difference between a footprint that tracks currently-live JIT code and one
-+// that never falls back below its peak. On a device that gets none of the
-+// memory entitlements this app ships (extended-virtual-addressing is iOS
-+// 14+, increased-memory-limit iOS 15+, increased-debugging-memory-limit iOS
-+// 16+, so iOS 13 gets nothing) that difference is worth reclaiming.
-+//
-+// Deliberately not MOZ_RELEASE_ASSERT(ret == 0), unlike the generic Darwin
-+// path: on iOS 26+ the region carries a second, shared mapping created by
-+// vm_remap (see sWritableExecutableMemoryBase), and MADV_FREE_REUSABLE can
-+// legitimately refuse a range that is mapped more than once - in which case
-+// this is a no-op there and the pre-existing behaviour is unchanged. A
-+// refusal costs footprint, not correctness, so it must not be fatal.
-+static void ReturnExecutablePagesToOS(void* addr, size_t bytes) {
-+  int ret;
-+  do {
-+    ret = madvise(addr, bytes, MADV_FREE_REUSABLE);
-+  } while (ret != 0 && errno == EAGAIN);
-+  (void)ret;
-+}
-+
-+static void ReclaimExecutablePagesFromOS(void* addr, size_t bytes) {
-+  int ret;
-+  do {
-+    ret = madvise(addr, bytes, MADV_FREE_REUSE);
-+  } while (ret != 0 && errno == EAGAIN);
-+  (void)ret;
-+}
-+#  endif
-+
  [[nodiscard]] static bool CommitPages(void* addr, size_t bytes,
                                        ProtectionSetting protection) {
 +#  ifdef XP_IOS
-+  // Counterpart to the MADV_FREE_REUSABLE in DecommitPages. Ordered before
-+  // the protection change, as on the generic Darwin path.
-+  ReclaimExecutablePagesFromOS(addr, bytes);
-+
 +  // iOS 26+
 +  if (sDeviceOSMajorVersion >= 26) {
 +    void* writable = WritableAliasForExecutableAddress(addr, bytes);
@@ -997,7 +881,7 @@ index cea7d764ca96..fc6c61676403 100644
    int ret;
    do {
      ret = madvise(addr, bytes, MADV_FREE_REUSE);
-@@ -570,14 +1498,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -570,14 +1384,14 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    if (ret != 0) {
      return false;
    }
@@ -1015,7 +899,7 @@ index cea7d764ca96..fc6c61676403 100644
    unsigned flags = ProtectionSettingToFlags(protection);
    void* p = MozTaggedAnonymousMmap(addr, bytes, flags,
                                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0,
-@@ -587,28 +1515,54 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
+@@ -587,28 +1401,51 @@ static unsigned ProtectionSettingToFlags(ProtectionSetting protection) {
    }
    MOZ_RELEASE_ASSERT(p == addr);
    return true;
@@ -1037,15 +921,12 @@ index cea7d764ca96..fc6c61676403 100644
 +                   bytes, false, VM_PROT_NONE);
 +    MOZ_RELEASE_ASSERT(kret == KERN_SUCCESS);
 +    if (!sHasTXMSupport) {
-+      ReturnExecutablePagesToOS(addr, bytes);
 +      return;
 +    }
 +  }
 +
 +  int ret = mprotect(addr, bytes, PROT_NONE);
 +  MOZ_RELEASE_ASSERT(ret == 0);
-+
-+  ReturnExecutablePagesToOS(addr, bytes);
 +
 +#  else
    // See the comment in ReserveProcessExecutableMemory.
@@ -1074,21 +955,19 @@ index cea7d764ca96..fc6c61676403 100644
  #  endif
  }
  #endif
-@@ -699,6 +1653,13 @@ class ProcessExecutableMemory {
+@@ -699,6 +1536,11 @@ class ProcessExecutableMemory {
    // Page where we should try to allocate next.
    size_t cursor_;
  
-+  // Pages actually available, i.e. ReservedExecutableBytes() in pages. Equal
-+  // to MaxCodePages unless the reservation ladder stepped down. pages_ stays
-+  // dimensioned for MaxCodePages - it is a compile-time bitset and a few
-+  // spare KB is not worth a second allocation strategy - so this, not
-+  // MaxCodePages, is what bounds every index the allocator may hand out.
++  // Pages actually available: ReservedExecutableBytes() in pages. Equal to
++  // MaxCodePages unless the ladder stepped down. pages_ stays dimensioned for
++  // MaxCodePages, so this - not MaxCodePages - bounds every index handed out.
 +  size_t maxCodePages_;
 +
    mozilla::Maybe<mozilla::non_crypto::XorShift128PlusRNG> rng_;
    PageBitSet<MaxCodePages> pages_;
  
-@@ -708,6 +1669,7 @@ class ProcessExecutableMemory {
+@@ -708,6 +1550,7 @@ class ProcessExecutableMemory {
          lock_(mutexid::ProcessExecutableRegion),
          pagesAllocated_(0),
          cursor_(0),
@@ -1096,18 +975,13 @@ index cea7d764ca96..fc6c61676403 100644
          pages_() {}
  
    [[nodiscard]] bool init() {
-@@ -722,8 +1684,56 @@ class ProcessExecutableMemory {
+@@ -722,8 +1565,51 @@ class ProcessExecutableMemory {
        return false;
      }
  
-+    // ReserveProcessExecutableMemory may have settled for less than it was
-+    // asked for; from here on the reservation's real size is authoritative.
++    // The ladder may have settled for less than it was asked for; from here
++    // the reservation's real size is authoritative.
 +    maxCodePages_ = ReservedExecutableBytes() / ExecutableCodePageSize;
-+
-+    // pages_ is dimensioned for MaxCodePages at compile time. Every ladder
-+    // rung is <= MaxCodeBytesPerProcess so this cannot trip today, but the
-+    // ladder is data and pages_ is a type - asserting the relationship keeps
-+    // a future rung from silently indexing past the bitset.
 +    MOZ_RELEASE_ASSERT(maxCodePages_ <= MaxCodePages);
 +    MOZ_RELEASE_ASSERT(maxCodePages_ > 0);
 +
@@ -1153,7 +1027,7 @@ index cea7d764ca96..fc6c61676403 100644
      mozilla::Array<uint64_t, 2> seed;
      GenerateXorShift128PlusSeed(seed);
      rng_.emplace(seed[0], seed[1]);
-@@ -735,7 +1745,7 @@ class ProcessExecutableMemory {
+@@ -735,7 +1621,7 @@ class ProcessExecutableMemory {
    bool initialized() const { return base_ != nullptr; }
  
    size_t bytesAllocated() const {
@@ -1162,7 +1036,7 @@ index cea7d764ca96..fc6c61676403 100644
      return pagesAllocated_ * ExecutableCodePageSize;
    }
  
-@@ -743,7 +1753,21 @@ class ProcessExecutableMemory {
+@@ -743,7 +1629,21 @@ class ProcessExecutableMemory {
      MOZ_ASSERT(initialized());
      MOZ_ASSERT(pages_.empty());
      MOZ_ASSERT(pagesAllocated_ == 0);
@@ -1185,7 +1059,7 @@ index cea7d764ca96..fc6c61676403 100644
      base_ = nullptr;
      rng_.reset();
      MOZ_ASSERT(!initialized());
-@@ -752,12 +1776,12 @@ class ProcessExecutableMemory {
+@@ -752,12 +1652,12 @@ class ProcessExecutableMemory {
    void assertValidAddress(void* p, size_t bytes) const {
      MOZ_RELEASE_ASSERT(p >= base_ &&
                         uintptr_t(p) + bytes <=
@@ -1200,7 +1074,7 @@ index cea7d764ca96..fc6c61676403 100644
    }
  
    void* allocate(size_t bytes, ProtectionSetting protection,
-@@ -779,21 +1803,21 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
+@@ -779,21 +1679,21 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
    void* p = nullptr;
    {
      LockGuard<Mutex> guard(lock_);
@@ -1227,7 +1101,7 @@ index cea7d764ca96..fc6c61676403 100644
          page = 0;
        }
  
-@@ -815,7 +1839,7 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
+@@ -815,7 +1715,7 @@ void* ProcessExecutableMemory::allocate(size_t bytes,
        }
  
        pagesAllocated_ += numPages;
@@ -1236,7 +1110,7 @@ index cea7d764ca96..fc6c61676403 100644
  
        // If we allocated a small number of pages, move cursor_ to the
        // next page. We don't do this for larger allocations to avoid
-@@ -901,9 +1925,20 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
+@@ -901,9 +1801,20 @@ bool js::jit::InitProcessExecutableMemory() { return execMemory.init(); }
  
  void js::jit::ReleaseProcessExecutableMemory() { execMemory.release(); }
  
@@ -1258,7 +1132,7 @@ index cea7d764ca96..fc6c61676403 100644
           AlignBytes(execMemory.bytesAllocated(), 0x100000U);
  }
  
-@@ -911,15 +1946,28 @@ bool js::jit::CanLikelyAllocateMoreExecutableMemory() {
+@@ -911,15 +1822,28 @@ bool js::jit::CanLikelyAllocateMoreExecutableMemory() {
    // Use a 8 MB buffer.
    static const size_t BufferSize = 8 * 1024 * 1024;
  
@@ -1289,7 +1163,7 @@ index cea7d764ca96..fc6c61676403 100644
  bool js::jit::ReprotectRegion(void* start, size_t size,
                                ProtectionSetting protection,
                                MustFlushICache flushICache) {
-@@ -969,7 +2017,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
+@@ -969,7 +1893,30 @@ bool js::jit::ReprotectRegion(void* start, size_t size,
      return true;
    }
  
