@@ -39,3 +39,15 @@ index 731551b96d9f..9f80aa5409d4 100644
    if (!xpc::IsInAutomation()) {
      return IPC_FAIL(this, "Should only be called from automation.");
    }
+@@ -151,6 +171,11 @@ void NativeLayerRootRemoteMacParent::HandleCreateLayerForColor(
+ }
+ 
+ void NativeLayerRootRemoteMacParent::HandleLayerDestroyed(uint64_t aID) {
++#ifdef XP_IOS
++  if (auto entry = mKnownLayers.MaybeGet(aID)) {
++    mRealNativeLayerRoot->RetainLayerUntilNextScreenCommit(*entry);
++  }
++#endif
+   mKnownLayers.Remove(aID);
+ }
+ 
