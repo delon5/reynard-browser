@@ -1,5 +1,5 @@
 diff --git a/js/src/jit/ProcessExecutableMemory.h b/js/src/jit/ProcessExecutableMemory.h
-index 4a08d4a6238f..e81f640ac22f 100644
+index 4a08d4a6238f..1a71c2d2373a 100644
 --- a/js/src/jit/ProcessExecutableMemory.h
 +++ b/js/src/jit/ProcessExecutableMemory.h
 @@ -7,9 +7,7 @@
@@ -13,7 +13,7 @@ index 4a08d4a6238f..e81f640ac22f 100644
  
  namespace js {
  namespace jit {
-@@ -77,10 +75,26 @@ enum class MustFlushICache { No, Yes };
+@@ -77,11 +75,39 @@ enum class MustFlushICache { No, Yes };
                                            ProtectionSetting protection,
                                            MustFlushICache flushICache);
  
@@ -36,11 +36,24 @@ index 4a08d4a6238f..e81f640ac22f 100644
  // executable memory region.
  [[nodiscard]] extern bool InitProcessExecutableMemory();
  extern void ReleaseProcessExecutableMemory();
-+extern void SetJITRuntimeInfo(const JITRuntimeInfo& aRuntimeInfo);
  
++// Bytes actually reserved for the executable region, which on iOS can be less
++// than MaxCodeBytesPerProcess - see the reservation ladder in
++// ProcessExecutableMemory.cpp. Equal to MaxCodeBytesPerProcess everywhere
++// else, and before InitProcessExecutableMemory has run.
++//
++// Callers outside this module want this, not MaxCodeBytesPerProcess, whenever
++// they are reasoning about how much executable memory actually exists.
++// MaxCodeBytesPerProcess remains the compile-time ceiling: it is
++// static_assert-ed and it dimensions PageBitSet, so it cannot carry a runtime
++// value.
++extern size_t ReservedCodeBytesPerProcess();
++extern void SetJITRuntimeInfo(const JITRuntimeInfo& aRuntimeInfo);
++
  // Allocate/deallocate executable pages.
  extern void* AllocateExecutableMemory(size_t bytes,
-@@ -123,22 +137,14 @@ class MOZ_RAII AutoMarkJitCodeWritableForThread {
+                                       ProtectionSetting protection,
+@@ -123,22 +149,14 @@ class MOZ_RAII AutoMarkJitCodeWritableForThread {
  
   public:
    MOZ_ALWAYS_INLINE_EVEN_DEBUG AutoMarkJitCodeWritableForThread() {
