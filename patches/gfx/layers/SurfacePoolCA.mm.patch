@@ -1,0 +1,32 @@
+diff --git a/gfx/layers/SurfacePoolCA.mm b/gfx/layers/SurfacePoolCA.mm
+index 04828808d305..fb4993aa7caa 100644
+--- a/gfx/layers/SurfacePoolCA.mm
++++ b/gfx/layers/SurfacePoolCA.mm
+@@ -260,7 +260,26 @@ uint64_t SurfacePoolCA::LockedPool::CollectPendingSurfaces(
+       // mCheckCount.
+       pendingSurf.mPreviousCheckGeneration = mCollectionGeneration;
+       pendingSurf.mCheckCount++;
+-      if (pendingSurf.mCheckCount >= 30) {
++#ifdef XP_MACOSX
++      // Half a second at 60Hz.
++      static constexpr uint64_t kMaxCheckCount = 30;
++#else
++      // This check runs once per composite (SurfacePoolHandleCA::OnBeginFrame),
++      // so the threshold is really a duration and it scales with refresh rate:
++      // 30 checks is 500ms at 60Hz but only 250ms at 120Hz. iOS's render
++      // server routinely holds a *displayed* surface longer than that across a
++      // scroll's triple buffering, so 30 ejects healthy surfaces. Ejecting
++      // frees nothing - IOSurfaceIsInUse() reports the cross-process use
++      // count, so an external holder is keeping the backing store alive
++      // either way - it only drops our reference, which stops the surface
++      // ever reaching mAvailableEntries and forces an IOSurfaceCreate for the
++      // replacement. That churn is what shows up as GPU-process growth while
++      // scrolling. 600 is 5s at 120Hz and 10s at 60Hz: past any legitimate
++      // hold, and still bounded, so a genuinely stuck surface is released and
++      // mPendingEntries cannot grow without limit.
++      static constexpr uint64_t kMaxCheckCount = 600;
++#endif
++      if (pendingSurf.mCheckCount >= kMaxCheckCount) {
+         // The window server has been holding on to this surface for an
+         // unreasonably long time. This is known to happen sometimes, for
+         // example in occluded windows or after a GPU switch. In that case,
