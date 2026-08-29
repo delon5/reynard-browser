@@ -2,7 +2,7 @@ diff --git a/mobile/ios/app/mobile.js b/mobile/ios/app/mobile.js
 index e835b1c33d86..3b8cd6d4e48e 100644
 --- a/mobile/ios/app/mobile.js
 +++ b/mobile/ios/app/mobile.js
-@@ -3,7 +3,102 @@
+@@ -3,7 +3,131 @@
  // License, v. 2.0. If a copy of the MPL was not distributed with this
  // file, You can obtain one at http://mozilla.org/MPL/2.0/.
  
@@ -80,6 +80,35 @@ index e835b1c33d86..3b8cd6d4e48e 100644
 +// Enable data collection permissions.
 +pref("extensions.dataCollectionPermissions.enabled", true);
 +
++// Ion's warmup trigger: invocations in Baseline before a function is
++// promoted to the optimizing compiler (blinterp 10 -> baselinejit 100 ->
++// ion, default 1500). Speedometer runs a bounded number of iterations, so
++// at 1500 a large slice of the measured work never leaves Baseline, which
++// does no inlining or type specialization. A prior result appearing to
++// favour RAISING this was an artifact of the W^X chunk cache being too
++// small - Ion simply allocated less and so stayed inside it - and that
++// cache now covers 256MB rather than 64MB. Measured directly, 15000
++// scored roughly half the default. Lower costs Ion compile time and one
++// region preparation per first-touch chunk, so there is an optimum, not a
++// monotonic win; sweep it rather than assuming. Inert on launches where
++// the JIT never attaches, since Ion does not run at all there.
++pref("javascript.options.ion.threshold", 750);
++
++// Stylo sizes its thread pool from Gecko_GetNumStyleThreads(), which
++// returns the big-core count on a heterogeneous CPU. This fork supplies
++// hal/uikit/UIKitHeterogeneousCpuInfo.cpp, so on Apple silicon that is the
++// 2 performance cores - a 2-thread pool (main thread plus one worker) on a
++// 6-core A18. Stock Firefox has no iOS HAL implementation and so takes the
++// num_virtual_cores * .75 fallback, which would give 4. The big-cores-only
++// rule was tuned on Android big.LITTLE parts whose little cluster is too
++// weak to be worth a rayon work unit; Apple's E cores are not in that
++// class, and restyle parallelises well enough to absorb a slower worker.
++// Clamped by Stylo to STYLO_MAX_THREADS (6); -1 restores the automatic
++// path. NOTE: this is device-invariant, so it is a measurement knob - on a
++// 2-core A9 the automatic path disables the pool and a fixed count here
++// would spawn workers with nowhere to run them.
++pref("layout.css.stylo-threads", 4);
++
 +pref("layout.spellcheckDefault", 0);
 +
 +// Allow autoplay configuration
@@ -106,7 +135,7 @@ index e835b1c33d86..3b8cd6d4e48e 100644
  
  // Use software webrender on simulator due to missing APIs.
  #if TARGET_OS_SIMULATOR
-@@ -19,3 +114,5 @@ pref("security.sandbox.content.level", 1);
+@@ -19,3 +143,5 @@ pref("security.sandbox.content.level", 1);
  // 1 complete progressbar at DOMContentLoaded
  // 2 complete progressbar at first MozAfterPaint after DOMContentLoaded
  pref("page_load.progressbar_completion", 2);
