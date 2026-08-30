@@ -19,7 +19,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
      /// The native compositor surface handle
      pub native_surface_id: NativeSurfaceId,
      /// List of image keys, and current image generations, that are drawn in this surface.
-@@ -1541,6 +1552,55 @@
+@@ -1541,6 +1552,66 @@
      ) -> Result<CompositorSurfaceKind, SurfacePromotionFailure> {
          use SurfacePromotionFailure::*;
  
@@ -59,7 +59,18 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +            // explain a picture lost with no refusal, no early return
 +            // and no destroyed surface. At one in six hundred a five
 +            // second stall is invisible.
-+            if nth == 0 || nth % 60 == 0 {
++            // BOTH ATTEMPTS, NOT EVERY OTHER ONE - see mse_fix_216's
++            // docstring. The YUV caller tries [Overlay, Underlay] in a
++            // fixed order, so this function is called in strict
++            // alternation and `nth % 60 == 0` is always an even index,
++            // always the Overlay attempt. Capture 27a859c4: sixty-three
++            // samples, sixty-three Overlay, zero Underlay - and Overlay
++            // cannot succeed on an atomic slice, so every sampled call
++            // was a foregone failure while the call that decides was
++            // never sampled at all. The `== 1` catches the Underlay
++            // attempt immediately after each sampled Overlay one; the
++            // pairing holds because the loop makes them back to back.
++            if nth == 0 || nth % 60 == 0 || nth % 60 == 1 {
 +                // CHANGED - see mse_fix_210's docstring. is_root_tile_cache
 +                // is the field that decides whether this primitive can be
 +                // promoted at all, and it was the one thing this line did
@@ -75,7 +86,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -1644,6 +1704,35 @@
+@@ -1644,6 +1715,35 @@
  
          // If not on the root picture cache, it has some kind of
          // complex effect (such as a filter, mix-blend-mode or 3d transform).
@@ -111,7 +122,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +            }
              return Err(NotRootTileCache);
          }
-@@ -1830,14 +1919,42 @@
+@@ -1830,14 +1930,42 @@
              frame_context.spatial_tree,
          );
  
@@ -155,7 +166,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -1854,6 +1971,7 @@
+@@ -1854,6 +1982,7 @@
  
          let is_visible = world_clip_rect.intersects(&frame_context.global_screen_world_rect);
          if !is_visible {
@@ -163,7 +174,54 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -2017,6 +2135,7 @@
+@@ -1893,6 +2022,46 @@
+             CompositorKind::Layer { .. } | CompositorKind::Draw { .. } => {}
+         }
+ 
++        // REYNARD: a promoted video that is about to get a DRAWN surface.
++        //
++        // ADDED - see mse_fix_216's docstring. Below this, external_image_id
++        // being None makes the code create an ordinary compositor surface
++        // and a tile to paint into, instead of an external surface for the
++        // IOSurface to attach to. On the protected MSE route that is a black
++        // rectangle by construction: the frames never pass through Gecko, so
++        // there is nothing to paint into the tile, and NativeLayerCA is never
++        // told the layer is DRM.
++        //
++        // Everything else the crate can complain about has been ruled out by
++        // capture 2997a7c3 - promotion is granted for the portrait box, the
++        // three early returns are silent, and the picture is still lost - so
++        // this branch is what is left. The three ways in are separated
++        // because they need different fixes.
++        if external_image_id.is_none() {
++            use std::sync::atomic::{AtomicUsize, Ordering};
++            static REYNARD_DRAWN: AtomicUsize = AtomicUsize::new(0);
++            let nth = REYNARD_DRAWN.fetch_add(1, Ordering::Relaxed);
++            if nth < 20 || nth % 60 == 0 {
++                let why = if !flags.contains(
++                        PrimitiveFlags::SUPPORTS_EXTERNAL_COMPOSITOR_SURFACE) {
++                    "the primitive does not carry \
++SUPPORTS_EXTERNAL_COMPOSITOR_SURFACE"
++                } else if image_rendering != ImageRendering::Auto {
++                    "image_rendering is not Auto"
++                } else if resource_cache.get_image_properties(api_keys[0])
++                        .and_then(|p| p.external_image).is_none() {
++                    "the image has no external_image to hand over"
++                } else {
++                    "the negative-scaling capability check took it away"
++                };
++                eprintln!("reynardWR: promoted video surface is NOT external \
++- {} (kind {:?}, at {:?}, scale {},{}, {} so far)",
++                          why, surface_kind, pic_coverage_rect,
++                          raster_to_device.scale.x, raster_to_device.scale.y,
++                          nth + 1);
++            }
++        }
++
+         let compositor_transform_index = composite_state.register_transform(
+             local_to_raster,
+             raster_to_device,
+@@ -2017,6 +2186,7 @@
  
                          ExternalNativeSurface {
                              used_this_frame: true,
@@ -171,7 +229,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
                              native_surface_id,
                              image_dependencies: [ImageDependency::INVALID; 3],
                          }
-@@ -2162,6 +2281,38 @@
+@@ -2162,6 +2332,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
@@ -210,7 +268,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          if !self.debug_flags.contains(DebugFlags::SURFACE_PROMOTION_LOGGING) || result.is_ok() {
              return;
          }
-@@ -2997,16 +3148,47 @@
+@@ -2997,16 +3199,47 @@
  
          // A simple GC of the native external surface cache, to remove and free any
          // surfaces that were not referenced during the update_prim_dependencies pass.
