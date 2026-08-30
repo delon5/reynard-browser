@@ -82,7 +82,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  }
  
  already_AddRefed<NativeLayer> NativeLayerRootCA::CreateLayer(
-@@ -236,6 +303,153 @@
+@@ -236,6 +303,208 @@
      layerCA->SetBackingScale(mBackingScale);
      layerCA->SetRootWindowIsFullscreen(mWindowIsFullscreen);
      layersCA.AppendElement(std::move(layerCA));
@@ -114,13 +114,38 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +  static size_t reynardLastLen = SIZE_MAX;
 +  static int reynardLastDrm = -1;
 +  static int reynardQuietCommits = 0;
++  // How many times the parser's ask was read during the current stretch
++  // of "nothing protected" - see mse_fix_214's docstring.
++  static int reynardQuietAsksTaken = 0;
 +  if (layersCA.Length() != reynardLastLen ||
 +      reynardDrmCount != reynardLastDrm) {
 +    printf_stderr("reynardWR: SetLayers %zu layers, %d protected\n",
 +                  layersCA.Length(), reynardDrmCount);
++    // REYNARD: how long the silence actually was, on the way out of it.
++    //
++    // ADDED - see mse_fix_214's docstring. 212's heartbeat prints every
++    // 300 commits, which says the compositor is alive but not how often
++    // it ran - and that number is what decides where the real repair
++    // goes. Capture 27a859c4 has 7.2 seconds between the parser's ask
++    // and the rotation that rescued it; four hundred commits in that
++    // window means the ask was ignored and this file is at fault, and
++    // nine means a page with no video surface barely composites at all
++    // and the fault is upstream in WebRender.
++    //
++    // Fires exactly once per stretch, whatever its length, and never on
++    // a healthy commit - reynardQuietCommits is zero unless the branch
++    // below has been running.
++    if (reynardQuietCommits > 0) {
++      printf_stderr(
++          "reynardWR: that ended a stretch of %d commit(s) with NONE "
++          "protected while the parser had a live picture; its ask was "
++          "read %d time(s) in that stretch\n",
++          reynardQuietCommits, reynardQuietAsksTaken);
++    }
 +    reynardLastLen = layersCA.Length();
 +    reynardLastDrm = reynardDrmCount;
 +    reynardQuietCommits = 0;
++    reynardQuietAsksTaken = 0;
 +  } else if (reynardDrmCount == 0 && ReynardMSEHasLivePicture()) {
 +    // REYNARD: say the silence out loud - see mse_fix_212's docstring.
 +    //
@@ -135,19 +160,49 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +    // Only while the parser is still producing pictures, so a paused
 +    // or torn-down page stays quiet, and only every 300 commits.
 +    //
-+    // NOT ReynardMSEWantsFreshSink() here, however much it belongs in
-+    // this line: that function CLEARS the flag on read - it is the
-+    // consumer the poll below depends on - so asking it from a
-+    // diagnostic would eat the parser's ask and cause the fault this
-+    // is looking for. The parser logs its own attempt number; the two
-+    // correlate by timestamp.
-+    if (++reynardQuietCommits % 300 == 0) {
++    // AND THIS IS WHERE THE ASK IS READ - see mse_fix_214's docstring.
++    //
++    // 212's comment here said not to call ReynardMSEWantsFreshSink,
++    // because it clears the flag on read and mse_fix_201's poll is its
++    // consumer. That was right for a diagnostic and wrong as a
++    // permanent rule: 201's poll is gated on a layer that carries
++    // mIsDRM and already holds the sink, and BETWEEN TWO TITLES THERE
++    // IS NO SUCH LAYER. Capture 27a859c4: the ask went up at 91361.481
++    // and nothing read it for 7.2 seconds, until rotating the phone
++    // forced a rebuild.
++    //
++    // The two readers cannot compete, because this branch runs only
++    // when reynardDrmCount == 0 and 201's poll runs only when some
++    // layer carries mIsDRM. Complementary conditions, never both true
++    // of one commit - except for a one-commit skew (this counts the
++    // list ARRIVING, the poll walks mSublayers from the last one), and
++    // there the outcomes converge: the poll forces a video-layer
++    // rebuild, and SetMutatedLayerStructure forces the full update path
++    // that rebuilds every layer including that one.
++    //
++    // It cannot churn. The flag clears on read and mse_fix_208's chase
++    // re-raises it at most twelve times, a second apart, so this forces
++    // at most twelve full updates across a stall and normally one. The
++    // flag is its own throttle.
++    ++reynardQuietCommits;
++    if (ReynardMSEWantsFreshSink()) {
++      ++reynardQuietAsksTaken;
++      SetMutatedLayerStructure();
++      printf_stderr(
++          "reynardWR: the parser asked for a fresh sink with no protected "
++          "layer on screen to read it - forcing a full update so the "
++          "video layer is rebuilt (%d commit(s) into this stretch)\n",
++          reynardQuietCommits);
++    }
++    // Kept for a stall that outlives the capture, which is how 9bdcfc97
++    // ended - three thousand lines with the state never changing, so the
++    // report on the way out never came.
++    if (reynardQuietCommits % 300 == 0) {
 +      printf_stderr(
 +          "reynardWR: %d commits with %zu layers and NONE protected "
 +          "while the parser still has a live picture - WebRender is "
 +          "not submitting a protected layer, so no layer carries "
-+          "mIsDRM, so the refusal poll has nobody to read the "
-+          "parser's ask\n",
++          "mIsDRM\n",
 +          reynardQuietCommits, layersCA.Length());
 +    }
 +  }
@@ -236,7 +291,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    if (layersCA != mSublayers) {
-@@ -244,6 +458,15 @@ void NativeLayerRootCA::SetLayers(
+@@ -244,6 +513,15 @@ void NativeLayerRootCA::SetLayers(
    }
  }
  
@@ -252,7 +307,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  void NativeLayerRootCA::SetBackingScale(float aBackingScale) {
    MutexAutoLock lock(mMutex);
  
-@@ -287,6 +510,10 @@ bool NativeLayerRootCA::CommitToScreen() {
+@@ -287,6 +565,10 @@ bool NativeLayerRootCA::CommitToScreen() {
                         mWindowIsFullscreen);
    mMutatedOnscreenLayerStructure = false;
  
@@ -263,7 +318,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    mCommitPending = false;
  
    if (StaticPrefs::gfx_webrender_debug_dump_native_layer_tree_to_file()) {
-@@ -320,6 +547,11 @@
+@@ -320,6 +602,11 @@
      EmitTelemetryForVideoLowPower(videoLowPower);
    }
  
@@ -275,7 +330,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    return true;
  }
  
-@@ -389,6 +621,19 @@
+@@ -389,6 +676,19 @@
      WhichRepresentation aRepresentation, CALayer* aRootCALayer,
      const nsTArray<RefPtr<NativeLayerCA>>& aSublayers,
      bool aMutatedLayerStructure, bool aWindowIsFullscreen) {
@@ -295,7 +350,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    UpdateType updateRequired =
        GetMaxUpdateRequired(aRepresentation, aSublayers, aMutatedLayerStructure);
    if (updateRequired == NativeLayerCA::UpdateType::OnlyVideo) {
-@@ -417,11 +662,71 @@
+@@ -417,11 +717,71 @@
    NSMutableArray<CALayer*>* sublayers =
        [NSMutableArray arrayWithCapacity:aSublayers.Length()];
    bool mustRebuild = updateRequired == UpdateType::All;
@@ -367,7 +422,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      }
    }
  
-@@ -428,6 +733,25 @@ void NativeLayerRootCA::CommitRepresentation(
+@@ -428,6 +788,25 @@ void NativeLayerRootCA::CommitRepresentation(
    if (mustRebuild) {
      aRootCALayer.sublayers = sublayers;
    }
@@ -393,7 +448,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  }
  
  SnapshotterCADelegate::~SnapshotterCADelegate() = default;
-@@ -921,9 +1245,51 @@
+@@ -921,9 +1300,51 @@
  }
  
  bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
@@ -445,7 +500,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1658,17 @@
+@@ -1292,6 +1713,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -463,7 +518,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1462,15 +1839,94 @@
+@@ -1462,15 +1894,94 @@
    }
  
    auto& r = GetRepresentation(aRepresentation);
@@ -559,7 +614,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
    }
-@@ -1477,6 +1933,35 @@ bool NativeLayerCA::ApplyChanges(WhichRepresentation aRepresentation,
+@@ -1477,6 +1988,35 @@ bool NativeLayerCA::ApplyChanges(WhichRepresentation aRepresentation,
    return updateSucceeded;
  }
  
@@ -595,7 +650,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  CALayer* NativeLayerCA::UnderlyingCALayer(WhichRepresentation aRepresentation) {
    MutexAutoLock lock(mMutex);
    return GetRepresentation(aRepresentation).UnderlyingCALayer();
-@@ -1521,12 +2006,38 @@
+@@ -1521,12 +2061,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -635,7 +690,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +2151,11 @@
+@@ -1640,6 +2206,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -647,7 +702,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +2196,11 @@
+@@ -1680,7 +2251,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -660,7 +715,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +2214,14 @@
+@@ -1694,13 +2269,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -676,7 +731,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +2238,23 @@
+@@ -1717,7 +2293,23 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -701,7 +756,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +2298,7 @@
+@@ -1761,7 +2353,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -710,7 +765,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2307,196 @@
+@@ -1770,6 +2362,196 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -907,7 +962,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2510,7 @@
+@@ -1783,6 +2565,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -915,7 +970,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2538,12 @@
+@@ -1810,8 +2593,12 @@
      }
    }
  
@@ -930,7 +985,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2728,7 @@
+@@ -1996,7 +2783,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -939,7 +994,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2744,7 @@
+@@ -2012,6 +2799,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
