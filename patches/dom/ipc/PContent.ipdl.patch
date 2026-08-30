@@ -2,7 +2,7 @@ diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
 index 23fb64851635..6afd9d5f25df 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,9 +571,110 @@ parent:
+@@ -571,9 +571,119 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -70,6 +70,15 @@ index 23fb64851635..6afd9d5f25df 100644
 +                           int32_t aWidth, int32_t aHeight);
 +    async AVPlayerTime(uint64_t aPlayerId, double aSeconds);
 +    async AVPlayerEnded(uint64_t aPlayerId);
++    // The player is broken and no report above is ever coming:
++    // createPlayerWithUrl answered 0, or the item itself reached
++    // AVPlayerItem.Status.failed. The decoder routes this to the
++    // element's error path - without it a failed player is
++    // indistinguishable from one still loading, and the element
++    // waits at HAVE_NOTHING forever. Terminal, like AVPlayerEnded:
++    // nothing is sent for the player after it, so it cannot
++    // reorder against the reports above in a way that matters.
++    async AVPlayerError(uint64_t aPlayerId);
 +    // The app process worked out this stream is protected by watching
 +    // its own video output go quiet while the clock kept running. Only
 +    // it can see that, so only it can say so. See
@@ -113,7 +122,7 @@ index 23fb64851635..6afd9d5f25df 100644
      async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
                             ManagedEndpoint<PWindowGlobalChild> windowEp,
                             TabId tabId,
-@@ -604,7 +705,8 @@ child:
+@@ -604,7 +714,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -123,7 +132,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +716,8 @@ child:
+@@ -614,7 +725,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

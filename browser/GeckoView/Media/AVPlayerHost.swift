@@ -987,6 +987,27 @@ public final class AVPlayerHost: NSObject {
             avLog("framePull[\(id)] not reporting protected: \(reason)")
         }
 
+        /// Quantises a time to the nearest quarter second before it
+        /// is embedded in a stall reason. ADDED - the edge trigger
+        /// above compares STRINGS, so a reason carrying a
+        /// full-precision Double is a new reason on every
+        /// display-link tick: "only 0.00833...s elapsed" flooded one
+        /// capture with 2656 lines, which is exactly the burial
+        /// noteStallReason exists to prevent. A quarter-second
+        /// bucket keeps the value diagnostic - which side of the
+        /// 1.0s window the detector is on, and roughly how far
+        /// along - while capping a value-carrying reason at four
+        /// changes per second of item time. Only the LOG is
+        /// bucketed; every comparison the detector makes still uses
+        /// the full-precision values. Non-finite values pass
+        /// through verbatim: "nan" and "inf" are already stable
+        /// strings, and the not-usable reason needs to say which
+        /// one it saw.
+        func coarse(_ seconds: Double) -> String {
+            guard seconds.isFinite else { return "\(seconds)" }
+            return String(format: "%.2f", (seconds * 4).rounded() / 4)
+        }
+
         func noteProtectedStall(at itemSeconds: Double) {
             // CHANGED - every early return below now says which one it
             // was. See fix_stall_detector_says_why.py's docstring: this
@@ -995,7 +1016,7 @@ public final class AVPlayerHost: NSObject {
             // Apple TV+, and its silence could not be told apart from
             // its not being called.
             guard itemSeconds.isFinite, itemSeconds >= 0 else {
-                noteStallReason("item time \(itemSeconds) is not usable")
+                noteStallReason("item time \(coarse(itemSeconds)) is not usable")
                 return
             }
             let player = entry.player
@@ -1028,18 +1049,18 @@ public final class AVPlayerHost: NSObject {
                 // stream is measured from where it actually is.
                 if entry.lastBufferItemTime < 0 {
                     entry.lastBufferItemTime = itemSeconds
-                    reason = "window opened at \(itemSeconds)"
+                    reason = "window opened at \(coarse(itemSeconds))"
                     return false
                 }
                 // A backwards seek rebases instead of accumulating.
                 if itemSeconds < entry.lastBufferItemTime {
                     entry.lastBufferItemTime = itemSeconds
-                    reason = "rebased to \(itemSeconds)"
+                    reason = "rebased to \(coarse(itemSeconds))"
                     return false
                 }
                 guard itemSeconds - entry.lastBufferItemTime >= 1.0 else {
                     reason = "only "
-                        + "\(itemSeconds - entry.lastBufferItemTime)s of "
+                        + "\(coarse(itemSeconds - entry.lastBufferItemTime))s of "
                         + "item time elapsed, need 1.0"
                     return false
                 }
@@ -1063,7 +1084,7 @@ public final class AVPlayerHost: NSObject {
                 return
             }
             avLog("framePull[\(id)] output stalled "
-                  + "\(itemSeconds - entry.lastBufferItemTime)s of item time "
+                  + "\(coarse(itemSeconds - entry.lastBufferItemTime))s of item time "
                   + "with no buffer - reporting protected")
             ReynardAVPlayerNotifyProtected(id)
         }
@@ -1272,6 +1293,21 @@ public final class AVPlayerHost: NSObject {
         for observation in [
             item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                 DispatchQueue.main.async {
+                    // .failed is terminal - AVFoundation never moves an
+                    // item out of it - and everything below is for a
+                    // live one: report only speaks at .readyToPlay and
+                    // resumeIfWanted requires it too, which is how a
+                    // failed item used to vanish without a word while
+                    // Gecko's demuxer parked forever waiting on a
+                    // position. Tell Gecko instead; it routes this to
+                    // the decoder's error path so the element fires
+                    // 'error' and the page can react.
+                    if item.status == .failed {
+                        avLog("item FAILED for \(playerId): "
+                              + "\(item.error.map { String(describing: $0) } ?? "no error object")")
+                        ReynardAVPlayerNotifyError(playerId)
+                        return
+                    }
                     // Before report, which returns early whenever the
                     // metadata is unchanged - playback must not depend on
                     // whether the duration happened to move.

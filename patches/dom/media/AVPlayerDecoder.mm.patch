@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..b56efaa8479c
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +0,2975 @@
+@@ -0,0 +1,3164 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -131,6 +131,7 @@ index 000000000000..b56efaa8479c
 +                                 int32_t aWidth, int32_t aHeight);
 +void ReynardAVPlayerSendTime(uint64_t aKey, double aSeconds);
 +void ReynardAVPlayerSendEnded(uint64_t aKey);
++void ReynardAVPlayerSendError(uint64_t aKey);
 +void ReynardAVPlayerSendProtected(uint64_t aKey);
 +// FairPlay, the same direction: app process -> the content process
 +// that asked for this player.
@@ -240,6 +241,22 @@ index 000000000000..b56efaa8479c
 +  }
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
 +      "ReynardAVPlayerSendEnded", [aKey]() { ReynardAVPlayerSendEnded(aKey); }));
++}
++
++// The player is broken and no other report is coming. Same shape as
++// the ended forward above because it travels the same road: host
++// callback (or the broker's create-failure site), parent relay,
++// PContent, and finally the decoder's error path in the owning
++// content process, where the element fires 'error'.
++static void ForwardErrorToOwner(uint64_t aKey) {
++  printf_stderr("avPlayer: forwarding player error for key %llu\n",
++                (unsigned long long)aKey);
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendError(aKey);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerSendError", [aKey]() { ReynardAVPlayerSendError(aKey); }));
 +}
 +
 +// PARENT PROCESS: what this process is holding on behalf of one
@@ -484,6 +501,75 @@ index 000000000000..b56efaa8479c
 +static Atomic<uint32_t, Relaxed> sContentRecvTime(0);
 +static Atomic<uint32_t, Relaxed> sContentRecvFrame(0);
 +
++// Per-player view of the same counters. ADDED - the totals above
++// cannot say WHOSE traffic they counted. A title switch on
++// tv.apple.com has the outgoing and incoming players alive in the
++// same content process at once, so a watchdog line read on behalf
++// of the deaf new player is inflated by the old one's frames and
++// looks like "messages arriving" for a player receiving nothing.
++// The totals stay, and stay first on the line: captures get diffed
++// against old ones, and the prefix must keep meaning what it meant.
++//
++// A fixed table rather than members on the decoder because the
++// watchdog below reads it from a raw pthread, which must not touch
++// PlayersById or take any lock - the whole point of that thread is
++// owing nothing to the machinery it measures. Claimed and bumped
++// only on Gecko's main thread (in a content process every caller
++// is a ContentChild Recv handler), so the scan-and-claim needs no
++// compare-exchange; the fields are atomic solely so the watchdog
++// thread reads torn-free values, Relaxed for the same reason as
++// the totals. Slots are never recycled - the diagnostic lives for
++// the watchdog's sixty seconds - and a player past the fourth is
++// simply absent from the suffix while the totals still count it.
++struct ContentRecvSlot {
++  Atomic<uintptr_t, Relaxed> mPlayerId{0};
++  Atomic<uint32_t, Relaxed> mMetadata{0};
++  Atomic<uint32_t, Relaxed> mTime{0};
++  Atomic<uint32_t, Relaxed> mFrame{0};
++};
++static const size_t kContentRecvSlotCount = 4;
++static ContentRecvSlot sContentRecvSlots[kContentRecvSlotCount];
++
++static ContentRecvSlot* ContentRecvSlotFor(uintptr_t aPlayerId) {
++  MOZ_ASSERT(NS_IsMainThread());
++  for (size_t i = 0; i < kContentRecvSlotCount; i++) {
++    const uintptr_t claimed = sContentRecvSlots[i].mPlayerId;
++    if (claimed == aPlayerId) {
++      return &sContentRecvSlots[i];
++    }
++    if (claimed == 0) {
++      sContentRecvSlots[i].mPlayerId = aPlayerId;
++      return &sContentRecvSlots[i];
++    }
++  }
++  return nullptr;
++}
++
++// Renders one " p7(meta=1 time=42 frame=40)" per claimed slot into
++// aBuf - an empty string when none is claimed - so callers append
++// it unconditionally. snprintf over relaxed atomic reads and
++// nothing else: one of the callers is the watchdog pthread.
++static void AppendContentRecvSlots(char* aBuf, size_t aLen) {
++  size_t used = 0;
++  aBuf[0] = '\0';
++  for (size_t i = 0; i < kContentRecvSlotCount; i++) {
++    const uintptr_t playerId = sContentRecvSlots[i].mPlayerId;
++    if (!playerId) {
++      continue;
++    }
++    const int wrote = snprintf(
++        aBuf + used, aLen - used, " p%llu(meta=%u time=%u frame=%u)",
++        (unsigned long long)playerId,
++        (uint32_t)sContentRecvSlots[i].mMetadata,
++        (uint32_t)sContentRecvSlots[i].mTime,
++        (uint32_t)sContentRecvSlots[i].mFrame);
++    if (wrote <= 0 || (size_t)wrote >= aLen - used) {
++      break;
++    }
++    used += (size_t)wrote;
++  }
++}
++
 +static uintptr_t sContentAlivePlayerId = 0;
 +static Atomic<uint32_t, Relaxed> sContentAliveTicks(0);
 +static const uint32_t kContentAliveTicks = 60;
@@ -692,11 +778,17 @@ index 000000000000..b56efaa8479c
 +  for (uint32_t t = 1; t <= kContentAliveTicks; t++) {
 +    sleep(1);
 +    const uint32_t mainTicks = (uint32_t)sContentAliveTicks;
++    // The totals answer "is anything arriving at this process"; the
++    // per-player suffix answers for WHOM. With two players alive the
++    // totals alone launder one player's traffic into a judgement
++    // about the other.
++    char perPlayer[256];
++    AppendContentRecvSlots(perPlayer, sizeof(perPlayer));
 +    printf_stderr(
 +        "avPlayer: content watchdog t=%u main=%u recv(meta=%u time=%u "
-+        "frame=%u)\n",
++        "frame=%u)%s\n",
 +        t, mainTicks, (uint32_t)sContentRecvMetadata,
-+        (uint32_t)sContentRecvTime, (uint32_t)sContentRecvFrame);
++        (uint32_t)sContentRecvTime, (uint32_t)sContentRecvFrame, perPlayer);
 +
 +    if (mainTicks == lastMain) {
 +      stuckSeconds++;
@@ -791,12 +883,16 @@ index 000000000000..b56efaa8479c
 +    }
 +  }
 +
++  // Totals plus the per-player split: the player= this line names
++  // is not necessarily the player whose traffic moved the totals.
++  char perPlayer[256];
++  AppendContentRecvSlots(perPlayer, sizeof(perPlayer));
 +  printf_stderr(
 +      "avPlayer: content alive tick=%u player=%llu recv(meta=%u time=%u "
-+      "frame=%u) pos=%.3f dur=%.3f decoder=%d\n",
++      "frame=%u)%s pos=%.3f dur=%.3f decoder=%d\n",
 +      (uint32_t)sContentAliveTicks, (unsigned long long)sContentAlivePlayerId,
 +      (uint32_t)sContentRecvMetadata, (uint32_t)sContentRecvTime,
-+      (uint32_t)sContentRecvFrame, position, duration,
++      (uint32_t)sContentRecvFrame, perPlayer, position, duration,
 +      PlayersById().count(sContentAlivePlayerId) ? 1 : 0);
 +
 +  if (sContentAliveTicks < kContentAliveTicks) {
@@ -1000,10 +1096,19 @@ index 000000000000..b56efaa8479c
 +
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
 +  MOZ_ASSERT(NS_IsMainThread());
++  // Both failure returns below tell the owning content process, not
++  // just the log. The content side's Load fire-and-forgets its
++  // AVPlayerCreate - there is no return value to fail - so without
++  // the message a player that was never built looks exactly like one
++  // still loading: the demuxer parks waiting for a position that
++  // cannot come and the element sits at HAVE_NOTHING forever.
++  // ReynardAVPlayerNoteOwner ran before this was called, so the send
++  // always has an owner to find.
 +  id<GeckoAVPlayerHost> host = AVPlayerHost();
 +  if (!host) {
 +    printf_stderr("avPlayer: broker has no host - cannot create key %llu\n",
 +                  (unsigned long long)aKey);
++    ForwardErrorToOwner(aKey);
 +    return;
 +  }
 +  NSUInteger playerId = [host
@@ -1011,6 +1116,7 @@ index 000000000000..b56efaa8479c
 +  if (!playerId) {
 +    printf_stderr("avPlayer: broker createPlayer FAILED for key %llu\n",
 +                  (unsigned long long)aKey);
++    ForwardErrorToOwner(aKey);
 +    return;
 +  }
 +  BrokeredPlayers()[aKey] = static_cast<uintptr_t>(playerId);
@@ -1181,6 +1287,32 @@ index 000000000000..b56efaa8479c
 +      [host parserRetireStream:static_cast<NSUInteger>(aKey >> 32)
 +                        stream:[NSString
 +                                   stringWithUTF8String:aContentId.get()]];
++      return;
++    }
++    // The child's MediaKeys is gone - FairPlayCDMProxy::Shutdown, the
++    // sender of everything on this path. Its parser key session goes
++    // with it, above all the KEYS the session accumulated: an
++    // AVContentKeySession raises no request for a key it already
++    // holds, silently, and tv.apple.com reuses its key ids for every
++    // title - so a session that outlived its MediaKeys left the next
++    // title waiting on a licence exchange that never started.
++    //
++    // Same shape as retire above: nothing is built for a destroy and
++    // nothing is looked up. The host is silent when there is nothing
++    // under the child, which is the ordinary case for a MediaKeys
++    // that never appended init data.
++    if (aInitDataType.EqualsLiteral("destroy")) {
++      SEL parserDestroy = @selector(parserDestroySession:);
++      if (!host || ![host respondsToSelector:parserDestroy]) {
++        printf_stderr(
++            "avPlayer: MSE destroy route unavailable for child %llu\n",
++            (unsigned long long)(aKey >> 32));
++        return;
++      }
++      printf_stderr("avPlayer: MSE destroy child=%llu - its MediaKeys "
++                    "is gone\n",
++                    (unsigned long long)(aKey >> 32));
++      [host parserDestroySession:static_cast<NSUInteger>(aKey >> 32)];
 +      return;
 +    }
 +    // The element's play state, and its volume. Neither is key
@@ -2096,6 +2228,28 @@ index 000000000000..b56efaa8479c
 +  NotifyReaderDataArrived();
 +}
 +
++// The player is gone or broken and nothing else will ever arrive for
++// it: the app process could not create it, or its AVPlayerItem
++// reached .failed. Routed through MediaDecoder::NetworkError, which
++// is exactly how HLSDecoder surfaces a GeckoHlsPlayer failure - HLS
++// comes from the network, so every platform-player error is treated
++// as a network error. At HAVE_NOTHING - where a create failure
++// always lands - the element turns that into
++// NoSupportedMediaSourceError and fires 'error', so the page finally
++// hears something instead of watching a spinner over a demuxer
++// parked for a position that can never come.
++void AVPlayerDecoder::NotifyPlayerError() {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Same teardown race as NotifyPlaybackPoke above, and NetworkError
++  // diagnostic-asserts on a shut-down decoder.
++  if (IsShutdown()) {
++    return;
++  }
++  printf_stderr("avPlayer: player %llu FAILED - raising media error\n",
++                (unsigned long long)mPlayerId);
++  NetworkError(MediaResult(NS_ERROR_FAILURE, "AVPlayer failed"));
++}
++
 +// Native HLS FairPlay never touches EME. Apple TV+ hands the whole key
 +// exchange to AVFoundation through its AVContentKeySession, so a capture
 +// shows "emeAccess: GRANTED" and then no setMediaKeys, no key request
@@ -2432,6 +2586,10 @@ index 000000000000..b56efaa8479c
 +  // host, which the counter is not about.
 +  if (XRE_IsContentProcess()) {
 +    mozilla::sContentRecvMetadata++;
++    if (mozilla::ContentRecvSlot* slot =
++            mozilla::ContentRecvSlotFor(aPlayerId)) {
++      slot->mMetadata++;
++    }
 +  }
 +
 +  // A player some content process asked for. Everything below this
@@ -2692,6 +2850,33 @@ index 000000000000..b56efaa8479c
 +      }));
 +}
 +
++// The player failed. In the app process this is either the Swift
++// host's .failed status observation or the broker's create-failure
++// site; a brokered player's report crosses to the content process
++// that owns it, exactly as ended does. In the owning process the
++// decoder is put on its error path so the element fires 'error'.
++// Any-thread like its siblings: the Swift observation arrives on the
++// GCD main queue, which is not Gecko's main thread in every process.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyError(uintptr_t aPlayerId) {
++  printf_stderr("avPlayer: error callback player=%llu\n",
++                (unsigned long long)aPlayerId);
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ForwardErrorToOwner(key);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyError", [aPlayerId]() {
++        MOZ_ASSERT(NS_IsMainThread());
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          // Teardown race, same as the other callbacks: dropped.
++          return;
++        }
++        entry->second->NotifyPlayerError();
++      }));
++}
++
 +// APP PROCESS: the asset wants a key nothing has claimed yet.
 +//
 +// AVFoundation raises this the moment the playlist reaches its
@@ -2843,6 +3028,10 @@ index 000000000000..b56efaa8479c
 +  MOZ_ASSERT(NS_IsMainThread());
 +  // Content-side by construction: nothing in the app process calls this.
 +  mozilla::sContentRecvFrame++;
++  if (mozilla::ContentRecvSlot* slot =
++          mozilla::ContentRecvSlotFor(aPlayerId)) {
++    slot->mFrame++;
++  }
 +  auto surface = CFTypeRefPtr<IOSurfaceRef>::WrapUnderCreateRule(
 +      ::IOSurfaceLookup(static_cast<IOSurfaceID>(aSurfaceId)));
 +  if (!surface) {

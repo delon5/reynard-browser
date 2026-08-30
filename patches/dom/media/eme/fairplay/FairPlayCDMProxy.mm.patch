@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,2207 @@
+@@ -0,0 +1,2292 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -903,6 +903,11 @@ index 000000000000..e859b69f6239
 +      printf_stderr("avPlayer: FairPlay key id from %s: %s\n", shape,
 +                    hex.get());
 +      mKeyIdBySession.InsertOrUpdate(sessionId, std::move(parsedKeyId));
++      // And WHEN it was filed. Services that reuse key ids across
++      // titles can leave several live sessions holding the same id,
++      // and DeliverRemoteKeyMessage must hand the SPC to the newest
++      // of them - hash order cannot say which that is.
++      mKeyIdSerialBySession.InsertOrUpdate(sessionId, ++mNextKeyIdSerial);
 +    } else if (shape) {
 +      printf_stderr(
 +          "avPlayer: FairPlay key id from %s: none (%zu bytes of init "
@@ -1220,6 +1225,15 @@ index 000000000000..e859b69f6239
 +  {
 +    NS_ConvertUTF16toUTF8 sessionKey(aSessionId);
 +    ReynardInitDataTypes().Remove(sessionKey);
++    // The key-id entries go too, and for a sharper reason than the
++    // never-looked-up-again one above: DeliverRemoteKeyMessage walks
++    // mKeyIdBySession by VALUE, and key ids - unlike NSUUID session
++    // ids - DO come back. tv.apple.com files every title under KIDs
++    // 0 and 1, so an entry left here after close can win that walk
++    // and swallow the next title's SPC on behalf of a session that
++    // no longer exists. The serial travels with its sibling.
++    mKeyIdBySession.Remove(sessionKey);
++    mKeyIdSerialBySession.Remove(sessionKey);
 +  }
 +  OnSessionClosed(aSessionId, dom::MediaKeySessionClosedReason::Closed_by_application);
 +  ResolvePromise(aPromiseId);
@@ -1386,11 +1400,50 @@ index 000000000000..e859b69f6239
 +    // 0 without ever having registered, so removing by id alone would
 +    // tear out a live entry belonging to someone else.
 +    const uint64_t key = static_cast<uint64_t>(mBoundPlayerId);
++    // Whether this proxy is the MSE route's registered owner, read
++    // BEFORE the removals below take the entry away. Identity-tested
++    // for the reason the removals are: an unbound native-HLS proxy
++    // carries id 0 without ever having registered, and an MSE proxy
++    // displaced by a second MediaKeys - SendRemoteKeyRequest says so
++    // out loud when it happens - no longer owns the parser session it
++    // once fed. Neither may tear down a session that is now somebody
++    // else's, which is the same mistake as removing by id alone.
++    const bool ownedParserSession =
++        key == 0 && RemoteProxies().Get(0) == this;
 +    if (RemoteProxies().Get(key) == this) {
 +      RemoteProxies().Remove(key);
 +    }
 +    if (key != 0 && RemoteProxies().Get(0) == this) {
 +      RemoteProxies().Remove(0);
++    }
++    // The parser key session dies WITH the MediaKeys that filled it.
++    //
++    // Nothing else ever destroyed it: the app process keeps ONE key
++    // session per child for the MSE route, and an AVContentKeySession
++    // raises no request for a key it already holds - silently, by
++    // design. tv.apple.com reuses key ids 0 and 1 for every title, so
++    // the next title's generateRequest landed on a session still
++    // holding the last title's keys, produced nothing, and the page
++    // waited forever on a licence exchange that never started. This
++    // is the moment the page itself says those keys are finished
++    // with; the deaf-watchdog in the app process can only infer it
++    // after the fact, and stays as the fallback for a page whose
++    // proxy dies without reaching here.
++    //
++    // Rides the message this route already reuses - like retire and
++    // playstate, the type string is what the broker switches on, so
++    // no IPDL change and no protocol rebuild. The send is async and
++    // merely queues, so holding sRemoteProxiesMutex across it blocks
++    // nothing.
++    if (ownedParserSession) {
++      if (dom::ContentChild* cc = dom::ContentChild::GetSingleton()) {
++        printf_stderr(
++            "avPlayer: FairPlay MediaKeys is going - destroying this "
++            "child's parser key session\n");
++        nsTArray<uint8_t> empty;
++        cc->SendAVPlayerKeyGenerateRequest(0, nsCString("shutdown"),
++                                           nsCString("destroy"), empty);
++      }
 +    }
 +  }
 +  if (mDelegate) {
@@ -2153,11 +2206,43 @@ index 000000000000..e859b69f6239
 +        wanted.AppendElement(static_cast<uint8_t>((hi << 4) | lo));
 +      }
 +      nsCString owner;
++      uint64_t ownerSerial = 0;
 +      if (!wanted.IsEmpty()) {
 +        for (auto iter = mKeyIdBySession.Iter(); !iter.Done(); iter.Next()) {
-+          if (iter.Data() == wanted) {
-+            owner = iter.Key();
-+            break;
++          if (iter.Data() != wanted) {
++            continue;
++          }
++          const nsCString candidate(iter.Key());
++          // A holder of this key id can be dead: CloseSession prunes
++          // its entry now, but a session the page abandoned without
++          // closing still matches here after MediaKeys has dropped
++          // it, and OnSessionMessage would deliver to a null session
++          // - the SPC vanishing with no log at all, the exact
++          // silence this branch exists to end. Skipped, and said so.
++          RefPtr<dom::MediaKeySession> live;
++          if (!mKeys.IsNull()) {
++            live = mKeys->GetSession(NS_ConvertUTF8toUTF16(candidate));
++          }
++          if (!live) {
++            printf_stderr(
++                "avPlayer: FairPlay SPC for key %s - session %s holds "
++                "that key id but is gone, skipping\n",
++                PromiseFlatCString(hex).get(), candidate.get());
++            continue;
++          }
++          // Several LIVE holders are still possible: a title switch
++          // on a service that reuses key ids mints the new title's
++          // session before the page closes the old one. This SPC
++          // answers the NEWEST generateRequest - the
++          // newest-session-receives property the degenerate adoption
++          // above settled on, see fix_degenerate_session_not_reused's
++          // docstring - and hash order knows nothing of age, so
++          // creation order is consulted explicitly.
++          uint64_t serial = 0;
++          mKeyIdSerialBySession.Get(candidate, &serial);
++          if (owner.IsEmpty() || serial > ownerSerial) {
++            owner = candidate;
++            ownerSerial = serial;
 +          }
 +        }
 +      }

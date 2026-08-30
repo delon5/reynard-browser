@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..6fb7f0dd6c7d
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.h
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,244 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -218,6 +218,15 @@ index 000000000000..6fb7f0dd6c7d
 +  // keyStatuses lookup that can never hit. Parsed in CreateSession,
 +  // used in UpdateSession, empty whenever there was nothing to parse.
 +  nsTHashMap<nsCStringHashKey, nsTArray<uint8_t>> mKeyIdBySession;
++  // When each of those entries was filed, as a monotonic serial.
++  // DeliverRemoteKeyMessage resolves a key id back to a session by
++  // walking the map above, and several live sessions can hold the
++  // same key id when a service reuses KIDs across titles; the SPC
++  // belongs to the newest of them, and hash order cannot say which
++  // that is. Written beside the key id in CreateSession, pruned with
++  // it in CloseSession. Main thread only, like everything here.
++  nsTHashMap<nsCStringHashKey, uint64_t> mKeyIdSerialBySession;
++  uint64_t mNextKeyIdSerial = 0;
 +
 +  // A generateRequest that arrived before AVPlayerDecoder::SetCDMProxy
 +  // named the player, so there was no id to address it to. Flushed by

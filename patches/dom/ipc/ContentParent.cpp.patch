@@ -53,7 +53,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  #ifdef MOZ_WMF_CDM
  #  include "mozilla/EMEUtils.h"
  #  include "nsIWindowsMediaFoundationCDMOriginsListService.h"
-@@ -1956,6 +1993,29 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
+@@ -1956,6 +1993,32 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
    MOZ_FUZZING_IPC_DROP_PEER("ContentParent::ActorDestroy");
  #endif
  
@@ -77,13 +77,16 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +  // Every brokered player this process owned dies with it. Dropping
 +  // the entries here is what keeps the registry from ever holding a
 +  // pointer to a destroyed actor: ActorDestroy always runs first.
++  // ForgetOwner also issues the host-side destroy for any player this
++  // child never destroyed itself - the reclaimed-process flow above
++  // lands here with its players still streaming in the app process.
 +  ReynardAVPlayerForgetOwner(static_cast<uint64_t>(this->ChildID()));
 +#endif
 +
    if (mSendShutdownTimer) {
      mSendShutdownTimer->Cancel();
      mSendShutdownTimer = nullptr;
-@@ -3007,14 +3067,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+@@ -3007,14 +3070,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -101,7 +104,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
    } else {
      // This can fail if we've already started shutting down the compositor
      // thread. See Bug 1562763 comment 8. On Android this can fail we are are
-@@ -3193,16 +3254,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+@@ -3193,16 +3257,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -121,7 +124,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -7985,6 +8047,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -7985,6 +8050,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  
@@ -202,7 +205,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    RecursiveMutexAutoLock lock(mMutex);
    return mRemoteType;
-@@ -8006,6 +8142,242 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+@@ -8006,6 +8145,284 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
  }
  
  }  // namespace dom
@@ -238,14 +241,45 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +  AVPlayerOwners().InsertOrUpdate(aKey, aOwner);
 +}
 +
++// kAVPlayerDestroy from the AVPlayerOp enum in
++// dom/media/AVPlayerDecoder.mm, which documents its numbering as
++// shared by value with this file and pledges to keep it stable.
++// Redeclared as a lone constant for the same reason the prototypes at
++// the top of this file are declared inline - neither directory should
++// grow an include path for it.
++static const uint32_t kAVPlayerDestroyOp = 4;
++
 +void ReynardAVPlayerForgetOwner(uint64_t aChildID) {
 +  MOZ_ASSERT(NS_IsMainThread());
 +  // Every key a process owns carries its child id in the high half, so
-+  // one pass drops all of that process's players.
++  // one pass drops all of that process's players. The keys are set
++  // aside first: the destroys below call into the Swift host, and
++  // nothing that can run arbitrary code belongs inside this map's
++  // iterator. Removing before destroying also means a report the host
++  // raises while tearing down finds no recorded owner - the ordinary
++  // teardown race the registry already documents, not a send to a
++  // half-dead actor.
++  AutoTArray<uint64_t, 4> orphaned;
 +  for (auto iter = AVPlayerOwners().Iter(); !iter.Done(); iter.Next()) {
 +    if ((iter.Key() >> 32) == aChildID) {
++      orphaned.AppendElement(iter.Key());
 +      iter.Remove();
 +    }
++  }
++  // A process that dies without sending kAVPlayerDestroy - a crash, or
++  // iOS reclaiming it cleanly in the unrequested-NormalShutdown flow
++  // ActorDestroy logs - used to leave its app-process players alive
++  // forever: the Swift host kept streaming and pulling frames, and the
++  // broker kept up to kFramesInFlight IOSurfaces pinned per player.
++  // Issue the destroy the child never got to send. Routing it through
++  // BrokerControl rather than calling the host directly is what also
++  // clears the player's BrokeredKeys and BrokeredFrameStates entries,
++  // exactly as the explicit path does. A player the child DID destroy
++  // is already out of BrokeredPlayers, and BrokerControl drops unknown
++  // keys before reaching the host, so a second destroy here is a
++  // no-op rather than a double teardown.
++  for (uint64_t key : orphaned) {
++    ReynardAVPlayerBrokerControl(key, kAVPlayerDestroyOp, 0.0);
 +  }
 +}
 +
@@ -321,6 +355,17 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +  dom::ContentParent* cp = AVPlayerOwner(aKey);
 +  const bool sent = cp && cp->SendAVPlayerEnded(aKey & 0xffffffff);
 +  printf_stderr("avPlayer: send ended key=%llu owner=%d sent=%d\n",
++                static_cast<unsigned long long>(aKey), cp ? 1 : 0,
++                sent ? 1 : 0);
++}
++
++// The player could not be built, or broke. Rare and terminal, so it
++// logs every time like the FairPlay sends below; owner=0 here means
++// the requesting process died first, which makes the error moot.
++void ReynardAVPlayerSendError(uint64_t aKey) {
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent = cp && cp->SendAVPlayerError(aKey & 0xffffffff);
++  printf_stderr("avPlayer: send error key=%llu owner=%d sent=%d\n",
 +                static_cast<unsigned long long>(aKey), cp ? 1 : 0,
 +                sent ? 1 : 0);
 +}

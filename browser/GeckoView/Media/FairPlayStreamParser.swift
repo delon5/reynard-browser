@@ -54,6 +54,12 @@ import UIKit
 struct FairPlayOrigination {
     let contentId: String
     let initData: Data
+    /// How many younger key requests have been matched past this
+    /// origination while it sat queued - see claimOrigination. A key
+    /// session raises no request for a key it already holds, so a
+    /// count that keeps rising is the only sign that this origination
+    /// is one nothing will ever claim.
+    var skips: Int = 0
 }
 
 @objc(ReynardFairPlayStreamParser)
@@ -188,6 +194,21 @@ public final class FairPlayStreamParser: NSObject {
         /// template over the pssh's key id on the grounds that it is
         /// "the media's own KID" - which stops being true the moment
         /// that media is gone.
+        ///
+        /// EXTENDED - every writer of templateSinf records provenance
+        /// now. Two of them used to leave this nil - the session entry
+        /// point's harvest and recycleSession's carry - and a template
+        /// with no provenance is one tearDownStream's drop can never
+        /// match: it addressed every later title's requests for the
+        /// rest of the process, which is exactly what mse_fix_189
+        /// exists to stop. A stream harvest records its stream key;
+        /// the session entry point, which has no stream, records the
+        /// bare session id as a sentinel. No stream key can equal that
+        /// - stream keys are session and buffer joined by a pipe - so
+        /// a stream teardown leaves a session-harvested template alone
+        /// and it dies with the entry itself, at destroySession - a
+        /// title switch that destroys the session takes the old
+        /// title's template with it.
         var templateFrom: String?
         /// The parser's own specifier for each key, by the tenc KID its
         /// sinf names.
@@ -206,6 +227,23 @@ public final class FairPlayStreamParser: NSObject {
         /// key - the same thing HBO Max's page hands over directly and
         /// the reason that site works.
         var specifierByKeyId: [String: Data] = [:]
+        /// The stream key that harvested each of those specifiers, by
+        /// the same hex KID.
+        ///
+        /// ADDED - the same lesson as templateFrom, per track: see
+        /// mse_fix_189's docstring. A filed specifier outlives its
+        /// title otherwise, and requestKey prefers one over everything
+        /// on the grounds that it names this track's real KID and
+        /// constant IV - which stops being true the moment that track
+        /// is gone. tv.apple.com numbers its KIDs per TITLE, 0 and 1
+        /// again for every title, so a dead title's sinf answers the
+        /// next title's request byte-perfectly and the licence that
+        /// comes back serves nothing the new samples can use.
+        ///
+        /// Absent for a filing from the render probe's delegate, which
+        /// has no stream behind it - those outlive any one stream, the
+        /// way the session-level template harvest does.
+        var specifierFrom: [String: String] = [:]
         /// Track ids the parsed asset reported.
         ///
         /// Separate from trackIDs, which only ever holds tracks a KEY
@@ -214,6 +252,24 @@ public final class FairPlayStreamParser: NSObject {
         /// key request arrives through the session rather than the
         /// parser, so trackIDs can be empty while the asset has two.
         var assetTrackIDs: [Int32] = []
+        /// The compositor's sink, parked between two streams of THIS
+        /// session.
+        ///
+        /// ADDED - fix 14. The sink's content protection names the KEY
+        /// SESSION that adopted it, not the stream - and tv.apple.com
+        /// retires its stream on every title switch while the session
+        /// lives on. tearDownStream parks the sink here when the dying
+        /// stream owned it, this entry is still live, and no successor
+        /// stream has built a layer yet; enqueueForDisplay's build
+        /// branch claims it for the session's next stream.
+        /// destroySession releases an unclaimed park through
+        /// noteSinkOwnerGone, so a NEXT SITE still gets a fresh sink -
+        /// mse_fix_186's lesson, unchanged.
+        var idleSink: AVSampleBufferDisplayLayer?
+        /// The stream key that had adopted the parked sink - the
+        /// identity pair noteSinkOwnerGone verifies when the park is
+        /// released rather than claimed.
+        var idleSinkOwner: String?
 
         init(parser: NSObject,
              recipient: AVContentKeyRecipient,
@@ -258,7 +314,7 @@ public final class FairPlayStreamParser: NSObject {
     /// number the new entry's first batch gets. Guarded by the state
     /// lock below, like the dictionaries above it.
     private var batchesBuilt = 0
-    /// Rebuilds spent per session id.
+    /// Rebuilds spent per session id SINCE A LICENCE LAST LANDED.
     ///
     /// ADDED - see mse_fix_200's docstring. The comment above the
     /// recycle branch says it cannot loop, because a rebuilt session's
@@ -266,8 +322,25 @@ public final class FairPlayStreamParser: NSObject {
     /// Capture ada4702e disproves it: "is deaf - rebuilding" at
     /// 294437.663, 294450.056 and 294484.444, because each rebuild is
     /// followed by real requests that push requestsSeen back above
-    /// zero. Monotonic per content process on purpose - a session that
-    /// has needed rebuilding twice will not be fixed by a third.
+    /// zero. That loop is why a bound exists at all, and it stays.
+    ///
+    /// CHANGED from monotonic per content process. The old rule - a
+    /// session that has needed rebuilding twice will not be fixed by
+    /// a third - read every rebuild as a symptom. On tv.apple.com it
+    /// is routine: the site reuses key ids 0 and 1 for every title,
+    /// so after an in-process title switch the session already holds
+    /// keys under the new title's ids and correctly raises no request
+    /// for them. Deafness is the NORMAL post-switch state there, the
+    /// rebuild is the designed recovery, and a lifetime cap of two
+    /// guaranteed the pipeline died a couple of switches into the
+    /// process. So noteLicenceLanded now zeroes this count when a
+    /// licence is applied to a request the session raised - a deaf
+    /// session raises none, so a licence landing is this machinery's
+    /// own definition of a rebuild that worked. What the cap bounds
+    /// now is CONSECUTIVE rebuilds that produced nothing. The
+    /// ada4702e loop itself is covered twice over: it was rebuilding
+    /// a session something was RENDERING on, and renderingStreamKey
+    /// stands that case down before a rebuild is ever claimed.
     private var recyclesBySession: [String: Int] = [:]
     private let lock = NSLock()
 
@@ -335,7 +408,12 @@ public final class FairPlayStreamParser: NSObject {
     /// the strength of a selector its own method dump listed. Every one
     /// returned nil with no NSError, because that is not the supported
     /// path. This is.
-    fileprivate func processSpecifier(sessionId: String, specifier: AnyObject) {
+    ///
+    /// `streamKey` names the per-stream parser this callback came
+    /// from, nil for the render probe's - see specifierFrom's
+    /// docstring for why the filing below wants to know.
+    fileprivate func processSpecifier(sessionId: String, streamKey: String?,
+                                      specifier: AnyObject) {
         guard let entry = withState({ entries[sessionId] }) else {
             return
         }
@@ -371,11 +449,22 @@ public final class FairPlayStreamParser: NSObject {
                     return false
                 }
                 entry.specifierByKeyId[hex] = initializationData
+                // WHOSE SPECIFIER - see specifierFrom's docstring.
+                // Filed with the stream that harvested it, so
+                // tearDownStream can take it when that stream goes.
+                // The render probe's delegate has no stream behind it;
+                // its filings carry no provenance and outlive any one
+                // stream, like the session-level template harvest.
+                if let streamKey {
+                    entry.specifierFrom[hex] = streamKey
+                }
                 return true
             }
             if isNew {
                 Self.log("session \(sessionId) filed the parser's specifier "
-                         + "for key \(hex), \(initializationData.count) bytes")
+                         + "for key \(hex), \(initializationData.count) bytes"
+                         + (streamKey.map { " - harvested by stream \($0)" }
+                            ?? " - harvested by the render probe"))
             }
         }
         // Stand down when the direct route drives this session.
@@ -576,6 +665,26 @@ public final class FairPlayStreamParser: NSObject {
                            keySession: entry.keySession,
                            why: "its session was destroyed")
         }
+        // AND THE SINK THIS SESSION PARKED, if a title switch left one
+        // waiting for a next stream that never came. The entry came
+        // out of entries above, so the orphan teardowns just now cannot
+        // have parked anything new - this is the release mse_fix_186
+        // requires: the next SITE gets a fresh sink rather than a
+        // layer whose protection names a key session that no longer
+        // exists. Taken under the state lock like every other Entry
+        // field, and released outside it, because noteSinkOwnerGone
+        // logs and nothing in this file calls out under a lock.
+        let parked = withState {
+            () -> (AVSampleBufferDisplayLayer, String)? in
+            guard let sink = entry.idleSink,
+                  let owner = entry.idleSinkOwner else { return nil }
+            entry.idleSink = nil
+            entry.idleSinkOwner = nil
+            return (sink, owner)
+        }
+        if let (sink, owner) = parked {
+            Self.noteSinkOwnerGone(sink, owner: owner)
+        }
         // AND THE STATE KEYED ON THEM.
         //
         // ADDED - see fix 13's docstring. These dictionaries live
@@ -654,13 +763,15 @@ public final class FairPlayStreamParser: NSObject {
     /// would hold the request rather than produce an SPC, and the page
     /// only sends a certificate while handling an 'encrypted' event -
     /// which this is trying to answer.
-    /// How many times one session id may be rebuilt.
+    /// How many times one session id may be rebuilt IN A ROW with no
+    /// licence landing in between - see recyclesBySession, which
+    /// noteLicenceLanded zeroes.
     ///
     /// ADDED - see mse_fix_200's docstring.
     fileprivate static let recycleCap = 2
 
     /// The key of a stream on this session whose display layer is
-    /// rendering right now, or nil.
+    /// rendering - and still being fed - right now, or nil.
     ///
     /// ADDED - see mse_fix_200's docstring. A key session raises no
     /// request for a key it already holds, and the recycle branch
@@ -672,19 +783,38 @@ public final class FairPlayStreamParser: NSObject {
     /// content protection with one AVContentKeySession is refused by
     /// another - so every frame after that was -11821 "Cannot Decode".
     ///
+    /// CHANGED - .rendering alone is not proof of use. A layer that
+    /// has stopped presenting still reports status 1 with no error -
+    /// maxEnqueuedPTS's docstring records exactly that state - so on
+    /// an in-process title switch the OLD title's frozen layer kept
+    /// answering for the session and this guard refused the rebuild
+    /// the NEW title's key requests were waiting on. "Rendering"
+    /// therefore also means "took a sample inside the liveness
+    /// window" - the same lastSampleAt test adopt() trusts to tell
+    /// the playing stream from a corpse. The ada4702e stream this
+    /// guard exists to protect passes it easily: it was 133 samples
+    /// in and still being fed when the rebuild destroyed its
+    /// session. The stand-down for a WORKING stream stays exactly as
+    /// mse_fix_200 wrote it.
+    ///
     /// The layers are snapshotted under the lock and asked for their
     /// status outside it, because nothing in this file calls out under
     /// a lock.
     fileprivate func renderingStreamKey(inSession sessionId: String)
         -> String? {
+        let cutoff = Self.hostNow() - Self.livenessWindow
         let layers = withState {
             () -> [(String, AVSampleBufferDisplayLayer)] in
             var out: [(String, AVSampleBufferDisplayLayer)] = []
             for key in Array(streamParsers.keys).sorted()
             where key.hasPrefix(sessionId + "|") {
-                if let layer = streamParsers[key]?.displayLayer {
-                    out.append((key, layer))
-                }
+                guard let slot = streamParsers[key],
+                      let layer = slot.displayLayer,
+                      // A stream nothing has fed inside the window is
+                      // not the one using this key, whatever its
+                      // layer's status says.
+                      slot.lastSampleAt > cutoff else { continue }
+                out.append((key, layer))
             }
             return out
         }
@@ -703,6 +833,78 @@ public final class FairPlayStreamParser: NSObject {
             guard spent < Self.recycleCap else { return false }
             recyclesBySession[sessionId] = spent + 1
             return true
+        }
+    }
+
+    /// Forgive this session's spent rebuilds - a licence has landed.
+    ///
+    /// Called from KeySessionDelegate.provide at the moment a licence
+    /// is applied to a request. A deaf session raises no request, so
+    /// a rebuild that bought an answered exchange did its job, and
+    /// its cost comes off the books - see recyclesBySession for why
+    /// the cap bounds consecutive failures rather than a lifetime.
+    ///
+    /// "Applied" is not "accepted" - the callbacks section says so in
+    /// as many words - and that is fine here: a rejected licence has
+    /// bounded machinery of its own (didFailWithError and the retry
+    /// offer, capped at keyRetryCap), and another rebuild is never
+    /// free - it still has to serve the full watchdog course of
+    /// fresh init data, five silent seconds, requests seen before,
+    /// and nothing rendering, before claimRecycle is even asked.
+    ///
+    /// The log call sits outside withState, because nothing in this
+    /// file calls out under a lock.
+    fileprivate func noteLicenceLanded(_ sessionId: String) {
+        let forgiven = withState { () -> Int in
+            let spent = recyclesBySession[sessionId, default: 0]
+            guard spent > 0 else { return 0 }
+            recyclesBySession[sessionId] = 0
+            return spent
+        }
+        if forgiven > 0 {
+            Self.log("session \(sessionId) licence landed after "
+                     + "\(forgiven) rebuild(s) - the rebuild worked, "
+                     + "so its spent count returns to zero and the "
+                     + "cap of \(Self.recycleCap) once again bounds "
+                     + "consecutive failures")
+        }
+    }
+
+    /// How many rebuilds this session id has spent so far - the
+    /// watchdog's rebuild generation.
+    ///
+    /// ADDED - see fix_watchdog_identity.py's docstring. Read at arm
+    /// time and compared again at fire time, which is the job
+    /// batchEpoch does for the flush timer (mse_fix_195):
+    /// recyclesBySession is per-session, monotonic, and lives outside
+    /// Entry, so it is the one number recycleSession cannot reset -
+    /// exactly what a timer that can outlive the rebuild needs to be
+    /// compared against.
+    fileprivate func rebuildsSpent(sessionId: String) -> Int {
+        return withState { recyclesBySession[sessionId, default: 0] }
+    }
+
+    /// Is a watchdog that captured this delegate still watching the
+    /// session it was armed against?
+    ///
+    /// ADDED - see fix_watchdog_identity.py's docstring. Two tests in
+    /// one take of the lock. IDENTITY: recycleSession replaces the
+    /// Entry whole, so a captured delegate that is not the entry's
+    /// current one belongs to a session that no longer exists - and
+    /// its requestsSeen is frozen, so the silence guard upstream of
+    /// this call passes forever. GENERATION: a rebuild answers every
+    /// ask armed before it - its own requestKey re-asks and arms a
+    /// fresh watchdog against the fresh delegate - so a watchdog from
+    /// an older generation has had its work done for it and stands
+    /// down. Values and a comparison only, looked up late: nothing
+    /// here captures or resurrects an Entry, the same doctrine as
+    /// liveSession and flushHeldBatch's fire-time guards.
+    fileprivate func watchdogStillCurrent(sessionId: String,
+                                          delegate: KeySessionDelegate,
+                                          generation: Int) -> Bool {
+        return withState {
+            entries[sessionId]?.keyDelegate === delegate
+                && recyclesBySession[sessionId, default: 0] == generation
         }
     }
 
@@ -768,8 +970,16 @@ public final class FairPlayStreamParser: NSObject {
         // avoid: it carries a fabricated tenc rather than the track's
         // real constant IV.
         let carriedTemplate = withState { entries[sessionId]?.templateSinf }
+        // And WHOSE they were. The streams themselves are carried
+        // across the rebuild, so the provenance that lets
+        // tearDownStream drop a dead stream's template and specifiers
+        // (mse_fix_189, and the purge beside it) has to survive the
+        // rebuild with them.
+        let carriedTemplateFrom = withState { entries[sessionId]?.templateFrom }
         let carriedSpecifiers = withState {
             entries[sessionId]?.specifierByKeyId ?? [:] }
+        let carriedSpecifierFrom = withState {
+            entries[sessionId]?.specifierFrom ?? [:] }
         if let old = liveSession(sessionId) {
             for (_, slot) in carried {
                 old.removeContentKeyRecipient(slot.recipient)
@@ -797,7 +1007,9 @@ public final class FairPlayStreamParser: NSObject {
             }
             if let fresh = entries[sessionId] {
                 fresh.templateSinf = carriedTemplate
+                fresh.templateFrom = carriedTemplateFrom
                 fresh.specifierByKeyId = carriedSpecifiers
+                fresh.specifierFrom = carriedSpecifierFrom
             }
         }
         if let fresh = liveSession(sessionId) {
@@ -880,9 +1092,19 @@ public final class FairPlayStreamParser: NSObject {
             // taking this once meant the second video on a page asked
             // Netflix for the first video's key for the rest of the
             // session.
+            // WHOSE TEMPLATE - see mse_fix_189's docstring and
+            // templateFrom's own. This entry point has no stream key to
+            // record - the segment arrived through the session append,
+            // not a SourceBuffer - and leaving templateFrom nil made
+            // these templates immortal: tearDownStream's drop only
+            // matches its dying stream's key. The bare session id is
+            // the sentinel for "the session itself harvested this"; no
+            // stream key can equal it, so the template survives stream
+            // teardowns as before and dies with the entry instead.
             let verdict = withState { () -> String? in
                 guard let held = entry.templateSinf else {
                     entry.templateSinf = sinf
+                    entry.templateFrom = sessionId
                     return "kept"
                 }
                 // Only on a real change: the same title's segments carry
@@ -893,6 +1115,7 @@ public final class FairPlayStreamParser: NSObject {
                     return nil
                 }
                 entry.templateSinf = sinf
+                entry.templateFrom = sessionId
                 return "REPLACED"
             }
             if let verdict {
@@ -1030,7 +1253,9 @@ public final class FairPlayStreamParser: NSObject {
         // One request per remaining key, each with a sinf naming it and
         // an origination of its own, so each produces its own SPC. The
         // originations are queued in the same order the requests are
-        // made, which is the order the delegate's FIFO claims them in.
+        // made, which is the order claimOrigination falls back on -
+        // normally each is matched by the exact key its content id
+        // carries, not by its place in the queue.
         //
         // reynard-keyid: is the existing convention for a request this
         // side raised. Nothing is held for these keys yet, so the replay
@@ -1103,7 +1328,18 @@ public final class FairPlayStreamParser: NSObject {
         // The delegate is captured rather than looked up again: by
         // the time this runs the session may be gone, and a
         // torn-down one should not be resurrected just to report on.
+        // What IS looked up again, at fire time, is whether this
+        // captured delegate is still the session's current one - the
+        // stand-down guard inside the closure. A watchdog that fires
+        // after its session was rebuilt or destroyed proves nothing
+        // and must do nothing: the recycle call used to reach a
+        // destroyed session id and re-CREATE it just to have
+        // something to rebuild.
         let delegate = entry.keyDelegate
+        // ADDED - see fix_watchdog_identity.py's docstring. Which
+        // rebuild generation this ask belongs to - how many rebuilds
+        // the session id had spent when the watchdog was armed.
+        let generation = rebuildsSpent(sessionId: sessionId)
         let sentCount = forSession.count
         let sentShape = payload == nil ? "init data as it arrived"
                                        : "the PSSH payload"
@@ -1114,18 +1350,57 @@ public final class FairPlayStreamParser: NSObject {
         // delegate - so on the run that failed to reload, this watchdog
         // was already satisfied by two exchanges from the previous
         // playthrough and never said a word.
-        let seenBefore = delegate.requestsSeen
+        //
+        // And the count FOR THIS KEY, not the session-wide one, when
+        // the ask names one. tv.apple.com asks for its audio and video
+        // keys 26ms apart, and the video key's request arriving moved
+        // the session-wide count past the audio key's snapshot - so the
+        // audio key's silence was masked the same way the latched flag
+        // once masked everything, and the incident ran 21 seconds with
+        // no deaf branch and no diagnostic. The hex is hexBytes'
+        // spelling, the same one didProvide files the arrival under, so
+        // the two sides cannot disagree on a key's name. A
+        // nil-identifier ask has no key to match on and keeps the
+        // session-wide count, which for it is exactly the old test.
+        let askedHex = keyId.map { Self.hexBytes($0) }
+        let seenBefore = askedHex.map { delegate.requestsSeen(forKeyHex: $0) }
+            ?? delegate.requestsSeen
         let askedFor = contentId
         Self.keyDelegateQueue.asyncAfter(deadline: .now() + 5) {
-            guard delegate.requestsSeen == seenBefore else {
+            let seenNow = askedHex.map { delegate.requestsSeen(forKeyHex: $0) }
+                ?? delegate.requestsSeen
+            guard seenNow == seenBefore else {
+                return
+            }
+            // ADDED - see fix_watchdog_identity.py's docstring. The
+            // silence test above proves nothing once the session has
+            // been rebuilt: this closure holds the OLD delegate, whose
+            // count froze the moment recycleSession replaced the
+            // Entry, so that guard passes forever after. One deaf
+            // episode arms several of these - tv.apple.com asks for
+            // audio and video keys back to back - and the first to
+            // fire rebuilds the session; a second, armed before the
+            // rebuild with seenBefore still above zero, then read its
+            // frozen count as the SUCCESSOR refusing and destroyed a
+            // healthy session, spending the second of mse_fix_200's
+            // two rebuilds on a session that was never deaf. A rebuild
+            // answers every ask armed before it, so a watchdog that is
+            // no longer watching the entry's current delegate, or was
+            // armed in an older rebuild generation, stands down in
+            // silence - batchEpoch's discipline (mse_fix_195), applied
+            // to this file's oldest timer.
+            guard FairPlayStreamParser.shared.watchdogStillCurrent(
+                    sessionId: sessionId, delegate: delegate,
+                    generation: generation) else {
                 return
             }
             Self.log("session \(sessionId) raised NO key request from "
                      + "\(sentCount) bytes sent as \(sentShape) with "
                      + (namedKey ? "a named key id" : "no identifier")
                      + " - AVFoundation did not recognise it, and said "
-                     + "nothing about it. Requests seen before this one: "
-                     + "\(seenBefore)")
+                     + "nothing about it. Requests seen before this one"
+                     + (askedHex.map { " for key \($0)" } ?? "")
+                     + ": \(seenBefore)")
 
             // A SESSION THAT HAS ANSWERED BEFORE AND HAS GONE QUIET IS
             // NOT REFUSING THE SHAPE - IT ALREADY HAS THE KEY.
@@ -1138,10 +1413,21 @@ public final class FairPlayStreamParser: NSObject {
             // the content process is waiting for a licence that only a
             // request could produce.
             //
+            // seenBefore is per-key when the ask named one, so this now
+            // asks the exact question the paragraph above poses: has
+            // THIS key been requested through this delegate before. A
+            // stranger key's traffic neither trips this branch nor -
+            // the incident's shape - hides the silence that should.
+            //
             // Rebuilding gives a session with no keys, which raises the
-            // request the old one would not. It cannot loop: a fresh
-            // delegate has seen nothing, so seenBefore is 0 next time and
-            // this branch is not taken.
+            // request the old one would not. It cannot loop, and now
+            // for the right reason: capture ada4702e showed a fresh
+            // delegate's count climbing straight back above zero,
+            // which is why mse_fix_200 capped the spend - and the
+            // stand-down guard above means a watchdog armed before a
+            // rebuild can no longer bill the successor for the old
+            // session's deafness, so every rebuild is paid for by
+            // silence observed against the session it destroys.
             if seenBefore > 0 {
                 // ADDED - see mse_fix_200's docstring. Silence from
                 // processContentKeyRequest means the session already
@@ -1158,22 +1444,23 @@ public final class FairPlayStreamParser: NSObject {
                         .renderingStreamKey(inSession: sessionId) {
                     Self.log("session \(sessionId) raised no request for "
                              + "this key and does not need to - \(working) "
-                             + "is rendering on this session right now, so "
-                             + "the key it went quiet about is a key it "
-                             + "already holds and is already using. Standing "
-                             + "down rather than rebuilding a session that "
-                             + "is working.")
+                             + "is rendering AND still taking samples on "
+                             + "this session right now, so the key it went "
+                             + "quiet about is a key it already holds and "
+                             + "is already using. Standing down rather than "
+                             + "rebuilding a session that is working.")
                     return
                 }
                 guard FairPlayStreamParser.shared
                         .claimRecycle(sessionId: sessionId) else {
                     Self.log("session \(sessionId) is deaf again, and has "
                              + "already been rebuilt "
-                             + "\(FairPlayStreamParser.recycleCap) times - "
+                             + "\(FairPlayStreamParser.recycleCap) times "
+                             + "in a row without a licence landing - "
                              + "not rebuilding it again. A rebuild costs "
                              + "every display layer its recipient status, "
-                             + "and a session that has needed two is not "
-                             + "going to be fixed by a third.")
+                             + "and two rebuilds that produced nothing "
+                             + "are not going to be fixed by a third.")
                     return
                 }
                 FairPlayStreamParser.shared.recycleSession(
@@ -1204,7 +1491,28 @@ public final class FairPlayStreamParser: NSObject {
                                           initializationData: initData,
                                           options: nil)
             Self.keyDelegateQueue.asyncAfter(deadline: .now() + 5) {
-                guard !delegate.sawRequest else {
+                // The same per-key count as above, not the latched
+                // flag: sawRequest is true forever after the first
+                // request this delegate EVER saw, so after any earlier
+                // exchange this verdict could never be reached - the
+                // masking the outer test just shed. seenBefore is
+                // still the right baseline: arrivals and the outer
+                // closure share keyDelegateQueue, so the count could
+                // not move between its guard and the retry.
+                let seenAfterRetry = askedHex
+                    .map { delegate.requestsSeen(forKeyHex: $0) }
+                    ?? delegate.requestsSeen
+                guard seenAfterRetry == seenBefore else {
+                    return
+                }
+                // The same stand-down as above, for the same reason: a
+                // rebuild between the retry and this reading replaces
+                // the delegate, and a frozen sawRequest would report
+                // "BOTH shapes refused" about a session that no longer
+                // exists.
+                guard FairPlayStreamParser.shared.watchdogStillCurrent(
+                        sessionId: sessionId, delegate: delegate,
+                        generation: generation) else {
                     return
                 }
                 Self.log("session \(sessionId) BOTH shapes refused WITH a "
@@ -1627,20 +1935,128 @@ public final class FairPlayStreamParser: NSObject {
         }
     }
 
-    /// Take the oldest origination this session has not yet matched to a
-    /// key request.
+    /// Take the origination this key request answers: the oldest one
+    /// raised for the key the request names, or the oldest outright
+    /// when the request names no key this queue knows.
     ///
     /// Claimed rather than read, so two requests can never resolve to
     /// the same exchange. Nil when a request arrives that nothing here
     /// asked for, which the delegate reports rather than guessing at.
-    func claimOrigination(for sessionId: String) -> FairPlayOrigination? {
-        return withState { () -> FairPlayOrigination? in
+    ///
+    /// CHANGED from strictly FIFO. FIFO assumes every origination gets
+    /// a request back, and one reliably does not: a key session raises
+    /// no request for a key it already holds - the silence requestKey's
+    /// watchdog is built on - so a re-asked key parks an origination
+    /// nothing will ever claim. Under FIFO the next real request
+    /// claimed that one instead of its own, and its SPC went out under
+    /// a content id whose page session was never sent the message. The
+    /// request's own identifier named the right origination all along -
+    /// the delegate's WARNING only ever observed the crossing - so the
+    /// identifier now selects, and queue order decides only between
+    /// originations raised for the same key.
+    ///
+    /// A skipped origination stays queued in its place. Once
+    /// originationSkipCap younger requests have been matched past it,
+    /// no request is coming for it, and it is expired and handed back
+    /// so the delegate can log the exchange the page will never hear
+    /// back on - instead of leaving it at the head to mis-address
+    /// whatever claims next.
+    func claimOrigination(for sessionId: String, matching identifier: Data?)
+        -> (origination: FairPlayOrigination, byKeyId: Bool,
+            expired: [FairPlayOrigination])? {
+        // Snapshotted and matched OUTSIDE the lock - requestedKeyId
+        // walks a pssh and logs, and nothing in this file calls out
+        // under a lock - then claimed by re-finding the winner, since
+        // a lock that was dropped may have missed an append.
+        let queued = withState {
+            entries[sessionId]?.pendingOriginations ?? []
+        }
+        guard !queued.isEmpty else {
+            return nil
+        }
+        var wanted: FairPlayOrigination?
+        if let identifier, identifier.count == 16 {
+            wanted = queued.first {
+                Self.requestedKeyId(of: $0) == identifier
+            }
+        }
+        return withState { () -> (FairPlayOrigination, Bool,
+                                  [FairPlayOrigination])? in
             guard let entry = entries[sessionId],
                   !entry.pendingOriginations.isEmpty else {
                 return nil
             }
-            return entry.pendingOriginations.removeFirst()
+            var at = 0
+            var byKeyId = false
+            if let wanted,
+               let found = entry.pendingOriginations.firstIndex(where: {
+                   $0.contentId == wanted.contentId
+                       && $0.initData == wanted.initData
+               }) {
+                at = found
+                byKeyId = true
+            }
+            let claimed = entry.pendingOriginations.remove(at: at)
+            var expired: [FairPlayOrigination] = []
+            if at > 0 {
+                // Everything in front of the winner has been overtaken
+                // once more, and anything overtaken past the cap is
+                // dropped in the same lock take that proved it was
+                // skipped again.
+                for skipped in 0..<at {
+                    entry.pendingOriginations[skipped].skips += 1
+                }
+                expired = entry.pendingOriginations[0..<at].filter {
+                    $0.skips >= Self.originationSkipCap
+                }
+                let kept = entry.pendingOriginations[0..<at].filter {
+                    $0.skips < Self.originationSkipCap
+                }
+                entry.pendingOriginations.replaceSubrange(0..<at,
+                                                          with: kept)
+            }
+            return (claimed, byKeyId, expired)
         }
+    }
+
+    /// How many younger requests may be matched past a queued
+    /// origination before it is expired as one that no request is
+    /// coming for. Three, like keyRetryCap: one skip could be request
+    /// reordering, three in a row on a queue that keeps moving is a
+    /// key the session went silent about.
+    fileprivate static let originationSkipCap = 3
+
+    /// The key identifier the request for a queued origination was
+    /// raised with, or nil when it cannot name one.
+    ///
+    /// requestKey's fan-out mints "reynard-keyid:" content ids carrying
+    /// the exact key as hex, and files the WHOLE pssh as each extra's
+    /// init data - so for those the content id is the only field that
+    /// names the right key, and reading the pssh back would answer the
+    /// batch's PRIMARY key for every one of them. Everything else was
+    /// raised with the pssh's own key id, which is exactly what
+    /// keyIdentifier(inPSSH:) reads.
+    static func requestedKeyId(of origination: FairPlayOrigination) -> Data? {
+        let marker = "reynard-keyid:"
+        if origination.contentId.hasPrefix(marker) {
+            let hex = origination.contentId.dropFirst(marker.count)
+            var bytes: [UInt8] = []
+            var at = hex.startIndex
+            while at < hex.endIndex,
+                  let next = hex.index(at, offsetBy: 2,
+                                       limitedBy: hex.endIndex) {
+                guard let byte = UInt8(hex[at..<next], radix: 16) else {
+                    return nil
+                }
+                bytes.append(byte)
+                at = next
+            }
+            return bytes.count == 16 ? Data(bytes) : nil
+        }
+        guard !origination.initData.isEmpty else {
+            return nil
+        }
+        return keyIdentifier(inPSSH: origination.initData)
     }
 
     /// The originations this session is still waiting on, for logging.
@@ -4184,6 +4600,64 @@ public final class FairPlayStreamParser: NSObject {
                 // that measurement into silence.
                 markLayerAttached(streamKey: streamKey)
             }
+            // ADDED - fix 14. THE SINK THIS SESSION PARKED COMES BACK
+            // BEFORE THE COMPOSITOR IS ASKED FOR A NEW ONE.
+            // tearDownStream parks the compositor's sink on the session
+            // entry when the stream that owned it dies while the key
+            // session lives on - a title switch, not a site change. The
+            // protection that sink established names THIS key session,
+            // so the next title claims it here instead of raising
+            // wantsFreshSink and hoping mse_fix_208's chase outlasts
+            // the gap between titles - twelve seconds did not span the
+            // four minutes capture ba4b6fe6 spent on the browse page.
+            //
+            // THE SESSION-IDENTITY GATE: a sink parked by another
+            // session is unreachable from here by construction - the
+            // park lives on this session's own entry, and
+            // destroySession releases it - so mse_fix_185/186's
+            // cross-site lesson stands: a different site still gets a
+            // fresh sink. And if AVFoundation ever refuses the claimed
+            // sink's re-add, addRecipient's backstop raises
+            // freshSinkWanted and this degrades to exactly the old
+            // behaviour.
+            //
+            // Claimed through adopt(), the one place that knows how to
+            // anchor a handed-over layer - the clock, the GOP carry,
+            // the audio realign. State lock first, freshSinkLock
+            // second, the order adopt takes them in.
+            var parkWasStale = false
+            let parkedSink = withState {
+                () -> AVSampleBufferDisplayLayer? in
+                guard let entry = entries[sessionOf(streamKey)],
+                      let idle = entry.idleSink else { return nil }
+                entry.idleSink = nil
+                entry.idleSinkOwner = nil
+                Self.freshSinkLock.lock()
+                let current = Self.compositorSink === idle
+                Self.freshSinkLock.unlock()
+                guard current else {
+                    parkWasStale = true
+                    return nil
+                }
+                // Fed RIGHT NOW - this call is the stream's own first
+                // video sample, a few lines ahead of the intake block
+                // that stamps it - so adopt()'s most-recently-fed
+                // selection lands on this stream and not on a corpse.
+                streamParsers[streamKey]?.lastSampleAt = Self.hostNow()
+                return idle
+            }
+            if parkWasStale {
+                Self.log("stream \(streamKey) found a parked sink the "
+                         + "compositor has since replaced - dropped it, "
+                         + "and the ordinary build carries on")
+            }
+            if let parkedSink {
+                Self.log("stream \(streamKey) claims the sink its "
+                         + "session parked - same key session, so the "
+                         + "content protection it established still "
+                         + "holds")
+                adopt(parkedSink)
+            }
         }
         guard let layer = withState({ slot.displayLayer }) else {
             return
@@ -4992,12 +5466,40 @@ public final class FairPlayStreamParser: NSObject {
                     }
                 }
             }
-            let next = withState { () -> CMSampleBuffer? in
+            // NOT THIS LAYER'S QUEUE ANY MORE. adopt() stops the old
+            // layer's callback at handover, but that stop only reaches
+            // invocations that have not fired yet - one already inside
+            // this loop kept consuming slot.pending into the dead
+            // layer, and the first thing it ate was the run 110 and
+            // 111 carry across a handover, prepended for the NEW layer
+            // moments before. So the identity check the nudge path
+            // makes before it trims is made here too, inside the same
+            // hold as the consume, where an adopt() cannot land
+            // between the two.
+            let next = withState { () -> (sample: CMSampleBuffer?,
+                                          mine: Bool) in
                 guard let slot = streamParsers[streamKey],
-                      !slot.pending.isEmpty else { return nil }
-                return slot.pending.removeFirst()
+                      slot.displayLayer === layer else {
+                    return (nil, false)
+                }
+                guard !slot.pending.isEmpty else { return (nil, true) }
+                return (slot.pending.removeFirst(), true)
             }
-            guard let sample = next else {
+            guard next.mine else {
+                // Superseded mid-drain. Nothing was consumed, and
+                // nothing else is touched: drainArmed and the rest of
+                // the slot describe the new layer now. Stopping the
+                // callback is this layer's own affair, and this block
+                // is already on its drain queue - the one place its
+                // stop is allowed to run.
+                Self.log("stream \(streamKey) the drain was caught "
+                         + "mid-handover - this layer is no longer the "
+                         + "stream's sink, leaving the queue to the one "
+                         + "that is")
+                layer.stopRequestingMediaData()
+                return
+            }
+            guard let sample = next.sample else {
                 // Nothing left. Stop, or the block spins on an empty
                 // queue for as long as the layer stays ready.
                 //
@@ -5044,8 +5546,13 @@ public final class FairPlayStreamParser: NSObject {
             // has done its job and can go. This is the only place that
             // retires it: it is the only place that knows the new sink
             // accepted anything.
+            // Identity re-checked: the lock was let go across the
+            // enqueue, and an adopt() in that window has posted an
+            // overlay that waits on the NEW sink's first sample, not
+            // on this layer's.
             let retiring = withState { () -> AVSampleBufferDisplayLayer? in
                 guard let slot = streamParsers[streamKey],
+                      slot.displayLayer === layer,
                       let overlay = slot.retiringOverlay else { return nil }
                 slot.retiringOverlay = nil
                 return overlay
@@ -7295,7 +7802,10 @@ public final class FairPlayStreamParser: NSObject {
         // The old layer's requestMediaDataWhenReady block outlives the
         // handover and would keep pulling from a queue that is no longer
         // its own. On the drain queue, because that is where its enqueues
-        // happen.
+        // happen. This stop only reaches callbacks that have not fired
+        // yet - an invocation already inside drainPending is covered by
+        // its own identity check, which re-reads the slot on every
+        // consume and steps aside without taking anything.
         if let queue = handover.queue, let old = handover.old {
             queue.async { old.stopRequestingMediaData() }
         }
@@ -8620,16 +9130,81 @@ public final class FairPlayStreamParser: NSObject {
         // its queues with it, and until now that was the largest of
         // Netflix's unreported losses.
         // AND THE SHARED SINK GOES WITH IT - see mse_fix_186's
-        // docstring. This is the moment the next site needs, and it
-        // arrives seconds before that site's layer is built rather than
-        // milliseconds after.
-        Self.noteSinkOwnerGone(slot.displayLayer, owner: key)
+        // docstring - UNLESS ITS OWN KEY SESSION IS STILL ALIVE.
+        //
+        // CHANGED - fix 14. The protection on the compositor's sink
+        // names the AVContentKeySession that adopted it, not the
+        // stream: tv.apple.com retires the stream on every title
+        // switch and builds the next one under the SAME session, and
+        // discarding the sink with the stream sent every new title
+        // through the wantsFreshSink poll and mse_fix_208's
+        // twelve-attempt chase - which capture ba4b6fe6 shows being
+        // abandoned. So the sink now follows the SESSION, and the gate
+        // is the session's identity three times over:
+        //
+        //   * entry still live, this stream the sink's recorded owner,
+        //     and NO successor stream holding a layer yet - the sink
+        //     is PARKED on the entry, stopped and at rate 0 by the
+        //     lines above but still placed in NativeLayerCA's tree,
+        //     for this session's next stream to claim at build;
+        //
+        //   * a successor of this session ALREADY holding a layer -
+        //     fix 95's supersede order, where the winner is built
+        //     before the loser is reaped. Its build has passed the
+        //     claim, so a park would strand the sink: the old route -
+        //     noteSinkOwnerGone, freshSinkWanted, one rebuild, one
+        //     offer - hands it over there, exactly as before;
+        //
+        //   * entry gone (destroySession removes it before calling
+        //     here), or the sink another stream's - exactly what
+        //     happened before: noteSinkOwnerGone, and the next site
+        //     gets a fresh sink rather than a layer it cannot claim,
+        //     which is the lesson mse_fix_186 must keep.
+        //
+        // State lock first, freshSinkLock second - the order adopt
+        // takes them in.
+        let parkedForSession = withState { () -> Bool in
+            guard let entry = entries[sessionOf(key)],
+                  let sink = slot.displayLayer,
+                  !slot.ownsDisplayLayer else { return false }
+            Self.freshSinkLock.lock()
+            let owns = Self.compositorSink === sink
+                && Self.compositorSinkOwner == key
+            Self.freshSinkLock.unlock()
+            guard owns else { return false }
+            let successorHasLayer = streamParsers.contains {
+                $0.key.hasPrefix(sessionOf(key) + "|")
+                    && $0.value.supersededBy == nil
+                    && $0.value.displayLayer != nil
+            }
+            guard !successorHasLayer else { return false }
+            entry.idleSink = sink
+            entry.idleSinkOwner = key
+            return true
+        }
+        if parkedForSession {
+            Self.log("stream \(key) parked the compositor's sink for "
+                     + "session \(sessionOf(key)) - its key session is "
+                     + "still alive, so the next stream claims this sink "
+                     + "instead of asking the compositor for another")
+        } else {
+            Self.noteSinkOwnerGone(slot.displayLayer, owner: key)
+        }
         // AND THE KEY REQUEST TEMPLATE GOES WITH IT - see mse_fix_189's
         // docstring. In capture 339c986e the template harvested here at
         // 247357.198 addressed the NEXT title's key request at
         // 247369.068, which timed out twenty seconds later and left the
         // page without a licence, without a source buffer and without a
         // picture.
+        //
+        // This guard is only as strong as templateFrom, and two writers
+        // used to leave that nil - the session entry point's harvest
+        // and recycleSession's carry - which made their templates
+        // immortal here. Both record provenance now. A templateFrom
+        // holding the bare session id is the session entry point's
+        // sentinel: it matches no stream key by construction, so that
+        // template is dropped by the entry's own death in
+        // destroySession rather than by this guard.
         let droppedTemplate = withState { () -> Data? in
             guard let entry = entries[sessionOf(key)],
                   entry.templateFrom == key,
@@ -8645,6 +9220,37 @@ public final class FairPlayStreamParser: NSObject {
                         .map { Self.hexBytes($0) } ?? "absent")
                      + ". The next title synthesises from its own pssh "
                      + "rather than inheriting this one's key.")
+        }
+        // AND SO DO THE SPECIFIERS IT FILED - the same lesson as
+        // mse_fix_189, per track. tv.apple.com numbers its KIDs per
+        // TITLE - 0 and 1 again for every title - so a dead title's
+        // filed sinf answers the next title's request for what looks
+        // like the same key. Worse than the template case: an exact
+        // specifier makes requestKey mark the request as NOT
+        // synthesised, and processSpecifier's stand-down then
+        // discards the fresh title's own specifier as a duplicate -
+        // the one object that names the new samples' real IV. Only
+        // entries this stream harvested go: the render probe's carry
+        // no provenance and stay, like the session-level template
+        // harvest, and another stream's are still serving its title.
+        let droppedSpecifiers = withState { () -> [String] in
+            guard let entry = entries[sessionOf(key)] else { return [] }
+            let going = entry.specifierFrom
+                .filter { $0.value == key }
+                .map { $0.key }
+                .sorted()
+            for hex in going {
+                entry.specifierByKeyId.removeValue(forKey: hex)
+                entry.specifierFrom.removeValue(forKey: hex)
+            }
+            return going
+        }
+        if !droppedSpecifiers.isEmpty {
+            Self.log("stream \(key) took the parser specifiers it filed "
+                     + "with it - key(s) "
+                     + droppedSpecifiers.joined(separator: ", ")
+                     + ". The next title files its own from its own "
+                     + "init segments rather than inheriting these.")
         }
         Self.log("stream \(key) torn down - \(why)"
                  + " - \(slot.pending.count) video and "
@@ -10168,14 +10774,29 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
     private var replayedKeyIds: Set<String> = []
     /// Whether any key request has ever arrived for this session.
     private var requestArrived = false
-    /// How many have. The watchdog needs the COUNT, not the flag: a
-    /// second playback in the same content process reuses this delegate,
-    /// so the flag was already true and the silence that mattered went
-    /// unreported.
+    /// How many have - in total, and per key id. The watchdog needs a
+    /// COUNT, not the flag: a second playback in the same content
+    /// process reuses this delegate, so the flag was already true and
+    /// the silence that mattered went unreported. And the total alone
+    /// was still not enough, because it is session-global and one
+    /// key's arrival vouched for every key in flight: tv.apple.com
+    /// asks for its audio and video keys 26ms apart, and the video
+    /// request moved the total past the audio watchdog's snapshot -
+    /// 21 seconds of audio-key silence, no deaf branch, no
+    /// diagnostic. Filed under hexBytes' spelling of the identifier
+    /// the request itself carries - the spelling requestKey asks
+    /// with, so the watchdog can match arrival to ask. A request
+    /// whose identifier is not Data files under "", and the
+    /// session-wide total still serves the nil-identifier asks.
     private var requestCount = 0
+    private var requestCountByKeyHex: [String: Int] = [:]
 
     var sawRequest: Bool { withLock { requestArrived } }
     var requestsSeen: Int { withLock { requestCount } }
+    /// How many requests have arrived carrying THIS key id.
+    func requestsSeen(forKeyHex hex: String) -> Int {
+        return withLock { requestCountByKeyHex[hex] ?? 0 }
+    }
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -10492,24 +11113,49 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         // Pin this request to the origination it answers, BEFORE
         // anything reads an identity off it.
         //
-        // FIFO, and that is an assumption worth naming: AVFoundation is
-        // not documented to raise requests in the order they were asked
-        // for. It is forced by raising requests with a nil identifier,
-        // which is the shape MSE needs and which removes the per-request
-        // handle AVFoundation would otherwise hand back. Where the
-        // request DOES carry an identifier the queue order is checked
-        // against it below, so a mismatch shows up in the log instead of
-        // silently addressing the wrong key.
-        let claimed = FairPlayStreamParser.shared.claimOrigination(for: sessionId)
+        // BY KEY ID, THEN FIFO. Plain FIFO was an assumption worth
+        // naming - AVFoundation is not documented to raise requests in
+        // the order they were asked for - and it was forced when
+        // requests were raised with a nil identifier, which is the
+        // shape MSE needs and which removes the per-request handle
+        // AVFoundation would otherwise hand back. It broke on the one
+        // request that never comes: a session raises no request for a
+        // key it already holds - requestKey's watchdog is built on that
+        // silence - so a re-asked key's origination sat at the head,
+        // every later request claimed one slot too early, and its SPC
+        // went out under a content id whose page session was never
+        // sent a message. The fkri key id is PASSED now - see
+        // requestKey - so where the request DOES carry an identifier
+        // it SELECTS the origination instead of merely checking the
+        // queue order against it; the WARNING below marks the fall
+        // back to the bare head, which can still address the wrong
+        // key exactly as before.
+        let claim = FairPlayStreamParser.shared.claimOrigination(
+            for: sessionId, matching: keyRequest.identifier as? Data)
+        let claimed = claim?.origination
         FairPlayStreamParser.log(
             "session \(sessionId) REAL AVContentKeyRequest arrived - "
             + "identifier \(String(describing: keyRequest.identifier)), "
             + "claimed "
-            + (claimed.map { "id \($0.contentId)" } ?? "NOTHING - no "
+            + (claim.map { "id \($0.origination.contentId)"
+                + ($0.byKeyId ? " by its key id" : " as the oldest queued")
+              } ?? "NOTHING - no "
                + "origination was waiting, so this request was not asked "
                + "for by this process")
             + ", \(FairPlayStreamParser.shared.pendingOriginationCount(for: sessionId))"
             + " still queued")
+        // An expired origination is a key the session was asked for
+        // and stayed silent about - a key it already holds. No request
+        // is coming, so it is out of the queue where it can no longer
+        // mis-address anyone else's SPC, and reported so the capture
+        // shows which exchange the page will never hear back on.
+        for dead in claim?.expired ?? [] {
+            FairPlayStreamParser.log(
+                "session \(sessionId) EXPIRED origination id "
+                + "\(dead.contentId.prefix(48)) - \(dead.skips) younger "
+                + "requests were matched past it and the session never "
+                + "raised one for it")
+        }
         // No origination is not an error - it is the render probe.
         //
         // The probe's requests come from the parser's specifier callback
@@ -10556,17 +11202,29 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
                 "session \(sessionId) has no origination to claim - "
                 + "proceeding on the request's own identifier")
         }
-        if let identifier = keyRequest.identifier as? Data,
-           let expected = FairPlayStreamParser.keyIdentifier(inPSSH: origination.initData),
+        // Kept for the fallback. A claim made by key id cannot
+        // mismatch, but a bare-head claim still can, and the crossed
+        // claim of capture fa05a590 was found by exactly this line.
+        if let claim, !claim.byKeyId,
+           let identifier = keyRequest.identifier as? Data,
+           let expected = FairPlayStreamParser.requestedKeyId(of: claim.origination),
            identifier != expected {
             FairPlayStreamParser.log(
                 "session \(sessionId) WARNING request identifier does not "
-                + "match the origination claimed for it - FIFO order may be "
-                + "wrong, and this SPC may address the wrong key")
+                + "match the origination claimed for it - no queued "
+                + "origination was raised for this key, so the oldest was "
+                + "claimed and this SPC may address the wrong key")
         }
+        // Filed under the identifier the request itself carries, spelt
+        // by hexBytes the way requestKey's ask was - the watchdog's
+        // per-key silence test matches on this exact string. Spelt out
+        // here, before the lock: formatting is not what a lock is for.
+        let arrivedHex = (keyRequest.identifier as? Data)
+            .map { FairPlayStreamParser.hexBytes($0) } ?? ""
         let ready = withLock { () -> Bool in
             requestArrived = true
             requestCount += 1
+            requestCountByKeyHex[arrivedHex, default: 0] += 1
             originations[ObjectIdentifier(keyRequest)] = origination
             if storedCertificate == nil {
                 heldRequests.append(keyRequest)
@@ -10939,6 +11597,19 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         FairPlayStreamParser.log(
             "session \(sessionId) licence applied to the request for id "
             + "\(contentId), \(ckc.count) bytes")
+        // A licence just landed on a request this session raised, and
+        // a deaf session raises none - so if a rebuild bought this
+        // exchange, the rebuild worked. Tell the recycle ledger, so
+        // the cap goes back to bounding consecutive failures instead
+        // of counting a lifetime. This is the one point every apply
+        // route funnels through - single, batch by label, batch by
+        // position, and every replay of a kept licence: mse_fix_199's
+        // serve on arrival, mse_fix_191's page-never-answered
+        // fallback, mse_fix_211's serve to the request already
+        // waiting. A kept licence replayed on a switch back to an
+        // already-played title is exactly the successful post-rebuild
+        // recovery those fixes built.
+        FairPlayStreamParser.shared.noteLicenceLanded(sessionId)
         // Kept, for a request that has not been raised yet.
         //
         // Apple's player answers one message per session. The parser's
@@ -11088,6 +11759,7 @@ private final class ParserDelegate: NSObject {
         lastSpecifier = specifier as AnyObject
         FairPlayStreamParser.shared.noteKeyRequest(sessionId: sessionId, trackID: trackID)
         FairPlayStreamParser.shared.processSpecifier(sessionId: sessionId,
+                                                     streamKey: streamKey,
                                                      specifier: specifier as AnyObject)
     }
 
