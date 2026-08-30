@@ -6820,11 +6820,33 @@ public final class FairPlayStreamParser: NSObject {
             return
         }
         let cutoff = hostNow() - livenessWindow
+        // SNAPSHOT FIRST - see mse_fix_209's docstring. compositorSink
+        // is guarded by freshSinkLock, and reading it inside withState
+        // guards it with the STATE lock, which is a different lock and
+        // therefore none at all. It is a strong class reference: an
+        // unsynchronised load races the writer's release, so the
+        // failure is an ARC over-release, not a stale value.
+        //
+        // Snapshotted rather than wrapped, and that is not a style
+        // choice. This file's order is the state lock FIRST and
+        // freshSinkLock SECOND - adopt takes freshSinkLock from inside
+        // a withState closure - so holding freshSinkLock across
+        // withState would invert a real path and deadlock. Taking it,
+        // reading, and releasing before withState is entered means the
+        // two are never held together and there is no order to invert.
+        //
+        // The snapshot may be stale when it is compared. That costs at
+        // worst one unnecessary or one late raise of freshSinkWanted,
+        // and mse_fix_201's poll is idempotent, capped at three
+        // rebuilds, and resets on a live picture.
+        freshSinkLock.lock()
+        let sinkNow = compositorSink
+        freshSinkLock.unlock()
         let waiting = shared.withState { () -> String? in
             for (key, slot) in shared.streamParsers
             where slot.displayLayer != nil && slot.supersededBy == nil
                     && slot.lastSampleAt > cutoff {
-                if slot.displayLayer !== compositorSink {
+                if slot.displayLayer !== sinkNow {
                     return key
                 }
             }
