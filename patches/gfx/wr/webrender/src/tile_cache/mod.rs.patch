@@ -19,7 +19,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
      /// The native compositor surface handle
      pub native_surface_id: NativeSurfaceId,
      /// List of image keys, and current image generations, that are drawn in this surface.
-@@ -1541,6 +1552,48 @@
+@@ -1541,6 +1552,55 @@
      ) -> Result<CompositorSurfaceKind, SurfacePromotionFailure> {
          use SurfacePromotionFailure::*;
  
@@ -60,15 +60,58 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +            // and no destroyed surface. At one in six hundred a five
 +            // second stall is invisible.
 +            if nth == 0 || nth % 60 == 0 {
-+                eprintln!("reynardWR: promotion considered {} times (kind {:?}, at {:?})",
-+                          nth + 1, surface_kind, pic_coverage_rect);
++                // CHANGED - see mse_fix_210's docstring. is_root_tile_cache
++                // is the field that decides whether this primitive can be
++                // promoted at all, and it was the one thing this line did
++                // not carry. With it, a capture where the video plays and
++                // one where it does not differ by a grep.
++                eprintln!("reynardWR: promotion considered {} times (kind {:?}, \
++slice {} flags {:?}, root {}, at {:?})",
++                          nth + 1, surface_kind, self.slice, self.slice_flags,
++                          is_root_tile_cache, pic_coverage_rect);
 +            }
 +        }
 +
          // Each strategy has different restrictions on whether we can promote
          match surface_kind {
              CompositorSurfaceKind::Overlay => {
-@@ -1830,14 +1883,42 @@
+@@ -1644,6 +1704,35 @@
+ 
+         // If not on the root picture cache, it has some kind of
+         // complex effect (such as a filter, mix-blend-mode or 3d transform).
+         if !is_root_tile_cache {
++            // REYNARD - see mse_fix_210's docstring. The comment above
++            // names three causes and the code distinguishes none of
++            // them, so a capture can say only that the video was
++            // refused, never why. Capture bca62a20 refused it sixty-one
++            // times and the picture never appeared.
++            //
++            // The slice says whether the video was given a cache of its
++            // own; the two spatial nodes say whether a transform sits
++            // between the cache and the primitive; SliceFlags names an
++            // atomic container or a scrollbar outright.
++            //
++            // .0 rather than {:?} for the node indices: the field is a
++            // pub u32 and guaranteed, where Debug is a hand-written impl
++            // in another module - and a bare integer diffs better
++            // between captures.
++            {
++                use std::sync::atomic::{AtomicUsize, Ordering};
++                static REYNARD_NOTROOT: AtomicUsize = AtomicUsize::new(0);
++                let nth = REYNARD_NOTROOT.fetch_add(1, Ordering::Relaxed);
++                if nth < 12 || nth % 120 == 0 {
++                    eprintln!("reynardWR: NOT ROOT - slice {} flags {:?} \
++sub_slice {} kind {:?} - cache node {} prim node {} - cache rect {:?} \
++prim rect {:?} ({} so far)",
++                              self.slice, self.slice_flags, sub_slice_index,
++                              surface_kind, self.spatial_node_index.0,
++                              prim_spatial_node_index.0, self.local_rect,
++                              pic_coverage_rect, nth + 1);
++                }
++            }
+             return Err(NotRootTileCache);
+         }
+@@ -1830,14 +1919,42 @@
              frame_context.spatial_tree,
          );
  
@@ -112,7 +155,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -1854,6 +1935,7 @@
+@@ -1854,6 +1971,7 @@
  
          let is_visible = world_clip_rect.intersects(&frame_context.global_screen_world_rect);
          if !is_visible {
@@ -120,7 +163,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
              return Ok(surface_kind);
          }
  
-@@ -2017,6 +2099,7 @@
+@@ -2017,6 +2135,7 @@
  
                          ExternalNativeSurface {
                              used_this_frame: true,
@@ -128,7 +171,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
                              native_surface_id,
                              image_dependencies: [ImageDependency::INVALID; 3],
                          }
-@@ -2162,6 +2245,38 @@
+@@ -2162,6 +2281,38 @@
                                  result: Result<CompositorSurfaceKind, SurfacePromotionFailure>,
                                  rect: PictureRect,
                                  ignored: bool) {
@@ -167,7 +210,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          if !self.debug_flags.contains(DebugFlags::SURFACE_PROMOTION_LOGGING) || result.is_ok() {
              return;
          }
-@@ -2997,16 +3112,47 @@
+@@ -2997,16 +3148,47 @@
  
          // A simple GC of the native external surface cache, to remove and free any
          // surfaces that were not referenced during the update_prim_dependencies pass.
