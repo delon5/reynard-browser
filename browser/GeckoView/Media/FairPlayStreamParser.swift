@@ -10222,6 +10222,59 @@ final class KeySessionDelegate: NSObject, AVContentKeySessionDelegate {
         withLock { () -> Void in
             licenceByKeyId[hex] = KeptLicence(bytes: ckc, forKeyHex: hex)
         }
+        // AND IF A REQUEST FOR THIS KEY IS ALREADY WAITING - see
+        // mse_fix_211's docstring. The log line below says "the request
+        // for this key may not have been raised yet", and in capture
+        // 9bdcfc97 it had been raised, six seconds earlier, and was
+        // still outstanding when these bytes were filed:
+        //
+        //   78387.739  REAL AVContentKeyRequest arrived - <09ef7d1c>
+        //   78393.656  KEPT 1004 bytes under ...09ef7d1c
+        //   78393.673  enqueued 1 - -11800 "no content key present"
+        //
+        // The batch record had moved on - Netflix raised a second
+        // batch for the previous title 2.9s after this one went out and
+        // 3.0s before its reply came back, overwriting batchKeyIds - so
+        // mse_fix_196's label match measured this reply against the
+        // wrong expectation and dropped it here. The request never came
+        // again; a key session raises no request twice for one key. So
+        // mse_fix_199's replay, which fires when a REQUEST arrives, had
+        // already missed its moment.
+        //
+        // Identity is the request's OWN 16-byte identifier, not the
+        // origination and not the content id - mse_fix_198's rule, and
+        // for exactly its reason: the bookkeeping that names requests
+        // is the thing that got confused, so it cannot be the thing
+        // that decides. Marked in replayedKeyIds first so that if these
+        // bytes are expired, mse_fix_194's eviction drops them on the
+        // retry they provoke and the page is asked afresh.
+        //
+        // The scan takes the delegate's lock alone with nothing called
+        // under it; provide() takes the same non-recursive lock, so it
+        // is called strictly after this one is released.
+        let reynardWaiting = withLock { () -> String? in
+            for (candidateId, request) in outstanding {
+                guard let identifier = request.identifier as? Data,
+                      identifier.count == 16,
+                      FairPlayStreamParser.hexBytes(identifier) == hex else {
+                    continue
+                }
+                replayedKeyIds.insert(hex)
+                return candidateId
+            }
+            return nil
+        }
+        if let reynardWaiting {
+            FairPlayStreamParser.log(
+                "session \(sessionId) KEPT \(ckc.count) bytes under the "
+                + "reply's own key id \(hex) - and a request whose own "
+                + "identifier IS this key is still outstanding under "
+                + "\(reynardWaiting.prefix(48)), so serving it now rather "
+                + "than waiting for a request that will never be raised "
+                + "again")
+            _ = provide(response: ckc, contentId: reynardWaiting)
+            return true
+        }
         FairPlayStreamParser.log(
             "session \(sessionId) KEPT \(ckc.count) bytes under the "
             + "reply's own key id \(hex) - it answers no outstanding "
