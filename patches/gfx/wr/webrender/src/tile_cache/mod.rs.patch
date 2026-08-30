@@ -325,3 +325,68 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          });
  
          if !self.underlays.is_empty() && !self.deferred_dirty_tests.is_empty() {
+@@ -3028,11 +3261,63 @@
+ 
+             // Cancel underlay if underlay intersects with backdrop filter and bit depth is 8 bits
+             // XXX WebRender does not support full HDR yet. HDR requires external composite to show correct colors.
++            //
++            // REYNARD: and not one the compositor owns - see mse_fix_217's
++            // docstring. This partition is why Apple TV is black in portrait
++            // and fine in landscape with the controls hidden.
++            //
++            // A deferred dirty test is pushed by exactly one thing, and
++            // upstream says so at the push site: "For backdrop-filter, we
++            // need to check if any of the dirty rects in tiles that are
++            // affected by the filter primitive are dirty." The portrait
++            // player draws its controls and card chrome with a backdrop
++            // filter over the video, so the video's underlay intersects one,
++            // it is YUV 8-bit because the title is SDR, and it is cancelled
++            // - rewritten to Blit below.
++            //
++            // Blit means "draw it into the tile", and that is the assumption
++            // that fails. On the protected MSE route the frames never pass
++            // through Gecko: AVStreamDataParser hands decoded buffers
++            // straight to an AVSampleBufferDisplayLayer, and the tile has
++            // nothing to paint. The remedy that makes a backdrop filter
++            // correct again over ordinary content makes protected content
++            // disappear.
++            //
++            // Upstream already carries this exemption for the one class it
++            // knew about - is_yuv_8bit spares HDR, because a blit would show
++            // wrong colours. Protected video is the same argument with a
++            // worse ending.
++            //
++            // Gated on the surface being one the compositor owns, which is
++            // the closest thing this crate has to the question being asked:
++            // external_image_id AND native_surface_id together mean the tile
++            // cannot repaint this, whoever it belongs to. Broader than DRM,
++            // and deliberately so - there is no DRM signal in webrender to
++            // be narrower with, and the cost of being broad is that a
++            // backdrop filter over ordinary external video keeps the video
++            // and loses its blur.
++            let reynard_compositor_owned = |desc: &ExternalSurfaceDescriptor| {
++                desc.external_image_id.is_some() && desc.native_surface_id.is_some()
++            };
+             let (underlays, cancel_underlays): (Vec<_>, Vec<_>) =
+                 self.underlays
+                     .iter()
+                     .partition(|desc| {
+-                        !is_yuv_8bit(desc) || !intersects_with_dirty_tests(desc)
++                        if reynard_compositor_owned(desc)
++                            && is_yuv_8bit(desc)
++                            && intersects_with_dirty_tests(desc) {
++                            use std::sync::atomic::{AtomicUsize, Ordering};
++                            static REYNARD_SPARED: AtomicUsize =
++                                AtomicUsize::new(0);
++                            let nth = REYNARD_SPARED.fetch_add(1, Ordering::Relaxed);
++                            if nth < 20 || nth % 60 == 0 {
++                                eprintln!("reynardWR: a backdrop filter would \
++have cancelled this compositor-owned underlay and demoted it to a blit - \
++keeping it instead (at {:?}, {} so far)", desc.local_rect, nth + 1);
++                            }
++                            return true;
++                        }
++                        !is_yuv_8bit(desc) || !intersects_with_dirty_tests(desc)
+                     });
+ 
+             if !cancel_underlays.is_empty() {
