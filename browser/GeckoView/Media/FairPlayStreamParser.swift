@@ -4141,6 +4141,34 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("stream \(streamKey) built a display layer - "
                      + "status \(layer.status.rawValue) "
                      + "timebase \(timebase != nil) - paused until attached")
+            // AND IF AN OFFER WAS GIVEN UP ON BEFORE THIS STREAM EXISTED
+            // - see mse_fix_213's docstring. A stream appearing is the
+            // event mse_fix_208's chase was really waiting for, and a
+            // twelve-second budget cannot span the four minutes capture
+            // ba4b6fe6 spent on the Apple TV browse page between two
+            // titles.
+            //
+            // One uncontended lock on the healthy path, and nothing
+            // else: the latch is only set by a chase that ran out, and
+            // it is cleared here so one abandoned offer buys exactly
+            // one restart. The lock is taken and released before
+            // reaskForTheMissedSink is called - it snapshots under this
+            // same lock and then enters withState, and this file's
+            // order is the state lock first and this one second.
+            let reynardResume: Bool = {
+                Self.freshSinkLock.lock()
+                defer { Self.freshSinkLock.unlock() }
+                guard Self.missedOfferAbandoned else { return false }
+                Self.missedOfferAbandoned = false
+                return true
+            }()
+            if reynardResume {
+                Self.log("stream \(streamKey) built a display layer after "
+                         + "the compositor's offer had been given up on - "
+                         + "chasing it again rather than playing sound with "
+                         + "no picture")
+                Self.reaskForTheMissedSink(attempt: 1)
+            }
             // ADDED - see mse_fix_95's docstring. A second display layer
             // in one session is a second picture, and a session is one
             // content process playing one element. Whatever held the
@@ -6813,10 +6841,22 @@ public final class FairPlayStreamParser: NSObject {
     /// nothing.
     fileprivate static func reaskForTheMissedSink(attempt: Int) {
         guard attempt <= missedSinkAttempts else {
+            // CHANGED - see mse_fix_213's docstring. This used to be the
+            // end of it, and the sentence it logged - "any stream that
+            // starts now has no sink to draw into and will play sound
+            // with no picture" - turned out to be a description of
+            // capture ba4b6fe6 rather than a warning about it.
+            //
+            // The poll still stops. What is kept is one bool saying an
+            // offer went unanswered, which the next stream to build a
+            // display layer consumes.
+            freshSinkLock.lock()
+            missedOfferAbandoned = true
+            freshSinkLock.unlock()
             log("no stream took the compositor's layer within "
-                + "\(missedSinkAttempts)s of it being offered - not asking "
-                + "again. Any stream that starts now has no sink to draw "
-                + "into and will play sound with no picture.")
+                + "\(missedSinkAttempts)s of it being offered - stopping "
+                + "the poll, and remembering the offer. The next stream to "
+                + "build a display layer starts the chase again.")
             return
         }
         let cutoff = hostNow() - livenessWindow
@@ -6865,6 +6905,11 @@ public final class FairPlayStreamParser: NSObject {
         }
         freshSinkLock.lock()
         freshSinkWanted = true
+        // Cleared here as well as at the consumer - see mse_fix_213's
+        // docstring. A chase that finds its stream has answered the
+        // offer, so the stream built after it must not inherit a
+        // restart that is already spent.
+        missedOfferAbandoned = false
         freshSinkLock.unlock()
         log("stream \(waiting) has a picture and is not on the "
             + "compositor's layer - asking for the sink that was offered "
@@ -7788,6 +7833,22 @@ public final class FairPlayStreamParser: NSObject {
     private static let freshSinkLock = NSLock()
     /// A display layer was refused as a content key recipient.
     private static var freshSinkWanted = false
+    /// An offer was chased, never taken, and the chase gave up.
+    ///
+    /// ADDED - see mse_fix_213's docstring. mse_fix_208's chase stops
+    /// after twelve seconds so a page that never plays again keeps no
+    /// timer alive. Capture ba4b6fe6 shows what that costs when the
+    /// page DOES play again: the offer was made at 89692.894 as the
+    /// first title was torn down, the chase gave up at 89940.961, and
+    /// the second title built its display layer at 89951.304 - ten
+    /// seconds too late, with nothing left able to hand it a sink.
+    ///
+    /// So the timer dies and the offer is remembered. Nothing reads
+    /// this until a stream builds a display layer, which is the event
+    /// that would have needed the sink anyway. Cleared under this lock
+    /// by whoever consumes it, so one abandoned offer buys exactly one
+    /// restart.
+    private static var missedOfferAbandoned = false
     /// Who last asked for a fresh sink, and when.
     ///
     /// ADDED - see mse_fix_201's docstring. The ask used to be a single
