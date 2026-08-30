@@ -6789,6 +6789,66 @@ public final class FairPlayStreamParser: NSObject {
     /// once: the last capture built three compositor layers because an
     /// ABR resize from 768x322 to 1024x428 rebuilds them. Everything here
     /// has to be safe to do again.
+    /// How many times a missed offer is chased before giving up.
+    ///
+    /// ADDED - see mse_fix_208's docstring. The gap in capture 11946c21
+    /// was six seconds; twelve is twice that, and a page that never
+    /// plays again must not keep a timer alive on its behalf.
+    fileprivate static let missedSinkAttempts = 12
+
+    /// Ask the compositor to offer its sink again, once a stream can
+    /// take it.
+    ///
+    /// ADDED - see mse_fix_208's docstring. adopt() refuses an offer
+    /// when no stream has a picture yet, and the sink block that made
+    /// the offer runs only inside a video-layer rebuild - so without
+    /// this the refusal is final. freshSinkWanted is the flag
+    /// mse_fix_201's per-commit poll turns into that rebuild, and it
+    /// is raised here for the same reason it is raised on a refusal:
+    /// the sink needs to reach a stream and currently has not.
+    ///
+    /// Asks the same question adopt() asks - a live stream, with a
+    /// display layer, that is not already on the compositor's. Silent
+    /// when there is nothing to do, so a healthy handover logs
+    /// nothing.
+    fileprivate static func reaskForTheMissedSink(attempt: Int) {
+        guard attempt <= missedSinkAttempts else {
+            log("no stream took the compositor's layer within "
+                + "\(missedSinkAttempts)s of it being offered - not asking "
+                + "again. Any stream that starts now has no sink to draw "
+                + "into and will play sound with no picture.")
+            return
+        }
+        let cutoff = hostNow() - livenessWindow
+        let waiting = shared.withState { () -> String? in
+            for (key, slot) in shared.streamParsers
+            where slot.displayLayer != nil && slot.supersededBy == nil
+                    && slot.lastSampleAt > cutoff {
+                if slot.displayLayer !== compositorSink {
+                    return key
+                }
+            }
+            return nil
+        }
+        guard let waiting else {
+            // KeySessionDelegate's queue, named in full: fallbackQueue
+            // is declared on that class, not on this one, and every
+            // other caller in this file spells it the same way.
+            KeySessionDelegate.fallbackQueue.asyncAfter(
+                deadline: .now() + 1.0
+            ) {
+                Self.reaskForTheMissedSink(attempt: attempt + 1)
+            }
+            return
+        }
+        freshSinkLock.lock()
+        freshSinkWanted = true
+        freshSinkLock.unlock()
+        log("stream \(waiting) has a picture and is not on the "
+            + "compositor's layer - asking for the sink that was offered "
+            + "while nothing could take it (attempt \(attempt))")
+    }
+
     private func adopt(_ sink: AVSampleBufferDisplayLayer) {
         // Which stream? The one with a picture. There is normally exactly
         // one - a page plays one video at a time - and where there are
@@ -6847,8 +6907,19 @@ public final class FairPlayStreamParser: NSObject {
             return (picked.key, picked.fedAt)
         }
         guard let chosen else {
+            // CHANGED - see mse_fix_208's docstring. "A resize offers
+            // another one" was the whole recovery, and a resize is not
+            // something the page owes anybody. Capture 11946c21: this
+            // fired at 75276.058 between two Apple TV titles, the next
+            // title's video stream was not built until 75282.446, and
+            // nothing offered a sink again for the rest of the
+            // session - twenty-four samples decrypted into a layer in
+            // no tree, audio playing through the parser's own
+            // renderer, no picture.
             Self.log("the compositor offered a layer before any stream had "
-                     + "a picture - ignored. A resize offers another one.")
+                     + "a picture - ignored. Asking again as soon as one "
+                     + "has.")
+            Self.reaskForTheMissedSink(attempt: 1)
             return
         }
         let streamKey = chosen.key
