@@ -362,6 +362,30 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     /// The backgrounding teardown, deferred off the didEnterBackground
     /// notification - see sceneDidEnterBackground for why. The order
     /// within this method is load-bearing and unchanged.
+    /// ADDED - see fix_media_keeps_its_trapping.py.
+    ///
+    /// The single question the whole JIT half of the background teardown
+    /// turns on: is a content process going to keep running, and running
+    /// JavaScript, after we go into the background?
+    ///
+    /// Three separate decisions used to test this independently -
+    /// setDebuggerListening(false), requestDetachForAllDebugSessions()
+    /// and the cancel/tunnelClose - and the first of them did not test it
+    /// at all. Routed through here so they cannot disagree.
+    ///
+    /// They MUST agree. Trapping enabled while the loops are gone is the
+    /// SIGBUS combination: the child executes brk #0xf00d with no
+    /// debugger to service it, or - worse, because it is silent -
+    /// PrepareExecutableRegionForWriting bails, CommitPages ignores the
+    /// bail and returns true, and the JIT writes into a chunk TXM never
+    /// backed. That fault surfaces as an instruction abort on first
+    /// entry, which no signal handler can recover.
+    private func shouldPreserveJITAcrossBackground(
+        for browserViewController: BrowserViewController
+    ) -> Bool {
+        return browserViewController.sessionManager.hasSystemMediaSession
+    }
+
     private func performBackgroundTeardown(for browserViewController: BrowserViewController) {
 
         // Release any content process the debugger is holding stopped,
@@ -400,7 +424,38 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // The cost is that background JavaScript runs interpreted, which
         // is the same trade already made for the registration-failure
         // fallback and matters little in an app whose tabs are asleep.
-        JITEnabler.setDebuggerListening(false)
+        // CHANGED - see fix_media_keeps_its_trapping.py.
+        //
+        // This used to run unconditionally, above and outside the media
+        // guard. Measured on device, 6 for 6 across three captures:
+        //
+        //   00:58:23.430765  jitListening: debugger is GONE
+        //   00:58:23.431475  backgroundTeardown: skipping the
+        //                    debug-session detach - PiP or system media
+        //                    is live ...
+        //   00:58:23.662815  backgroundTeardown: skipping the cancel and
+        //                    the tunnel close ...
+        //
+        // The sessions survived, the tunnel survived, and the one tab
+        // still executing JavaScript was told it could not trap - 0.7ms
+        // before the guard that exists to keep it working.
+        //
+        // The old comment justified that as "a region needed during
+        // playback is simply prepared interpreted". It is not:
+        // PrepareExecutableRegionForWriting returns void, CommitPages
+        // ignores it, SetAliasProtection has already marked the alias
+        // executable, so the allocation succeeds into a chunk TXM never
+        // backed and the failure lands on the first instruction fetch.
+        //
+        // Safe to leave listening on here for one reason only: on this
+        // branch nothing is torn down. No detach, no cancel, no tunnel
+        // close, every loop still parked in its continue. A child that
+        // traps has a live loop to service it.
+        if shouldPreserveJITAcrossBackground(for: browserViewController) {
+            logger("backgroundTeardown: keeping the debugger listening - PiP or system media is live and its content process still needs to compile")
+        } else {
+            JITEnabler.setDebuggerListening(false)
+        }
         
         // Before the detach, while every loop is still running normally -
         // a stopped one stands out against ticks of 30-60ms, where at
@@ -439,7 +494,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // makes at every background. Only the interrupt and the detach
         // are skipped. The loops stay alive, parked in their continue,
         // and the next background after media stops tears down normally.
-        if browserViewController.sessionManager.hasSystemMediaSession {
+        // CHANGED - fix_media_keeps_its_trapping.py routes this through
+        // the shared predicate. Same value as before; the point is that
+        // this and the listening flag above can no longer diverge.
+        if shouldPreserveJITAcrossBackground(for: browserViewController) {
             logger("backgroundTeardown: skipping the debug-session detach - PiP or system media is live and its content process must keep running")
         } else {
             JITEnabler.requestDetachForAllDebugSessions()
@@ -521,7 +579,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             // audio assertion is not suspended, which is why its tunnel
             // survives in the first place. The next background after
             // media stops tears down normally.
-            guard !browserViewController.sessionManager.hasSystemMediaSession else {
+            // CHANGED - fix_media_keeps_its_trapping.py. Same value,
+            // still re-read at this moment rather than sampled earlier,
+            // now through the shared predicate.
+            guard !self.shouldPreserveJITAcrossBackground(for: browserViewController) else {
                 logger("backgroundTeardown: skipping the cancel and the tunnel close - PiP or system media is still live")
                 if cancelTaskIdentifier != .invalid {
                     application.endBackgroundTask(cancelTaskIdentifier)
