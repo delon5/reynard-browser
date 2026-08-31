@@ -426,8 +426,15 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             forName: UIApplication.willEnterForegroundNotification,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             SystemProxyBridge.apply()
+            // ADDED - see fix_stand_down_from_orphaned_fullscreen.py's
+            // docstring. Leaving fullscreen is driven by a DOM event, and
+            // backgrounding is where that event goes missing: sleeping a
+            // tab replaces its session, so the exit never arrives and the
+            // chrome stays hidden until the user manufactures one by
+            // entering and leaving fullscreen again.
+            self?.reynardStandDownFromOrphanedFullscreen()
         }
     }
 
@@ -1263,6 +1270,46 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         updateBrowserLayout(animated: false)
         UIApplication.shared.isIdleTimerDisabled = fullScreen
         requestContentKeyboardFocus(for: tabManager.selectedTab?.session)
+    }
+
+    /// Leave fullscreen when the page that asked for it is no longer the
+    /// page on screen.
+    ///
+    /// ADDED - see fix_stand_down_from_orphaned_fullscreen.py's
+    /// docstring. This is the same question, and the same remedy, that
+    /// BrowserViewController+TabManager already applies on tab
+    /// selection:
+    ///
+    ///     if isShowingFullscreenMedia,
+    ///        fullscreenSession !== selectedTab.session {
+    ///         applyFullscreenState(false, for: fullscreenSession)
+    ///     }
+    ///
+    /// That check never runs across a background cycle, because
+    /// backgrounding and foregrounding the same tab does not change the
+    /// selection - and a background cycle is precisely where the
+    /// fullscreenExit event is lost. sleepBackgroundedTabs REPLACES
+    /// tab.session with a new object, and fullscreenSession is a weak
+    /// reference to the old one.
+    ///
+    /// Silent and free on a glance and return: the session is untouched,
+    /// owner is the same live object as the selected tab's, and a video
+    /// that really is still fullscreen stays fullscreen.
+    private func reynardStandDownFromOrphanedFullscreen() {
+        guard isShowingFullscreenMedia else {
+            return
+        }
+        let owner = fullscreenSession
+        // owner == nil is the deallocated case and has to be spelled out:
+        // when there is also no selected tab, `nil !== nil` is false and
+        // the comparison alone would leave the chrome hidden with nothing
+        // on screen able to bring it back.
+        guard owner == nil || owner !== tabManager.selectedTab?.session else {
+            return
+        }
+        NSLog("fullscreenState: fullscreen owner is %@ - standing down so the toolbar comes back",
+              owner == nil ? "deallocated" : "no longer the selected session")
+        applyFullscreenState(false, for: owner)
     }
     
     // MARK: - Orientation

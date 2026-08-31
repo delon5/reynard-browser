@@ -6,9 +6,22 @@
 //
 
 import AVFoundation
-import os
 
-private let pipLog = OSLog(subsystem: "com.minh-ton.Reynard", category: "PiPDebug")
+// REYNARD - see fix_pip_log_to_stdout.py's docstring. This file used to
+// log its eligibility refusals through
+//
+//     private let pipLog = OSLog(subsystem: "com.minh-ton.Reynard",
+//                                category: "PiPDebug")
+//
+// which reaches Console.app and `log stream` and NOT reynard_stdout.txt.
+// Every capture taken while PiP failed to arm therefore carried no
+// reason, and the only remaining signal was the absence of the
+// `pipLife:` lines below - which is a weak enough inference that it led
+// to a wrong diagnosis on capture 68ad15df.
+//
+// The refusals now go through logger(), the same call the `pipLife:`
+// lines already use and the reason those show up. Prefixed `pipGate:`
+// so a grep can take the two together or apart.
 import AVKit
 import Foundation
 import GeckoView
@@ -241,26 +254,26 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     
     private func eligibleSession() -> EligibleSession? {
         guard let snapshot = mediaSession.selectedSnapshot else {
-            os_log("eligibleSession: no selectedSnapshot", log: pipLog, type: .debug)
+            logger("pipGate: no selectedSnapshot - nothing is registered as playing")
             return nil
         }
         guard snapshot.playbackState == .playing else {
-            os_log("eligibleSession: playbackState is %{public}@, not .playing", log: pipLog, type: .debug, String(describing: snapshot.playbackState))
+            logger("pipGate: playbackState is \(String(describing: snapshot.playbackState)), not .playing")
             return nil
         }
         guard let displayLayer = snapshot.session.pictureInPictureDisplayLayer else {
-            os_log("eligibleSession: pictureInPictureDisplayLayer is nil", log: pipLog, type: .debug)
+            logger("pipGate: pictureInPictureDisplayLayer is nil - the compositor is offering no PiP source")
             return nil
         }
         guard let positionState = snapshot.positionState else {
-            os_log("eligibleSession: positionState is nil", log: pipLog, type: .debug)
+            logger("pipGate: positionState is nil")
             return nil
         }
         guard isValid(positionState) else {
-            os_log("eligibleSession: positionState failed isValid check", log: pipLog, type: .debug)
+            logger("pipGate: positionState failed isValid - needs a finite duration > 0, a position within it, and a rate > 0")
             return nil
         }
-        os_log("eligibleSession: all checks passed, session is eligible", log: pipLog, type: .debug)
+        logger("pipGate: all checks passed - the session is eligible")
         return EligibleSession(
             session: snapshot.session,
             displayLayer: displayLayer,
