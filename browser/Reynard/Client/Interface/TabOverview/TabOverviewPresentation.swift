@@ -223,6 +223,20 @@ final class TabOverviewPresentation {
         state = .dismissed
         applyPresentationProgress(0)
         tabOverview.isHidden = true
+        // ADDED - see fix_bottom_toolbar_stranded_hidden.py's docstring.
+        // finishPresentationWithoutAnimation hides this bar and nothing
+        // on the no-animation path ever put it back: the three unhides
+        // in this file are in dismissOnPad, which a phone never reaches,
+        // and in two animation completions behind an
+        // activePresentationTransition identity guard that a superseded
+        // transition fails. Backgrounding takes exactly this path, and
+        // capture 2c6e86ed caught the result - one `bottom hid 0 -> 1`
+        // in 46170 lines with no return, and the chrome left reading
+        // `a=1.00 hid=1`: alpha restored, view still hidden, no toolbar.
+        //
+        // Before updateLayout, so the layout pass that follows sees a
+        // visible bar rather than laying out against a hidden one.
+        context.browserChrome.setBottomToolbarHidden(false)
         context.updateLayout(animated: false, duration: 0)
         context.tabOverviewDidFinishDismissal()
     }
