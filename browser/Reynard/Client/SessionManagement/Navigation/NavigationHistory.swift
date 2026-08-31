@@ -38,12 +38,11 @@ final class NavigationHistory {
         sessionState: SessionNavigationAvailability
     ) -> NavigationAvailability {
         let snapshot = store.currentSnapshot(for: tabID)
-        if snapshot.usesStoredHistory {
-            return NavigationAvailability(
-                canGoBack: snapshot.canGoBack,
-                canGoForward: snapshot.canGoForward
-            )
-        }
+        // The engine's own answer is always OR-ed in, latched or not. The
+        // latch says where this tab's history is KEPT, not whether the
+        // engine has any; reporting canGoBack: false while the engine can
+        // in fact go back disables the button and makes the engine path
+        // unreachable, which is how a latched tab used to get stuck.
         return NavigationAvailability(
             canGoBack: snapshot.canGoBack || sessionState.canGoBack,
             canGoForward: snapshot.canGoForward || sessionState.canGoForward
@@ -68,8 +67,19 @@ final class NavigationHistory {
         for tabID: UUID,
         sessionState: SessionNavigationAvailability
     ) -> NavigationTransition? {
-        let snapshot = store.currentSnapshot(for: tabID)
-        if !snapshot.usesStoredHistory && sessionState.canGoBack {
+        // Prefer the engine whenever it actually has history, latched or
+        // not. usesStoredHistory is a one-way flag - restoreState() sets
+        // it on any restored tab with stored entries, both fallback arms
+        // re-assert it, and nothing anywhere clears it - so gating the
+        // engine path on it means a tab that has been restored once never
+        // uses engine traversal again, even after session state is
+        // restored and the engine has a real history. The flag's job is to
+        // pick the FALLBACK, which is the branch below.
+        //
+        // The snapshot read that used to sit here went with the term that
+        // needed it: currentSnapshot is a pure read but a queue.sync one
+        // that hits the filesystem, and neither arm below uses it.
+        if sessionState.canGoBack {
             _ = store.goBack(for: tabID)
             return NavigationTransition(
                 action: .session,
@@ -91,8 +101,9 @@ final class NavigationHistory {
         for tabID: UUID,
         sessionState: SessionNavigationAvailability
     ) -> NavigationTransition? {
-        let snapshot = store.currentSnapshot(for: tabID)
-        if !snapshot.usesStoredHistory && sessionState.canGoForward {
+        // See goBack: the latch selects the fallback, it does not veto the
+        // engine, and the snapshot read went with the term that used it.
+        if sessionState.canGoForward {
             _ = store.goForward(for: tabID)
             return NavigationTransition(
                 action: .session,
