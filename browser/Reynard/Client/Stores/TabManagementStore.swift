@@ -245,12 +245,25 @@ final class TabManagementStore {
         selectedPrivateTabID: UUID?,
         selectedTabMode: TabMode
     ) {
-        let persistedRegularTabs = regularTabs.map { PersistedTab(id: $0.id, title: $0.title, url: $0.url) }
-        let persistedPrivateTabs = privateTabs.map { PersistedTab(id: $0.id, title: $0.title, url: $0.url) }
-        NSLog("[TabPersistence] emergencyPersistTabs STARTED: %d regular, %d private", persistedRegularTabs.count, persistedPrivateTabs.count)
+        NSLog("[TabPersistence] emergencyPersistTabs STARTED: %d regular, %d private", regularTabs.count, privateTabs.count)
         
         _ = syncWithTimeout(2, default: (), label: "emergencyPersistTabs()") {
             let lastTabOverview = self.persistedStateLocked().lastTabOverview
+            // Carried across the DELETE below. This path receives tuples,
+            // not Tabs, so it has no session state of its own to write -
+            // and both persist paths clear the table before re-inserting,
+            // so writing nil here would erase every tab's stored history
+            // at exactly the moment the process is being killed, which is
+            // when it matters most.
+            let carried = self.sessionStatesLocked()
+            let persistedRegularTabs = regularTabs.map {
+                PersistedTab(id: $0.id, title: $0.title, url: $0.url,
+                             sessionState: carried[$0.id])
+            }
+            let persistedPrivateTabs = privateTabs.map {
+                PersistedTab(id: $0.id, title: $0.title, url: $0.url,
+                             sessionState: carried[$0.id])
+            }
             
             guard self.executeLocked("BEGIN IMMEDIATE TRANSACTION;") else {
                 NSLog("[TabPersistence] emergencyPersistTabs FAILED to begin transaction")
@@ -554,6 +567,30 @@ final class TabManagementStore {
         }
         
         return false
+    }
+    
+    /// Every tab's persisted session-state blob, by id. Used by
+    /// emergencyPersistTabs to carry state across its own DELETE.
+    private func sessionStatesLocked() -> [UUID: String] {
+        guard let statement = prepareStatementLocked(
+            "SELECT id, session_state FROM tabs WHERE session_state IS NOT NULL;"
+        ) else {
+            return [:]
+        }
+        
+        defer {
+            sqlite3_finalize(statement)
+        }
+        
+        var states: [UUID: String] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let id = UUID(uuidString: string(from: statement, at: 0)),
+               let blob = optionalString(from: statement, at: 1) {
+                states[id] = blob
+            }
+        }
+        
+        return states
     }
     
     /// The persisted session-state blob for one tab, or nil when the
