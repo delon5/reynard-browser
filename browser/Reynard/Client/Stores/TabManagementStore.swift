@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import GeckoView
 import SQLite3
 import UIKit
 
@@ -50,6 +51,7 @@ final class TabManagementStore {
         let id: UUID
         let title: String
         let url: String?
+        let sessionState: String?
     }
     
     private struct PersistedState {
@@ -151,10 +153,20 @@ final class TabManagementStore {
         selectedTabMode: TabMode
     ) {
         let persistedRegularTabs = regularTabs.map {
-            PersistedTab(id: $0.id, title: $0.title, url: $0.url)
+            PersistedTab(
+                id: $0.id,
+                title: $0.title,
+                url: $0.url,
+                sessionState: $0.state.sessionState?.jsonString()
+            )
         }
         let persistedPrivateTabs = privateTabs.map {
-            PersistedTab(id: $0.id, title: $0.title, url: $0.url)
+            PersistedTab(
+                id: $0.id,
+                title: $0.title,
+                url: $0.url,
+                sessionState: $0.state.sessionState?.jsonString()
+            )
         }
         
         stateQueue.async {
@@ -497,7 +509,8 @@ final class TabManagementStore {
             title TEXT NOT NULL,
             url TEXT,
             is_private INTEGER NOT NULL,
-            position INTEGER NOT NULL
+            position INTEGER NOT NULL,
+            session_state TEXT
         );
         
         CREATE INDEX IF NOT EXISTS idx_tabs_private_position ON tabs(is_private, position ASC);
@@ -510,6 +523,69 @@ final class TabManagementStore {
         """
         
         _ = executeLocked(sql)
+        migrateSchemaLocked()
+    }
+    
+    /// Adds columns that CREATE TABLE IF NOT EXISTS cannot add to a
+    /// database created by an earlier build. ALTER TABLE ADD COLUMN
+    /// fails outright if the column is already there and executeLocked
+    /// swallows the error, so the presence check is load-bearing rather
+    /// than an optimization.
+    private func migrateSchemaLocked() {
+        guard !columnExistsLocked(table: "tabs", column: "session_state") else {
+            return
+        }
+        _ = executeLocked("ALTER TABLE tabs ADD COLUMN session_state TEXT;")
+    }
+    
+    private func columnExistsLocked(table: String, column: String) -> Bool {
+        guard let statement = prepareStatementLocked("PRAGMA table_info(\(table));") else {
+            return false
+        }
+        
+        defer {
+            sqlite3_finalize(statement)
+        }
+        
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if string(from: statement, at: 1) == column {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// The persisted session-state blob for one tab, or nil when the
+    /// engine never reported state for it. Deliberately a separate
+    /// single-row read rather than a field on TabSnapshot: that type is
+    /// returned to the tab overview, search and CarPlay, and adding a
+    /// stored property to it would break every construction site.
+    func sessionState(for tabID: UUID) -> String? {
+        return stateQueue.sync {
+            guard let statement = self.prepareStatementLocked(
+                """
+                SELECT session_state
+                FROM tabs
+                WHERE id = ?
+                LIMIT 1;
+                """
+            ) else {
+                return nil
+            }
+            
+            defer {
+                sqlite3_finalize(statement)
+            }
+            
+            self.bind(tabID.uuidString, to: statement, at: 1)
+            
+            guard sqlite3_step(statement) == SQLITE_ROW else {
+                return nil
+            }
+            
+            return self.optionalString(from: statement, at: 0)
+        }
     }
     
     private func ensureStateRowLocked() {
@@ -767,8 +843,8 @@ final class TabManagementStore {
     private func insertTabsLocked(_ tabs: [PersistedTab], isPrivate: Bool) -> Bool {
         guard let statement = prepareStatementLocked(
             """
-            INSERT INTO tabs (id, title, url, is_private, position)
-            VALUES (?, ?, ?, ?, ?);
+            INSERT INTO tabs (id, title, url, is_private, position, session_state)
+            VALUES (?, ?, ?, ?, ?, ?);
             """
         ) else {
             return false
@@ -786,6 +862,7 @@ final class TabManagementStore {
             bindOptional(tab.url, to: statement, at: 3)
             sqlite3_bind_int64(statement, 4, isPrivate ? 1 : 0)
             sqlite3_bind_int64(statement, 5, Int64(index))
+            bindOptional(tab.sessionState, to: statement, at: 6)
             
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 return false

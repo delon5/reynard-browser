@@ -1022,7 +1022,20 @@ final class TabManagerImplementation: NSObject, TabManager {
         // against, so it is set here as browse() sets it.
         // See fix_loadwatchdog_restore_loads.py.
         tab.state.displayState = .pending(url)
-        loadURL(url, in: tab)
+        // A persisted session state carries the tab's history, scroll
+        // position and form data, and GeckoView:RestoreState performs
+        // the navigation itself - so this replaces the loadURL rather
+        // than preceding it. Sending both would have the load clobber
+        // the restore. The watchdog is still armed either way, so the
+        // retry ladder protects a restore that never paints exactly as
+        // it protects a load that never arrives.
+        if let serialized = store.sessionState(for: tab.id),
+           let restored = GeckoSessionState(jsonString: serialized) {
+            tab.state.sessionState = restored
+            tab.session.restoreSessionState(restored)
+        } else {
+            loadURL(url, in: tab)
+        }
         armLoadWatchdog(for: tab, pendingInput: url, retryURL: url)
     }
     
@@ -2950,6 +2963,18 @@ extension TabManagerImplementation: HistoryDelegate {
 }
 
 extension TabManagerImplementation: ProgressDelegate {
+    /// The engine reports state on its own schedule and again whenever
+    /// flushSessionState() is called - GeckoSession does that on
+    /// deactivation. Cached on the tab here; TabManagementStore
+    /// serializes it on the next persistState().
+    func onSessionStateChange(session: GeckoSession, state: GeckoSessionState) {
+        guard !state.isEmpty,
+              let location = tabLocation(for: session) else {
+            return
+        }
+        tabs(for: location.mode)[location.index].state.sessionState = state
+    }
+    
     func onPageStart(session: GeckoSession, url: String) {
         systemMediaSession.navigationStarted(in: session)
         pictureInPictureCoordinator?.navigationStarted(in: session)

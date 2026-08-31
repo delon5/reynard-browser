@@ -58,6 +58,14 @@ final class TabSessionState {
     var navigationState = NavigationAvailability(canGoBack: false, canGoForward: false)
     var loadingState = TabLoadingState.idle
     
+    /// The engine's last reported session state for this tab - its
+    /// navigation history, scroll position and form data. Set from
+    /// ProgressDelegate.onSessionStateChange, serialized by
+    /// TabManagementStore alongside the tab's other metadata, and read
+    /// back on restore so a tab returns where it was rather than being
+    /// re-navigated to its URL. nil until the engine first reports.
+    var sessionState: GeckoSessionState?
+    
     /// How the current page reserves space at its bottom edge, asked of
     /// the content process at PageStop and on location change. Decides
     /// which mechanism can move the page's content: an env() reader
