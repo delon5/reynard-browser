@@ -383,7 +383,26 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     private func shouldPreserveJITAcrossBackground(
         for browserViewController: BrowserViewController
     ) -> Bool {
+        // CHANGED - see fix_keepalive_holds_the_jit_teardown.py.
+        //
+        // The keep-alive holds the app awake indefinitely, so its tab
+        // keeps executing JavaScript and keeps needing new JIT regions -
+        // the same requirement PiP has, for longer. Before this, turning
+        // the toggle on kept the app running and let its JIT be torn down
+        // anyway, which is the worst of both: battery spent running
+        // interpreted.
+        //
+        // isActive, not the preference. The preference can be true while
+        // the engine is dead (a call, Siri, a media services reset), and
+        // holding the tunnel open for an app that then gets suspended
+        // loses the tunnel for the rest of the launch.
+        //
+        // hasSystemMediaSession is deliberately NOT widened to include
+        // this. It is also read by isMediaPriority, which tab eviction
+        // uses; keeping tabs resident on a preference rather than on
+        // actual playback is a different change with a different risk.
         return browserViewController.sessionManager.hasSystemMediaSession
+            || BackgroundAudioKeepAlive.shared.isActive
     }
 
     private func performBackgroundTeardown(for browserViewController: BrowserViewController) {

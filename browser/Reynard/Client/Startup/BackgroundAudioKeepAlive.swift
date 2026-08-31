@@ -48,6 +48,24 @@ final class BackgroundAudioKeepAlive {
         )
     }
     
+    /// ADDED - see fix_keepalive_holds_the_jit_teardown.py.
+    ///
+    /// Whether the silent engine is RUNNING, which is not the same as
+    /// whether the preference is on. A call or Siri stops it
+    /// (handleInterruption), and a media services reset tears the session
+    /// down entirely (handleMediaServicesReset); both go through stop()
+    /// and clear isRunning before any recovery is attempted.
+    ///
+    /// The background teardown gates the whole JIT half on this. Gating
+    /// on the preference instead would hold the pairing tunnel open for
+    /// an app that is about to be suspended after all, and a socket does
+    /// not survive a suspension - the tunnel then cannot be rebuilt,
+    /// which is the failure fix_close_before_suspension.py exists to
+    /// prevent.
+    var isActive: Bool {
+        return isRunning
+    }
+
     func start() {
         guard !isRunning else {
             return
