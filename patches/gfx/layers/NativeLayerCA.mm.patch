@@ -340,40 +340,18 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  void NativeLayerRootCA::SetBackingScale(float aBackingScale) {
    MutexAutoLock lock(mMutex);
  
-@@ -287,6 +598,32 @@ bool NativeLayerRootCA::CommitToScreen() {
+@@ -287,6 +598,10 @@ bool NativeLayerRootCA::CommitToScreen() {
                         mWindowIsFullscreen);
    mMutatedOnscreenLayerStructure = false;
  
 +#ifdef XP_IOS
-+  if (!mLayersRetainedUntilNextScreenCommit.IsEmpty()) {
-+    // Swept here rather than at the end of CommitRepresentation: the
-+    // OnlyVideo fast path early-exits that function before its final
-+    // statements, and this list must be swept on every screen commit
-+    // regardless of which update path ran - Clear() without the sweep
-+    // is the destroyed-layer surface leak coming back. The emptiness
-+    // check keeps the OnlyVideo path free of CATransactions, which it
-+    // deliberately never opens.
-+    AutoCATransaction transaction;
-+    for (const auto& layer : mLayersRetainedUntilNextScreenCommit) {
-+      // A destroyed layer can legitimately still be onscreen: SetLayers
-+      // re-inserts a just-destroyed protected layer while the MSE parser
-+      // still has a live picture (the reynardHeldProtected hold), which
-+      // is routine during protected-playback transitions. Clearing it
-+      // would blank a picture that is still being displayed; skip it and
-+      // let the retention lapse instead.
-+      if (mSublayers.Contains(layer)) {
-+        continue;
-+      }
-+      layer->ClearOnscreenSurfaceContents();
-+    }
-+    mLayersRetainedUntilNextScreenCommit.Clear();
-+  }
++  mLayersRetainedUntilNextScreenCommit.Clear();
 +#endif
 +
    mCommitPending = false;
  
    if (StaticPrefs::gfx_webrender_debug_dump_native_layer_tree_to_file()) {
-@@ -320,6 +657,11 @@
+@@ -320,6 +635,11 @@
      EmitTelemetryForVideoLowPower(videoLowPower);
    }
  
@@ -385,7 +363,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    return true;
  }
  
-@@ -389,6 +731,19 @@
+@@ -389,6 +709,19 @@
      WhichRepresentation aRepresentation, CALayer* aRootCALayer,
      const nsTArray<RefPtr<NativeLayerCA>>& aSublayers,
      bool aMutatedLayerStructure, bool aWindowIsFullscreen) {
@@ -405,7 +383,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    UpdateType updateRequired =
        GetMaxUpdateRequired(aRepresentation, aSublayers, aMutatedLayerStructure);
    if (updateRequired == NativeLayerCA::UpdateType::OnlyVideo) {
-@@ -417,11 +772,71 @@
+@@ -417,11 +750,71 @@
    NSMutableArray<CALayer*>* sublayers =
        [NSMutableArray arrayWithCapacity:aSublayers.Length()];
    bool mustRebuild = updateRequired == UpdateType::All;
@@ -477,7 +455,33 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      }
    }
  
-@@ -921,9 +1336,51 @@
+@@ -428,6 +821,25 @@ void NativeLayerRootCA::CommitRepresentation(
+   if (mustRebuild) {
+     aRootCALayer.sublayers = sublayers;
+   }
++
++#ifdef XP_IOS
++  if (aRepresentation == WhichRepresentation::ONSCREEN) {
++    // HandleLayerDestroyed() removes the layer from mKnownLayers before
++    // CommitToScreen() updates the CALayer tree. The retained NativeLayerCA
++    // gives this commit access to the removed layer so it can set
++    // mContentCALayer.contents to nil.
++    for (const auto& layer : mLayersRetainedUntilNextScreenCommit) {
++      // A destroyed layer should not still be in this commit's list, but the
++      // command batch that destroyed it can arrive without a SetLayers that
++      // drops it. Clearing then blanks a layer that is still onscreen - a
++      // visible flash - so skip it and let the retention lapse instead.
++      if (aSublayers.Contains(layer)) {
++        continue;
++      }
++      layer->ClearOnscreenSurfaceContents();
++    }
++  }
++#endif
+ }
+ 
+ SnapshotterCADelegate::~SnapshotterCADelegate() = default;
+@@ -921,9 +1333,51 @@
  }
  
  bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
@@ -529,7 +533,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1749,17 @@
+@@ -1292,6 +1746,17 @@
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -547,7 +551,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    mIsHDR = aIsHDR;
  
    bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1462,15 +1930,94 @@
+@@ -1462,15 +1927,94 @@
    }
  
    auto& r = GetRepresentation(aRepresentation);
@@ -643,7 +647,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
    }
-@@ -1477,6 +2024,35 @@ bool NativeLayerCA::ApplyChanges(WhichRepresentation aRepresentation,
+@@ -1477,6 +2021,35 @@ bool NativeLayerCA::ApplyChanges(WhichRepresentation aRepresentation,
    return updateSucceeded;
  }
  
@@ -679,7 +683,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  CALayer* NativeLayerCA::UnderlyingCALayer(WhichRepresentation aRepresentation) {
    MutexAutoLock lock(mMutex);
    return GetRepresentation(aRepresentation).UnderlyingCALayer();
-@@ -1521,12 +2097,38 @@
+@@ -1521,12 +2094,38 @@
  }
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
@@ -719,7 +723,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +2242,11 @@
+@@ -1640,6 +2239,11 @@
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -731,7 +735,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +2287,11 @@
+@@ -1680,7 +2284,11 @@
      const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
@@ -744,7 +748,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +2305,14 @@
+@@ -1694,13 +2302,14 @@
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -760,7 +764,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +2329,23 @@
+@@ -1717,7 +2326,23 @@
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -785,7 +789,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +2389,7 @@
+@@ -1761,7 +2386,7 @@
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -794,7 +798,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2398,196 @@
+@@ -1770,6 +2395,196 @@
            mLogNextVideoSurface = true;
          }
  #endif
@@ -991,7 +995,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2601,7 @@
+@@ -1783,6 +2598,7 @@
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -999,7 +1003,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2629,12 @@
+@@ -1810,8 +2626,12 @@
      }
    }
  
@@ -1014,7 +1018,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2819,7 @@
+@@ -1996,7 +2816,7 @@
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -1023,7 +1027,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2835,7 @@
+@@ -2012,6 +2832,7 @@
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
