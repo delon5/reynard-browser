@@ -268,7 +268,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          if !self.debug_flags.contains(DebugFlags::SURFACE_PROMOTION_LOGGING) || result.is_ok() {
              return;
          }
-@@ -2997,16 +3199,93 @@
+@@ -2997,16 +3199,47 @@
  
          // A simple GC of the native external surface cache, to remove and free any
          // surfaces that were not referenced during the update_prim_dependencies pass.
@@ -290,8 +290,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 +        // for that long is an allocation; the cost of not holding it is
 +        // a black picture.
 +        const REYNARD_SURFACE_GRACE_FRAMES: u32 = 300;
--        self.external_native_surface_cache.retain(|_, surface| {
-+        self.external_native_surface_cache.retain(|key, surface| {
+         self.external_native_surface_cache.retain(|_, surface| {
 -            if !surface.used_this_frame {
 -                // If we removed an external surface, we need to mark the dirty rects as
 -                // invalid so a full composite occurs on the next frame.
@@ -303,52 +302,6 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
 -            surface.used_this_frame
 +            if surface.used_this_frame {
 +                surface.unused_frames = 0;
-+                return true;
-+            }
-+
-+            // NEVER A TRUE EXTERNAL SURFACE - see mse_fix_218's docstring.
-+            //
-+            // key.size is None exactly when this surface came from
-+            // Compositor::create_external_surface - upstream's own doc
-+            // comment on the field is the definition - which means a
-+            // video handed to the compositor whole rather than drawn
-+            // into a tile.
-+            //
-+            // Collecting one of those takes the external image binding
-+            // away, and on the clear-video route that is the only thing
-+            // feeding the AVSampleBufferDisplayLayer AVKit is presenting
-+            // in Picture in Picture. Captures 32c39ed1 and e732227d:
-+            // "external surface unused for 300 frames - freeing it"
-+            // fires inside every Twitch PiP window and never inside the
-+            // Apple TV one, and Twitch freezes while Apple TV does not.
-+            // The protected route survives because FairPlayStreamParser
-+            // feeds its sink directly and the compositor is not in the
-+            // frame path at all.
-+            //
-+            // The frame counter here advances per post_update, not per
-+            // presented frame, so a backgrounded app burns through the
-+            // grace period in seconds - which is why raising it is not
-+            // the fix.
-+            //
-+            // Bounded: one such surface per distinct set of video image
-+            // keys, destroyed with the tile cache on navigation or tab
-+            // close. Drawn surfaces below keep the grace period and keep
-+            // being collected, so this narrows the GC rather than
-+            // switching it off.
-+            if key.size.is_none() {
-+                surface.unused_frames += 1;
-+                if surface.unused_frames == REYNARD_SURFACE_GRACE_FRAMES {
-+                    use std::sync::atomic::{AtomicUsize, Ordering};
-+                    static REYNARD_KEPT_EXTERNAL: AtomicUsize =
-+                        AtomicUsize::new(0);
-+                    let nth =
-+                        REYNARD_KEPT_EXTERNAL.fetch_add(1, Ordering::Relaxed);
-+                    if nth < 20 || nth % 60 == 0 {
-+                        eprintln!("reynardWR: an unused EXTERNAL surface \
-+reached the grace period - keeping it, because collecting it takes away \
-+the only thing feeding a Picture in Picture layer ({} so far)", nth + 1);
-+                    }
-+                }
 +                return true;
 +            }
 +
@@ -372,7 +325,7 @@ diff --git a/gfx/wr/webrender/src/tile_cache/mod.rs b/gfx/wr/webrender/src/tile_
          });
  
          if !self.underlays.is_empty() && !self.deferred_dirty_tests.is_empty() {
-@@ -3028,11 +3307,63 @@
+@@ -3028,11 +3261,63 @@
  
              // Cancel underlay if underlay intersects with backdrop filter and bit depth is 8 bits
              // XXX WebRender does not support full HDR yet. HDR requires external composite to show correct colors.
