@@ -2,7 +2,7 @@ diff --git a/mobile/ios/app/mobile.js b/mobile/ios/app/mobile.js
 index e835b1c33d86..3b8cd6d4e48e 100644
 --- a/mobile/ios/app/mobile.js
 +++ b/mobile/ios/app/mobile.js
-@@ -3,7 +3,131 @@
+@@ -3,7 +3,142 @@
  // License, v. 2.0. If a copy of the MPL was not distributed with this
  // file, You can obtain one at http://mozilla.org/MPL/2.0/.
  
@@ -12,6 +12,17 @@ index e835b1c33d86..3b8cd6d4e48e 100644
 +
 +// Block popups by default (bug 436057)
 +pref("dom.disable_open_during_load", true);
++
++// Autocorrect off by default. The pref gates HTMLElement.autocorrect and
++// defaults to true, so a field is autocorrected unless the page opts out
++// with autocorrect="off" - which is the wrong default for a browser whose
++// text fields are mostly URLs, search terms and credentials. With it
++// false, IMEStateManager::GetAutocorrect returns false outright on
++// anything that is not Android, so InputContext.mAutocorrect is false and
++// UIKitUtils::GetUITextAutocorrectionType hands UIKit
++// UITextAutocorrectionTypeNo. A page can no longer turn it back on, which
++// is the point.
++pref("dom.forms.autocorrect", false);
 +
 +// Enable prelaunching of content processes.
 +pref("dom.ipc.processPrelaunch.enabled", true);
@@ -135,7 +146,7 @@ index e835b1c33d86..3b8cd6d4e48e 100644
  
  // Use software webrender on simulator due to missing APIs.
  #if TARGET_OS_SIMULATOR
-@@ -19,3 +143,5 @@ pref("security.sandbox.content.level", 1);
+@@ -19,3 +154,5 @@ pref("security.sandbox.content.level", 1);
  // 1 complete progressbar at DOMContentLoaded
  // 2 complete progressbar at first MozAfterPaint after DOMContentLoaded
  pref("page_load.progressbar_completion", 2);
