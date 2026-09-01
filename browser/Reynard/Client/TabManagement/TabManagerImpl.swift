@@ -453,6 +453,12 @@ final class TabManagerImplementation: NSObject, TabManager {
         // backgrounding, so it cannot be caught with a live syslog
         // capture - it has to be recorded and read afterwards.
         logger(String(format: "tabPersist: writing %d regular, %d private tabs", regularTabs.count, privateTabs.count))
+        // DIAGNOSTIC - see fix_log_session_state_pipeline.py.
+        logger(String(
+            format: "sessionState: persisting %d of %d regular, %d of %d private with state",
+            regularTabs.filter { $0.state.sessionState != nil }.count, regularTabs.count,
+            privateTabs.filter { $0.state.sessionState != nil }.count, privateTabs.count
+        ))
         
         store.persistTabs(
             regularTabs: regularTabs,
@@ -1031,9 +1037,14 @@ final class TabManagerImplementation: NSObject, TabManager {
         // it protects a load that never arrives.
         if let serialized = store.sessionState(for: tab.id),
            let restored = GeckoSessionState(jsonString: serialized) {
+            // DIAGNOSTIC - see fix_log_session_state_pipeline.py.
+            logger(String(format: "sessionState: tab %@ RESTORE via engine state (%d bytes)",
+                          tab.id.uuidString, serialized.utf8.count))
             tab.state.sessionState = restored
             tab.session.restoreSessionState(restored)
         } else {
+            logger(String(format: "sessionState: tab %@ RESTORE via loadURL - no stored state",
+                          tab.id.uuidString))
             loadURL(url, in: tab)
         }
         armLoadWatchdog(for: tab, pendingInput: url, retryURL: url)
@@ -1793,8 +1804,11 @@ final class TabManagerImplementation: NSObject, TabManager {
         delegate?.tabManager(self, didUpdateTabAt: selectedTabIndex, reason: .navigationState)
         switch transition.action {
         case .session:
+            logger(String(format: "navArm: tab %@ goBack via SESSION", tab.id.uuidString))
             tab.session.goBack()
         case let .load(url):
+            logger(String(format: "navArm: tab %@ goBack via LOAD %@",
+                          tab.id.uuidString, loggableURL(url, isPrivate: tab.isPrivate)))
             loadURL(url, in: tab)
         }
     }
@@ -2972,7 +2986,21 @@ extension TabManagerImplementation: ProgressDelegate {
               let location = tabLocation(for: session) else {
             return
         }
-        tabs(for: location.mode)[location.index].state.sessionState = state
+        let tab = tabs(for: location.mode)[location.index]
+        // DIAGNOSTIC - see fix_log_session_state_pipeline.py. Section
+        // membership is read off the serialized form rather than the
+        // payload, because GeckoSessionState.state is internal to the
+        // GeckoView module and jsonString() is the public surface.
+        let serialized = state.jsonString()
+        logger(String(
+            format: "sessionState: tab %@ update bytes=%d history=%@ scroll=%@ form=%@",
+            tab.id.uuidString,
+            serialized?.utf8.count ?? 0,
+            (serialized?.contains("\"history\"") ?? false) ? "Y" : "N",
+            (serialized?.contains("\"scrolldata\"") ?? false) ? "Y" : "N",
+            (serialized?.contains("\"formdata\"") ?? false) ? "Y" : "N"
+        ))
+        tab.state.sessionState = state
     }
     
     func onPageStart(session: GeckoSession, url: String) {
