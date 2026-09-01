@@ -140,6 +140,34 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         (window?.rootViewController as? BrowserViewController)?
             .sessionManager.setApplicationForeground(true)
         
+        // ADDED - see fix_background_audio_skips_jit_teardown.py.
+        // The other half of the pair. Nothing was torn down at the
+        // last background, so there is nothing to restore: no census,
+        // no setDebuggerListening(true) on a flag that was never
+        // cleared, and no reattachOrphanedProcesses over sessions that
+        // never went orphaned.
+        //
+        // setApplicationForeground(true) above still runs - it drives
+        // the commit latch and session activation, which have nothing
+        // to do with the debugger.
+        //
+        // sceneDidBecomeActive is deliberately NOT touched. Its
+        // applicationDidBecomeActive drains attaches for children that
+        // spawned while we were inactive, and those still need
+        // attaching whether or not anything was torn down. Skipping it
+        // would leave every new tab without JIT.
+        //
+        // The loop state is dumped on the way out so the next capture
+        // says outright whether the sessions actually survived. If it
+        // ever reads "0 session(s) registered" here, the app WAS
+        // suspended despite the keep-alive, the skip above was wrong,
+        // and this branch has to fall through to the normal restore.
+        if Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled {
+            JITEnabler.dumpDebugLoopState(labelled: "loopState at foreground (restore skipped)")
+            logger("foregroundRestore: SKIPPED - background audio keep-alive is on, nothing was torn down")
+            return
+        }
+        
         // The tunnel dies during suspension and every debug loop with
         // it, but an attach is otherwise only triggered by a process
         // STARTING - so a process that survives runs interpreted
@@ -430,6 +458,47 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // live and answer promptly. It also leaves less to detach, since
         // a process whose session has closed is on its way out anyway.
         sleepBackgroundedTabsWithTimeBudget(for: browserViewController)
+        
+        // ADDED - see fix_background_audio_skips_jit_teardown.py.
+        //
+        // Background audio on means the app is meant to keep running,
+        // which means its tabs keep executing JavaScript, which means
+        // they keep needing JIT. So take none of the teardown: the
+        // listening flag stays set, the sessions stay attached, the
+        // loops stay parked, and the tunnel stays open.
+        //
+        // An early return rather than wrapping the rest of the method:
+        // with the toggle OFF this branch is false and every line below
+        // runs byte-identical to before, which is the requirement. The
+        // existing shouldPreserveJITAcrossBackground gates below are
+        // left in place for exactly that reason - they are what still
+        // protects PiP and system media when the toggle is off.
+        //
+        // sleepBackgroundedTabsWithTimeBudget above is deliberately NOT
+        // skipped - it is a memory measure with its own media-priority
+        // exclusion, not part of the JIT teardown.
+        //
+        // flushNavigationHistoryInBackground is the last statement on
+        // the normal path and is unrelated to JIT, so it is called here
+        // rather than dropped.
+        //
+        // Risk, once: the pairing socket stays open across the
+        // background. Safe while the app is genuinely not suspended,
+        // which is what the keep-alive is for. Note that
+        // shouldPreserveJITAcrossBackground below argues the opposite
+        // case - "isActive, not the preference", because the preference
+        // can be true while the audio engine is dead. If a capture ever
+        // shows "tunnel_create_rppairing FAILED ... Connection refused"
+        // on the foreground after a background taken with this on, the
+        // parent was suspended anyway and the fix is to add
+        // && BackgroundAudioKeepAlive.shared.isActive here. isActive is
+        // already the public accessor for the private isRunning, so
+        // that is a one-line change with nothing to expose.
+        if Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled {
+            logger("backgroundTeardown: SKIPPED - background audio keep-alive is on, leaving JIT fully up")
+            flushNavigationHistoryInBackground()
+            return
+        }
         
         // Before the detach, so no process can trap during the
         // teardown. See fix_stop_trapping_on_background.py.
