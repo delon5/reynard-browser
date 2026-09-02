@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/nsAppShell.mm b/widget/uikit/nsAppShell.mm
-index 4441c8faf625..7fb660eefaa2 100644
+index 13436918ecd2..730587bf1a5d 100644
 --- a/widget/uikit/nsAppShell.mm
 +++ b/widget/uikit/nsAppShell.mm
-@@ -3,10 +3,13 @@
+@@ -3,17 +3,22 @@
   * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  
  #import <UIKit/UIApplication.h>
@@ -10,27 +10,29 @@ index 4441c8faf625..7fb660eefaa2 100644
  #import <UIKit/UIScreen.h>
  #import <UIKit/UIWindow.h>
  
+ #include "HeadlessScreenHelper.h"
+ #include "ScreenHelperUIKit.h"
+ #include "gfxPlatform.h"
 +#include "mozilla/AvailableMemoryWatcher.h"
  #include "mozilla/Components.h"
+ #include "mozilla/Hal.h"
 +#include "mozilla/MemoryPressureLevelIOS.h"
  #include "mozilla/Services.h"
  #include "mozilla/dom/Document.h"
- #include "nsIObserverService.h"
-@@ -22,12 +25,13 @@
- #include "nsIRollupListener.h"
- #include "nsIWidget.h"
- #include "nsThreadUtils.h"
--#include "nsMemoryPressure.h"
- #include "nsServiceManagerUtils.h"
++#include "mozilla/ipc/GeckoChildProcessHost.h"
  #include "mozilla/widget/EventDispatcher.h"
 +#include "mozilla/widget/GeckoViewSupport.h"
  #include "mozilla/widget/ScreenManager.h"
- #include "ScreenHelperUIKit.h"
- #include "mozilla/Hal.h"
-+#include "mozilla/ipc/GeckoChildProcessHost.h"
- #include "HeadlessScreenHelper.h"
- #include "nsWindow.h"
- #include "nsXREDirProvider.h"
+ #include "nsAppRunner.h"
+ #include "nsAppShell.h"
+@@ -24,7 +29,6 @@
+ #include "nsIObserverService.h"
+ #include "nsIRollupListener.h"
+ #include "nsIWidget.h"
+-#include "nsMemoryPressure.h"
+ #include "nsObjCExceptions.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsString.h"
 @@ -42,14 +46,73 @@
    fprintf(stderr, "\n")
  

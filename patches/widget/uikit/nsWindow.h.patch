@@ -1,8 +1,8 @@
 diff --git a/widget/uikit/nsWindow.h b/widget/uikit/nsWindow.h
-index dd2d9e2be070..a2ed08693033 100644
+index 027dbf683744..9d5f16c5cace 100644
 --- a/widget/uikit/nsWindow.h
 +++ b/widget/uikit/nsWindow.h
-@@ -21,11 +21,14 @@ typedef struct objc_object ChildView;
+@@ -20,11 +20,14 @@ typedef struct objc_object ChildView;
  #endif
  
  namespace mozilla::layers {
@@ -18,7 +18,7 @@ index dd2d9e2be070..a2ed08693033 100644
  class TextInputHandler;
  }  // namespace mozilla::widget
  
-@@ -55,12 +58,16 @@ class nsWindow final : public nsIWidget {
+@@ -54,12 +57,16 @@ class nsWindow final : public nsIWidget {
    LayoutDeviceIntPoint WidgetToScreenOffset() override;
  
    void SetBackgroundColor(const nscolor& aColor) override;
@@ -36,15 +36,16 @@ index dd2d9e2be070..a2ed08693033 100644
    void Resize(const DesktopSize&, bool aRepaint) override;
    void Resize(const DesktopRect&, bool aRepaint) override;
    void DoResize(double aX, double aY, double aWidth, double aHeight,
-@@ -77,8 +84,20 @@ class nsWindow final : public nsIWidget {
+@@ -76,8 +83,21 @@ class nsWindow final : public nsIWidget {
      // XXX: terrible
      return 326.0f;
    }
 +  uint32_t GetMaxTouchPoints() const override;
    double GetDefaultScaleInternal() override { return BackingScaleFactor(); }
    int32_t RoundsWidgetCoordinatesTo() override;
-+  void NotifyCompositorScrollUpdate(
-+      const mozilla::layers::CompositorScrollUpdate& aUpdate) override;
++  void NotifyCompositorScrollUpdates(
++      const nsTArray<mozilla::layers::CompositorScrollUpdate>& aUpdates)
++      override;
 +  void UpdateDynamicToolbarOffset(mozilla::ScreenIntCoord aOffset);
 +  void SetFixedLayerMarginBottom(mozilla::ScreenIntCoord aMargin);
 +  void UpdateDynamicToolbarMaxHeight(mozilla::ScreenIntCoord aHeight) override;
@@ -57,7 +58,7 @@ index dd2d9e2be070..a2ed08693033 100644
  
    nsresult SetTitle(const nsAString& aTitle) override { return NS_OK; }
  
-@@ -93,22 +112,32 @@ class nsWindow final : public nsIWidget {
+@@ -92,22 +112,32 @@ class nsWindow final : public nsIWidget {
    void SetInputContext(const InputContext& aContext,
                         const InputContextAction& aAction) override;
    InputContext GetInputContext() override;
@@ -98,7 +99,7 @@ index dd2d9e2be070..a2ed08693033 100644
  
    void HandleMainThreadCATransaction();
  
-@@ -129,6 +158,14 @@ class nsWindow final : public nsIWidget {
+@@ -128,6 +158,14 @@ class nsWindow final : public nsIWidget {
    // and we can start modifying CALayers from the compositor thread again.
    void UnsuspendAsyncCATransactions();
  
@@ -113,7 +114,7 @@ index dd2d9e2be070..a2ed08693033 100644
    mozilla::widget::EventDispatcher* GetEventDispatcher() const;
  
    static already_AddRefed<nsWindow> From(nsPIDOMWindowOuter* aDOMWindow);
-@@ -138,6 +175,16 @@ class nsWindow final : public nsIWidget {
+@@ -137,6 +175,16 @@ class nsWindow final : public nsIWidget {
      mIOSView = aView;
    }
    mozilla::widget::IOSView* GetIOSView() const { return mIOSView; }
@@ -130,7 +131,7 @@ index dd2d9e2be070..a2ed08693033 100644
  
   protected:
    virtual ~nsWindow();
-@@ -147,6 +194,8 @@ class nsWindow final : public nsIWidget {
+@@ -146,6 +194,8 @@ class nsWindow final : public nsIWidget {
    nsresult GetCurrentOffset(uint32_t& aOffset, uint32_t& aLength);
    nsresult DeleteRange(int aOffset, int aLen);
  
@@ -139,7 +140,7 @@ index dd2d9e2be070..a2ed08693033 100644
    void TearDownView();
  
    ChildView* mNativeView;
-@@ -156,13 +205,21 @@ class nsWindow final : public nsIWidget {
+@@ -155,13 +205,21 @@ class nsWindow final : public nsIWidget {
    nsWindow* mParent;
  
    mozilla::widget::InputContext mInputContext;

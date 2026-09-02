@@ -1,11 +1,8 @@
 diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
+index 370d1953abb4..f6e1a5f7cfb0 100644
 --- a/dom/media/MediaFormatReader.cpp
 +++ b/dom/media/MediaFormatReader.cpp
-@@ -362,9 +362,26 @@ void MediaFormatReader::DecoderFactory::DoCreateDecoder(Data& aData) {
-   auto& decoder = mOwner->GetDecoderData(aData.mTrack);
- 
-   RefPtr<PDMFactory> platform = new PDMFactory();
-   if (decoder.IsEncrypted()) {
+@@ -366,6 +366,23 @@ void MediaFormatReader::DecoderFactory::DoCreateDecoder(Data& aData) {
      MOZ_DIAGNOSTIC_ASSERT(mOwner->mCDMProxy);
      platform->SetCDMProxy(mOwner->mCDMProxy);
    }
@@ -28,10 +25,11 @@ diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
 +      mOwner->mCDMProxy ? 1 : 0);
  
    RefPtr<PlatformDecoderModule::CreateDecoderPromise> p;
-@@ -1129,6 +1129,21 @@
+   MediaFormatReader* owner = mOwner;
+@@ -1130,6 +1147,21 @@ bool MediaFormatReader::IsDecoderWaitingForCDM(TrackType aTrack) {
  RefPtr<SetCDMPromise> MediaFormatReader::SetCDMProxy(CDMProxy* aProxy) {
    MOZ_ASSERT(OnTaskQueue());
-   LOGV("SetCDMProxy (%p)", aProxy);
+   LOGV("SetCDMProxy ({})", fmt::ptr(aProxy));
 +  // Reynard: WHICH reader is being given a CDM proxy - see
 +  // mse_fix_206's docstring. A second playback in one content process
 +  // is a second MediaFormatReader, and in capture f15f9d06 the second
@@ -50,10 +48,8 @@ diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
  
    if (mShutdown) {
      return SetCDMPromise::CreateAndReject(
-@@ -1313,7 +1313,30 @@
-   if (videoDuration.IsPositive() || audioDuration.IsPositive()) {
-     auto duration = std::max(videoDuration, audioDuration);
-     LOG("Determine mMetadataDuration=%" PRId64, duration.ToMicroseconds());
+@@ -1316,6 +1348,29 @@ void MediaFormatReader::OnDemuxerInitDone(const MediaResult& aResult) {
+     LOG("Determine mMetadataDuration={}", duration.ToMicroseconds());
      mInfo.mMetadataDuration = Some(duration);
    }
 +  // REYNARD DIAGNOSTIC - which VideoInfo does the reader actually use?
@@ -81,10 +77,8 @@ diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
 +          : -1.0);
  
    mInfo.mMediaSeekable = mDemuxer->IsSeekable();
-@@ -2244,9 +2244,40 @@
-   if (!decoder.mDecoder) {
-     // In Clear Lead situation, the `mInfo` could change from unencrypted to
-     // encrypted so we need to ensure the CDM proxy is ready before creating a
+   mInfo.mMediaSeekableOnlyInBufferedRanges =
+@@ -2249,6 +2304,37 @@ void MediaFormatReader::HandleDemuxedSamples(
      // decoder.
      if (decoder.IsEncrypted() &&
          (IsWaitingOnCDMResource() || !ResolveSetCDMPromiseIfDone(aTrack))) {
@@ -122,7 +116,9 @@ diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
        return;
      }
      mDecoderFactory->CreateDecoder(aTrack);
-@@ -2705,5 +2705,35 @@
+@@ -2727,6 +2813,36 @@ void MediaFormatReader::Update(TrackType aTrack) {
+       IsDecoderWaitingForCDM(aTrack));
+ 
    if (IsWaitingOnCDMResource() || !ResolveSetCDMPromiseIfDone(aTrack)) {
 +    // Reynard: the gate that stops decoder creation - see mse_fix_206's
 +    // docstring. The comment below has always said what happens here;
@@ -157,4 +153,3 @@ diff --git a/dom/media/MediaFormatReader.cpp b/dom/media/MediaFormatReader.cpp
      // If the content is encrypted, MFR won't start to create decoder until
      // CDMProxy is set.
      return;
-   }

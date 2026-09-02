@@ -82,7 +82,7 @@ index 2c65a0702095..1d939061632d 100644
 +      },
      },
      messageManagerGroups: ["browsers"],
-   },
+     safeForUntrustedWebProcess: true,
 diff --git a/uriloader/exthandler/uikit/nsOSHelperAppService.h b/uriloader/exthandler/uikit/nsOSHelperAppService.h
 index ffefed3b8d95..6eb45b407349 100644
 --- a/uriloader/exthandler/uikit/nsOSHelperAppService.h

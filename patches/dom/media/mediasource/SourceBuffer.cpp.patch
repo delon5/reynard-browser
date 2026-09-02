@@ -1,9 +1,8 @@
 diff --git a/dom/media/mediasource/SourceBuffer.cpp b/dom/media/mediasource/SourceBuffer.cpp
-index d79526afbbfa..cb10fad683d0 100644
+index a77dd302eba5..df3f80412ccf 100644
 --- a/dom/media/mediasource/SourceBuffer.cpp
 +++ b/dom/media/mediasource/SourceBuffer.cpp
-@@ -446,7 +446,35 @@ void SourceBuffer::Detach() {
-   if (!mMediaSource) {
+@@ -449,6 +449,34 @@ void SourceBuffer::Detach() {
      MSE_DEBUG("Already detached");
      return;
    }
@@ -38,9 +37,9 @@ index d79526afbbfa..cb10fad683d0 100644
    AbortBufferAppend();
    if (mTrackBuffersManager) {
      mMediaSource->GetDecoder()->GetDemuxer()->DetachSourceBuffer(
-@@ -568,6 +596,219 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -571,6 +599,219 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
-   MSE_DEBUG("AppendData(aLength=%zu)", aData->Length());
+   MSE_DEBUG("AppendData(aLength={})", aData->Length());
  
 +  // Reynard: what the page actually appends, for the FairPlay MSE route.
 +  //

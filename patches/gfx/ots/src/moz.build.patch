@@ -1,0 +1,14 @@
+diff --git a/gfx/ots/src/moz.build b/gfx/ots/src/moz.build
+index 561da7524c9e..8338c4536e8c 100644
+--- a/gfx/ots/src/moz.build
++++ b/gfx/ots/src/moz.build
+@@ -75,7 +75,8 @@ USE_LIBS += [
+     'brotli',
+ ]
+ 
+-if not CONFIG['MOZ_WASM_SANDBOXING_WOFF2']:
++if not CONFIG['MOZ_WASM_SANDBOXING_WOFF2'] or \
++    CONFIG['MOZ_WIDGET_TOOLKIT'] == 'uikit':
+     USE_LIBS += [
+         'woff2',
+     ]

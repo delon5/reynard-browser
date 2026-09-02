@@ -1,12 +1,11 @@
 diff --git a/js/xpconnect/src/nsXPConnect.cpp b/js/xpconnect/src/nsXPConnect.cpp
-index fc50c3260009..158d9b2655af 100644
+index d63672c8dc68..8258293ba561 100644
 --- a/js/xpconnect/src/nsXPConnect.cpp
 +++ b/js/xpconnect/src/nsXPConnect.cpp
-@@ -5,6 +5,12 @@
+@@ -4,6 +4,11 @@
+ 
  /* High level class and public functions implementation. */
  
- #include "js/Transcoding.h"
-+
 +#ifdef XP_IOS
 +#  include <os/log.h>
 +#  include <stdint.h>
@@ -14,8 +13,8 @@ index fc50c3260009..158d9b2655af 100644
 +#endif
  #include "mozilla/Assertions.h"
  #include "mozilla/Base64.h"
- #include "mozilla/Likely.h"
-@@ -119,6 +125,58 @@ static void InitJSEngine() {
+ #include "mozilla/BasePrincipal.h"
+@@ -116,6 +121,58 @@ static void InitJSEngine() {
  
    const char* jsInitFailureReason = JS_InitWithFailureDiagnostic();
    if (jsInitFailureReason) {

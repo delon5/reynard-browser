@@ -1,15 +1,15 @@
 diff --git a/gfx/thebes/SharedFontList.cpp b/gfx/thebes/SharedFontList.cpp
-index 1770cd8315d7..671aaa0f635a 100644
+index 1f3bd63aa5fc..c0beb05f948b 100644
 --- a/gfx/thebes/SharedFontList.cpp
 +++ b/gfx/thebes/SharedFontList.cpp
-@@ -6,6 +6,7 @@
- #include "gfxPlatformFontList.h"
- #include "gfxFontUtils.h"
- #include "gfxFont.h"
-+#include "nsUnicodeProperties.h"
- #include "nsReadableUtils.h"
- #include "prerror.h"
+@@ -10,6 +10,7 @@
  #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/dom/ContentParent.h"
+ #include "nsReadableUtils.h"
++#include "nsUnicodeProperties.h"
+ #include "prerror.h"
+ 
+ #define LOG_FONTLIST(args) \
 @@ -501,6 +502,22 @@ Face* Family::FindFaceForStyle(FontList* aList, const gfxFontStyle& aStyle,
  
  void Family::SearchAllFontsForChar(FontList* aList,

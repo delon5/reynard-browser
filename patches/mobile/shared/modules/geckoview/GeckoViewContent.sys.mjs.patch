@@ -1,5 +1,5 @@
 diff --git a/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
-index c850b03..a85c1de 100644
+index 635806ea1724..19e9e7e3a7bc 100644
 --- a/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
 +++ b/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
 @@ -3,6 +3,7 @@
@@ -10,8 +10,8 @@ index c850b03..a85c1de 100644
  
  export class GeckoViewContent extends GeckoViewModule {
    onInit() {
-@@ -14,6 +15,12 @@
-       "GeckoView:HasCookieBannerRuleForBrowsingContextTree",
+@@ -13,6 +14,12 @@ export class GeckoViewContent extends GeckoViewModule {
+       "GeckoView:FindInPage",
        "GeckoView:RestoreState",
        "GeckoView:ContainsFormData",
 +      "GeckoView:Autofill:FillOneTimeCode",
@@ -23,11 +23,10 @@ index c850b03..a85c1de 100644
        "GeckoView:ProcessBackPressed",
        "GeckoView:ScrollBy",
        "GeckoView:ScrollTo",
-@@ -278,7 +285,25 @@
-         break;
+@@ -274,6 +281,24 @@ export class GeckoViewContent extends GeckoViewModule {
        case "GeckoView:ContainsFormData":
          this._containsFormData(aCallback);
-+        break;
+         break;
 +      case "GeckoView:Autofill:FillOneTimeCode":
 +        this._fillOneTimeCode(aData, aCallback);
 +        break;
@@ -39,22 +38,20 @@ index c850b03..a85c1de 100644
 +        break;
 +      case "GeckoView:GetVisualViewportMetrics":
 +        this._getVisualViewportMetrics(aCallback);
-         break;
++        break;
 +      case "GeckoView:RunUserScript":
 +        this._runUserScript(aData, aCallback);
 +        break;
 +      case "GeckoView:MarkUserActivated":
 +        this._markUserActivated(aCallback);
 +        break;
-       case "GeckoView:GetWebCompatInfo":
-         this._getWebCompatInfo(aCallback);
+       case "GeckoView:GetBrokenSiteReport":
+         this._getBrokenSiteReport(aCallback);
          break;
-@@ -453,8 +478,112 @@
- 
-   async _containsFormData(aCallback) {
+@@ -491,6 +516,110 @@ export class GeckoViewContent extends GeckoViewModule {
      aCallback.onSuccess(await this.actor.containsFormData());
-+  }
-+
+   }
+ 
 +  async _fillOneTimeCode(aData, aCallback) {
 +    try {
 +      const result = await gAutofillManager.fillOneTimeCode(
@@ -66,8 +63,8 @@ index c850b03..a85c1de 100644
 +    } catch (error) {
 +      aCallback.onError(`Cannot fill one-time code, error: ${error}`);
 +    }
-   }
- 
++  }
++
 +  async _getFocusedInputMetrics(aCallback) {
 +    try {
 +      if (this.window.windowUtils.isMozAfterPaintPending) {
@@ -159,6 +156,6 @@ index c850b03..a85c1de 100644
 +    }
 +  }
 +
-   async _hasCookieBannerRuleForBrowsingContextTree(aCallback) {
-     const { browsingContext } = this.actor;
-     aCallback.onSuccess(
+   _findInPage(aData, aCallback) {
+     debug`findInPage: data=${aData} callback=${aCallback && "non-null"}`;
+ 

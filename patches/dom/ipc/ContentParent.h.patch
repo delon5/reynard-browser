@@ -1,10 +1,10 @@
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index 8cca90086a07..ccabf1e2f072 100644
+index 44097bbffd66..745957724ad2 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
-@@ -746,6 +746,29 @@ class ContentParent final : public PContentParent,
-       const OriginAttributes& aOriginAttributes, uint64_t aInnerWindowId,
-       const nsCString& aPartitionKey, BlobURLDataRequestResolver&& aResolver);
+@@ -731,6 +731,29 @@ class ContentParent final : public PContentParent,
+ 
+   bool WasA11yEverActivated() const { return mWasA11yEverActivated; }
  
 +  mozilla::ipc::IPCResult RecvNotifyGPUProcessLost(
 +      const uint64_t& aProcessToken);

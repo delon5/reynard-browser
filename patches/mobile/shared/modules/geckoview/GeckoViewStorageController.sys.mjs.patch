@@ -1,8 +1,8 @@
 diff --git a/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs
-index 3e93dbca031b..18921ffc5830 100644
+index 1be98f6b3163..efbb4b78f36a 100644
 --- a/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs
 +++ b/mobile/shared/modules/geckoview/GeckoViewStorageController.sys.mjs
-@@ -115,7 +115,7 @@ export const GeckoViewStorageController = {
+@@ -98,7 +98,7 @@ export const GeckoViewStorageController = {
  
      switch (aEvent) {
        case "GeckoView:ClearData": {
@@ -11,7 +11,7 @@ index 3e93dbca031b..18921ffc5830 100644
          break;
        }
        case "GeckoView:ClearSessionContextData": {
-@@ -215,6 +215,28 @@ export const GeckoViewStorageController = {
+@@ -198,11 +198,34 @@ export const GeckoViewStorageController = {
          );
          break;
        }
@@ -37,10 +37,6 @@ index 3e93dbca031b..18921ffc5830 100644
 +        Services.perms.removeFromPrincipal(principal, aData.perm);
 +        break;
 +      }
- 
-       case "GeckoView:SetCookieBannerModeForDomain": {
-         let exceptionLabel = "SetCookieBannerModeForDomain";
-@@ -284,8 +306,9 @@ export const GeckoViewStorageController = {
      }
    },
  
@@ -51,7 +47,7 @@ index 3e93dbca031b..18921ffc5830 100644
  
      // storageAccessAPI permissions record every site that the user
      // interacted with and thus mirror history quite closely. It makes
-@@ -299,13 +322,23 @@ export const GeckoViewStorageController = {
+@@ -216,13 +239,23 @@ export const GeckoViewStorageController = {
        await new Promise(resolve => {
          Services.clearData.deleteUserInteractionForClearingHistory(
            principals,

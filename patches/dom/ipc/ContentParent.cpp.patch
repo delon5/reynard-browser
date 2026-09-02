@@ -1,8 +1,8 @@
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 2ee13e7e51c7..a14369d17d0e 100644
+index 21a9c93a1325..2474b01edc02 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
-@@ -185,6 +185,7 @@
+@@ -193,6 +193,7 @@
  #include "nsContentPermissionHelper.h"
  #include "nsContentUtils.h"
  #include "nsDNSService2.h"
@@ -10,7 +10,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  #include "nsDebugImpl.h"
  #include "nsDirectoryServiceDefs.h"
  #include "nsDocShell.h"
-@@ -334,6 +335,42 @@
+@@ -344,6 +345,42 @@
  #include "nsIToolkitProfile.h"
  #include "nsIToolkitProfileService.h"
  
@@ -53,7 +53,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  #ifdef MOZ_WMF_CDM
  #  include "mozilla/EMEUtils.h"
  #  include "nsIWindowsMediaFoundationCDMOriginsListService.h"
-@@ -1956,6 +1993,32 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
+@@ -1940,6 +1977,32 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
    MOZ_FUZZING_IPC_DROP_PEER("ContentParent::ActorDestroy");
  #endif
  
@@ -86,7 +86,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
    if (mSendShutdownTimer) {
      mSendShutdownTimer->Cancel();
      mSendShutdownTimer = nullptr;
-@@ -3007,14 +3070,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+@@ -3020,14 +3083,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -104,7 +104,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
    } else {
      // This can fail if we've already started shutting down the compositor
      // thread. See Bug 1562763 comment 8. On Android this can fail we are are
-@@ -3193,16 +3257,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+@@ -3199,16 +3263,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -124,7 +124,7 @@ index 2ee13e7e51c7..a14369d17d0e 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -7985,6 +8050,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -8224,6 +8289,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  
@@ -203,11 +203,9 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +#endif
 +
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
-   RecursiveMutexAutoLock lock(mMutex);
-   return mRemoteType;
-@@ -8006,6 +8145,284 @@ ThreadsafeContentParentHandle::TryAddKeepAlive(uint64_t aBrowserId) {
+   return mLoadedOrigins->GetRemoteType();
  }
- 
+@@ -8252,6 +8391,284 @@ bool ThreadsafeContentParentHandle::ValidatePrincipal(
  }  // namespace dom
  }  // namespace mozilla
  
@@ -490,3 +488,5 @@ index 2ee13e7e51c7..a14369d17d0e 100644
 +#endif
 +
  NS_IMPL_ISUPPORTS(ParentIdleListener, nsIObserver)
+ 
+ NS_IMETHODIMP

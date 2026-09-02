@@ -1,8 +1,8 @@
 diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
---- a/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
-+++ b/dom/media/MediaDecoder.cpp	2026-08-09 06:56:40
-@@ -129,17 +129,44 @@
- void MediaDecoder::Pause() {
+index ad2ae9674ec8..d7e567f8ddd0 100644
+--- a/dom/media/MediaDecoder.cpp
++++ b/dom/media/MediaDecoder.cpp
+@@ -131,6 +131,25 @@ void MediaDecoder::Pause() {
    MOZ_ASSERT(NS_IsMainThread());
    MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
    LOG("Pause");
@@ -28,10 +28,7 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
    if (mPlayState == PLAY_STATE_LOADING || IsEnded()) {
      mNextState = PLAY_STATE_PAUSED;
      return;
-   }
-   ChangeState(PLAY_STATE_PAUSED);
- }
- 
+@@ -141,6 +160,14 @@ void MediaDecoder::Pause() {
  void MediaDecoder::SetVolume(double aVolume) {
    MOZ_ASSERT(NS_IsMainThread());
    mVolume = aVolume;
@@ -46,7 +43,7 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
  }
  
  RefPtr<GenericPromise> MediaDecoder::SetSink(AudioDeviceInfo* aSinkDevice) {
-@@ -546,15 +573,25 @@
+@@ -562,15 +589,25 @@ nsresult MediaDecoder::CreateAndInitStateMachine(bool aIsLiveStream,
    SetStateMachine(CreateStateMachine(aDisableExternalEngine));
  
    NS_ENSURE_TRUE(GetStateMachine(), NS_ERROR_FAILURE);
@@ -72,9 +69,7 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
  
    return NS_OK;
  }
-@@ -623,10 +660,21 @@
- void MediaDecoder::Play() {
-   MOZ_ASSERT(NS_IsMainThread());
+@@ -641,6 +678,17 @@ void MediaDecoder::Play() {
  
    NS_ASSERTION(mDecoderStateMachine != nullptr, "Should have state machine.");
    LOG("Play");
@@ -92,9 +87,7 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
    if (mPlaybackRate == 0) {
      return;
    }
- 
-   if (IsEnded()) {
-@@ -916,18 +964,26 @@
+@@ -933,12 +981,18 @@ bool MediaDecoder::IsShutdown() const {
  void MediaDecoder::PlaybackEnded() {
    MOZ_ASSERT(NS_IsMainThread());
    MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
@@ -106,14 +99,14 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
    if (mLogicallySeeking || mPlayState == PLAY_STATE_LOADING ||
        mPlayState == PLAY_STATE_ENDED) {
      LOG("MediaDecoder::PlaybackEnded bailed out, "
-         "mLogicallySeeking=%d mPlayState=%s",
+         "mLogicallySeeking={} mPlayState={}",
          mLogicallySeeking.Ref(), EnumValueToString(mPlayState));
 +    printf_stderr("mediaDecoder: PlaybackEnded BAILED (state=%s)\n",
 +                  EnumValueToString(mPlayState));
      return;
    }
  
-   LOG("MediaDecoder::PlaybackEnded");
+@@ -946,6 +1000,8 @@ void MediaDecoder::PlaybackEnded() {
  
    ChangeState(PLAY_STATE_ENDED);
    InvalidateWithFlags(VideoFrameContainer::INVALIDATE_FORCE);
@@ -121,9 +114,8 @@ diff --git a/dom/media/MediaDecoder.cpp b/dom/media/MediaDecoder.cpp
 +      "mediaDecoder: PlaybackEnded - element will fire 'ended' and Pause()\n");
    GetOwner()->PlaybackEnded();
  }
-@@ -1081,8 +1137,27 @@ void MediaDecoder::UpdateLogicalPositionInternal() {
-   TimeUnit currentPosition = CurrentPosition();
-   if (mPlayState == PLAY_STATE_ENDED) {
+ 
+@@ -1044,6 +1100,25 @@ void MediaDecoder::UpdateLogicalPositionInternal() {
      currentPosition =
          std::max(currentPosition, mDuration.match(DurationToTimeUnit()));
    }

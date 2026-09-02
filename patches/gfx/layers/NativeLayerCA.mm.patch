@@ -1,7 +1,8 @@
 diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
+index 5760a816612b..dcaf8a911223 100644
 --- a/gfx/layers/NativeLayerCA.mm
 +++ b/gfx/layers/NativeLayerCA.mm
-@@ -39,6 +39,72 @@
+@@ -39,6 +39,72 @@ - (void)setContentsOpaque:(BOOL)opaque;
  @end
  
  namespace mozilla {
@@ -74,7 +75,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  namespace layers {
  
  using gfx::DataSourceSurface;
-@@ -167,6 +233,7 @@
+@@ -167,6 +233,7 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
  
    [mOnscreenRootCALayer release];
    [mOffscreenRootCALayer release];
@@ -82,12 +83,10 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  }
  
  already_AddRefed<NativeLayer> NativeLayerRootCA::CreateLayer(
-@@ -236,6 +303,241 @@
-     layerCA->SetBackingScale(mBackingScale);
-     layerCA->SetRootWindowIsFullscreen(mWindowIsFullscreen);
+@@ -238,12 +305,256 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
      layersCA.AppendElement(std::move(layerCA));
-+  }
-+
+   }
+ 
 +  // REYNARD: does the protected layer survive the list WebRender sends?
 +  //
 +  // Capture 3390a8d5 settled where the layer is NOT lost: no protected
@@ -321,10 +320,11 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +      reynardHeldProtected = nullptr;
 +      reynardHeldFrames = 0;
 +    }
-   }
- 
++  }
++
    if (layersCA != mSublayers) {
-@@ -244,6 +546,15 @@ void NativeLayerRootCA::SetLayers(
+     mSublayers = std::move(layersCA);
+     SetMutatedLayerStructure();
    }
  }
  
@@ -340,7 +340,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  void NativeLayerRootCA::SetBackingScale(float aBackingScale) {
    MutexAutoLock lock(mMutex);
  
-@@ -287,6 +598,10 @@ bool NativeLayerRootCA::CommitToScreen() {
+@@ -287,6 +598,10 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
                         mWindowIsFullscreen);
    mMutatedOnscreenLayerStructure = false;
  
@@ -351,7 +351,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    mCommitPending = false;
  
    if (StaticPrefs::gfx_webrender_debug_dump_native_layer_tree_to_file()) {
-@@ -320,6 +635,11 @@
+@@ -320,6 +635,11 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
      EmitTelemetryForVideoLowPower(videoLowPower);
    }
  
@@ -363,7 +363,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    return true;
  }
  
-@@ -389,6 +709,19 @@
+@@ -389,6 +709,19 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
      WhichRepresentation aRepresentation, CALayer* aRootCALayer,
      const nsTArray<RefPtr<NativeLayerCA>>& aSublayers,
      bool aMutatedLayerStructure, bool aWindowIsFullscreen) {
@@ -383,7 +383,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    UpdateType updateRequired =
        GetMaxUpdateRequired(aRepresentation, aSublayers, aMutatedLayerStructure);
    if (updateRequired == NativeLayerCA::UpdateType::OnlyVideo) {
-@@ -417,11 +750,71 @@
+@@ -417,17 +750,96 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
    NSMutableArray<CALayer*>* sublayers =
        [NSMutableArray arrayWithCapacity:aSublayers.Length()];
    bool mustRebuild = updateRequired == UpdateType::All;
@@ -455,7 +455,6 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      }
    }
  
-@@ -428,6 +821,25 @@ void NativeLayerRootCA::CommitRepresentation(
    if (mustRebuild) {
      aRootCALayer.sublayers = sublayers;
    }
@@ -481,7 +480,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  }
  
  SnapshotterCADelegate::~SnapshotterCADelegate() = default;
-@@ -921,9 +1333,51 @@
+@@ -924,11 +1336,53 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
  }
  
  bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
@@ -526,14 +525,16 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    if (!IsVideo(aProofOfLock)) {
      // Only videos are eligible.
      return false;
-+  }
-+
-+  if (IsPictureInPictureEligibleSurface(aProofOfLock)) {
-+    return true;
    }
  
++  if (IsPictureInPictureEligibleSurface(aProofOfLock)) {
++    return true;
++  }
++
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
-@@ -1292,6 +1746,17 @@
+   // a specialized video layer.
+   if (mIsDRM) {
+@@ -1339,6 +1793,17 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -548,10 +549,10 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 +    printf_stderr("NativeLayerCA: mIsDRM -> %d\n", aIsDRM ? 1 : 0);
 +  }
 +
+   bool changedIsHDR = (mIsHDR != aIsHDR);
    mIsHDR = aIsHDR;
  
-   bool specializeVideo = ShouldSpecializeVideo(lock);
-@@ -1462,15 +1927,94 @@
+@@ -1512,6 +1977,84 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    }
  
    auto& r = GetRepresentation(aRepresentation);
@@ -636,18 +637,17 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    if (r.mMutatedSpecializeVideo) {
      *aMustRebuild = true;
    }
-   bool hadExtentBeforeUpdate = r.UnderlyingCALayer() != nullptr;
+@@ -1519,7 +2062,8 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
--      mSpecializeVideo, surface, mColor, mIsDRM, IsVideo(lock));
-+      mSpecializeVideo, surface, mColor, mIsDRM, IsVideo(lock),
+-      mSpecializeVideo, surface, mColor, IsVideo(lock), mIsDRM, mIsHDR);
++      mSpecializeVideo, surface, mColor, IsVideo(lock), mIsDRM, mIsHDR,
 +      aRepresentation == WhichRepresentation::ONSCREEN);
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-   }
-@@ -1477,6 +2021,35 @@ bool NativeLayerCA::ApplyChanges(WhichRepresentation aRepresentation,
+@@ -1527,6 +2071,35 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    return updateSucceeded;
  }
  
@@ -683,10 +683,10 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  CALayer* NativeLayerCA::UnderlyingCALayer(WhichRepresentation aRepresentation) {
    MutexAutoLock lock(mMutex);
    return GetRepresentation(aRepresentation).UnderlyingCALayer();
-@@ -1521,12 +2094,38 @@
- }
+@@ -1534,12 +2107,38 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
  
- bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef) {
+ bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef,
+                                                  bool aIsHDR) {
 +  // An AVPlayerLayer draws from its player, not from enqueued samples,
 +  // so there is nothing to do here - and every selector below is
 +  // unrecognised on it. A device crash proved that precisely:
@@ -723,7 +723,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1640,6 +2239,11 @@
+@@ -1645,6 +2244,11 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -735,27 +735,26 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1680,7 +2284,11 @@
-     const Maybe<gfx::RoundedRect>& aRoundedClip, float aBackingScale,
+@@ -1712,7 +2316,10 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
--    const Maybe<gfx::DeviceColor>& aColor, bool aIsDRM, bool aIsVideo) {
-+    const Maybe<gfx::DeviceColor>& aColor, bool aIsDRM, bool aIsVideo,
-+    bool aIsOnscreen) {
+     const Maybe<gfx::DeviceColor>& aColor, bool aIsVideo, bool aIsDRM,
+-    bool aIsHDR) {
++    bool aIsHDR, bool aIsOnscreen) {
 +  bool useSpecializedVideo =
 +      aSpecializeVideo && !mPictureInPictureFailureLatched;
 +
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1694,13 +2302,14 @@
+@@ -1726,13 +2333,14 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
 -    if (aSpecializeVideo) {
 +    if (useSpecializedVideo) {
        IOSurfaceRef surface = aFrontSurface.get();
-       updateSucceeded = EnqueueSurface(surface);
+       updateSucceeded = EnqueueSurface(surface, aIsHDR);
  
        if (updateSucceeded) {
          mMutatedFrontSurface = false;
@@ -764,7 +763,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1717,7 +2326,23 @@
+@@ -1749,7 +2357,23 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -789,7 +788,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1761,7 +2386,7 @@
+@@ -1793,7 +2417,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -798,7 +797,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1770,6 +2395,196 @@
+@@ -1802,6 +2426,196 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
            mLogNextVideoSurface = true;
          }
  #endif
@@ -995,7 +994,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1783,6 +2598,7 @@
+@@ -1815,6 +2629,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -1003,7 +1002,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1810,8 +2626,12 @@
+@@ -1842,8 +2657,12 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      }
    }
  
@@ -1018,7 +1017,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -1996,7 +2816,7 @@
+@@ -2028,7 +2847,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -1027,7 +1026,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2012,6 +2832,7 @@
+@@ -2044,6 +2863,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;

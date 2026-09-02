@@ -1,16 +1,16 @@
 diff --git a/gfx/layers/NativeLayerCA.h b/gfx/layers/NativeLayerCA.h
-index 4714b8a15791..03bce06ba608 100644
+index 1456d03f8962..bedc3f81feb7 100644
 --- a/gfx/layers/NativeLayerCA.h
 +++ b/gfx/layers/NativeLayerCA.h
-@@ -7,6 +7,7 @@
- 
+@@ -8,6 +8,7 @@
+ #include <CoreMedia/CoreMedia.h>
  #include <IOSurface/IOSurfaceRef.h>
  
 +#include <functional>
  #include <ostream>
  
  #include "mozilla/Mutex.h"
-@@ -156,6 +157,12 @@ class NativeLayerRootCA final : public NativeLayerRoot {
+@@ -157,6 +158,12 @@ class NativeLayerRootCA final : public NativeLayerRoot {
    void SetLayers(const nsTArray<RefPtr<NativeLayer>>& aLayers) override;
    UniquePtr<NativeLayerRootSnapshotter> CreateSnapshotter() override;
  
@@ -23,7 +23,7 @@ index 4714b8a15791..03bce06ba608 100644
    void SetBackingScale(float aBackingScale);
    float BackingScale();
  
-@@ -171,6 +178,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
+@@ -172,6 +179,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
  
    void SetWindowIsFullscreen(bool aFullscreen);
  
@@ -34,7 +34,7 @@ index 4714b8a15791..03bce06ba608 100644
    VideoLowPowerType CheckVideoLowPower(const MutexAutoLock& aProofOfLock);
  
   protected:
-@@ -188,6 +199,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
+@@ -189,6 +200,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
                              bool aMutatedLayerStructure,
                              bool aWindowIsFullscreen);
  
@@ -45,7 +45,7 @@ index 4714b8a15791..03bce06ba608 100644
    void SetMutatedLayerStructure();
  
    using UpdateType = NativeLayerCAUpdateType;
-@@ -217,7 +232,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
+@@ -218,7 +233,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
    CALayer* mOnscreenRootCALayer = nullptr;   // strong
    CALayer* mOffscreenRootCALayer = nullptr;  // strong
    NativeLayerRootSnapshotterCA* mWeakSnapshotter = nullptr;
@@ -57,7 +57,7 @@ index 4714b8a15791..03bce06ba608 100644
    float mBackingScale = 1.0f;
    bool mMutated = false;
  
-@@ -241,6 +259,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
+@@ -242,6 +260,10 @@ class NativeLayerRootCA final : public NativeLayerRoot {
    bool mMutatedOnscreenLayerStructure = false;
    bool mMutatedOffscreenLayerStructure = false;
  
@@ -68,25 +68,25 @@ index 4714b8a15791..03bce06ba608 100644
    // How many times have we committed since the last time we emitted
    // telemetry?
    unsigned int mTelemetryCommitCount = 0;
-@@ -291,6 +313,8 @@ struct NativeLayerCARepresentation {
+@@ -292,6 +314,8 @@ struct NativeLayerCARepresentation {
      return mWrappingCALayerHasExtent ? mWrappingCALayer : nullptr;
    }
  
 +  CALayer* PictureInPictureSourceLayer();
 +
-   bool EnqueueSurface(IOSurfaceRef aSurfaceRef);
+   bool EnqueueSurface(IOSurfaceRef aSurfaceRef, bool aIsHDR);
  
    // Applies buffered changes to the native CALayers. The contract with the
-@@ -312,7 +336,7 @@
+@@ -313,7 +337,7 @@ struct NativeLayerCARepresentation {
                      gfx::SamplingFilter aSamplingFilter, bool aSpecializeVideo,
                      const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
-                     const Maybe<gfx::DeviceColor>& aColor, bool aIsDRM,
--                    bool aIsVideo);
-+                    bool aIsVideo, bool aIsOnscreen);
+                     const Maybe<gfx::DeviceColor>& aColor, bool aIsVideo,
+-                    bool aIsDRM, bool aIsHDR);
++                    bool aIsDRM, bool aIsHDR, bool aIsOnscreen);
  
    // Return whether any aspects of this layer representation have been mutated
    // since the last call to ApplyChanges, i.e. whether ApplyChanges needs to
-@@ -330,6 +354,7 @@ struct NativeLayerCARepresentation {
+@@ -331,6 +355,7 @@ struct NativeLayerCARepresentation {
    CALayer* mRoundedClipCALayer = nullptr;   // strong
    CALayer* mContentCALayer = nullptr;       // strong
    CALayer* mOpaquenessTintLayer = nullptr;  // strong
@@ -94,7 +94,7 @@ index 4714b8a15791..03bce06ba608 100644
  
  #ifdef NIGHTLY_BUILD
    bool mLogNextVideoSurface = false;
-@@ -433,6 +458,10 @@ class NativeLayerCA : public NativeLayer {
+@@ -438,6 +463,10 @@ class NativeLayerCA : public NativeLayer {
    bool ApplyChanges(WhichRepresentation aRepresentation, UpdateType aUpdate,
                      bool* aMustRebuild);
  
@@ -105,7 +105,7 @@ index 4714b8a15791..03bce06ba608 100644
    void SetBackingScale(float aBackingScale);
  
    // Invalidate aUpdateRegion and make sure that mInProgressSurface retains any
-@@ -447,6 +476,8 @@ class NativeLayerCA : public NativeLayer {
+@@ -452,6 +481,8 @@ class NativeLayerCA : public NativeLayer {
                             const gfx::IntRegion& aUpdateRegion, F&& aCopyFn);
  
    bool IsVideo(const MutexAutoLock& aProofOfLock);

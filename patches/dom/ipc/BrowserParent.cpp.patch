@@ -1,8 +1,11 @@
 diff --git a/dom/ipc/BrowserParent.cpp b/dom/ipc/BrowserParent.cpp
-index ba640fdbc080..a597dc002395 100644
+index 4fbe13919101..dd7f72efd2e3 100644
 --- a/dom/ipc/BrowserParent.cpp
 +++ b/dom/ipc/BrowserParent.cpp
-@@ -139,6 +139,10 @@
+@@ -139,12 +139,16 @@
+ #include "nsThreadUtils.h"
+ 
+ #ifdef XP_WIN
  #  include "FxRWindowManager.h"
  #endif
  
@@ -13,7 +16,13 @@ index ba640fdbc080..a597dc002395 100644
  #if defined(XP_WIN) && defined(ACCESSIBILITY)
  #  include "mozilla/a11y/AccessibleWrap.h"
  #  include "mozilla/a11y/Compatibility.h"
-@@ -793,6 +797,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
+ #  include "mozilla/a11y/nsWinUtils.h"
+ #endif
+ 
+@@ -794,12 +798,27 @@ mozilla::ipc::IPCResult BrowserParent::RecvDidUnsuppressPainting() {
+ }
+ 
+ mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
      Maybe<CompositorOptions>* aCompositorOptions) {
    if (mRemoteLayerTreeOwner.IsInitialized()) {
      mRemoteLayerTreeOwner.EnsureLayersConnected(*aCompositorOptions);
@@ -35,7 +44,13 @@ index ba640fdbc080..a597dc002395 100644
    }
    return IPC_OK();
  }
-@@ -860,6 +879,27 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
+ 
+ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
+   // Need to close undeleted ContentPermissionRequestParents before tab is
+@@ -861,12 +880,33 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
+     mBrowsingContext->Group()->RemoveKeepAlive();
+   }
+ 
    // Tell our embedder that the tab is now going away unless we're an
    // out-of-process iframe.
    RefPtr<nsFrameLoader> frameLoader = GetFrameLoader(true);
@@ -63,7 +78,13 @@ index ba640fdbc080..a597dc002395 100644
    if (frameLoader) {
      if (mBrowsingContext->IsTop()) {
        // If this is a top-level BrowsingContext, tell the frameloader it's time
-@@ -1020,13 +1060,19 @@ void BrowserParent::InitRendering() {
+       // to go away. Otherwise, this is a subframe crash, and we can keep the
+       // frameloader around.
+       frameLoader->DestroyComplete();
+@@ -1022,19 +1062,25 @@ void BrowserParent::InitRendering() {
+   if (widget) {
+     (void)SendSafeAreaInsetsChanged(widget->GetSafeAreaInsets());
+     (void)SendInitSupportsUnadjustedMovement(
          widget->SupportsUnadjustedMovement());
    }
  
@@ -84,7 +105,13 @@ index ba640fdbc080..a597dc002395 100644
  #endif
  }
  
-@@ -2404,6 +2450,16 @@ mozilla::ipc::IPCResult BrowserParent::RecvSetCursor(
+ bool BrowserParent::AttachWindowRenderer() {
+   return mRemoteLayerTreeOwner.AttachWindowRenderer();
+ }
+@@ -2505,12 +2551,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvSetCursor(
+       EventStateManager::MouseCursorUpdateLogRef(), LogLevel::Info,
+       ("BrowserParent::RecvSetCursor(): Updated the cursor (%p, widget=%p)",
+        this, widget.get()));
    return IPC_OK();
  }
  
@@ -101,7 +128,13 @@ index ba640fdbc080..a597dc002395 100644
  mozilla::ipc::IPCResult BrowserParent::RecvSetLinkStatus(
      const nsString& aStatus) {
    nsCOMPtr<nsIXULBrowserWindow> xulBrowserWindow = GetXULBrowserWindow();
-@@ -2554,14 +2610,22 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
+   if (!xulBrowserWindow) {
+     return IPC_OK();
+   }
+@@ -2655,20 +2711,28 @@ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEMouseButtonEvent(
+ }
+ 
+ mozilla::ipc::IPCResult BrowserParent::RecvNotifyIMEPositionChange(
      const ContentCache& aContentCache,
      const IMENotification& aIMENotification) {
    nsCOMPtr<nsIWidget> widget = GetTextInputHandlingWidget();
@@ -127,7 +160,13 @@ index ba640fdbc080..a597dc002395 100644
    return IPC_OK();
  }
  
-@@ -3223,18 +3287,31 @@ bool BrowserParent::HandleQueryContentEvent(WidgetQueryContentEvent& aEvent) {
+ mozilla::ipc::IPCResult BrowserParent::RecvOnEventNeedingAckHandled(
+     const EventMessage& aMessage, const uint32_t& aCompositionId) {
+   // This is called when the child process receives WidgetCompositionEvent or
+@@ -3324,24 +3388,37 @@ bool BrowserParent::HandleQueryContentEvent(WidgetQueryContentEvent& aEvent) {
+     return true;
+   }
+   if (!mContentCache.HandleQueryContentEvent(aEvent, textInputHandlingWidget) ||
        NS_WARN_IF(aEvent.Failed())) {
      return true;
    }
@@ -162,3 +201,6 @@ index ba640fdbc080..a597dc002395 100644
      default:
        break;
    }
+   return true;
+ }
+ 
