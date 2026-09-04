@@ -471,43 +471,154 @@ final class JITController {
         }
     }
 
+    /// CHANGED - see fix_hang_recovery_off_attach_queue.py.
+    ///
+    /// Split across two queues. Everything that needs no queue now
+    /// runs synchronously on the caller's thread -
+    /// MainThreadHangWatchdog's own background queue - BEFORE the hop.
+    ///
+    /// The whole body used to sit inside attachQueue.async, and
+    /// attachQueue is the least available serial queue in this file.
+    /// The preflight-watchdog retry runs a full attachToProcess on it
+    /// and boundedEnableJIT's bound is enableJITMaxWaitSeconds = 90;
+    /// processPendingHelperAttachRequests holds it for a directory
+    /// scan plus up to 50 passes. This function is dispatched by a
+    /// watchdog that fires at 2.0s of a ~10s scene-update budget, with
+    /// a documented target of landing the reattach at +3.5s. Eight
+    /// seconds of budget cannot be spent waiting on a queue that can
+    /// be held for ninety.
+    ///
+    /// It was also defeating the one instrument built for this case.
+    /// dumpChildCensus calls JITEnabler.dumpChildHeartbeats BEFORE its
+    /// own hop, deliberately, "so it still prints if attachQueue is
+    /// wedged" - but calling it from inside an attachQueue block put
+    /// that half behind the wedge too. It is called from here now, so
+    /// the heartbeat lines (and the "<<< STOPPED - cannot answer
+    /// XPC" verdict that names the child) print immediately, and the
+    /// ledger half hops on its own exactly as it does for every other
+    /// caller.
+    ///
+    /// What stays behind the hop, and why it has to: AttachLedger
+    /// asserts attachQueue confinement on every accessor,
+    /// attachedSnapshot() included. Reading the ledger from this
+    /// thread would trip dispatchPrecondition - turning the hang path
+    /// into a crash, in the seconds before a watchdog kill. The
+    /// evidence gate therefore lives inside the block, where it is
+    /// legal.
+    ///
+    /// Called from MainThreadHangWatchdog's background queue - never
+    /// the main thread, which is the one that is stuck.
     func recoverStoppedChildrenAfterForegroundHang() {
+        // Read here, on the caller's thread, and used for the log line
+        // only. Both are plain Bools written from the main queue -
+        // start(), handleJITFailure's main hop, the tunnel-recovery
+        // probe's completion - and already read from several queues
+        // without synchronisation. Reading them here is the same
+        // unsynchronised read the attachQueue version did, minus the
+        // wait.
+        let jitLess = isJITLessModeActive
+        let latchedFailure = hasHandledFailure
+
+        // Hoisted out of the queue block, and no longer gated.
+        //
+        // What queue it needs: none, checked rather than assumed.
+        // +[JITEnabler clearDebuggerTeardownRequest] is a thin
+        // forwarder, and the C function it forwards to is nothing but
+        // a dispatch_async onto debugSessionStateQueue - no lock on
+        // the calling thread, nothing blocking, no confinement. It was
+        // inside the attachQueue block only by accident of that
+        // block's extent. (Its sibling debuggerTeardownRequested() IS
+        // a dispatch_sync onto that same queue, which fourteen debug
+        // loops are constantly using - that one would not be safe to
+        // call from here, and is not called.)
+        //
+        // Un-gated because hasHandledFailure is not a startup verdict.
+        // It latches on any non-allowlisted attach failure, at any
+        // point in the launch, long after children have been attached
+        // and possibly left stopped - and the old guard skipped this
+        // lift along with the reattach whenever it was set, so the
+        // standing detach request survived the one moment it most
+        // needed lifting. Clearing it when there is nothing to clear
+        // is inert: the C function returns immediately if the flag is
+        // already false, and applicationDidBecomeActive clears it
+        // again anyway once the hang breaks.
+        JITEnabler.clearDebuggerTeardownRequest()
+
+        logger(String(
+            format: "hangRecovery: main thread parked - teardown request lifted off the attach queue (jitLess=%@, latchedFailure=%@)",
+            jitLess ? "YES" : "NO",
+            latchedFailure ? "YES" : "NO"
+        ))
+
+        // Called from HERE rather than from inside the block below.
+        // Its heartbeat half runs on this thread - an NSLock around a
+        // dictionary copy plus two per-child reads, documented safe
+        // from any thread and deliberately independent of the attach
+        // queue - and its ledger half hops to attachQueue on its own,
+        // exactly as it does from every other caller.
+        dumpChildCensus(labelled: "childCensus at hangRecovery")
+
+        // Monotonic uptime, matching MainThreadHangWatchdog's own
+        // timing: a wall-clock adjustment must not be able to
+        // masquerade as a wedged queue.
+        let dispatchedAt = ProcessInfo.processInfo.systemUptime
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
 
-            // No session was ever attached in these modes, so no
-            // child can be holding a debugger stop - and the hang,
-            // whatever it is, is not one a re-attach can fix.
-            guard !self.isJITLessModeActive, !self.hasHandledFailure else {
-                logger("hangRecovery: skipped - JIT-less mode or a latched failure, no child holds a debugger stop")
+            // The number that says whether this half was worth
+            // anything. The watchdog fires at 2.0s of a ~10s budget
+            // and an attach takes ~1.4s, so much over a second here
+            // means the reattach lands after the kill and the hoisted
+            // half above was the only part that ran in time.
+            let waitedForQueue = ProcessInfo.processInfo.systemUptime - dispatchedAt
+
+            // CHANGED - the gate is evidence now, not
+            // hasHandledFailure.
+            //
+            // attachedSnapshot() is the ledger's record of every pid
+            // an attach was ever started for, and a child can only be
+            // holding a debugger stop if it is in there. Read HERE
+            // because AttachLedger asserts this queue on every
+            // accessor, that one included - reading it before the hop
+            // would trip dispatchPrecondition.
+            //
+            // isJITLessModeActive is kept and RE-READ rather than
+            // captured, so a long wait cannot act on a stale answer.
+            // It looks redundant next to the snapshot -
+            // activateJITLessMode calls clearAllAttached, so the
+            // snapshot empties on its own - but that clear is itself
+            // an attachQueue.async, and the window between the latch
+            // and the clear landing is exactly the window in which a
+            // forced vAttach would be wrong.
+            let attached = self.ledger.attachedSnapshot()
+            guard !self.isJITLessModeActive, !attached.isEmpty else {
+                logger(String(
+                    format: "hangRecovery: attachQueue reached after %.2fs - no forced reattach (jitLess=%@, %d pid(s) in the attach ledger)",
+                    waitedForQueue,
+                    self.isJITLessModeActive ? "YES" : "NO",
+                    attached.count
+                ))
                 return
             }
 
-            // The background teardown's standing detach request would
-            // make every recovered loop detach on its first
-            // iteration. Even that resumes the child - but the
-            // watchdog only runs foregrounded (it pauses on
-            // didEnterBackground), and the applicationDidBecomeActive
-            // that normally lifts the request is parked behind the
-            // hang. Lift it here, mirroring that handler's ordering,
-            // so the recovered loops re-arm instead of churning.
-            JITEnabler.clearDebuggerTeardownRequest()
+            logger(String(
+                format: "hangRecovery: attachQueue reached after %.2fs - forcing a reattach pass over %d attached pid(s)",
+                waitedForQueue,
+                attached.count
+            ))
 
-            logger("hangRecovery: main thread parked - re-attaching orphaned children from the watchdog path")
-
-            // The same census the main-queue recovery runs, then a
-            // FORCED reattach pass: reattachOrphanedProcesses gates
-            // itself on the app being active, and during this hang
-            // the app is provably not yet active - didBecomeActive is
-            // parked behind the very hang being recovered from - so
-            // the normal pass skipped itself entirely, two seconds
-            // before the kill it existed to prevent. Observed exactly
-            // that way on device. Idempotence against the main-queue
-            // copy running later is unchanged: a pid with a live
-            // session is not an orphan, and boundedEnableJIT's
-            // per-pid in-flight guard covers the overlap window. See
+            // A FORCED reattach pass: reattachOrphanedProcesses
+            // gates itself on the app being active, and during this
+            // hang the app is provably not yet active -
+            // didBecomeActive is parked behind the very hang being
+            // recovered from - so the normal pass skipped itself
+            // entirely, two seconds before the kill it existed to
+            // prevent. Observed exactly that way on device.
+            // Idempotence against the main-queue copy running later
+            // is unchanged: a pid with a live session is not an
+            // orphan, and boundedEnableJIT's per-pid in-flight guard
+            // covers the overlap window. See
             // fix_hang_recovery_bypasses_active_gate.py.
-            self.dumpChildCensus(labelled: "childCensus at hangRecovery")
             self.reattachOrphansForHangRecovery()
         }
     }
