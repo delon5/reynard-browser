@@ -51,37 +51,19 @@ final class BackgroundAudioKeepAlive {
     /// ADDED - see fix_keepalive_holds_the_jit_teardown.py.
     ///
     /// Whether the silent engine is RUNNING, which is not the same as
-    /// whether the preference is on.
+    /// whether the preference is on. A call or Siri stops it
+    /// (handleInterruption), and a media services reset tears the session
+    /// down entirely (handleMediaServicesReset); both go through stop()
+    /// and clear isRunning before any recovery is attempted.
     ///
-    /// CORRECTED - see fix_background_skip_predicates.py.
-    ///
-    /// This used to claim that a call or Siri (handleInterruption) and a
-    /// media services reset (handleMediaServicesReset) "both go through
-    /// stop() and clear isRunning before any recovery is attempted".
-    /// Neither does, in this file: handleInterruption calls
-    /// recoverIfNeeded() on .ended and does nothing at all on .began, and
-    /// handleMediaServicesReset calls startEngine() directly. stop() has
-    /// exactly one caller, applyPreference().
-    ///
-    /// So isRunning is not "the engine is up", it is "the keep-alive is
-    /// engaged": it stays true across an interruption, and across a
-    /// startEngine() that threw and logged "failed to start". The engine
-    /// is therefore tested directly as well, using the same health test
-    /// recoverIfNeeded() already makes, inverted - not a new API and not
-    /// a new idea. A transient false is repaired by the existing 2s
-    /// health check within one tick.
-    ///
-    /// The background teardown gates the whole JIT half on this, and so
-    /// now do the two keep-alive skips in SceneDelegate, which used to
-    /// test the preference. Gating on the preference holds the pairing
-    /// tunnel open for an app that is about to be suspended after all,
-    /// and a socket does not survive a suspension - the tunnel then
-    /// cannot be rebuilt, which is the failure
-    /// fix_close_before_suspension.py exists to prevent. Erring the other
-    /// way costs only background JIT: the teardown runs, and an app that
-    /// was awake after all rebuilds on the next foreground.
+    /// The background teardown gates the whole JIT half on this. Gating
+    /// on the preference instead would hold the pairing tunnel open for
+    /// an app that is about to be suspended after all, and a socket does
+    /// not survive a suspension - the tunnel then cannot be rebuilt,
+    /// which is the failure fix_close_before_suspension.py exists to
+    /// prevent.
     var isActive: Bool {
-        return isRunning && engine.isRunning && player.isPlaying
+        return isRunning
     }
 
     func start() {

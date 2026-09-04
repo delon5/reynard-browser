@@ -119,36 +119,6 @@ final class JITController {
     // lost its one retry. The two collections are written together
     // under one lock so they cannot disagree about a pid.
     private var retriedWatchdogPIDs: Set<Int32> = []
-    // ADDED - fix_preflight_watchdog_retry.py. Guarded by
-    // preflightWatchdogLock, alongside the two collections above.
-    //
-    // When attachToProcess for this pid actually STARTED - which is
-    // after its attachSlots.wait() returned, not when the attach was
-    // queued. schedulePreflightWatchdog is called before the
-    // attachWorkQueue.async and before that (unbounded) slot wait, so
-    // without this the five-second timer measured the QUEUE rather than
-    // the attach: fifteen children through three slots at ~1012ms each
-    // leaves everything past roughly the twelfth still parked at +5s,
-    // and the watchdog fired on healthy attaches that had not begun.
-    //
-    // Which is not cosmetic. The watchdog's terminal path calls
-    // handleJITFailure(ETIMEDOUT), and ETIMEDOUT is not in
-    // recoverableTransportCodes - so it latches hasHandledFailure and
-    // guard 1 in childProcessDidStart then rejects every content
-    // process for the rest of the process lifetime.
-    //
-    // The timer is DEFERRED rather than moved, so every call site is
-    // left exactly as it is.
-    private var preflightAttachStarts: [Int32: CFAbsoluteTime] = [:]
-    // How many times each pid's watchdog has re-armed itself. Capped,
-    // so a pid whose attach never starts at all still reaches a verdict
-    // - late and loudly - instead of rescheduling forever and leaking
-    // its map entry.
-    private var preflightWatchdogDeferrals: [Int32: Int] = [:]
-    // 12 x preflightTimeoutSeconds = up to 60s of grace, which covers a
-    // pid queued behind one attach burning the full 90s bound better
-    // than any smaller number would, without being unbounded.
-    private static let preflightWatchdogMaxDeferrals = 12
     private var hasHandledFailure = false
     
     // The deferred-attach state (see
@@ -471,154 +441,43 @@ final class JITController {
         }
     }
 
-    /// CHANGED - see fix_hang_recovery_off_attach_queue.py.
-    ///
-    /// Split across two queues. Everything that needs no queue now
-    /// runs synchronously on the caller's thread -
-    /// MainThreadHangWatchdog's own background queue - BEFORE the hop.
-    ///
-    /// The whole body used to sit inside attachQueue.async, and
-    /// attachQueue is the least available serial queue in this file.
-    /// The preflight-watchdog retry runs a full attachToProcess on it
-    /// and boundedEnableJIT's bound is enableJITMaxWaitSeconds = 90;
-    /// processPendingHelperAttachRequests holds it for a directory
-    /// scan plus up to 50 passes. This function is dispatched by a
-    /// watchdog that fires at 2.0s of a ~10s scene-update budget, with
-    /// a documented target of landing the reattach at +3.5s. Eight
-    /// seconds of budget cannot be spent waiting on a queue that can
-    /// be held for ninety.
-    ///
-    /// It was also defeating the one instrument built for this case.
-    /// dumpChildCensus calls JITEnabler.dumpChildHeartbeats BEFORE its
-    /// own hop, deliberately, "so it still prints if attachQueue is
-    /// wedged" - but calling it from inside an attachQueue block put
-    /// that half behind the wedge too. It is called from here now, so
-    /// the heartbeat lines (and the "<<< STOPPED - cannot answer
-    /// XPC" verdict that names the child) print immediately, and the
-    /// ledger half hops on its own exactly as it does for every other
-    /// caller.
-    ///
-    /// What stays behind the hop, and why it has to: AttachLedger
-    /// asserts attachQueue confinement on every accessor,
-    /// attachedSnapshot() included. Reading the ledger from this
-    /// thread would trip dispatchPrecondition - turning the hang path
-    /// into a crash, in the seconds before a watchdog kill. The
-    /// evidence gate therefore lives inside the block, where it is
-    /// legal.
-    ///
-    /// Called from MainThreadHangWatchdog's background queue - never
-    /// the main thread, which is the one that is stuck.
     func recoverStoppedChildrenAfterForegroundHang() {
-        // Read here, on the caller's thread, and used for the log line
-        // only. Both are plain Bools written from the main queue -
-        // start(), handleJITFailure's main hop, the tunnel-recovery
-        // probe's completion - and already read from several queues
-        // without synchronisation. Reading them here is the same
-        // unsynchronised read the attachQueue version did, minus the
-        // wait.
-        let jitLess = isJITLessModeActive
-        let latchedFailure = hasHandledFailure
-
-        // Hoisted out of the queue block, and no longer gated.
-        //
-        // What queue it needs: none, checked rather than assumed.
-        // +[JITEnabler clearDebuggerTeardownRequest] is a thin
-        // forwarder, and the C function it forwards to is nothing but
-        // a dispatch_async onto debugSessionStateQueue - no lock on
-        // the calling thread, nothing blocking, no confinement. It was
-        // inside the attachQueue block only by accident of that
-        // block's extent. (Its sibling debuggerTeardownRequested() IS
-        // a dispatch_sync onto that same queue, which fourteen debug
-        // loops are constantly using - that one would not be safe to
-        // call from here, and is not called.)
-        //
-        // Un-gated because hasHandledFailure is not a startup verdict.
-        // It latches on any non-allowlisted attach failure, at any
-        // point in the launch, long after children have been attached
-        // and possibly left stopped - and the old guard skipped this
-        // lift along with the reattach whenever it was set, so the
-        // standing detach request survived the one moment it most
-        // needed lifting. Clearing it when there is nothing to clear
-        // is inert: the C function returns immediately if the flag is
-        // already false, and applicationDidBecomeActive clears it
-        // again anyway once the hang breaks.
-        JITEnabler.clearDebuggerTeardownRequest()
-
-        logger(String(
-            format: "hangRecovery: main thread parked - teardown request lifted off the attach queue (jitLess=%@, latchedFailure=%@)",
-            jitLess ? "YES" : "NO",
-            latchedFailure ? "YES" : "NO"
-        ))
-
-        // Called from HERE rather than from inside the block below.
-        // Its heartbeat half runs on this thread - an NSLock around a
-        // dictionary copy plus two per-child reads, documented safe
-        // from any thread and deliberately independent of the attach
-        // queue - and its ledger half hops to attachQueue on its own,
-        // exactly as it does from every other caller.
-        dumpChildCensus(labelled: "childCensus at hangRecovery")
-
-        // Monotonic uptime, matching MainThreadHangWatchdog's own
-        // timing: a wall-clock adjustment must not be able to
-        // masquerade as a wedged queue.
-        let dispatchedAt = ProcessInfo.processInfo.systemUptime
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
 
-            // The number that says whether this half was worth
-            // anything. The watchdog fires at 2.0s of a ~10s budget
-            // and an attach takes ~1.4s, so much over a second here
-            // means the reattach lands after the kill and the hoisted
-            // half above was the only part that ran in time.
-            let waitedForQueue = ProcessInfo.processInfo.systemUptime - dispatchedAt
-
-            // CHANGED - the gate is evidence now, not
-            // hasHandledFailure.
-            //
-            // attachedSnapshot() is the ledger's record of every pid
-            // an attach was ever started for, and a child can only be
-            // holding a debugger stop if it is in there. Read HERE
-            // because AttachLedger asserts this queue on every
-            // accessor, that one included - reading it before the hop
-            // would trip dispatchPrecondition.
-            //
-            // isJITLessModeActive is kept and RE-READ rather than
-            // captured, so a long wait cannot act on a stale answer.
-            // It looks redundant next to the snapshot -
-            // activateJITLessMode calls clearAllAttached, so the
-            // snapshot empties on its own - but that clear is itself
-            // an attachQueue.async, and the window between the latch
-            // and the clear landing is exactly the window in which a
-            // forced vAttach would be wrong.
-            let attached = self.ledger.attachedSnapshot()
-            guard !self.isJITLessModeActive, !attached.isEmpty else {
-                logger(String(
-                    format: "hangRecovery: attachQueue reached after %.2fs - no forced reattach (jitLess=%@, %d pid(s) in the attach ledger)",
-                    waitedForQueue,
-                    self.isJITLessModeActive ? "YES" : "NO",
-                    attached.count
-                ))
+            // No session was ever attached in these modes, so no
+            // child can be holding a debugger stop - and the hang,
+            // whatever it is, is not one a re-attach can fix.
+            guard !self.isJITLessModeActive, !self.hasHandledFailure else {
+                logger("hangRecovery: skipped - JIT-less mode or a latched failure, no child holds a debugger stop")
                 return
             }
 
-            logger(String(
-                format: "hangRecovery: attachQueue reached after %.2fs - forcing a reattach pass over %d attached pid(s)",
-                waitedForQueue,
-                attached.count
-            ))
+            // The background teardown's standing detach request would
+            // make every recovered loop detach on its first
+            // iteration. Even that resumes the child - but the
+            // watchdog only runs foregrounded (it pauses on
+            // didEnterBackground), and the applicationDidBecomeActive
+            // that normally lifts the request is parked behind the
+            // hang. Lift it here, mirroring that handler's ordering,
+            // so the recovered loops re-arm instead of churning.
+            JITEnabler.clearDebuggerTeardownRequest()
 
-            // A FORCED reattach pass: reattachOrphanedProcesses
-            // gates itself on the app being active, and during this
-            // hang the app is provably not yet active -
-            // didBecomeActive is parked behind the very hang being
-            // recovered from - so the normal pass skipped itself
-            // entirely, two seconds before the kill it existed to
-            // prevent. Observed exactly that way on device.
-            // Idempotence against the main-queue copy running later
-            // is unchanged: a pid with a live session is not an
-            // orphan, and boundedEnableJIT's per-pid in-flight guard
-            // covers the overlap window. See
+            logger("hangRecovery: main thread parked - re-attaching orphaned children from the watchdog path")
+
+            // The same census the main-queue recovery runs, then a
+            // FORCED reattach pass: reattachOrphanedProcesses gates
+            // itself on the app being active, and during this hang
+            // the app is provably not yet active - didBecomeActive is
+            // parked behind the very hang being recovered from - so
+            // the normal pass skipped itself entirely, two seconds
+            // before the kill it existed to prevent. Observed exactly
+            // that way on device. Idempotence against the main-queue
+            // copy running later is unchanged: a pid with a live
+            // session is not an orphan, and boundedEnableJIT's
+            // per-pid in-flight guard covers the overlap window. See
             // fix_hang_recovery_bypasses_active_gate.py.
+            self.dumpChildCensus(labelled: "childCensus at hangRecovery")
             self.reattachOrphansForHangRecovery()
         }
     }
@@ -854,55 +713,6 @@ final class JITController {
                     defer {
                         self.attachSlots.signal()
                         self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
-                    }
-                    // ADDED - fix_attach_gates_and_helper_guards.py. The
-                    // same re-check reattachOrphanedProcesses grew, for
-                    // exactly the same reason: attachSlots.wait() above is
-                    // UNBOUNDED, so "the app is active" was settled by the
-                    // didBecomeActive callback that queued this drain and
-                    // has not been asked again since.
-                    //
-                    // Three slots at ~1.2s each and the 15 children a cold
-                    // launch spawns (AttachLedger.swift:77-84) puts the
-                    // tail of a drain roughly five seconds past that
-                    // decision. The window that killed the app on
-                    // 2026-08-12 was 1.04s wide.
-                    //
-                    // Starting the vAttach is the irreversible step: it
-                    // stops the target for ~1013ms, and a stopped
-                    // NSExtension cannot answer the synchronous XPC iOS
-                    // sends on the next lifecycle transition. 0x8BADF00D.
-                    // Nothing downstream will refuse it either -
-                    // JITEnabler.m's enableJITForPID: has no foreground
-                    // check at all.
-                    //
-                    // AFTER the defer, deliberately: returning from here
-                    // still signals the slot and still clears the
-                    // in-flight mark.
-                    //
-                    // The mirror rather than the ledger flag, for the
-                    // reason given at reattachOrphanedProcesses: this runs
-                    // on the CONCURRENT attachWorkQueue, and hopping to
-                    // attachQueue to ask would block a slot-holding thread
-                    // behind a possible 90-second attach.
-                    guard Self.isApplicationActiveFromAnyQueue else {
-                        logger(String(format: "attachGate: pid %d abandoned at the slot - app went inactive while the deferred drain queued", pid))
-                        // Load-bearing. schedulePreflightWatchdog ran above,
-                        // and its timeout path retries by calling
-                        // attachToProcess directly on attachQueue with no
-                        // gate of its own - so leaving it armed would start
-                        // the very vAttach this guard just refused, five
-                        // seconds from now and still backgrounded. It also
-                        // clears retriedWatchdogPIDs, so this pid keeps its
-                        // one retry for whenever it is attached for real.
-                        //
-                        // No deferAttach: markAttached already ran and the
-                        // drain skips anything in attachedPIDs. The
-                        // recovery is reattachOrphanedProcesses on the next
-                        // foreground, which is precisely what a pid marked
-                        // attached with no live debug session is for.
-                        self.cancelPreflightWatchdog(for: pid)
-                        return
                     }
                     self.attachToProcess(pid: pid)
                 }
@@ -1178,59 +988,6 @@ final class JITController {
                     self.attachSlots.signal()
                     self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
                 }
-                // ADDED - fix_attach_gates_and_helper_guards.py, the same
-                // re-check reattachOrphanedProcesses grew.
-                //
-                // The gate for this attach was evaluated on attachQueue
-                // before the dispatch above, and half of it is not even a
-                // real reading: actualStateIsActive is hard-coded true
-                // whenever childProcessDidStart is called off the main
-                // thread, so off-main the whole decision rests on the
-                // cached ledger flag. The slot wait immediately above is
-                // UNBOUNDED - the log line right before it exists because
-                // this queue is known to back up - so by the time this pid
-                // reaches the front that decision can be seconds old.
-                //
-                // Three slots at ~1.2s each and the 15 children a cold
-                // launch spawns (AttachLedger.swift:77-84) puts the tail
-                // of that burst roughly five seconds past its own gate.
-                // The active-to-background window that killed the app on
-                // 2026-08-12 was 1.04s wide.
-                //
-                // Starting the vAttach is the irreversible step: it stops
-                // the target for ~1013ms, and a stopped NSExtension cannot
-                // answer the synchronous XPC iOS sends on the next
-                // lifecycle transition. 0x8BADF00D. There is no backstop
-                // underneath - JITEnabler.m's enableJITForPID: has no
-                // foreground check at all.
-                //
-                // AFTER the defer, deliberately: returning from here still
-                // signals the slot and still clears the in-flight mark.
-                //
-                // The mirror rather than the ledger flag: this runs on the
-                // CONCURRENT attachWorkQueue, and hopping to attachQueue to
-                // ask would block a slot-holding thread behind a possible
-                // 90-second attach.
-                guard Self.isApplicationActiveFromAnyQueue else {
-                    logger(String(format: "attachGate: pid %d abandoned at the slot - app went inactive while the native attach queued", pid))
-                    // Load-bearing. schedulePreflightWatchdog ran before
-                    // this dispatch, and its timeout path retries by
-                    // calling attachToProcess directly on attachQueue with
-                    // no gate of its own - so leaving it armed would start
-                    // the very vAttach this guard just refused, five
-                    // seconds from now and still backgrounded. It also
-                    // clears retriedWatchdogPIDs, so this pid keeps its one
-                    // retry for whenever it is attached for real.
-                    //
-                    // No deferAttach and no ReportJITStatusForChild. The
-                    // deferral this mirrors, a few lines up, is silent for
-                    // the same reason: the drain skips anything already in
-                    // attachedPIDs, and burning the single-use report pipe
-                    // with a FALSE would foreclose the real TRUE that the
-                    // next foreground's reattach pass can still deliver.
-                    self.cancelPreflightWatchdog(for: pid)
-                    return
-                }
                 self.attachToProcess(pid: pid)
             }
         }
@@ -1414,22 +1171,6 @@ final class JITController {
     
     private func attachToProcess(pid: Int32) {
         let attachStart = CFAbsoluteTimeGetCurrent()
-        // ADDED - fix_preflight_watchdog_retry.py. Every path into here
-        // calls this immediately after attachSlots.wait() returns, so
-        // this is the moment "the attach has actually begun" becomes
-        // true and the preflight watchdog can start measuring something
-        // real.
-        //
-        // Only for a pid that HAS a watchdog armed: the orphan
-        // re-attach passes never arm one and must not leave an entry
-        // behind. And only for the first attach to reach here, so a
-        // duplicate that boundedEnableJIT is about to bounce with EBUSY
-        // cannot push the live attach's deadline out.
-        preflightWatchdogLock.lock()
-        if preflightWatchdogs[pid] != nil, preflightAttachStarts[pid] == nil {
-            preflightAttachStarts[pid] = attachStart
-        }
-        preflightWatchdogLock.unlock()
         logger(String(format: "attachStall: pid %d entering boundedEnableJIT", pid))
         let (success, error) = boundedEnableJIT(forPID: pid)
         logger(String(format: "attachStall: pid %d boundedEnableJIT returned after %.0fms (success=%@, code=%ld)",
@@ -1437,6 +1178,7 @@ final class JITController {
                       (CFAbsoluteTimeGetCurrent() - attachStart) * 1000.0,
                       success ? "YES" : "NO",
                       (error?.code).map { Int($0) } ?? 0))
+        cancelPreflightWatchdog(for: pid)
         
         // EBUSY means another attach for this PID is already running -
         // not a failure, and reporting FALSE for it tells the child to
@@ -1452,25 +1194,6 @@ final class JITController {
             logger(String(format: "attachToProcess: pid %d already in flight - leaving the signal to that call", pid))
             return
         }
-        
-        // MOVED - fix_preflight_watchdog_retry.py. This used to run
-        // twelve lines higher, above the EBUSY test, so a duplicate
-        // that boundedEnableJIT bounced in microseconds disarmed the
-        // LIVE attach's freshly-scheduled watchdog and cleared its
-        // retry mark on the way out. Below the branch, only a call
-        // that actually reached the device - a success or a real
-        // failure - is allowed to cancel.
-        //
-        // Still pid-keyed rather than token-scoped, deliberately.
-        // The watchdog is a per-pid resource because the pipe it
-        // consumes is: ReportJITStatusForChild is single-use per
-        // child, so once ANY attempt has resolved the pid no watchdog
-        // for it should fire. A token-scoped cancel would leave a
-        // watchdog armed by a superseding retry running after this
-        // attach reported TRUE, and that watchdog's terminal path
-        // calls handleJITFailure(ETIMEDOUT), which latches JIT off
-        // for the whole app.
-        cancelPreflightWatchdog(for: pid)
         
         if success {
             // ADDED - see fix_no_jit_promise_during_teardown.py's
@@ -1553,28 +1276,10 @@ final class JITController {
 
         preflightWatchdogLock.lock()
         preflightWatchdogs[pid] = token
-        // ADDED - fix_preflight_watchdog_retry.py. Arming is also a
-        // reset: under THIS token the attach has not started, and the
-        // watchdog has not deferred.
-        preflightAttachStarts.removeValue(forKey: pid)
-        preflightWatchdogDeferrals.removeValue(forKey: pid)
         preflightWatchdogLock.unlock()
 
-        armPreflightWatchdog(for: pid, token: token, after: Double(preflightTimeoutSeconds))
-    }
-
-    // ADDED - fix_preflight_watchdog_retry.py. The timer half of
-    // schedulePreflightWatchdog, split out so the closure can re-arm
-    // ITSELF - same token, shorter deadline - on waking to find that the
-    // attach it is timing has not started yet, or has not yet had its
-    // full preflightTimeoutSeconds of running time.
-    //
-    // The same token deliberately: re-arming through
-    // schedulePreflightWatchdog would install a new one and reset the
-    // deferral count with it, and a pid could then defer forever.
-    private func armPreflightWatchdog(for pid: Int32, token: UUID, after seconds: Double) {
         watchdogQueue.asyncAfter(
-            deadline: DispatchTime.now() + seconds
+            deadline: .now() + .seconds(preflightTimeoutSeconds)
         ) { [weak self] in
             guard let self else {
                 return
@@ -1592,54 +1297,7 @@ final class JITController {
                 self.preflightWatchdogLock.unlock()
                 return
             }
-
-            // ADDED - fix_preflight_watchdog_retry.py. This timer was
-            // armed when the attach was QUEUED, not when it started:
-            // schedulePreflightWatchdog runs before the
-            // attachWorkQueue.async and before attachSlots.wait(), and
-            // that wait is unbounded by design. Three slots at ~1012ms
-            // per vAttach means a burst of fifteen children leaves
-            // everything past roughly the twelfth still parked when this
-            // fires - healthy attaches that have not begun.
-            //
-            // So measure the ATTACH. If it has not begun, or has begun
-            // but has had less than preflightTimeoutSeconds of running
-            // time, re-arm for whatever is left and keep the token.
-            // Bounded by preflightWatchdogMaxDeferrals so a pid whose
-            // attach never starts still reaches a verdict.
-            let deferrals = self.preflightWatchdogDeferrals[pid] ?? 0
-            let attachStarted = self.preflightAttachStarts[pid]
-            let elapsed = attachStarted.map { CFAbsoluteTimeGetCurrent() - $0 } ?? 0.0
-            let remaining = Double(self.preflightTimeoutSeconds) - elapsed
-            // 0.05 rather than 0: re-arming for a few microseconds is
-            // just a wakeup, and the watchdog would fire anyway.
-            let windowUnspent = remaining > 0.05
-            if windowUnspent, deferrals < Self.preflightWatchdogMaxDeferrals {
-                self.preflightWatchdogDeferrals[pid] = deferrals + 1
-                // Unlocked BEFORE logging: logger() writes to a file and
-                // takes a lock of its own, and the whole point of
-                // guarding these maps with a lock rather than confining
-                // them to a queue is that a cancel never waits.
-                self.preflightWatchdogLock.unlock()
-                // Hoisted out of the String(format:) argument list rather
-                // than written inline: a ternary in a CVarArg... position
-                // is needless work for the type checker.
-                let reason: String = attachStarted == nil
-                    ? "its attach has not started yet, it is still queued for a slot"
-                    : "its attach has not had its full preflight window yet"
-                logger(String(format: "preflightWatchdog: pid %d deferring - %@ (deferral %ld of %ld, %.1fs to go)",
-                              pid,
-                              reason,
-                              deferrals + 1,
-                              Self.preflightWatchdogMaxDeferrals,
-                              remaining))
-                self.armPreflightWatchdog(for: pid, token: token, after: remaining)
-                return
-            }
-
             self.preflightWatchdogs.removeValue(forKey: pid)
-            self.preflightAttachStarts.removeValue(forKey: pid)
-            self.preflightWatchdogDeferrals.removeValue(forKey: pid)
             let shouldRetry = !self.retriedWatchdogPIDs.contains(pid)
             if shouldRetry {
                 self.retriedWatchdogPIDs.insert(pid)
@@ -1648,15 +1306,6 @@ final class JITController {
                 self.retriedWatchdogPIDs.remove(pid)
             }
             self.preflightWatchdogLock.unlock()
-
-            // ADDED - fix_preflight_watchdog_retry.py. Reaching a verdict
-            // with the preflight window still unspent means the cap ran
-            // out, i.e. the attach never got far enough for ~60 seconds.
-            // Worth saying out loud - it is the one way this fix can hide
-            // a real failure, and it should be rare.
-            if windowUnspent {
-                logger(String(format: "preflightWatchdog: pid %d hit the deferral cap (%ld) - proceeding to a verdict with %.1fs of its preflight window unspent", pid, Self.preflightWatchdogMaxDeferrals, remaining))
-            }
 
             // One retry before giving up - covers the confirmed,
             // intermittent (~8-10% background rate) stall on
@@ -1675,137 +1324,9 @@ final class JITController {
             // practice - it is not a complete fix for a true
             // indefinite hang.
             if shouldRetry {
-                // CHANGED - fix_preflight_watchdog_retry.py.
-                //
-                // This used to call attachToProcess INLINE on the serial
-                // attachQueue, with no slot permit and no guards.
-                //
-                // The permit: without one the documented cap of three
-                // concurrent vAttaches became four. And because
-                // attachToProcess can sit inside boundedEnableJIT for
-                // enableJITMaxWaitSeconds = 90, attachQueue itself was
-                // held for up to ninety seconds - taking
-                // closeTunnelForSuspension,
-                // recoverStoppedChildrenAfterForegroundHang,
-                // applicationDidBecomeActive, the
-                // isProcessingHelperAttachRequests reset (so Helper
-                // attach delivery was suppressed for the duration) and
-                // every completing attach's clearAttachInFlight defer -
-                // gate 1 of the tunnel close, left stale-non-zero - down
-                // with it. The EBUSY fast path does not save it: a pid
-                // parked at a slot has no enableJITInFlightByPID entry
-                // yet.
-                //
-                // It now takes exactly the path every other caller takes:
-                // bookkeeping on attachQueue, the slow call on
-                // attachWorkQueue behind a permit.
                 self.attachQueue.async {
-                    dispatchPrecondition(condition: .onQueue(self.attachQueue))
-
-                    // The guards every other entry point has and this one
-                    // had none of.
-                    //
-                    // hasActiveDebugSession is the load-bearing one. The
-                    // registries in JITSupport.m are pid-keyed and assume
-                    // one session per pid - registerDebugSessionProxy
-                    // OVERWRITES - so a second attach on a pid that
-                    // already has a live loop makes loop 1 invisible:
-                    // session 2's teardown unregisters the proxy, so
-                    // liveDebugSessionCount() reports 0 while loop 1 is
-                    // still issuing FFI calls on provider->adapter. That
-                    // count is gate 4 of closeTunnelForSuspension, added
-                    // precisely to stop adapter_free running under a live
-                    // loop. Session 2's teardown also runs
-                    // setDebugSessionListeningForPID(pid, NO), which finds
-                    // session 1's notify token and cancels it - disarming
-                    // a live loop's target while the child still has JIT
-                    // enabled.
-                    //
-                    // The window is small and real: the first attach can
-                    // register its session a few milliseconds after this
-                    // watchdog fires.
-                    //
-                    // isJITLessModeActive/hasHandledFailure are read here
-                    // the same way childProcessDidStart's guard 1 reads
-                    // them, off their writing queue - deliberately
-                    // unchanged, this is not the place to alter that
-                    // contract.
-                    let rejection: String?
-                    if JITEnabler.hasActiveDebugSession(forPID: pid) {
-                        rejection = "it already has a live debug session - a second one would make the first invisible to the tunnel close"
-                    } else if self.isJITLessModeActive || self.hasHandledFailure {
-                        rejection = "JIT is already latched off for this process"
-                    } else if !Self.isApplicationActiveFromAnyQueue {
-                        rejection = "the app is not active, and vAttach stops its target"
-                    } else if !Self.pidIsAlive(pid) {
-                        rejection = "it is gone"
-                    } else if let type = self.ledger.knownType(pid), !self.shouldAttach(to: type) {
-                        rejection = "type=\(type) is not attachable"
-                    } else {
-                        rejection = nil
-                    }
-
-                    if let rejection {
-                        // Nothing is reported to the child here, on
-                        // purpose. ReportJITStatusForChild is a
-                        // single-use pipe: a FALSE from this guard would
-                        // burn it, and in the live-session case would
-                        // contradict the TRUE the successful attach is
-                        // about to send. The child has its own
-                        // five-second deadline and falls back to the
-                        // interpreter on its own - the same end state,
-                        // one beat later.
-                        logger(String(format: "preflightWatchdog: pid %d NOT retrying - %@", pid, rejection))
-                        // Drop the spent retry mark with it, exactly as
-                        // cancelPreflightWatchdog does, so a later attach
-                        // on this pid number is not left without its one
-                        // retry.
-                        self.preflightWatchdogLock.lock()
-                        self.retriedWatchdogPIDs.remove(pid)
-                        self.preflightWatchdogLock.unlock()
-                        return
-                    }
-
                     self.schedulePreflightWatchdog(for: pid)
-                    self.ledger.markAttachInFlight(pid)
-                    self.attachWorkQueue.async {
-                        self.attachSlots.wait()
-                        defer {
-                            self.attachSlots.signal()
-                            self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
-                        }
-                        // The slot wait above is unbounded, so both of
-                        // the irreversible-step checks are made again
-                        // here. Starting the vAttach is what stops the
-                        // target, and only the debug loop's continue
-                        // resumes it.
-                        //
-                        // The mirror is read rather than the ledger flag
-                        // for the same reason reattachOrphanedProcesses
-                        // reads it here: this runs on the CONCURRENT
-                        // attachWorkQueue, and hopping to attachQueue to
-                        // ask would block a slot-holding thread behind a
-                        // possible 90-second attach.
-                        //
-                        // Both abandon paths cancel the watchdog armed
-                        // just above. attachToProcess is what normally
-                        // cancels it, and it is not going to run - so
-                        // without this the watchdog would stand, defer
-                        // its way through the whole cap because no
-                        // attach ever starts, and then report FALSE and
-                        // latch JIT off for the app a minute later.
-                        guard Self.isApplicationActiveFromAnyQueue else {
-                            logger(String(format: "preflightWatchdog: pid %d abandoned at the slot - the app went inactive while the retry queued", pid))
-                            self.cancelPreflightWatchdog(for: pid)
-                            return
-                        }
-                        guard !JITEnabler.hasActiveDebugSession(forPID: pid) else {
-                            logger(String(format: "preflightWatchdog: pid %d abandoned at the slot - a debug session appeared while the retry queued", pid))
-                            self.cancelPreflightWatchdog(for: pid)
-                            return
-                        }
-                        self.attachToProcess(pid: pid)
-                    }
+                    self.attachToProcess(pid: pid)
                 }
                 return
             }
@@ -1822,34 +1343,21 @@ final class JITController {
         }
     }
 
-    // CHANGED - fix_preflight_watchdog_retry.py. Returns whether a
-    // watchdog was actually armed, so handleTargetDidExitNotification can
-    // log only when it cancelled something real. @discardableResult
-    // because the attachToProcess caller does not care.
-    @discardableResult
-    private func cancelPreflightWatchdog(for pid: Int32) -> Bool {
+    private func cancelPreflightWatchdog(for pid: Int32) {
         preflightWatchdogLock.lock()
         // Dropping the token IS the cancel: the scheduled closure wakes,
         // finds the map no longer holds it, and returns.
-        let wasArmed = preflightWatchdogs.removeValue(forKey: pid) != nil
+        preflightWatchdogs.removeValue(forKey: pid)
         // Cleared with it, so a later attach on a recycled pid number
         // gets its own retry rather than inheriting a spent one.
         retriedWatchdogPIDs.remove(pid)
-        // Same reasoning for the deferral bookkeeping: a recycled pid
-        // number must not inherit a spent deferral budget or a stale
-        // attach start.
-        preflightAttachStarts.removeValue(forKey: pid)
-        preflightWatchdogDeferrals.removeValue(forKey: pid)
         preflightWatchdogLock.unlock()
-        return wasArmed
     }
 
     private func cancelAllPreflightWatchdogs() {
         preflightWatchdogLock.lock()
         preflightWatchdogs.removeAll()
         retriedWatchdogPIDs.removeAll()
-        preflightAttachStarts.removeAll()
-        preflightWatchdogDeferrals.removeAll()
         preflightWatchdogLock.unlock()
     }
     
@@ -2114,20 +1622,6 @@ final class JITController {
         }
 
         let pid = pidNumber.int32Value
-        // ADDED - fix_preflight_watchdog_retry.py. Synchronously, on
-        // whatever thread the debug loop posted from, and BEFORE the
-        // attachQueue hop: the whole reason the watchdog maps are
-        // lock-guarded rather than attachQueue-confined is that a cancel
-        // must never queue behind a bounded attach.
-        //
-        // Nothing cancelled this before, so a watchdog for an exited pid
-        // fired anyway - reporting FALSE for a child that is already gone
-        // and then calling handleJITFailure(ETIMEDOUT), which is not in
-        // recoverableTransportCodes and so latches JIT off for the whole
-        // app.
-        if cancelPreflightWatchdog(for: pid) {
-            logger(String(format: "preflightWatchdog: pid %d exited with its watchdog still armed - cancelled, so it cannot report FALSE and latch JIT off for a dead pid", pid))
-        }
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.ledger.forgetChild(pid)
@@ -2468,74 +1962,6 @@ extension JITController {
                     // been correctly rejected. Measured: 21 attaches
                     // for 12 processes, 12.2s of serialized queue time,
                     // only 9 of them necessary.
-
-                    // ADDED - fix_attach_gates_and_helper_guards.py.
-                    //
-                    // The two guards childProcessDidStart has had all
-                    // along and this path never got. Its veto chain is
-                    // isRejected / knownType+shouldAttach / isAttached /
-                    // isApplicationActive, and neither the JIT-less latch,
-                    // nor the failure latch, nor the prefs test appears
-                    // anywhere in it. attachToHelperProcess does not check
-                    // them either.
-                    //
-                    // The listener is wired up unconditionally -
-                    // startListeningForHelperAttachRequests() is called
-                    // from start() with no condition, and it gets there
-                    // because isDDIMissing() is false when JIT is off, so
-                    // start()'s own guard passes. Two reachable states
-                    // followed:
-                    //
-                    //   (a) a launch with isJITEnabled == false and a
-                    //       pairing file installed. Every Helper got a
-                    //       real boundedEnableJIT attach and
-                    //       ReportJITStatusForChild(pid, true), while
-                    //       childProcessDidStart's guard 2 correctly
-                    //       reported FALSE for the same pid. The two paths
-                    //       handed one child opposite answers.
-                    //
-                    //   (b) after activateJITLessMode() has latched and run
-                    //       clearAllAttached() + detachAllJITSessions(),
-                    //       the next Helper request attached again and
-                    //       undid the mode - and clearAllAttached() had
-                    //       just removed the isAttached dedup below that
-                    //       would have suppressed it.
-                    //
-                    // Replies "failed:", never "success". The skipReason
-                    // branch further down replies "success", and its own
-                    // comment explains why that must not be used for a
-                    // case like this one: telling a child JIT is ready
-                    // with nothing attached behind it leaves it enabling
-                    // the backend with no W^X mediation, and the first
-                    // write into the executable region takes a SIGBUS.
-                    //
-                    // The flags are read the way the rest of this file
-                    // reads them - plainly, no lock. This block runs on
-                    // attachQueue (asserted above), which is where
-                    // recoverStoppedChildrenAfterForegroundHang reads the
-                    // same pair.
-                    let jitLessLatched = self.isJITLessModeActive
-                    let failureLatched = self.hasHandledFailure
-                    let jitEnabled = self.usePtraceJIT() || Prefs.JITSettings.isJITEnabled
-                    if jitLessLatched || failureLatched || !jitEnabled {
-                        logger(String(format: "helperGate: pid %d refused - JIT is not available on this launch (jitLess=%@, latchedFailure=%@, enabled=%@)",
-                                      pid,
-                                      jitLessLatched ? "YES" : "NO",
-                                      failureLatched ? "YES" : "NO",
-                                      jitEnabled ? "YES" : "NO"))
-                        let refusedResultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
-                        try? "failed:JIT is not available on this launch"
-                            .write(to: refusedResultFileURL, atomically: true, encoding: .utf8)
-                        CFNotificationCenterPostNotification(
-                            CFNotificationCenterGetDarwinNotifyCenter(),
-                            CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
-                            nil,
-                            nil,
-                            true
-                        )
-                        continue
-                    }
-
                     var skipReason: String? = nil
                     if self.ledger.isRejected(pid) {
                         skipReason = "process type was rejected by shouldAttach - does not need JIT"
@@ -2652,58 +2078,6 @@ extension JITController {
                         defer {
                             self.attachSlots.signal()
                             self.attachQueue.async { self.ledger.clearAttachInFlight(pid) }
-                        }
-
-                        // ADDED - fix_attach_gates_and_helper_guards.py,
-                        // the same re-check reattachOrphanedProcesses grew.
-                        //
-                        // isApplicationActive was read on attachQueue well
-                        // above, before markAttached and before this
-                        // dispatch. attachSlots.wait() is UNBOUNDED, so
-                        // that answer can be seconds old by the time this
-                        // pid reaches the front - three slots at ~1.2s each
-                        // against the 15 children a cold launch spawns
-                        // (AttachLedger.swift:77-84) puts the tail around
-                        // five seconds out, and the window that killed the
-                        // app on 2026-08-12 was 1.04s wide.
-                        //
-                        // Starting the vAttach is the irreversible step: it
-                        // stops the target for ~1013ms, and a stopped
-                        // NSExtension cannot answer the synchronous XPC iOS
-                        // sends on the next lifecycle transition - the
-                        // capture quoted a few lines above, at the
-                        // isApplicationActive check, is exactly that.
-                        //
-                        // AFTER the defer, deliberately: returning from
-                        // here still signals the slot and still clears the
-                        // in-flight mark.
-                        //
-                        // Unlike the two native sites this one has a
-                        // blocked caller, so it answers rather than just
-                        // returning: the Helper is inside
-                        // requestJITAttachFromMainApp's 20-second wait
-                        // (browser/Helper/main.m) and would otherwise sit
-                        // out the whole budget for a reply that is never
-                        // coming. "failed:" and not "success" - main.m
-                        // turns any non-"success" body into NO plus an
-                        // error string, which is the fallback this
-                        // codebase uses everywhere.
-                        //
-                        // No preflight watchdog to cancel here: the Helper
-                        // path never schedules one.
-                        guard Self.isApplicationActiveFromAnyQueue else {
-                            logger(String(format: "attachGate: pid %d abandoned at the slot - app went inactive while the Helper attach queued", pid))
-                            let deferredResultFileURL = containerURL.appendingPathComponent("\(Self.jitAttachResultFilePrefix)\(pid)_\(token)")
-                            try? "failed:deferred - app went inactive while this attach waited for a slot"
-                                .write(to: deferredResultFileURL, atomically: true, encoding: .utf8)
-                            CFNotificationCenterPostNotification(
-                                CFNotificationCenterGetDarwinNotifyCenter(),
-                                CFNotificationName(rawValue: Self.jitAttachReplyNotificationName(forToken: token)),
-                                nil,
-                                nil,
-                                true
-                            )
-                            return
                         }
 
                         let (success, errorDescription) = self.attachToHelperProcess(pid: pid)

@@ -1255,53 +1255,6 @@ void clearDebuggerTeardownRequest(void) {
             return;
         }
         sDebuggerTeardownRequested = NO;
-
-        // ADDED - see fix_detach_disarms_only_its_own_pid.py.
-        //
-        // The sticky BOOL was the only thing this cleared, and the
-        // BOOL is read in exactly one place - runDebugService's entry
-        // check, where it decides whether a NEWLY STARTING loop joins
-        // a standing teardown. A loop that is ALREADY RUNNING never
-        // reads it. It reads the SET, through
-        // shouldDetachDebugSessionPID at the top of every iteration,
-        // and nothing removed a pid from that set on a foreground.
-        //
-        // requestDetachForAllDebugSessions deliberately does not
-        // interrupt live loops, "so sessions persist across a
-        // background rather than draining". Those survivors kept
-        // their pid in the set: the app foregrounds, this runs, and
-        // on that tab's very next trap shouldDetachDebugSessionPID
-        // still says YES - so the loop detaches and exits, killing
-        // JIT for the tab the user just came back to. Those same
-        // late detaches are the ones that fail on device.
-        //
-        // JITController's hang-recovery path already assumes this
-        // call does exactly this: "Lift it here ... so the recovered
-        // loops re-arm instead of churning". It only ever lifted it
-        // for loops that had not started yet.
-        //
-        // INSIDE the sticky-BOOL guard above, deliberately. JIT-less
-        // mode's detachAllJITSessions unions pids in WITHOUT setting
-        // that BOOL, so the set can be non-empty with the BOOL
-        // already NO; clearing above the guard would cancel that
-        // request too, and it is meant to stand until those loops
-        // drain. Here this only ever undoes what
-        // requestDetachForAllDebugSessions did, which is this
-        // function's stated job.
-        //
-        // Same queue, same block: detachRequestedDebugSessionPIDs is
-        // only ever touched on debugSessionStateQueue.
-        NSMutableSet<NSNumber *> *stillRequested = detachRequestedDebugSessionPIDs();
-        if (stillRequested.count > 0) {
-            NSMutableString *releasedPIDs = [NSMutableString string];
-            for (NSNumber *requestedPID in stillRequested) {
-                if (releasedPIDs.length > 0) [releasedPIDs appendString:@", "];
-                [releasedPIDs appendFormat:@"%d", requestedPID.intValue];
-            }
-            logger([NSString stringWithFormat:@"clearDebuggerTeardownRequest: detachSetCleared - released %lu pid(s) [%@] from the detach set, loops that survived the background keep their JIT", (unsigned long)stillRequested.count, releasedPIDs]);
-            [stillRequested removeAllObjects];
-        }
-
         logger(@"clearDebuggerTeardownRequest: foreground - attaches are wanted again");
     });
 }
@@ -1768,37 +1721,7 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
     }
 
     if (writablePageAddresses.count == 0) {
-        // CHANGED - was `return YES`. See
-        // fix_chunk_mask_truthfulness.py's docstring.
-        //
-        // Reporting success for a batch that touched ZERO pages is what
-        // lets Gecko latch a whole 4MB chunk as prepared when nothing
-        // was. Tolerating SOME unreadable pages is right, for the reason
-        // given above - a chunk is prepared 4MB at a time whatever is
-        // currently committed, and DecommitPages leaves the rest
-        // PROT_NONE. All of them is a different thing.
-        //
-        // Every caller has just made its own sub-range
-        // PROT_READ|PROT_EXEC before asking: SetAliasProtection runs
-        // before PrepareExecutableRegionForWriting in both CommitPages
-        // and ReprotectRegion, and the chunk always contains that
-        // sub-range. So at least those pages must read back. If none of
-        // them do, either the response stream has desynced and these are
-        // Exx replies being scanned as data, or the mapping is gone -
-        // and the honest answer to both is NO.
-        //
-        // This costs the debug loop: the caller at runDebugService
-        // breaks and detaches. That is the point. The teardown clears
-        // this pid's listening key, after which every later
-        // PrepareExecutableRegionForWriting takes its notListening guard
-        // and returns WITHOUT latching, so the process runs interpreted
-        // and truthful instead of fast and wrong. Nothing is left
-        // un-drained here either - every read reply was consumed by the
-        // loop above - so unlike the other early returns in this
-        // function this one does not desync the proxy.
-        logger([NSString stringWithFormat:@"prepareMemoryRegion: NOTHING PREPARED - all %lu page(s) at 0x%llx+0x%llx were unreadable, reporting failure rather than success", (unsigned long)pageAddresses.count, startAddress, size]);
-        if (error && !*error) *error = MakeError(MemoryPrepareReadFailed);
-        return NO;
+        return YES;
     }
 
     // Pass 2 - write each byte straight back, again in a single write.
@@ -1861,37 +1784,7 @@ BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid) {
     // isNotConnectedError is not excluded. That governs whether to log,
     // on the basis that a dead transport is unremarkable during
     // teardown; here it is exactly the thing worth acting on.
-    //
-    // CHANGED - see fix_detach_disarms_only_its_own_pid.py.
-    //
-    // Was setDebuggerListeningState(0) - the PROCESS-WIDE key. One
-    // pid's failed D disarmed trapping for every content process in
-    // the app. The child needs both keys before it executes its brk
-    // (ProcessExecutableMemory.cpp.patch, DebuggerIsListening: "Both
-    // must say yes"), so every other healthy child went dark until
-    // some unrelated attach re-armed the master key in
-    // runDebugService - and kept committing RX pages the debugger was
-    // never asked to prepare in the meantime.
-    //
-    // Nothing that reaches here implies the SHARED TRANSPORT died.
-    // All four call sites are per-session: the loop-top requested
-    // detach, the target's own CMD_DETACH, the post-loop detach and
-    // its 50ms retry, and JITEnabler's non-TXM "detach immediately"
-    // which never started a loop at all. The two paths that DO know
-    // the transport died still clear the process-wide key themselves
-    // and are untouched: runDebugService's !continueOK branch, and
-    // the background teardown.
-    //
-    // Per-pid is already the documented contract, JITSupport.h: "a
-    // session that ends for a per-process reason and then fails its
-    // detach disarms exactly one child".
-    //
-    // Harmless where it is redundant: the post-loop teardown already
-    // ran setDebugSessionListeningForPID(pid, NO) before its detach,
-    // so on that path this takes that function's own no-op early
-    // return. The loop-top and CMD_DETACH paths are where it bites.
-    setDebugSessionListeningForPID(pid, NO);
-    logger([NSString stringWithFormat:@"detachDisarm: (pid %d) detach failed - disarmed THIS pid only, process-wide trapping left alone", pid]);
+    setDebuggerListeningState(0);
     
     return NO;
 }
@@ -2113,36 +2006,8 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 detachedByCommand = detachDebuggerSession(session->debugProxy, pid);
                 if (detachedByCommand) {
                     logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach requested and completed at iteration %ld", pid, (long)debugServiceIteration]);
-                } else {
-                    // ADDED - see fix_detach_disarms_only_its_own_pid.py.
-                    //
-                    // Was: no else and no break, so a failed requested
-                    // detach fell through to the `c` below. If the
-                    // transport really is dead that `c` fails too and
-                    // the !continueOK branch ends the loop - fine. If
-                    // it is NOT dead, `c` succeeds and the loop parks
-                    // waiting for a trap that cannot come: the failed
-                    // detach just disarmed this pid. The loop then
-                    // sits in that continue for the rest of the
-                    // launch, holding a debug_proxy that
-                    // liveDebugSessionCount() makes the tunnel close
-                    // wait on.
-                    //
-                    // detachedByCommand stays NO, so the teardown
-                    // below takes its normal branch and gets two more
-                    // attempts at the D - the detach and its existing
-                    // 50ms retry.
-                    //
-                    // Cost: the target is stopped here (vAttach stops
-                    // it, and every continue in this loop arrives from
-                    // a stop packet), so if all three D packets fail it
-                    // is left stopped where the old fall-through would
-                    // have resumed it. killStoppedChildren() is the
-                    // existing escalation for that, and the alternative
-                    // is a loop that never ends at all.
-                    logger([NSString stringWithFormat:@"runDebugService: (pid %d) detach requested but FAILED at iteration %ld - leaving the loop, the teardown gets the last two attempts", pid, (long)debugServiceIteration]);
+                    break;
                 }
-                break;
             }
             
             if (verboseThisIteration) {
