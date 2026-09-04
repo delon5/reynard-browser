@@ -72,6 +72,93 @@ static NSDate *sVAttachInFlightSince = nil;
     return result;
 }
 
+// ADDED - see fix_validate_vattach_response.py's docstring.
+//
+// sendDebugCommand answers YES for ANY reply the transport managed to
+// deliver: JITSupport.m only fails on an IdeviceFfiError, so a NULL
+// response and a GDB error packet both come back as success. vAttach was
+// the one command in this file whose reply was never read -
+// QStartNoAckMode logs its reply, QPassSignals compares it to "OK", and
+// over in JITSupport.m both the register writes and the prepare-region
+// replies check for "OK" - so a refused attach ran the whole success
+// path and attachToProcess told the child TRUE. The child then enables
+// its JIT backend and executes brk #0xf00d with nothing attached to
+// service the trap.
+//
+// A successful vAttach returns a stop reply and nothing else: 'T' with a
+// two-hex signal and semicolon-delimited fields, or the older bare 'S'.
+// Both are uppercase on the wire, and this codebase already relies on
+// that - packetSignal() in JITUtils.m requires hasPrefix:@"T".
+//
+// Deliberately conservative in the other direction. Only four shapes are
+// treated as a refusal: an empty reply (packet unsupported), 'E' (the
+// error packet, e.g. E08 when the target exited between spawn and
+// attach, or when the ack-mode change just above desynced the stream),
+// and 'W'/'X' (the target already exited - genuine stop replies, but
+// runDebugService reads them as "target exited" and breaks out
+// immediately, so there is nothing to attach to). Any other first byte -
+// including 'O' console output, which read_response could in principle
+// hand back ahead of the stop reply - is ACCEPTED and logged loudly
+// rather than failing an attach that may well be fine.
+
+// Longest reply this will put in a log line. A real T packet carries
+// every register and runs to about a kilobyte; the first 96 characters
+// are the signal, the thread and enough fields to identify it.
+static const NSUInteger kVAttachReplyLogLimit = 96;
+
+// Ack bytes and $...#xx framing are stripped by the idevice layer before
+// this point - every other reader in this tree compares bare payloads
+// ("OK", hasPrefix:@"W"). Stripped again here so a leftover '+', '-' or
+// '$' can only ever widen what is accepted, never narrow it. nil-safe:
+// a nil reply normalises to an empty string, which is a refusal.
+static NSString *normalisedVAttachReply(NSString *reply) {
+    NSString *trimmed = [reply stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSUInteger index = 0;
+    while (index < trimmed.length) {
+        unichar character = [trimmed characterAtIndex:index];
+        if (character != '+' && character != '-' && character != '$') {
+            break;
+        }
+        index++;
+    }
+    return [trimmed substringFromIndex:index] ?: @"";
+}
+
+// YES only for a genuine stop reply - attached, and the target is
+// stopped waiting for us.
+static BOOL vAttachReplyIsStopPacket(NSString *normalisedReply) {
+    if (normalisedReply.length == 0) {
+        return NO;
+    }
+    unichar first = [normalisedReply characterAtIndex:0];
+    return first == 'T' || first == 'S';
+}
+
+// YES for the shapes that positively mean "not attached". Anything that
+// is neither this nor a stop packet is unknown, and unknown is accepted.
+static BOOL vAttachReplyIsRefusal(NSString *normalisedReply) {
+    if (normalisedReply.length == 0) {
+        return YES;
+    }
+    unichar first = [normalisedReply characterAtIndex:0];
+    return first == 'E' || first == 'W' || first == 'X';
+}
+
+// Bounded and single-line, because a refusal is only diagnosable if the
+// actual bytes reach the log. Printing "<stop packet>" for an E08 is
+// exactly what kept this hidden.
+static NSString *vAttachReplySummary(NSString *reply) {
+    if (reply.length == 0) {
+        return @"<no response>";
+    }
+    NSString *oneLine = [[reply stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"]
+                         stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+    if (oneLine.length > kVAttachReplyLogLimit) {
+        oneLine = [[oneLine substringToIndex:kVAttachReplyLogLimit] stringByAppendingString:@"..."];
+    }
+    return [NSString stringWithFormat:@"\"%@\"", oneLine];
+}
+
 // DIAGNOSTIC - hung-thread backtrace capture, see
 // fix_combined_tunnel_reuse_and_notify_instrumentation.py. Runs ON
 // the stuck thread when signalled, so the frames it walks are that
@@ -533,7 +620,37 @@ static void jitHangBacktraceHandler(int signalNumber) {
             return NO;
         }
         
-        logger([NSString stringWithFormat:@"Attach response for pid %d: %@ (call took %.0fms)", pid, attachResponse.length > 0 ? @"<stop packet>" : @"<no response>", (attachCallEnd - attachCallStart) * 1000.0]);
+        // ADDED - see fix_validate_vattach_response.py's docstring.
+        //
+        // attachSucceeded above only means the transport delivered a
+        // reply. This is where the reply is finally read.
+        //
+        // The refusal path is the one already twelve lines above, reused
+        // verbatim: MakeError(AttachDebugProxyFailed), freeDebugSession,
+        // return NO. No commandError exists here - sendDebugCommand
+        // returned YES - so this is the `?:` half of that line. Returning
+        // NO is what makes attachToProcess report FALSE, which the child
+        // needs promptly: its WaitForJITReadySignal is one-shot with a
+        // 5000ms budget and permanently disables the JIT backend on
+        // timeout, so a hang here is worse than a clean FALSE.
+        NSString *normalisedAttachReply = normalisedVAttachReply(attachResponse);
+        if (!vAttachReplyIsStopPacket(normalisedAttachReply)) {
+            if (vAttachReplyIsRefusal(normalisedAttachReply)) {
+                logger([NSString stringWithFormat:@"vAttachReject: (pid %d) attach REFUSED - reply %@ is not a stop packet, call took %.0fms; reporting failure rather than arming a debugger-less JIT backend", pid, vAttachReplySummary(attachResponse), (attachCallEnd - attachCallStart) * 1000.0]);
+                if (error) *error = MakeError(AttachDebugProxyFailed);
+                freeDebugSession(&session);
+                return NO;
+            }
+        
+            // Not a stop packet, but not positively a refusal either.
+            // Accepted on purpose - rejecting a working attach would be
+            // the worse bug - and named in the log so the bytes come back.
+            logger([NSString stringWithFormat:@"vAttachReject: (pid %d) attach reply %@ is neither a stop packet nor a refusal - accepting it, call took %.0fms", pid, vAttachReplySummary(attachResponse), (attachCallEnd - attachCallStart) * 1000.0]);
+        }
+        
+        // CHANGED - was `attachResponse.length > 0 ? @"<stop packet>" :
+        // @"<no response>"`, which printed "<stop packet>" for an E08.
+        logger([NSString stringWithFormat:@"Attach response for pid %d: %@ (call took %.0fms)", pid, vAttachReplySummary(attachResponse), (attachCallEnd - attachCallStart) * 1000.0]);
         
         // ADDED - see fix_pass_fault_signals_through.py's docstring.
         //
