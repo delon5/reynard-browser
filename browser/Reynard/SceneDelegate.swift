@@ -162,10 +162,41 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // ever reads "0 session(s) registered" here, the app WAS
         // suspended despite the keep-alive, the skip above was wrong,
         // and this branch has to fall through to the normal restore.
-        if Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled {
+        //
+        // CHANGED - the preference -> isActive. See
+        // fix_background_skip_predicates.py.
+        //
+        // applyPreference() is now called at launch (AppDelegate), so
+        // isActive can mean what it says. Before that it could not:
+        // applyPreference had exactly one caller, the Experimental toggle
+        // handler, isRunning starts false and only start() sets it - so
+        // on EVERY relaunch with the preference already on, this branch
+        // fired for a process whose silent-audio engine had never been
+        // started. iOS suspends such an app normally.
+        //
+        // This is the durable half. The restore skipped here is the only
+        // caller of reattachOrphanedProcesses; sceneDidBecomeActive's
+        // applicationDidBecomeActive drains DEFERRED pids only, and has
+        // nothing to say about children that were already attached and
+        // lost their session to the suspension. Those children had no
+        // session and no route to one for the rest of the launch.
+        //
+        // isActive rather than the preference also makes this agree with
+        // shouldPreserveJITAcrossBackground below, which has always
+        // tested isActive. Three sites, one question, one answer.
+        if BackgroundAudioKeepAlive.shared.isActive {
             JITEnabler.dumpDebugLoopState(labelled: "loopState at foreground (restore skipped)")
             logger("foregroundRestore: SKIPPED - background audio keep-alive is on, nothing was torn down")
             return
+        }
+        
+        // Logged rather than passed over silently: the user believes
+        // the feature is on, and this is the one line that says the
+        // engine is not actually up. It is not a reason to skip - an app
+        // with a dead engine IS suspended, so the restore below is what
+        // it needs.
+        if Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled {
+            logger("foregroundRestore: keep-alive is ON but its engine is NOT RUNNING - restoring normally")
         }
         
         // The tunnel dies during suspension and every debug loop with
@@ -429,7 +460,35 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // this. It is also read by isMediaPriority, which tab eviction
         // uses; keeping tabs resident on a preference rather than on
         // actual playback is a different change with a different risk.
-        return browserViewController.sessionManager.hasSystemMediaSession
+        //
+        // CHANGED - see fix_background_skip_predicates.py.
+        //
+        // hasSystemMediaSession -> hasPlayingSystemMediaSession. The two
+        // differ in exactly one arm: a lock-screen card that exists for
+        // merely PAUSED media.
+        //
+        // SystemMediaSession.applicationDidEnterBackground runs 1.5s
+        // before this teardown - sceneDidEnterBackground calls it inline
+        // and defers the teardown - and for paused media it keeps the
+        // card while deactivating the audio session UNCONDITIONALLY:
+        //
+        //   mediaSession: backgrounded with only paused media -
+        //                 audio session released, card kept
+        //
+        // so hasNowPlayingSession stayed true for an app holding no
+        // assertion whatsoever. Every step below was then skipped -
+        // listening left on, no detach, no cancel, no tunnel close - and
+        // iOS suspended the app anyway. Measured: all three skip lines,
+        // then the transport dying 93 seconds later regardless.
+        //
+        // The comment further down that justifies skipping the tunnel
+        // close - "an app holding a background audio assertion is not
+        // suspended" - was simply false in that case. Requiring actual
+        // playback makes it true again, because PLAYING is precisely the
+        // condition under which this app keeps the audio session active:
+        // both places that release it test the same `anyPlaying`, and
+        // hasPlayingSession IS that expression.
+        return browserViewController.sessionManager.hasPlayingSystemMediaSession
             || BackgroundAudioKeepAlive.shared.isActive
     }
 
@@ -484,20 +543,37 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         //
         // Risk, once: the pairing socket stays open across the
         // background. Safe while the app is genuinely not suspended,
-        // which is what the keep-alive is for. Note that
-        // shouldPreserveJITAcrossBackground below argues the opposite
-        // case - "isActive, not the preference", because the preference
-        // can be true while the audio engine is dead. If a capture ever
-        // shows "tunnel_create_rppairing FAILED ... Connection refused"
-        // on the foreground after a background taken with this on, the
-        // parent was suspended anyway and the fix is to add
-        // && BackgroundAudioKeepAlive.shared.isActive here. isActive is
-        // already the public accessor for the private isRunning, so
-        // that is a one-line change with nothing to expose.
-        if Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled {
+        // which is what the keep-alive is for.
+        //
+        // CHANGED - the preference -> isActive, which is what the note
+        // that used to sit here said to do if the parent turned out to
+        // be suspended anyway. It does not need a capture to settle it:
+        // nothing called applyPreference() at launch, so on every
+        // relaunch with the preference already on this branch skipped the
+        // whole teardown for a process whose engine had never started.
+        // See fix_background_skip_predicates.py.
+        //
+        // The teardown skipped here includes
+        // waitForInFlightAttachesBeforeSuspending(), whose entire purpose
+        // is that an attach in flight has left its target STOPPED -
+        // measured at 260 seconds and a watchdog kill.
+        //
+        // shouldPreserveJITAcrossBackground below has always tested
+        // isActive; now all three sites do, and the launch call in
+        // AppDelegate is what makes that answer honest.
+        if BackgroundAudioKeepAlive.shared.isActive {
             logger("backgroundTeardown: SKIPPED - background audio keep-alive is on, leaving JIT fully up")
             flushNavigationHistoryInBackground()
             return
+        }
+        
+        // Named rather than silent, for the same reason as the
+        // foreground half: an engine that is not running is the one
+        // thing that makes this feature do nothing, and it is otherwise
+        // invisible. Falling through is correct - iOS is about to
+        // suspend an app with no assertion, so it needs the teardown.
+        if Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled {
+            logger("backgroundTeardown: keep-alive is ON but its engine is NOT RUNNING - tearing down normally")
         }
         
         // Before the detach, so no process can trap during the

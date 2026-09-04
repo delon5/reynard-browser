@@ -122,6 +122,31 @@ final class SystemMediaSession: MediaSessionDelegate {
         return activeSession != nil
     }
     
+    /// Whether some live session is ACTUALLY PLAYING right now, as
+    /// opposed to merely holding the lock-screen card.
+    ///
+    /// ADDED - see fix_background_skip_predicates.py.
+    ///
+    /// This is the expression applicationDidEnterBackground and
+    /// releaseAudioSessionIfIdleInBackground already compute for
+    /// `anyPlaying`, exposed rather than copied a third time so the
+    /// three cannot drift apart. That shared definition is the whole
+    /// point: those two are what RELEASE the shared audio session, so
+    /// "some session is .playing" is exactly "this app is still
+    /// holding an audio assertion" - which is the question the JIT
+    /// teardown actually needs answered before it decides the app is
+    /// not about to be suspended.
+    ///
+    /// hasNowPlayingSession above is deliberately left alone. It is
+    /// paused-tolerant on purpose - a paused video keeps its card, and
+    /// tab eviction keeps its tab - and this is the separate, stricter
+    /// question, not a correction of that one.
+    var hasPlayingSession: Bool {
+        return sessionStates.values.contains {
+            $0.session != nil && $0.playbackState == .playing
+        }
+    }
+    
     init() {
         registerRemoteCommands()
         apply(MediaSessionFeatures())
