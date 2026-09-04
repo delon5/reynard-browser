@@ -1768,7 +1768,37 @@ static BOOL prepareMemoryRegion(DebugProxyHandle *debugProxy, uint64_t startAddr
     }
 
     if (writablePageAddresses.count == 0) {
-        return YES;
+        // CHANGED - was `return YES`. See
+        // fix_chunk_mask_truthfulness.py's docstring.
+        //
+        // Reporting success for a batch that touched ZERO pages is what
+        // lets Gecko latch a whole 4MB chunk as prepared when nothing
+        // was. Tolerating SOME unreadable pages is right, for the reason
+        // given above - a chunk is prepared 4MB at a time whatever is
+        // currently committed, and DecommitPages leaves the rest
+        // PROT_NONE. All of them is a different thing.
+        //
+        // Every caller has just made its own sub-range
+        // PROT_READ|PROT_EXEC before asking: SetAliasProtection runs
+        // before PrepareExecutableRegionForWriting in both CommitPages
+        // and ReprotectRegion, and the chunk always contains that
+        // sub-range. So at least those pages must read back. If none of
+        // them do, either the response stream has desynced and these are
+        // Exx replies being scanned as data, or the mapping is gone -
+        // and the honest answer to both is NO.
+        //
+        // This costs the debug loop: the caller at runDebugService
+        // breaks and detaches. That is the point. The teardown clears
+        // this pid's listening key, after which every later
+        // PrepareExecutableRegionForWriting takes its notListening guard
+        // and returns WITHOUT latching, so the process runs interpreted
+        // and truthful instead of fast and wrong. Nothing is left
+        // un-drained here either - every read reply was consumed by the
+        // loop above - so unlike the other early returns in this
+        // function this one does not desync the proxy.
+        logger([NSString stringWithFormat:@"prepareMemoryRegion: NOTHING PREPARED - all %lu page(s) at 0x%llx+0x%llx were unreadable, reporting failure rather than success", (unsigned long)pageAddresses.count, startAddress, size]);
+        if (error && !*error) *error = MakeError(MemoryPrepareReadFailed);
+        return NO;
     }
 
     // Pass 2 - write each byte straight back, again in a single write.
