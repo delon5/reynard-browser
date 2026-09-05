@@ -1,9 +1,9 @@
 diff --git a/media/libcubeb/src/cubeb_audiounit_ios.mm b/media/libcubeb/src/cubeb_audiounit_ios.mm
 new file mode 100644
-index 000000000000..d62c3b6d08d2
+index 000000000000..c5db3f380678
 --- /dev/null
 +++ b/media/libcubeb/src/cubeb_audiounit_ios.mm
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,539 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,6 +17,7 @@ index 000000000000..d62c3b6d08d2
 +#if defined(__IPHONE_14_0) && (__IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_14_0)
 +#  import <AVFoundation/AVFoundation.h>
 +#  include "cubeb/cubeb.h"
++#  include <stdio.h>
 +
 +namespace {
 +
@@ -177,7 +178,33 @@ index 000000000000..d62c3b6d08d2
 +              AVAudioSessionCategoryOptionAllowAirPlay;
 +  }
 +
-+  [session setCategory:category mode:mode options:options error:&error];
++  // Reynard AirPlay: an unchanged write is skipped.
++  //
++  // This runs at every stream init - a new <audio>, a Web Audio context,
++  // a WebRTC track - and used to re-issue setCategory:mode:options: with
++  // the triple the session already had. Whether that identical write is
++  // free is undocumented, and it matters once the user has moved the
++  // route to an Apple TV or HomePod through the picker: the system marks
++  // such a session .independent, and a category write on it is the one
++  // thing this file does that could send the route back to the phone.
++  // The write bought nothing when nothing changed, so it is not made; a
++  // real change (playback <-> record) still goes through as before.
++  // Reported once - a capture needs the fact, not a line per stream.
++  if ([session.category isEqualToString:category] &&
++      [session.mode isEqualToString:mode] &&
++      session.categoryOptions == options) {
++    static bool sReportedUnchanged = false;
++    if (!sReportedUnchanged) {
++      sReportedUnchanged = true;
++      // fprintf, not printf_stderr: this library builds without
++      // mozglue's headers on its include path, and stderr is where the
++      // capture reads the avPlayer: lines from anyway.
++      fprintf(stderr, "cubeb: audio session already %s/%s - not rewritten\n",
++              category.UTF8String, mode.UTF8String);
++    }
++  } else {
++    [session setCategory:category mode:mode options:options error:&error];
++  }
 +  if (aPreferredOutputChannels && session.maximumOutputNumberOfChannels > 0) {
 +    NSInteger channels = MIN(static_cast<NSInteger>(aPreferredOutputChannels),
 +                             session.maximumOutputNumberOfChannels);

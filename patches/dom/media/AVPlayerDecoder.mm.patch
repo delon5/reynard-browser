@@ -1,9 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.mm b/dom/media/AVPlayerDecoder.mm
 new file mode 100644
-index 000000000000..b56efaa8479c
+index 000000000000..0385fba02e86
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,3164 @@
+@@ -0,0 +1,3423 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -18,7 +18,13 @@ index 000000000000..b56efaa8479c
 +#include "MediaFormatReader.h"
 +#include "MediaShutdownManager.h"
 +#include "mozilla/StaticPrefs_media.h"
++#include "mozilla/dom/Document.h"          // NotifyUserGestureActivation
 +#include "mozilla/dom/HTMLMediaElement.h"
++#include "mozilla/AsyncEventDispatcher.h"  // NotifyHostState's chrome event
++#include "mozilla/dom/Promise.h"           // the Play() promise, released unused
++#include "mozilla/ErrorResult.h"           // IgnoredErrorResult
++#include "nsAtom.h"                        // NS_Atomize
++#include "nsNameSpaceManager.h"            // kNameSpaceID_None
 +#include "nsContentUtils.h"
 +#include "nsIChannel.h"
 +#include "nsIScriptSecurityManager.h"
@@ -107,6 +113,9 @@ index 000000000000..b56efaa8479c
 +  kAVPlayerDestroy = 4,
 +  kAVPlayerSeek = 5,
 +  kAVPlayerVolume = 6,
++  // aArg != 0 lets the player go external (AirPlay video). Page policy
++  // only - the app's own kill switch is ANDed in on the Swift side.
++  kAVPlayerSetExternalPlayback = 7,
 +};
 +
 +// PARENT PROCESS ONLY: the real players, keyed by the composite id
@@ -133,6 +142,7 @@ index 000000000000..b56efaa8479c
 +void ReynardAVPlayerSendEnded(uint64_t aKey);
 +void ReynardAVPlayerSendError(uint64_t aKey);
 +void ReynardAVPlayerSendProtected(uint64_t aKey);
++void ReynardAVPlayerSendHostState(uint64_t aKey, uint32_t aKind, bool aValue);
 +// FairPlay, the same direction: app process -> the content process
 +// that asked for this player.
 +void ReynardFairPlaySendEncrypted(uint64_t aKey,
@@ -230,6 +240,24 @@ index 000000000000..b56efaa8479c
 +  NS_DispatchToMainThread(NS_NewRunnableFunction(
 +      "ReynardAVPlayerSendProtected",
 +      [aKey]() { ReynardAVPlayerSendProtected(aKey); }));
++}
++
++// A host fact for the owning process - external playback came or went,
++// or the receiver paused or resumed on its own. Same road as the
++// protected mark.
++static void ForwardHostStateToOwner(uint64_t aKey, uint32_t aKind,
++                                    bool aValue) {
++  printf_stderr(
++      "avPlayer: forwarding hostState kind=%u value=%d for key %llu\n", aKind,
++      aValue ? 1 : 0, (unsigned long long)aKey);
++  if (NS_IsMainThread()) {
++    ReynardAVPlayerSendHostState(aKey, aKind, aValue);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerSendHostState", [aKey, aKind, aValue]() {
++        ReynardAVPlayerSendHostState(aKey, aKind, aValue);
++      }));
 +}
 +
 +static void ForwardEndedToOwner(uint64_t aKey) {
@@ -1538,6 +1566,13 @@ index 000000000000..b56efaa8479c
 +    case kAVPlayerVolume:
 +      [host setVolume:playerId to:aArg];
 +      break;
++    case kAVPlayerSetExternalPlayback:
++      // Optional on the protocol, like the FairPlay methods: a host
++      // built before AirPlay simply keeps AVFoundation's default.
++      if ([host respondsToSelector:@selector(setExternalPlayback:allowed:)]) {
++        [host setExternalPlayback:playerId allowed:(aArg != 0.0)];
++      }
++      break;
 +    case kAVPlayerDestroy:
 +      [host destroy:playerId];
 +      players.erase(entry);
@@ -1592,6 +1627,13 @@ index 000000000000..b56efaa8479c
 +    case kAVPlayerVolume:
 +      [host setVolume:playerId to:aArg];
 +      break;
++    case kAVPlayerSetExternalPlayback:
++      // Optional on the protocol, like the FairPlay methods: a host
++      // built before AirPlay simply keeps AVFoundation's default.
++      if ([host respondsToSelector:@selector(setExternalPlayback:allowed:)]) {
++        [host setExternalPlayback:playerId allowed:(aArg != 0.0)];
++      }
++      break;
 +    case kAVPlayerDestroy:
 +      [host destroy:playerId];
 +      break;
@@ -1616,6 +1658,46 @@ index 000000000000..b56efaa8479c
 +  MOZ_ASSERT(NS_IsMainThread());
 +  static std::unordered_map<uintptr_t, AVPlayerDecoder*> sPlayersById;
 +  return sPlayersById;
++}
++
++// Whether the page keeps this element off AirPlay video. The three
++// attributes Safari honours, in the order
++// MediaElementSession::wirelessVideoPlaybackDisabled reads them: the
++// prefixed opt-out, then the legacy x-webkit-airplay - whose "allow"
++// is the one value that positively grants - then the Remote Playback
++// spec's attribute. None of the three has a static atom, and adding
++// one means regenerating nsGkAtoms.h and rebuilding most of the tree,
++// so they are atomised on the way in. Runs per attribute change and
++// once per Load, never per frame.
++//
++// The opt-out is spelled x-webkit-wirelessvideoplaybackdisabled in
++// WebKit's HTMLAttributeNames.in (the C++ identifier drops the x-
++// prefix, which is what the plan first copied); the bare spelling is
++// still honoured because the shim accepts it too.
++static bool ElementDeniesExternalPlayback(dom::HTMLMediaElement* aElement) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (!aElement) {
++    return false;
++  }
++  RefPtr<nsAtom> wirelessDisabled =
++      NS_Atomize(u"x-webkit-wirelessvideoplaybackdisabled"_ns);
++  RefPtr<nsAtom> wirelessDisabledBare =
++      NS_Atomize(u"webkitwirelessvideoplaybackdisabled"_ns);
++  if (aElement->HasAttr(wirelessDisabled) ||
++      aElement->HasAttr(wirelessDisabledBare)) {
++    return true;
++  }
++  RefPtr<nsAtom> legacyAirPlay = NS_Atomize(u"x-webkit-airplay"_ns);
++  if (aElement->AttrValueIs(kNameSpaceID_None, legacyAirPlay, u"deny"_ns,
++                            eIgnoreCase)) {
++    return true;
++  }
++  if (aElement->AttrValueIs(kNameSpaceID_None, legacyAirPlay, u"allow"_ns,
++                            eIgnoreCase)) {
++    return false;
++  }
++  RefPtr<nsAtom> disableRemote = NS_Atomize(u"disableremoteplayback"_ns);
++  return aElement->HasAttr(disableRemote);
 +}
 +
 +AVPlayerDecoder::AVPlayerDecoder(MediaDecoderInit& aInit)
@@ -1773,6 +1855,14 @@ index 000000000000..b56efaa8479c
 +  printf_stderr("avPlayer: initial volume for player %llu -> %.3f\n",
 +                (unsigned long long)mPlayerId, mVolume.Ref());
 +  SetVolume(mVolume);
++
++  // The element's AirPlay attributes, for the same reason: a page that
++  // writes x-webkit-airplay="deny" in its markup did so before there
++  // was a player to tell, and AfterSetAttr only pushes while mDecoder
++  // exists. Through the change-gated method rather than around it;
++  // mLastExternalPlaybackAllowedSent starts negative, so this first one
++  // is never gated away either.
++  NotifyExternalPlaybackPolicyChanged();
 +
 +  // The page can set mediaKeys before the element has a src, so the
 +  // proxy may already be here waiting for a player to name.
@@ -1969,6 +2059,30 @@ index 000000000000..b56efaa8479c
 +  ReynardMSEEnterNativeRoute(true);
 +  MediaDecoder::SetVolume(aVolume);
 +  ReynardMSEEnterNativeRoute(false);
++}
++
++// The element's say over AirPlay video, pushed to the player as opcode
++// 7. WebKit folds the same three attributes into allowsExternalPlayback
++// (MediaPlayerPrivateAVFoundationObjC::setWirelessVideoPlaybackDisabled),
++// and a site that writes x-webkit-airplay="deny" - a trailer it licenses
++// for the phone only - expects the picker to leave the picture at home.
++// Change-gated like the volume: AfterSetAttr calls this for every write
++// of the three, including ones that do not change the answer.
++void AVPlayerDecoder::NotifyExternalPlaybackPolicyChanged() {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (IsShutdown() || !mPlayerId) {
++    return;
++  }
++  MediaDecoderOwner* owner = GetOwner();
++  const bool allowed = !ElementDeniesExternalPlayback(
++      owner ? owner->GetMediaElement() : nullptr);
++  if (mLastExternalPlaybackAllowedSent == (allowed ? 1 : 0)) {
++    return;
++  }
++  mLastExternalPlaybackAllowedSent = allowed ? 1 : 0;
++  printf_stderr("avPlayer: decoder externalPlayback allowed player=%llu -> %d\n",
++                (unsigned long long)mPlayerId, allowed ? 1 : 0);
++  ControlPlayer(mPlayerId, kAVPlayerSetExternalPlayback, allowed ? 1.0 : 0.0);
 +}
 +
 +void AVPlayerDecoder::Pause() {
@@ -2281,6 +2395,93 @@ index 000000000000..b56efaa8479c
 +  }
 +}
 +
++// What the app process saw of our player. Two kinds today - see
++// PContent.ipdl's AVPlayerHostState.
++//
++// Kind 0, external playback. AVFoundation blanks an AVPlayerLayer during
++// external playback and WebKit skips painting; a frozen last frame
++// beside a TV that is playing is the one picture that is wrong. Forcing
++// a black, non-DRM placeholder is the same size and mark as the first
++// one, so the compositor keeps its AVSampleBufferDisplayLayer; real
++// frames resume through ReynardAVPlayerNotifyFrameData, which has no
++// guard. Then chrome is told, through a chrome-only event on the
++// element - the shape MozDOMFullscreen:Entered takes to reach the
++// GeckoView actors - so the actor can flip the element's
++// webkitCurrentPlaybackTargetIsWireless.
++//
++// Kind 1, a play or pause the page did not ask for: the Siri Remote, or
++// the receiver going away. Reflected as element->Play()/Pause() so the
++// element's paused state, its promises and its 'play'/'pause' events all
++// agree with the receiver, the way MediaControlKeyListener reflects the
++// lock screen. Re-entrancy is benign: Pause() reaches the host's
++// pause(id), which finds the player already paused. The Play() is
++// preceded by a user-activation grant, not assumed to have one - see
++// the kind 1 branch.
++void AVPlayerDecoder::NotifyHostState(uint32_t aKind, bool aValue) {
++  MOZ_ASSERT(NS_IsMainThread());
++  // Same teardown race as NotifyPlayerError above.
++  if (IsShutdown()) {
++    return;
++  }
++  MediaDecoderOwner* owner = GetOwner();
++  RefPtr<dom::HTMLMediaElement> element =
++      owner ? owner->GetMediaElement() : nullptr;
++  printf_stderr("avPlayer: hostState player=%llu kind=%u value=%d element=%d\n",
++                (unsigned long long)mPlayerId, aKind, aValue ? 1 : 0,
++                element ? 1 : 0);
++  switch (aKind) {
++    case 0: {
++      mExternalPlaybackActive = aValue;
++      if (aValue) {
++        // At the size of the picture on screen when there is one:
++        // mLastPlaceholderSize is only ever the geometry of a
++        // placeholder, which for a clear stream is the 1920x1080
++        // initial frame, and forcing that over a 640x360 picture
++        // would resize the element for the duration of the cast.
++        const gfx::IntSize size =
++            !mLastRealFrameSize.IsEmpty()
++                ? mLastRealFrameSize
++                : (mLastPlaceholderSize.IsEmpty() ? kInitialDisplay
++                                                  : mLastPlaceholderSize);
++        PublishPlaceholderFrame(size, /* aForceOverRealFrames */ true);
++      }
++      if (element) {
++        AsyncEventDispatcher::RunDOMEventWhenSafe(
++            *element,
++            aValue ? u"MozReynardAirPlayActive"_ns
++                   : u"MozReynardAirPlayInactive"_ns,
++            CanBubble::eYes, ChromeOnlyDispatch::eYes);
++      }
++      break;
++    }
++    case 1: {
++      if (!element) {
++        break;
++      }
++      if (aValue && element->Paused()) {
++        // The receiver's play button is the user's gesture, and Gecko
++        // never saw it. Granted here rather than assumed: Reynard runs
++        // media.autoplay.blocking_policy 1 (transient activation) for
++        // every Autoplay setting but Allow, so the tap that started the
++        // cast expired seconds ago, and a player whose play() ran from
++        // an async manifest or licence callback was never blessed -
++        // Play() would reject with NotAllowedError and leave the
++        // element paused beside a TV that is playing. The grant is
++        // both transient and sticky, so it passes under every policy.
++        element->OwnerDoc()->NotifyUserGestureActivation();
++        IgnoredErrorResult rv;
++        RefPtr<dom::Promise> promise = element->Play(rv);
++      } else if (!aValue && !element->Paused()) {
++        element->Pause();
++      }
++      break;
++    }
++    default:
++      printf_stderr("avPlayer: hostState kind %u unknown - dropped\n", aKind);
++      break;
++  }
++}
++
 +void AVPlayerDecoder::DispatchEncryptedFromKeySession(
 +    nsTArray<uint8_t>&& aInitData, const nsAString& aInitDataType) {
 +  MOZ_ASSERT(NS_IsMainThread());
@@ -2316,8 +2517,29 @@ index 000000000000..b56efaa8479c
 +// The surface is deliberately blank NV12 - the same bi-planar format
 +// IsEligiblePictureInPictureSurface already accepts - so the compositor
 +// path handling it is the one video normally takes.
-+void AVPlayerDecoder::PublishPlaceholderFrame(const gfx::IntSize& aDisplay) {
++//
++// aForceOverRealFrames is external playback's blank-the-local-picture
++// republish (NotifyHostState, kind 0). It bypasses exactly the two
++// skips that exist to avoid a redundant rebuild - "real frames are
++// flowing" and "same size, same mark" - and nothing else.
++void AVPlayerDecoder::PublishPlaceholderFrame(const gfx::IntSize& aDisplay,
++                                              bool aForceOverRealFrames) {
 +  MOZ_ASSERT(NS_IsMainThread());
++
++  // Computed up front: the force path and two of the guards below all
++  // ask it.
++  const bool isProtectedNow = !!mCDMProxy || mOutputStallProtected;
++
++  // A protected layer is AVFoundation's, bound through attachLayer:to:,
++  // and a republish over it would tear it down for a black frame the
++  // receiver makes irrelevant anyway. Refused outright rather than left
++  // to the guards below, which a fresh mark could slip past.
++  if (aForceOverRealFrames && isProtectedNow) {
++    printf_stderr(
++        "avPlayer: placeholder force SKIPPED - protected layer belongs to "
++        "AVFoundation\n");
++    return;
++  }
 +
 +  // Split out of one combined guard so a log line names the actual
 +  // cause. Every return in this function used to be bare, which is why
@@ -2343,7 +2565,8 @@ index 000000000000..b56efaa8479c
 +  // mHasPublishedProtectedPlaceholder caps it at one republish.
 +  const bool republishForProtection =
 +      mOutputStallProtected && !mHasPublishedProtectedPlaceholder;
-+  if (mHasPublishedRealFrame && !republishForProtection) {
++  if (mHasPublishedRealFrame && !republishForProtection &&
++      !aForceOverRealFrames) {
 +    printf_stderr(
 +        "avPlayer: placeholder SKIPPED - real frames are already flowing\n");
 +    return;
@@ -2351,6 +2574,10 @@ index 000000000000..b56efaa8479c
 +  if (republishForProtection) {
 +    printf_stderr(
 +        "avPlayer: placeholder republished to mark a stalled output DRM\n");
++  }
++  if (aForceOverRealFrames) {
++    printf_stderr(
++        "avPlayer: placeholder forced over real frames - external playback\n");
 +  }
 +
 +  // Protected content never sets mHasPublishedRealFrame, because the
@@ -2368,14 +2595,14 @@ index 000000000000..b56efaa8479c
 +  // always a regression, and it is what turns a settled AVPlayerLayer
 +  // back into an AVSampleBufferDisplayLayer. And a republish at the same
 +  // geometry and the same mark changes nothing the compositor needs, so
-+  // it only costs a rebuild.
-+  const bool isProtectedNow = !!mCDMProxy || mOutputStallProtected;
++  // it only costs a rebuild - unless that rebuild is the point, which
++  // is what the force flag says.
 +  if (mHasPublishedProtectedPlaceholder && !isProtectedNow) {
 +    printf_stderr(
 +        "avPlayer: placeholder SKIPPED - would unmark a protected layer\n");
 +    return;
 +  }
-+  if (mLastPlaceholderSize == aDisplay &&
++  if (!aForceOverRealFrames && mLastPlaceholderSize == aDisplay &&
 +      mLastPlaceholderWasProtected == isProtectedNow) {
 +    printf_stderr(
 +        "avPlayer: placeholder SKIPPED - same %dx%d and same DRM=%d\n",
@@ -2746,6 +2973,7 @@ index 000000000000..b56efaa8479c
 +        // Latched before publishing, so a metadata callback that runs
 +        // between this and the next frame cannot slip a placeholder in.
 +        entry->second->mHasPublishedRealFrame = true;
++        entry->second->mLastRealFrameSize = size;
 +        entry->second->mSawRealFrameSincePoke = true;
 +
 +        RefPtr<mozilla::layers::Image> image =
@@ -2825,6 +3053,36 @@ index 000000000000..b56efaa8479c
 +          return;
 +        }
 +        entry->second->MarkProtectedByOutputStall();
++      }));
++}
++
++// AirPlay: the app process saw its player go external or come back
++// (AVPlayer.isExternalPlaybackActive), or saw the receiver pause or
++// resume it (timeControlStatus) - both KVO on the GCD main queue, which
++// is not Gecko's main thread in every process, so this is any-thread
++// like its siblings. Crosses to the owning content process exactly as
++// the protected mark does; there the decoder blanks the local picture
++// and tells the element. Kept out of the dead-strip by
++// ContentChild::RecvAVPlayerHostState, not by the anchor array below.
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyHostState(uintptr_t aPlayerId,
++                                                          uint32_t aKind,
++                                                          bool aValue) {
++  printf_stderr("avPlayer: hostState callback player=%llu kind=%u value=%d\n",
++                (unsigned long long)aPlayerId, aKind, aValue ? 1 : 0);
++  if (const uint64_t key = mozilla::BrokeredKeyFor(aPlayerId)) {
++    mozilla::ForwardHostStateToOwner(key, aKind, aValue);
++    return;
++  }
++  NS_DispatchToMainThread(NS_NewRunnableFunction(
++      "ReynardAVPlayerNotifyHostState", [aPlayerId, aKind, aValue]() {
++        MOZ_ASSERT(NS_IsMainThread());
++        auto& players = mozilla::PlayersById();
++        auto entry = players.find(aPlayerId);
++        if (entry == players.end()) {
++          // Teardown race, same as the other callbacks: dropped.
++          return;
++        }
++        entry->second->NotifyHostState(aKind, aValue);
 +      }));
 +}
 +
@@ -3159,6 +3417,7 @@ index 000000000000..b56efaa8479c
 +  // Latched before publishing, so a metadata callback cannot slip a
 +  // placeholder in over live video.
 +  entry->second->mHasPublishedRealFrame = true;
++  entry->second->mLastRealFrameSize = mozilla::gfx::IntSize(aWidth, aHeight);
 +  entry->second->mSawRealFrameSincePoke = true;
 +
 +  RefPtr<mozilla::layers::Image> image =

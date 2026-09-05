@@ -1,8 +1,8 @@
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index 23fb64851635..6afd9d5f25df 100644
+index 3bb04a55ab7c..1e2c08d857e9 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -571,9 +571,119 @@ parent:
+@@ -575,9 +575,129 @@ parent:
      async UpdateRemotePrintSettings(MaybeDiscardedBrowsingContext aBc,
                                      PrintData aPrintData);
  
@@ -15,8 +15,10 @@ index 23fb64851635..6afd9d5f25df 100644
 +    // returns '!pla' - so a player created here never sustains
 +    // playback. AVPlayerDecoder therefore drives one over these two
 +    // messages instead. aOp is AVPlayerDecoder's control opcode
-+    // (play/pause/suspend/resume/destroy/seek); aArg carries the seek
-+    // target and is ignored otherwise.
++    // (0 play, 1 pause, 2 suspend, 3 resume, 4 destroy, 5 seek,
++    // 6 volume, 7 set external playback); aArg carries the seek target,
++    // the volume, or 0/1 for external playback, and is ignored
++    // otherwise.
 +    async AVPlayerCreate(uint64_t aPlayerId, nsCString aUrl);
 +    async AVPlayerControl(uint64_t aPlayerId, uint32_t aOp, double aArg);
 +
@@ -85,6 +87,14 @@ index 23fb64851635..6afd9d5f25df 100644
 +    // AVPlayerDecoder::MaybeMarkProtectedOutputStall.
 +    async AVPlayerProtected(uint64_t aPlayerId);
 +
++    // Reynard AirPlay: a fact about the app-process player only the app
++    // can observe. aKind 0 = external playback (AVPlayer.
++    // isExternalPlaybackActive); aKind 1 = playback state the page did
++    // not ask for (Siri Remote pause/play, AirPlay route loss): true =
++    // playing, false = paused. Generic on purpose: a later host fact is
++    // a new kind, not a new message, so this stays the only IPDL edit.
++    async AVPlayerHostState(uint64_t aPlayerId, uint32_t aKind, bool aValue);
++
 +    // Reynard FairPlay, the other direction.
 +    //
 +    // The asset reached an EXT-X-KEY nothing has claimed yet. The page
@@ -122,7 +132,7 @@ index 23fb64851635..6afd9d5f25df 100644
      async ConstructBrowser(ManagedEndpoint<PBrowserChild> browserEp,
                             ManagedEndpoint<PWindowGlobalChild> windowEp,
                             TabId tabId,
-@@ -604,7 +714,8 @@ child:
+@@ -608,7 +728,8 @@ child:
        Endpoint<PImageBridgeChild> imageBridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,
@@ -132,7 +142,7 @@ index 23fb64851635..6afd9d5f25df 100644
  
      // Re-create the rendering stack using the given endpoints. This is sent
      // after the compositor process has crashed. The new endpoints may be to a
-@@ -614,7 +725,8 @@ child:
+@@ -618,7 +739,8 @@ child:
        Endpoint<PImageBridgeChild> bridge,
        Endpoint<PVRManagerChild> vr,
        Endpoint<PRemoteMediaManagerChild> video,

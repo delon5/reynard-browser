@@ -1,0 +1,106 @@
+diff --git a/mobile/shared/actors/GeckoViewContentParent.sys.mjs b/mobile/shared/actors/GeckoViewContentParent.sys.mjs
+index ebe505d0bab0..a87ec7aeb866 100644
+--- a/mobile/shared/actors/GeckoViewContentParent.sys.mjs
++++ b/mobile/shared/actors/GeckoViewContentParent.sys.mjs
+@@ -15,9 +15,57 @@ ChromeUtils.defineESModuleGetters(lazy, {
+ 
+ const { debug, warn } = GeckoViewUtils.initLogging("GeckoViewContentParent");
+ 
++// Reynard AirPlay: "a page in this tab is watching for AirPlay targets",
++// counted per <browser>.
++//
++// The app keeps one such reason per session, but this actor is per
++// document - the top page and every iframe each have one, and each comes
++// and goes with its own document. Forwarding every actor's own true/false
++// would let a dying ad frame switch the tab's watch off while the player
++// frame is still listening. So the actors watching under one <browser>
++// are counted here, and the app hears one boolean per session: true on
++// the first, false after the last (or when the last one is destroyed
++// mid-watch - see didDestroy).
++const gReynardAirPlayWatchers = new WeakMap();
++
++function reynardAirPlayWatchEdge(aBrowser, aActor, aWatching) {
++  let watchers = gReynardAirPlayWatchers.get(aBrowser);
++  if (!watchers) {
++    watchers = new Set();
++    gReynardAirPlayWatchers.set(aBrowser, watchers);
++  }
++  const before = watchers.size > 0;
++  if (aWatching) {
++    watchers.add(aActor);
++  } else {
++    watchers.delete(aActor);
++  }
++  const after = watchers.size > 0;
++  return before === after ? null : after;
++}
++
+ export class GeckoViewContentParent extends GeckoViewActorParent {
+   didDestroy() {
+     this._didDestroy = true;
++    // Reynard AirPlay: an actor that dies while watching (navigation, tab
++    // close, content-process crash) can no longer send its own
++    // "watching: false", so its share is released here. The browser and
++    // dispatcher were cached when it first watched - by now
++    // this.browsingContext may already be gone, hence the try as well.
++    try {
++      if (this._airPlayBrowser) {
++        const edge = reynardAirPlayWatchEdge(
++          this._airPlayBrowser,
++          this,
++          false
++        );
++        if (edge !== null) {
++          this._airPlayDispatcher?.sendRequest("GeckoView:AirPlay:Watch", {
++            watching: edge,
++          });
++        }
++      }
++    } catch (e) {}
+   }
+ 
+   async containsFormData() {
+@@ -32,6 +80,43 @@ export class GeckoViewContentParent extends GeckoViewActorParent {
+           aMsg.data
+         );
+       }
++      case "GeckoView:AirPlay:ShowPicker": {
++        // Reynard: the picker is an app-process AVRoutePickerView; the
++        // string it answers with ("selected", "dismissed", "unavailable")
++        // resolves the page's remote.prompt(). Same route as
++        // GeckoView:MediaSession:Fullscreen in MediaControlDelegateParent.
++        return this.eventDispatcher.sendRequestForResult(
++          "GeckoView:AirPlay:ShowPicker",
++          aMsg.data
++        );
++      }
++      case "GeckoView:AirPlay:Watch": {
++        // Reynard: counted per <browser> - see reynardAirPlayWatchEdge.
++        // The browser and dispatcher are cached for didDestroy, which
++        // may run after the browsing context is gone.
++        try {
++          const { browser, eventDispatcher } = this;
++          if (!browser || !eventDispatcher) {
++            return undefined;
++          }
++          this._airPlayBrowser = browser;
++          this._airPlayDispatcher = eventDispatcher;
++          const edge = reynardAirPlayWatchEdge(
++            browser,
++            this,
++            !!aMsg.data?.watching
++          );
++          if (edge !== null) {
++            debug`airplay watch -> ${edge}`;
++            eventDispatcher.sendRequest("GeckoView:AirPlay:Watch", {
++              watching: edge,
++            });
++          }
++        } catch (e) {
++          warn`airplay watch failed: ${e}`;
++        }
++        return undefined;
++      }
+       default: {
+         return super.receiveMessage(aMsg);
+       }

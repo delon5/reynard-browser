@@ -1,11 +1,11 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15..18d37f0 100644
+index 9ca6e15bed3e..a28a4a80e20e 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,3969 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,5297 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
-
+ 
 +// Reynard: Apple's legacy prefixed EME (WebKitMediaKeys), implemented
 +// over standard EME, for the Safari-targeted players that use it.
 +//
@@ -3969,13 +3969,1341 @@ index 9ca6e15..18d37f0 100644
 +  "tv.apple.com",
 +];
 +
++// Reynard AirPlay: the hosts that get Safari's AirPlay surface.
++//
++// The EME list above plus the Safari-UA list in UserAgentPolicy.swift -
++// hulu, peacocktv and paramountplus carry the Safari user agent without
++// ever needing prefixed EME. A host that presents as Safari must also
++// answer Safari's AirPlay feature-detect: a player that finds
++// WebKitPlaybackTargetAvailabilityEvent missing on "Safari" draws no
++// button, or an inert one. Everything else stays off unless
++// media.reynard.airplay.shim.all-hosts or the extra-hosts pref says
++// otherwise - YouTube gets the Android UA and looks for Cast, not
++// AirPlay, and a sandbox eval per subframe across the web is the cost
++// the comment above refuses. Matched like the EME list: exact host or
++// any subdomain.
++const AIRPLAY_SHIM_HOSTS = [
++  "primevideo.com",
++  "max.com",
++  "hbomax.com",
++  "disneyplus.com",
++  "netflix.com",
++  "tv.apple.com",
++  "hulu.com",
++  "peacocktv.com",
++  "paramountplus.com",
++];
++
++// Reynard AirPlay: one pref observer per content process, fanning out to
++// every live actor's shim.
++//
++// "AirPlay targets exist" and "the current route's name" are app-wide
++// facts. The app publishes them on the default pref branch
++// (GeckoRuntime.setDefaultPrefs -> media.reynard.airplay.available and
++// .route-name), the parent forwards default-branch changes to every
++// content process, and this observer hands each change to every shim
++// in the process. Installed with the first shim and never removed - one
++// object per process, walking a Set the actors leave in didDestroy.
++const gReynardAirPlayActors = new Set();
++let gReynardAirPlayPrefObserver = null;
++
++function reynardWatchAirPlayPrefs() {
++  if (gReynardAirPlayPrefObserver) {
++    return;
++  }
++  gReynardAirPlayPrefObserver = {
++    QueryInterface: ChromeUtils.generateQI(["nsIObserver"]),
++    observe(aSubject, aTopic, aData) {
++      if (aTopic !== "nsPref:changed") {
++        return;
++      }
++      // Hooks are called detached, never as methods: the record they
++      // sit in is a chrome object, and a sandbox function must not
++      // receive one as `this`.
++      let deliver = null;
++      if (aData === "media.reynard.airplay.available") {
++        const available = Services.prefs.getBoolPref(aData, false);
++        deliver = ({ onAvailability }) => onAvailability?.(available);
++      } else if (aData === "media.reynard.airplay.route-name") {
++        const name = Services.prefs.getStringPref(aData, "");
++        deliver = ({ onRoute }) => onRoute?.(name);
++      } else {
++        return;
++      }
++      for (const actor of gReynardAirPlayActors) {
++        try {
++          // didDestroy is not guaranteed; an actor whose window is gone
++          // throws on contentWindow, and that is its exit from the Set.
++          if (!actor.contentWindow) {
++            gReynardAirPlayActors.delete(actor);
++            continue;
++          }
++          const shim = actor._airPlayShim;
++          if (shim) {
++            deliver(shim);
++          }
++        } catch (e) {
++          gReynardAirPlayActors.delete(actor);
++          warn`airplay pref fan-out dropped an actor: ${e}`;
++        }
++      }
++    },
++  };
++  try {
++    Services.prefs.addObserver(
++      "media.reynard.airplay.",
++      gReynardAirPlayPrefObserver
++    );
++  } catch (e) {
++    gReynardAirPlayPrefObserver = null;
++    warn`airplay pref observer could not be installed: ${e}`;
++  }
++}
++
++// Reynard AirPlay: the page-facing shim. A second template literal, kept
++// apart from the EME one: different pref, different host list, and a
++// live channel back to the actor (airPlayBridge) the EME shim never
++// needed. The no-backslash rule of the EME shim applies here too.
++const AIRPLAY_SHIM = `
++/*
++ * airplay-shim.js - Safari's prefixed AirPlay surface and the Remote
++ * Playback API facade, for the Safari-targeted players Reynard already
++ * presents a Safari user agent to.
++ *
++ * WHAT A PAGE SEES
++ *   window.WebKitPlaybackTargetAvailabilityEvent   (the feature-detect)
++ *   video.webkitShowPlaybackTargetPicker()
++ *   video.webkitCurrentPlaybackTargetIsWireless
++ *   video.webkitWirelessVideoPlaybackDisabled       (HTMLVideoElement)
++ *   'webkitplaybacktargetavailabilitychanged'       event.availability
++ *   'webkitcurrentplaybacktargetiswirelesschanged'
++ *   x-webkit-airplay="deny", x-webkit-wirelessvideoplaybackdisabled,
++ *   disableremoteplayback / video.disableRemotePlayback
++ *   video.remote (RemotePlayback), when the app enables it
++ *
++ * WHERE THE FACTS COME FROM
++ *   "Targets exist" and the route name are app-wide: the app publishes
++ *   them on a pref the actor observes, and the actor calls onAvailability
++ *   and onRoute here. "This element is wireless" is per player: the app
++ *   reports it for the element's AVPlayer and the actor calls onWireless
++ *   with the element. The shim learns nothing else - in particular it
++ *   cannot tell which decoder an element got, so an element Gecko decodes
++ *   itself is never wireless and remote.prompt() on it settles to
++ *   "disconnected" after a grace period.
++ *
++ * THE SHAPE, AND WHY
++ *   Runs in its own Cu.Sandbox over the page's window, before page
++ *   script, like the EME shim. Everything the page can hold is a
++ *   page-realm object - window.Event, window.EventTarget, window.Promise,
++ *   window.DOMException - because a sandbox-realm object fails the page's
++ *   instanceof (see the typed-array note in the EME shim). __reynardAirPlay
++ *   is the one way back to the actor; it returns nothing and answers
++ *   through callbacks, so no chrome object ever lands in the page.
++ *
++ *   No backslash may appear anywhere in this file: it ships inside a
++ *   template literal, which eats one. See the EME shim.
++ */
++(function () {
++  "use strict";
++
++  if (
++    typeof window === "undefined" ||
++    window.WebKitPlaybackTargetAvailabilityEvent
++  ) {
++    return; // real Safari, or already installed
++  }
++  var HTMLMediaElement = window.HTMLMediaElement;
++  var HTMLVideoElement = window.HTMLVideoElement;
++  // The gesture gate goes through these accessors, captured now, before
++  // any page script runs. With Xrays off, "navigator" in here is the
++  // page's own object, and an own userActivation property the page put on
++  // it would stand in for the real one and forge a gesture.
++  var uaDesc =
++    window.Navigator &&
++    Object.getOwnPropertyDescriptor(
++      window.Navigator.prototype,
++      "userActivation"
++    );
++  var isActiveDesc =
++    window.UserActivation &&
++    Object.getOwnPropertyDescriptor(
++      window.UserActivation.prototype,
++      "isActive"
++    );
++  var hasBeenActiveDesc =
++    window.UserActivation &&
++    Object.getOwnPropertyDescriptor(
++      window.UserActivation.prototype,
++      "hasBeenActive"
++    );
++  if (
++    !HTMLMediaElement ||
++    !window.EventTarget ||
++    !window.Event ||
++    !window.Promise ||
++    typeof window.MutationObserver !== "function" ||
++    !uaDesc ||
++    !uaDesc.get ||
++    !isActiveDesc ||
++    !isActiveDesc.get ||
++    !hasBeenActiveDesc ||
++    !hasBeenActiveDesc.get
++  ) {
++    return; // nothing to build on
++  }
++  var uaGet = uaDesc.get;
++  var isActiveGet = isActiveDesc.get;
++  var hasBeenActiveGet = hasBeenActiveDesc.get;
++
++  var LOG = "airplay:";
++  function debug() {
++    var args = [].slice.call(arguments);
++    try {
++      console.debug.apply(console, [LOG].concat(args));
++    } catch (e) {}
++    // console.debug does not reach a device capture. __reynardAirPlayLog
++    // is exported into the sandbox by the actor and writes to stdout,
++    // beside the avPlayer: and airPlay: lines.
++    try {
++      if (typeof __reynardAirPlayLog === "function") {
++        __reynardAirPlayLog(args.join(" "));
++      }
++    } catch (e) {}
++  }
++
++  // The one channel to the actor. Returns whether the call was made -
++  // never what it produced; results arrive through the callback in b.
++  function bridge(op, a, b) {
++    try {
++      if (typeof __reynardAirPlay === "function") {
++        __reynardAirPlay(op, a, b);
++        return true;
++      }
++    } catch (e) {
++      debug("bridge " + op + " failed:", String(e));
++    }
++    return false;
++  }
++
++  function describe(el) {
++    try {
++      return el.localName + (el.id ? "#" + el.id : "");
++    } catch (e) {
++      return "?";
++    }
++  }
++
++  var AVAILABILITY_EVENT = "webkitplaybacktargetavailabilitychanged";
++  var WIRELESS_EVENT = "webkitcurrentplaybacktargetiswirelesschanged";
++  // Both spellings of the wireless attribute are honoured. Safari's is
++  // x-webkit-wirelessvideoplaybackdisabled (HTMLAttributeNames.in); the
++  // un-prefixed one is what the engine side keys the player policy on.
++  var DISABLE_ATTRIBUTES = [
++    "x-webkit-airplay",
++    "x-webkit-wirelessvideoplaybackdisabled",
++    "webkitwirelessvideoplaybackdisabled",
++    "disableremoteplayback",
++  ];
++
++  // Copied in by the actor at install; kept current by onAvailability
++  // and onRoute afterwards.
++  var cachedAvailable =
++    typeof __reynardAirPlayAvailable === "boolean"
++      ? __reynardAirPlayAvailable
++      : false;
++  var cachedRouteName =
++    typeof __reynardAirPlayRouteName === "string"
++      ? __reynardAirPlayRouteName
++      : "";
++  var remoteEnabled =
++    typeof __reynardAirPlayRemoteEnabled === "boolean"
++      ? __reynardAirPlayRemoteEnabled
++      : true;
++
++  var wirelessByElement = new WeakMap(); // el -> true while wireless
++  var listenersByElement = new WeakMap(); // el -> Set of listener entries
++  var lastAvailability = new WeakMap(); // el -> last value it was told
++  var lastDisabled = new WeakMap(); // el -> last isDisabled() seen
++  var attrObservers = new WeakMap(); // el -> MutationObserver
++  var remotes = new WeakMap(); // el -> RemotePlayback
++  var remoteInfos = new WeakMap(); // RemotePlayback -> state record
++  // Strong on purpose, like Safari's media session keeps such elements;
++  // bounded by the document, emptied as listeners go.
++  var tracked = new Set(); // availability listener, callback or pending prompt
++  var watchedElements = new Set(); // tracked and not disabled
++  var watching = false;
++  var everWatched = false;
++  var pageHidden = false;
++
++  function attrValue(el, name) {
++    try {
++      var value = el.getAttribute(name);
++      return typeof value === "string" ? value.toLowerCase() : null;
++    } catch (e) {
++      return null;
++    }
++  }
++  function hasAttr(el, name) {
++    try {
++      return el.hasAttribute(name);
++    } catch (e) {
++      return false;
++    }
++  }
++
++  // HTMLMediaElement::isWirelessPlaybackTargetDisabledChanged: "deny",
++  // or either disabling attribute present. A disabled element gets no
++  // availability events, its picker call is a no-op and remote.* reject.
++  function isDisabled(el) {
++    return (
++      attrValue(el, "x-webkit-airplay") === "deny" ||
++      hasAttr(el, "x-webkit-wirelessvideoplaybackdisabled") ||
++      hasAttr(el, "webkitwirelessvideoplaybackdisabled") ||
++      hasAttr(el, "disableremoteplayback")
++    );
++  }
++
++  // ---- WebKitPlaybackTargetAvailabilityEvent ------------------------------
++  //
++  // A page-realm Event re-prototyped onto our constructor, so that both
++  // "e instanceof WebKitPlaybackTargetAvailabilityEvent" and
++  // "e instanceof Event" hold and dispatchEvent still accepts it. The
++  // sandbox cannot subclass the page's Event directly - a sandbox-realm
++  // class extends the sandbox's Event, which the page's dispatchEvent
++  // would reject.
++  function WebKitPlaybackTargetAvailabilityEvent(type, init) {
++    if (!(this instanceof WebKitPlaybackTargetAvailabilityEvent)) {
++      throw new window.TypeError(
++        "WebKitPlaybackTargetAvailabilityEvent requires 'new'"
++      );
++    }
++    if (arguments.length < 1) {
++      throw new window.TypeError(
++        "WebKitPlaybackTargetAvailabilityEvent requires a type"
++      );
++    }
++    var event = new window.Event(String(type), init);
++    var availability =
++      init && init.availability !== undefined
++        ? String(init.availability)
++        : "not-available";
++    Object.defineProperty(event, "availability", {
++      value: availability,
++      enumerable: true,
++      configurable: true,
++    });
++    Object.setPrototypeOf(event, Object.getPrototypeOf(this));
++    return event;
++  }
++  WebKitPlaybackTargetAvailabilityEvent.prototype = Object.create(
++    window.Event.prototype,
++    {
++      constructor: {
++        value: WebKitPlaybackTargetAvailabilityEvent,
++        writable: true,
++        configurable: true,
++      },
++    }
++  );
++  Object.defineProperty(
++    WebKitPlaybackTargetAvailabilityEvent.prototype,
++    Symbol.toStringTag,
++    { value: "WebKitPlaybackTargetAvailabilityEvent", configurable: true }
++  );
++
++  // ---- availability ---------------------------------------------------------
++
++  function availabilityFor(el) {
++    return !isDisabled(el) && cachedAvailable ? "available" : "not-available";
++  }
++
++  // on<event> expandos are not IDL attributes here, so dispatchEvent does
++  // not reach them - same hand-off as the EME shim's webkitneedkey.
++  function callInlineHandler(el, type, event) {
++    try {
++      var handler = el["on" + type];
++      if (typeof handler === "function") {
++        handler.call(el, event);
++      }
++    } catch (e) {
++      debug("on" + type + " threw:", String(e));
++    }
++  }
++
++  // {once: true} listeners are gone from the DOM after the first event;
++  // this is the only place these two events are dispatched from, so the
++  // bookkeeping can follow suit here.
++  function pruneOnceListeners(el, type) {
++    var set = listenersByElement.get(el);
++    if (!set) {
++      return;
++    }
++    var changed = false;
++    set.forEach(function (entry) {
++      if (entry.once && entry.type === type) {
++        set.delete(entry);
++        changed = true;
++      }
++    });
++    if (changed) {
++      refresh(el);
++    }
++  }
++
++  // enqueuePlaybackTargetAvailabilityChangedEvent. "always" is Safari's
++  // EnqueueBehavior::Always; otherwise only when the value differs from
++  // the last one this element was told (which starts out as
++  // "not-available"). Async, as Safari's scheduleEvent is.
++  function deliverAvailability(el, always) {
++    var value = availabilityFor(el);
++    var last = lastAvailability.has(el)
++      ? lastAvailability.get(el)
++      : "not-available";
++    if (!always && last === value) {
++      return;
++    }
++    lastAvailability.set(el, value);
++    debug("availability " + describe(el) + " -> " + value);
++    setTimeout(function () {
++      try {
++        var event = new WebKitPlaybackTargetAvailabilityEvent(
++          AVAILABILITY_EVENT,
++          { availability: value }
++        );
++        el.dispatchEvent(event);
++        callInlineHandler(el, AVAILABILITY_EVENT, event);
++        pruneOnceListeners(el, AVAILABILITY_EVENT);
++      } catch (e) {
++        debug("availability event failed:", String(e));
++      }
++    }, 0);
++  }
++
++  function queueCallback(callback, available) {
++    setTimeout(function () {
++      try {
++        callback(available);
++      } catch (e) {
++        debug("availability callback threw:", String(e));
++      }
++    }, 0);
++  }
++
++  // RemotePlayback::availabilityChanged - the callbacks hear a change
++  // once each, from their own last value.
++  function notifyRemoteAvailability(el) {
++    var remote = remotes.get(el);
++    var info = remote && remoteInfos.get(remote);
++    if (!info) {
++      return;
++    }
++    var available = availabilityFor(el) === "available";
++    if (info.available === available) {
++      return;
++    }
++    info.available = available;
++    info.callbacks.forEach(function (callback) {
++      queueCallback(callback, available);
++    });
++  }
++
++  // From the actor: the app-wide "AirPlay targets exist" bit changed.
++  function onAvailability(available) {
++    available = !!available;
++    if (available === cachedAvailable) {
++      return;
++    }
++    cachedAvailable = available;
++    debug(
++      "targets " +
++        (available ? "available" : "not available") +
++        " - " +
++        watchedElements.size +
++        " element(s) listening"
++    );
++    watchedElements.forEach(function (el) {
++      deliverAvailability(el, false);
++      notifyRemoteAvailability(el);
++    });
++  }
++
++  // From the actor: the name of the current AirPlay route ("" when the
++  // route is local). Nothing page-facing reads it - Safari only shows it
++  // in its own placard - but it names the receiver in the log.
++  function onRoute(name) {
++    name = typeof name === "string" ? name : "";
++    if (name === cachedRouteName) {
++      return;
++    }
++    cachedRouteName = name;
++    debug("route -> " + (name ? name : "(local)"));
++  }
++
++  // ---- who is listening, and whether to watch ---------------------------
++
++  // Only availability listeners count, as in Safari's addEventListener
++  // override: a page that wants nothing but the iswireless event gets it
++  // straight from setWireless and must not start route monitoring (or
++  // flip everWatched, which changes what remote.prompt() rejects with).
++  // Wireless entries stay in the Set for removeEventListener and
++  // pruneOnceListeners to find.
++  function hasListeners(el) {
++    var set = listenersByElement.get(el);
++    var listening = false;
++    if (set) {
++      set.forEach(function (entry) {
++        if (entry.type === AVAILABILITY_EVENT) {
++          listening = true;
++        }
++      });
++    }
++    if (listening) {
++      return true;
++    }
++    var remote = remotes.get(el);
++    var info = remote && remoteInfos.get(remote);
++    return !!(info && (info.callbacks.size || info.pending.length));
++  }
++
++  function refresh(el) {
++    var listening = hasListeners(el);
++    if (listening && !tracked.has(el)) {
++      tracked.add(el);
++      lastDisabled.set(el, isDisabled(el));
++      observeAttributes(el);
++    } else if (!listening && tracked.has(el)) {
++      tracked.delete(el);
++      unobserveAttributes(el);
++    }
++    var enabled = listening && !isDisabled(el);
++    if (enabled && !watchedElements.has(el)) {
++      watchedElements.add(el);
++    } else if (!enabled && watchedElements.has(el)) {
++      watchedElements.delete(el);
++    }
++    syncWatch();
++  }
++
++  // MediaElementSession::requiresPlaybackTargetRouteMonitoring, per
++  // document rather than per element: someone is listening and the
++  // document is visible. The app turns its AVRouteDetector on for the
++  // first watching document and off after the last; the actor and its
++  // parent send the final "off" if the document goes away first.
++  function syncWatch() {
++    var hidden = pageHidden;
++    try {
++      hidden = hidden || document.visibilityState === "hidden";
++    } catch (e) {}
++    var want = watchedElements.size > 0 && !hidden;
++    if (want === watching) {
++      return;
++    }
++    watching = want;
++    if (want) {
++      everWatched = true;
++    }
++    debug(
++      "watch " +
++        (want ? "on" : "off") +
++        " (" +
++        watchedElements.size +
++        " element(s)" +
++        (hidden ? ", document hidden" : "") +
++        ")"
++    );
++    bridge("watch", want);
++  }
++
++  function observeAttributes(el) {
++    if (attrObservers.has(el)) {
++      return;
++    }
++    try {
++      var observer = new window.MutationObserver(function () {
++        disabledMayHaveChanged(el);
++      });
++      observer.observe(el, {
++        attributes: true,
++        attributeFilter: DISABLE_ATTRIBUTES,
++      });
++      attrObservers.set(el, observer);
++    } catch (e) {
++      debug("attribute observer failed:", String(e));
++    }
++  }
++  function unobserveAttributes(el) {
++    var observer = attrObservers.get(el);
++    if (!observer) {
++      return;
++    }
++    attrObservers.delete(el);
++    try {
++      observer.disconnect();
++    } catch (e) {}
++  }
++
++  // HTMLMediaElement::isWirelessPlaybackTargetDisabledChanged. Re-enabling
++  // arms the listeners again and fires one event unconditionally;
++  // disabling fires one last "not-available" only if the element was
++  // last told "available", so a player can grey out its button. (WebKit
++  // source, not the spec.)
++  function disabledMayHaveChanged(el) {
++    var disabled = isDisabled(el);
++    if (lastDisabled.get(el) === disabled) {
++      return;
++    }
++    lastDisabled.set(el, disabled);
++    debug(
++      "wireless playback " +
++        (disabled ? "disabled" : "enabled") +
++        " by attribute on " +
++        describe(el)
++    );
++    refresh(el);
++    if (!hasListeners(el)) {
++      return;
++    }
++    if (!disabled || lastAvailability.get(el) === "available") {
++      deliverAvailability(el, true);
++    }
++    notifyRemoteAvailability(el);
++  }
++
++  // ---- HTMLMediaElement surface -------------------------------------------
++
++  var nativeAddEventListener = window.EventTarget.prototype.addEventListener;
++  var nativeRemoveEventListener =
++    window.EventTarget.prototype.removeEventListener;
++
++  function isAirPlayEventType(type) {
++    return type === AVAILABILITY_EVENT || type === WIRELESS_EVENT;
++  }
++  function captureOf(options) {
++    if (options === true) {
++      return true;
++    }
++    return !!(options && typeof options === "object" && options.capture);
++  }
++  function onceOf(options) {
++    return !!(options && typeof options === "object" && options.once);
++  }
++  function findEntry(set, type, listener, capture) {
++    var found = null;
++    set.forEach(function (entry) {
++      if (
++        !found &&
++        entry.type === type &&
++        entry.listener === listener &&
++        entry.capture === capture
++      ) {
++        found = entry;
++      }
++    });
++    return found;
++  }
++
++  function noteListenerAdded(el, type, listener, options) {
++    var signal =
++      options && typeof options === "object" ? options.signal : null;
++    if (signal && signal.aborted) {
++      return; // the DOM added nothing
++    }
++    var set = listenersByElement.get(el);
++    if (!set) {
++      set = new Set();
++      listenersByElement.set(el, set);
++    }
++    var capture = captureOf(options);
++    if (findEntry(set, type, listener, capture)) {
++      return; // the DOM ignored the duplicate, and so does Safari
++    }
++    var entry = {
++      type: type,
++      listener: listener,
++      capture: capture,
++      once: onceOf(options),
++    };
++    set.add(entry);
++    // An abort removes the DOM listener without going through the
++    // removeEventListener shadow, so the entry has to go here, or the
++    // element stays pinned and watched until the document dies.
++    if (signal) {
++      try {
++        nativeAddEventListener.call(
++          signal,
++          "abort",
++          function () {
++            if (set.delete(entry)) {
++              refresh(el);
++            }
++          },
++          { once: true }
++        );
++      } catch (e) {}
++    }
++    var first = !tracked.has(el);
++    refresh(el);
++    if (type !== AVAILABILITY_EVENT) {
++      return;
++    }
++    if (isDisabled(el)) {
++      debug(
++        "availability listener on " +
++          describe(el) +
++          " parked - the element disables wireless playback"
++      );
++      return;
++    }
++    if (first) {
++      debug("first AirPlay listener on " + describe(el));
++    }
++    // "Ensure the event listener gets at least one event."
++    deliverAvailability(el, true);
++  }
++
++  // HTMLMediaElement::addEventListener. Shadowed on the media prototype
++  // only, and everything goes to the real EventTarget method first and
++  // untouched - the shim merely takes note of the two AirPlay types
++  // afterwards. The first availability listener starts route monitoring
++  // and is promised one event; a listener on a disabled element is
++  // registered and then ignored until the attribute goes away.
++  //
++  // EventTarget.prototype.addEventListener.call(video, ...) bypasses
++  // this and gets no events. Accepted: no player does that.
++  HTMLMediaElement.prototype.addEventListener = function addEventListener(
++    type,
++    listener,
++    options
++  ) {
++    var result = nativeAddEventListener.apply(this, arguments);
++    try {
++      var name = String(type);
++      if (
++        isAirPlayEventType(name) &&
++        listener &&
++        this instanceof HTMLMediaElement
++      ) {
++        noteListenerAdded(this, name, listener, options);
++      }
++    } catch (e) {
++      debug("addEventListener bookkeeping failed:", String(e));
++    }
++    return result;
++  };
++
++  HTMLMediaElement.prototype.removeEventListener =
++    function removeEventListener(type, listener, options) {
++      var result = nativeRemoveEventListener.apply(this, arguments);
++      try {
++        var name = String(type);
++        if (isAirPlayEventType(name) && this instanceof HTMLMediaElement) {
++          var set = listenersByElement.get(this);
++          var entry =
++            set && findEntry(set, name, listener, captureOf(options));
++          if (entry) {
++            set.delete(entry);
++            refresh(this);
++          }
++        }
++      } catch (e) {
++        debug("removeEventListener bookkeeping failed:", String(e));
++      }
++      return result;
++    };
++
++  // Through the accessors captured at the top, never a property read on
++  // the page's navigator. A page that redefined window.navigator makes
++  // uaGet throw on the wrong receiver, which fails closed.
++  function userActivation(sticky) {
++    try {
++      var activation = uaGet.call(window.navigator);
++      return !!(sticky ? hasBeenActiveGet : isActiveGet).call(activation);
++    } catch (e) {
++      return false;
++    }
++  }
++
++  // MediaElementSession::showPlaybackTargetPicker: no return, no throw;
++  // silently nothing without a gesture. Sticky activation on purpose -
++  // Safari drops the gesture restriction after the document's first one
++  // (removeBehaviorRestrictionsAfterFirstUserGesture), and players call
++  // this from their own button handlers, often a tick after the tap. No
++  // availability gate: iOS Safari has none either.
++  HTMLMediaElement.prototype.webkitShowPlaybackTargetPicker =
++    function webkitShowPlaybackTargetPicker() {
++      if (!(this instanceof HTMLMediaElement)) {
++        return;
++      }
++      var el = this;
++      if (isDisabled(el)) {
++        debug(
++          "showPicker refused - " + describe(el) + " disables wireless playback"
++        );
++        return;
++      }
++      if (!userActivation(true)) {
++        debug("showPicker refused - no user gesture on this document yet");
++        return;
++      }
++      var video = el instanceof HTMLVideoElement;
++      debug(
++        "showPicker for " + describe(el) + (video ? " (video)" : " (audio)")
++      );
++      bridge("showPicker", video, function (result) {
++        debug("showPicker for " + describe(el) + " -> " + String(result));
++      });
++    };
++
++  Object.defineProperty(
++    HTMLMediaElement.prototype,
++    "webkitCurrentPlaybackTargetIsWireless",
++    {
++      configurable: true,
++      enumerable: true,
++      get: function () {
++        return wirelessByElement.get(this) === true;
++      },
++    }
++  );
++
++  if (!("disableRemotePlayback" in HTMLMediaElement.prototype)) {
++    Object.defineProperty(HTMLMediaElement.prototype, "disableRemotePlayback", {
++      configurable: true,
++      enumerable: true,
++      get: function () {
++        return hasAttr(this, "disableremoteplayback");
++      },
++      set: function (value) {
++        if (value) {
++          this.setAttribute("disableremoteplayback", "");
++        } else {
++          this.removeAttribute("disableremoteplayback");
++        }
++      },
++    });
++  }
++
++  // MediaElementSession::wirelessVideoPlaybackDisabled, minus the media
++  // engine's opinion: the wireless-disabled attribute wins, then the
++  // legacy deny/allow, then disableremoteplayback, and before metadata
++  // there is no player - which Safari reports as disabled. Same order as
++  // isDisabled() and the decoder's ElementDeniesExternalPlayback, so this
++  // never answers "enabled" for an element every other path treats as
++  // disabled. The shim cannot ask which decoder the element got, so a
++  // Gecko-decoded element answers false here even though it will never
++  // go wireless; Safari's MSE engine answers the same.
++  if (
++    HTMLVideoElement &&
++    !("webkitWirelessVideoPlaybackDisabled" in HTMLVideoElement.prototype)
++  ) {
++    Object.defineProperty(
++      HTMLVideoElement.prototype,
++      "webkitWirelessVideoPlaybackDisabled",
++      {
++        configurable: true,
++        enumerable: true,
++        get: function () {
++          if (
++            hasAttr(this, "x-webkit-wirelessvideoplaybackdisabled") ||
++            hasAttr(this, "webkitwirelessvideoplaybackdisabled")
++          ) {
++            return true;
++          }
++          var legacy = attrValue(this, "x-webkit-airplay");
++          if (legacy === "deny") {
++            return true;
++          }
++          if (legacy === "allow") {
++            return false;
++          }
++          if (hasAttr(this, "disableremoteplayback")) {
++            return true;
++          }
++          try {
++            if (this.readyState < 1) {
++              return true; // HAVE_NOTHING: no player yet
++            }
++          } catch (e) {}
++          return false;
++        },
++        set: function (value) {
++          if (value) {
++            this.setAttribute("x-webkit-wirelessvideoplaybackdisabled", "");
++          } else {
++            this.removeAttribute("x-webkit-wirelessvideoplaybackdisabled");
++            this.removeAttribute("webkitwirelessvideoplaybackdisabled");
++          }
++        },
++      }
++    );
++  }
++
++  // ---- the per-element wireless bit ----------------------------------------
++
++  function setWireless(el, wireless, why) {
++    wirelessByElement.set(el, wireless);
++    debug(
++      "wireless " +
++        describe(el) +
++        " -> " +
++        wireless +
++        (wireless && cachedRouteName ? " (" + cachedRouteName + ")" : "") +
++        (why ? " - " + why : "")
++    );
++    // remote.state moves before the element event, as in Safari's
++    // setIsPlayingToWirelessTarget, so a handler for the event below
++    // already reads "connected". setRemoteState only queues its own
++    // connect/disconnect event, so that one still lands afterwards.
++    var remote = remotes.get(el);
++    var info = remote && remoteInfos.get(remote);
++    if (info) {
++      setRemoteState(info, wireless ? "connected" : "disconnected");
++    }
++    // Safari dispatches this one synchronously: non-bubbling, cancelable.
++    try {
++      var event = new window.Event(WIRELESS_EVENT, {
++        bubbles: false,
++        cancelable: true,
++      });
++      el.dispatchEvent(event);
++      callInlineHandler(el, WIRELESS_EVENT, event);
++      pruneOnceListeners(el, WIRELESS_EVENT);
++    } catch (e) {
++      debug("wireless event failed:", String(e));
++    }
++  }
++
++  // From the actor: the element's app-process AVPlayer started or stopped
++  // external playback.
++  function onWireless(el, wireless, routeName) {
++    if (typeof routeName === "string") {
++      onRoute(routeName);
++    }
++    if (!el || !(el instanceof HTMLMediaElement)) {
++      debug("wireless report for something that is not a media element");
++      return;
++    }
++    wireless = !!wireless;
++    if ((wirelessByElement.get(el) === true) === wireless) {
++      return;
++    }
++    setWireless(el, wireless, "player");
++  }
++
++  // createMediaPlayer flips wireless off before building the next player
++  // (a src change, load()). The app never reports "not wireless" for a
++  // player that was simply destroyed, so the shim makes the same flip at
++  // the same moment; the next player goes external again on play() and
++  // the element reconnects - Safari's airplay-autoplay sequence.
++  function onSourceReset(event) {
++    var el = event.target;
++    if (!(el instanceof HTMLMediaElement)) {
++      return;
++    }
++    if (wirelessByElement.get(el) !== true) {
++      return;
++    }
++    setWireless(el, false, event.type);
++  }
++
++  // ---- RemotePlayback -----------------------------------------------------
++  //
++  // A spec-shaped facade with no platform access of its own, exactly as
++  // Safari's: availability from the same machinery as the prefixed
++  // event, prompt() through the same picker, state from the same wireless
++  // bit. One object per element, a page-realm EventTarget re-prototyped
++  // onto RemotePlayback.prototype so dispatchEvent and instanceof both
++  // hold.
++
++  function RemotePlayback() {
++    throw new window.TypeError("Illegal constructor");
++  }
++  RemotePlayback.prototype = Object.create(window.EventTarget.prototype, {
++    constructor: { value: RemotePlayback, writable: true, configurable: true },
++  });
++  Object.defineProperty(RemotePlayback.prototype, Symbol.toStringTag, {
++    value: "RemotePlayback",
++    configurable: true,
++  });
++
++  function infoOf(remote) {
++    var info = remoteInfos.get(remote);
++    if (!info) {
++      throw new window.TypeError(
++        "'RemotePlayback' called on an object that is not a RemotePlayback"
++      );
++    }
++    return info;
++  }
++
++  function domException(message, name) {
++    try {
++      return new window.DOMException(message, name);
++    } catch (e) {
++      return new window.Error(name + ": " + message);
++    }
++  }
++
++  function clearConnectingTimer(info) {
++    if (info.timer) {
++      try {
++        clearTimeout(info.timer);
++      } catch (e) {}
++      info.timer = 0;
++    }
++  }
++
++  function setRemoteState(info, state) {
++    if (info.state === state) {
++      return;
++    }
++    info.state = state;
++    if (state !== "connecting") {
++      clearConnectingTimer(info);
++    }
++    debug("remote " + describe(info.element) + " -> " + state);
++    var eventName =
++      state === "connecting"
++        ? "connecting"
++        : state === "connected"
++          ? "connect"
++          : "disconnect";
++    // Spec: queue a task to fire it.
++    setTimeout(function () {
++      try {
++        info.remote.dispatchEvent(new window.Event(eventName));
++      } catch (e) {
++        debug("remote " + eventName + " event failed:", String(e));
++      }
++    }, 0);
++  }
++
++  // The picker changes the system route; nothing tells an element it was
++  // chosen. An AVPlayer-backed element reports wireless within a couple
++  // of seconds of the receiver connecting; an element Gecko decodes
++  // itself never will, and without this its state would strand at
++  // "connecting" forever.
++  function armConnectingFallback(info) {
++    clearConnectingTimer(info);
++    info.timer = setTimeout(function () {
++      info.timer = 0;
++      if (info.state === "connecting") {
++        debug(
++          "remote " +
++            describe(info.element) +
++            " never reported wireless - giving up"
++        );
++        setRemoteState(info, "disconnected");
++      }
++    }, 3000);
++  }
++
++  function settlePrompt(info, pending, result) {
++    var index = info.pending.indexOf(pending);
++    if (index < 0) {
++      return; // already settled
++    }
++    info.pending.splice(index, 1);
++    debug("remote prompt on " + describe(info.element) + " -> " + result);
++    if (result === "selected") {
++      // Safari resolves on any route change - including back to the
++      // phone - and the player's own report decides connected or not.
++      pending.resolve(undefined);
++      if (info.state === "disconnected") {
++        setRemoteState(info, "connecting");
++        armConnectingFallback(info);
++      }
++    } else if (result === "dismissed") {
++      pending.reject(
++        domException("The user dismissed the device picker", "NotAllowedError")
++      );
++    } else {
++      pending.reject(
++        domException("Remote playback is not available", "NotSupportedError")
++      );
++    }
++    refresh(info.element);
++  }
++
++  Object.defineProperty(RemotePlayback.prototype, "state", {
++    configurable: true,
++    enumerable: true,
++    get: function () {
++      return infoOf(this).state;
++    },
++  });
++
++  RemotePlayback.prototype.watchAvailability = function watchAvailability(
++    callback
++  ) {
++    var info = infoOf(this);
++    var el = info.element;
++    return new window.Promise(function (resolve, reject) {
++      if (typeof callback !== "function") {
++        reject(
++          new window.TypeError(
++            "RemotePlayback.watchAvailability: argument 1 is not a function"
++          )
++        );
++        return;
++      }
++      if (isDisabled(el)) {
++        reject(
++          domException(
++            "Remote playback is disabled for this element",
++            "InvalidStateError"
++          )
++        );
++        return;
++      }
++      var id = ++info.nextId;
++      info.callbacks.set(id, callback);
++      var available = availabilityFor(el) === "available";
++      info.available = available;
++      debug(
++        "remote watchAvailability #" +
++          id +
++          " on " +
++          describe(el) +
++          " (" +
++          available +
++          ")"
++      );
++      resolve(id);
++      queueCallback(callback, available);
++      refresh(el);
++    });
++  };
++
++  RemotePlayback.prototype.cancelWatchAvailability =
++    function cancelWatchAvailability(id) {
++      var info = infoOf(this);
++      var el = info.element;
++      var hasId = arguments.length > 0 && id !== undefined;
++      return new window.Promise(function (resolve, reject) {
++        if (isDisabled(el)) {
++          reject(
++            domException(
++              "Remote playback is disabled for this element",
++              "InvalidStateError"
++            )
++          );
++          return;
++        }
++        if (hasId) {
++          var key = Number(id);
++          key = isFinite(key) ? Math.trunc(key) : 0;
++          if (!info.callbacks.has(key)) {
++            reject(
++              domException(
++                "No availability callback with id " + key,
++                "NotFoundError"
++              )
++            );
++            return;
++          }
++          info.callbacks.delete(key);
++          debug(
++            "remote cancelWatchAvailability #" + key + " on " + describe(el)
++          );
++        } else {
++          info.callbacks.clear();
++          debug("remote cancelWatchAvailability (all) on " + describe(el));
++        }
++        refresh(el);
++        resolve(undefined);
++      });
++    };
++
++  // RemotePlayback::prompt. Transient activation, sampled when called -
++  // the spec's rule, unlike the sticky one the prefixed picker gets. The
++  // "no devices" refusal only once the document has actually watched:
++  // before that the cached bit is whatever the app last knew, not an
++  // answer about this page.
++  RemotePlayback.prototype.prompt = function prompt() {
++    var info = infoOf(this);
++    var el = info.element;
++    var activated = userActivation(false);
++    return new window.Promise(function (resolve, reject) {
++      if (isDisabled(el)) {
++        debug("remote prompt refused - " + describe(el) + " is disabled");
++        reject(
++          domException(
++            "Remote playback is disabled for this element",
++            "InvalidStateError"
++          )
++        );
++        return;
++      }
++      if (!activated) {
++        debug("remote prompt refused - no user gesture");
++        reject(
++          domException(
++            "RemotePlayback.prompt() requires a user gesture",
++            "InvalidAccessError"
++          )
++        );
++        return;
++      }
++      if (info.state === "disconnected" && everWatched && !cachedAvailable) {
++        debug("remote prompt refused - no targets available");
++        reject(
++          domException(
++            "No remote playback devices are available",
++            "NotSupportedError"
++          )
++        );
++        return;
++      }
++      var pending = { resolve: resolve, reject: reject };
++      info.pending.push(pending);
++      refresh(el); // a pending prompt counts as an availability listener
++      debug("remote prompt on " + describe(el));
++      var sent = bridge("showPicker", el instanceof HTMLVideoElement, function (
++        result
++      ) {
++        settlePrompt(info, pending, String(result));
++      });
++      if (!sent) {
++        settlePrompt(info, pending, "error");
++      }
++    });
++  };
++
++  ["connecting", "connect", "disconnect"].forEach(function (type) {
++    Object.defineProperty(RemotePlayback.prototype, "on" + type, {
++      configurable: true,
++      enumerable: true,
++      get: function () {
++        return infoOf(this).handlers[type] || null;
++      },
++      set: function (value) {
++        var info = infoOf(this);
++        var handler = typeof value === "function" ? value : null;
++        info.handlers[type] = handler;
++        if (handler && !info.hooked[type]) {
++          // One native listener per type, reading the current handler
++          // when it fires, so on* keeps its place in listener order.
++          info.hooked[type] = true;
++          var remote = info.remote;
++          nativeAddEventListener.call(remote, type, function (event) {
++            var current = info.handlers[type];
++            if (typeof current === "function") {
++              current.call(remote, event);
++            }
++          });
++        }
++      },
++    });
++  });
++
++  function makeRemote(el) {
++    var remote = new window.EventTarget();
++    Object.setPrototypeOf(remote, RemotePlayback.prototype);
++    remoteInfos.set(remote, {
++      element: el,
++      remote: remote,
++      state: wirelessByElement.get(el) === true ? "connected" : "disconnected",
++      nextId: 0,
++      callbacks: new Map(),
++      pending: [],
++      timer: 0,
++      available: false,
++      handlers: {},
++      hooked: {},
++    });
++    return remote;
++  }
++
++  // ---- install ------------------------------------------------------------
++
++  if (remoteEnabled && !("remote" in HTMLMediaElement.prototype)) {
++    try {
++      Object.defineProperty(HTMLMediaElement.prototype, "remote", {
++        configurable: true,
++        enumerable: true,
++        get: function () {
++          if (!(this instanceof HTMLMediaElement)) {
++            throw new window.TypeError(
++              "'remote' getter called on an object that is not a media element"
++            );
++          }
++          var remote = remotes.get(this);
++          if (!remote) {
++            remote = makeRemote(this);
++            remotes.set(this, remote);
++          }
++          return remote;
++        },
++      });
++      window.RemotePlayback = RemotePlayback;
++    } catch (e) {
++      debug("RemotePlayback install failed:", String(e));
++    }
++  }
++
++  try {
++    document.addEventListener("emptied", onSourceReset, true);
++    document.addEventListener("loadstart", onSourceReset, true);
++    document.addEventListener(
++      "visibilitychange",
++      function () {
++        syncWatch();
++      },
++      true
++    );
++    window.addEventListener(
++      "pagehide",
++      function () {
++        pageHidden = true;
++        syncWatch();
++      },
++      true
++    );
++    window.addEventListener(
++      "pageshow",
++      function () {
++        pageHidden = false;
++        syncWatch();
++      },
++      true
++    );
++  } catch (e) {
++    debug("document listeners failed:", String(e));
++  }
++
++  bridge("register", {
++    onAvailability: onAvailability,
++    onRoute: onRoute,
++    onWireless: onWireless,
++  });
++
++  // Last, so a page that feature-detects sees the whole surface or none.
++  window.WebKitPlaybackTargetAvailabilityEvent =
++    WebKitPlaybackTargetAvailabilityEvent;
++  var host = "";
++  try {
++    host = location.hostname;
++  } catch (e) {}
++  debug(
++    "installed on " +
++      host +
++      " (targets " +
++      (cachedAvailable ? "available" : "not available") +
++      (cachedRouteName ? ", route " + cachedRouteName : "") +
++      (remoteEnabled ? ", remote on" : ", remote off") +
++      ")"
++  );
++})();
++`;
++
  const lazy = {};
-
+ 
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +4030,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +5358,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
-
+ 
 +  isFocusedEditableElement(element) {
 +    if (!element) {
 +      return false;
@@ -4589,7 +5917,7 @@ index 9ca6e15..18d37f0 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +4757,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +6085,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -4609,12 +5937,12 @@ index 9ca6e15..18d37f0 100644
 +        return this.getVisualViewportMetrics();
 +      }
      }
-
+ 
      return null;
-@@ -199,11 +4787,205 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +6115,396 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
-
+ 
 +  // Reynard: give this document sticky user activation.
 +  //
 +  // For the CarPlay display, which cannot be tapped: without a gesture
@@ -4800,10 +6128,173 @@ index 9ca6e15..18d37f0 100644
 +    }
 +  }
 +
++  // Reynard AirPlay: install Safari's AirPlay surface before page script.
++  //
++  // Same trigger and the same sandbox shape as the EME shim above, for
++  // the same reason: a player feature-detects
++  // WebKitPlaybackTargetAvailabilityEvent during boot. Its own sandbox
++  // rather than the EME one - the two are gated by different prefs and
++  // host lists - and, unlike the EME one, the actor keeps hold of what
++  // the shim registers (_airPlayShim), because facts keep arriving after
++  // install: availability from the pref observer, the wireless bit from
++  // the decoder's chrome-only events.
++  maybeInstallAirPlayShim() {
++    const { contentWindow } = this;
++    if (!contentWindow) {
++      return;
++    }
++    try {
++      if (
++        !Services.prefs.getBoolPref("media.reynard.airplay.shim.enabled", true)
++      ) {
++        return;
++      }
++      const host = contentWindow.location?.hostname ?? "";
++      if (!host) {
++        return; // about:blank and friends
++      }
++      let allHosts = false;
++      try {
++        allHosts = Services.prefs.getBoolPref(
++          "media.reynard.airplay.shim.all-hosts",
++          false
++        );
++      } catch (e) {}
++      // Comma separated, matched like the built-ins; empty entries and
++      // stray whitespace dropped so a trailing comma cannot become a
++      // match-everything rule (the EME shim's rule).
++      let extraHosts = [];
++      try {
++        extraHosts = Services.prefs
++          .getStringPref("media.reynard.airplay.shim.extra-hosts", "")
++          .split(",")
++          .map(entry => entry.trim().toLowerCase())
++          .filter(entry => entry.length > 0);
++      } catch (e) {}
++      const wanted =
++        allHosts ||
++        AIRPLAY_SHIM_HOSTS.concat(extraHosts).some(
++          domain => host === domain || host.endsWith("." + domain)
++        );
++      if (!wanted) {
++        return;
++      }
++      const sandbox = Cu.Sandbox(contentWindow, {
++        sandboxPrototype: contentWindow,
++        wantXrays: false,
++      });
++      // Defined on the SANDBOX, not the window: page script cannot see
++      // either, while the shim's closures can.
++      Cu.exportFunction(
++        message => dump("airplay: " + message + "\n"),
++        sandbox,
++        { defineAs: "__reynardAirPlayLog" }
++      );
++      Cu.exportFunction((op, a, b) => this.airPlayBridge(op, a, b), sandbox, {
++        defineAs: "__reynardAirPlay",
++      });
++      // Primitives cross into the sandbox by assignment; the shim reads
++      // them once at eval and hears every later change through the
++      // bridge.
++      sandbox.__reynardAirPlayAvailable = Services.prefs.getBoolPref(
++        "media.reynard.airplay.available",
++        false
++      );
++      sandbox.__reynardAirPlayRouteName = Services.prefs.getStringPref(
++        "media.reynard.airplay.route-name",
++        ""
++      );
++      sandbox.__reynardAirPlayRemoteEnabled = Services.prefs.getBoolPref(
++        "media.reynard.airplay.remote-playback.enabled",
++        true
++      );
++      Cu.evalInSandbox(AIRPLAY_SHIM, sandbox);
++      reynardWatchAirPlayPrefs();
++      gReynardAirPlayActors.add(this);
++      debug`airplay shim installed for ${host}`;
++    } catch (e) {
++      // Never let this break a page load.
++      warn`airplay shim failed: ${e}`;
++    }
++  }
++
++  // Reynard AirPlay: the shim's one channel back to privileged code,
++  // exported into its sandbox as __reynardAirPlay(op, a, b).
++  //
++  // Nothing chrome-owned ever crosses back into the page: the return
++  // value is always undefined, and results reach the shim as primitives
++  // handed to a callback it supplied. A chrome Promise returned into a
++  // content realm is exactly the "Permission denied to access object"
++  // shape the listener at the top of this file exists to diagnose.
++  airPlayBridge(op, a, b) {
++    switch (op) {
++      case "register": {
++        // The shim's hooks, called later from the pref observer and from
++        // handleEvent. Waived, so the calls go straight to the sandbox
++        // functions rather than through chrome's Xray view of them.
++        const hooks = a && typeof a === "object" ? Cu.waiveXrays(a) : {};
++        this._airPlayShim = {
++          onAvailability: hooks.onAvailability,
++          onRoute: hooks.onRoute,
++          onWireless: hooks.onWireless,
++        };
++        break;
++      }
++      case "watch": {
++        const watching = !!a;
++        if (this._airPlayWatching === watching) {
++          break;
++        }
++        this._airPlayWatching = watching;
++        debug`airplay watch ${watching}`;
++        this.sendAsyncMessage("GeckoView:AirPlay:Watch", { watching });
++        break;
++      }
++      case "showPicker": {
++        const callback = typeof b === "function" ? b : null;
++        const answer = result => {
++          try {
++            callback?.(String(result));
++          } catch (e) {
++            warn`airplay showPicker callback threw: ${e}`;
++          }
++        };
++        this.sendQuery("GeckoView:AirPlay:ShowPicker", { hasVideo: !!a }).then(
++          result => answer(result ?? "unavailable"),
++          e => {
++            warn`airplay showPicker failed: ${e}`;
++            answer("error");
++          }
++        );
++        break;
++      }
++      default: {
++        warn`airplay bridge: unknown op ${op}`;
++      }
++    }
++    return undefined;
++  }
++
++  didDestroy() {
++    // Reynard AirPlay: out of the process-wide fan-out, and the app is
++    // told this document stopped watching if it was. The shim's own
++    // pagehide handler covers navigation; this covers tab close and
++    // process teardown, where the message may or may not still go out
++    // (the parent actor's didDestroy is the backstop).
++    gReynardAirPlayActors.delete(this);
++    this._airPlayShim = null;
++    if (this._airPlayWatching) {
++      this._airPlayWatching = false;
++      try {
++        this.sendAsyncMessage("GeckoView:AirPlay:Watch", { watching: false });
++      } catch (e) {}
++    }
++  }
++
    // eslint-disable-next-line complexity
    handleEvent(aEvent) {
      debug`handleEvent: ${aEvent.type}`;
-
+ 
      switch (aEvent.type) {
 +      case "DOMWindowCreated": {
 +        // Before the shim, not after: if the shim's own installation
@@ -4811,6 +6302,34 @@ index 9ca6e15..18d37f0 100644
 +        // would miss exactly the error worth having.
 +        reynardWatchPermissionDenied();
 +        this.maybeInstallWebKitMediaKeysShim();
++        // After the EME shim: a host on both lists gets prefixed EME
++        // first, and a failure in one must not cost the other.
++        this.maybeInstallAirPlayShim();
++        break;
++      }
++
++      case "MozReynardAirPlayActive":
++      case "MozReynardAirPlayInactive": {
++        // Reynard AirPlay: AVPlayerDecoder's report that this element's
++        // app-process AVPlayer started or stopped external playback.
++        // Chrome-only, so page script never sees these names; the shim
++        // owns the per-element bit and the page-facing events, and gets
++        // the element itself - the sandbox is same-origin with the page,
++        // so it is the object the shim keyed its WeakMaps on.
++        const onWireless = this._airPlayShim?.onWireless;
++        if (typeof onWireless !== "function") {
++          debug`${aEvent.type} with no airplay shim - dropped`;
++          break;
++        }
++        try {
++          onWireless(
++            aEvent.target,
++            aEvent.type === "MozReynardAirPlayActive",
++            Services.prefs.getStringPref("media.reynard.airplay.route-name", "")
++          );
++        } catch (e) {
++          warn`airplay wireless hand-off failed: ${e}`;
++        }
 +        break;
 +      }
 +

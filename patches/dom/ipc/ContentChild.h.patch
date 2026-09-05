@@ -1,8 +1,8 @@
 diff --git a/dom/ipc/ContentChild.h b/dom/ipc/ContentChild.h
-index 1de5f331b0a3..560c1b904458 100644
+index 8c9896a71f94..64f17ef11c14 100644
 --- a/dom/ipc/ContentChild.h
 +++ b/dom/ipc/ContentChild.h
-@@ -167,16 +167,43 @@ class ContentChild final : public PContentChild,
+@@ -191,17 +191,50 @@ class ContentChild final : public PContentChild,
        Endpoint<PImageBridgeChild>&& aImageBridge,
        Endpoint<PVRManagerChild>&& aVRBridge,
        Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -30,6 +30,12 @@ index 1de5f331b0a3..560c1b904458 100644
 +  mozilla::ipc::IPCResult RecvAVPlayerEnded(const uint64_t& aPlayerId);
 +  mozilla::ipc::IPCResult RecvAVPlayerError(const uint64_t& aPlayerId);
 +  mozilla::ipc::IPCResult RecvAVPlayerProtected(const uint64_t& aPlayerId);
++  // Reynard AirPlay: what the app process saw of the player - external
++  // playback, or a pause/play the page never asked for. See
++  // PContent.ipdl's AVPlayerHostState for the kinds.
++  mozilla::ipc::IPCResult RecvAVPlayerHostState(const uint64_t& aPlayerId,
++                                                const uint32_t& aKind,
++                                                const bool& aValue);
 +  // Reynard FairPlay: the AVContentKeySession is the app process's, so
 +  // both halves of the licence conversation that face the PAGE arrive
 +  // here. See PContent.ipdl.
@@ -48,3 +54,4 @@ index 1de5f331b0a3..560c1b904458 100644
 +
    mozilla::ipc::IPCResult RecvSetProcessSandbox(
        const Maybe<FileDescriptor>& aBroker);
+ 

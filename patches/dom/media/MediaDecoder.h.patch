@@ -1,8 +1,8 @@
 diff --git a/dom/media/MediaDecoder.h b/dom/media/MediaDecoder.h
-index 98d4e9bffca6..edc305b6883e 100644
+index ae7c0aef711a..1a88c513f14f 100644
 --- a/dom/media/MediaDecoder.h
 +++ b/dom/media/MediaDecoder.h
-@@ -174,7 +174,14 @@
+@@ -174,7 +174,21 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
    // Pause video playback.
    virtual void Pause();
    // Adjust the speed of the playback, optionally with pitch correction,
@@ -15,10 +15,17 @@ index 98d4e9bffca6..edc305b6883e 100644
 +  // inaudible - was defeated by a player that never heard about the
 +  // volume at all.
 +  virtual void SetVolume(double aVolume);
++
++  // Virtual for AVPlayerDecoder, the only override: one of the element's
++  // x-webkit-airplay / webkitwirelessvideoplaybackdisabled /
++  // disableremoteplayback attributes changed, and the player it drives
++  // has to hear whether it may still go external. A no-op for every
++  // decoder that renders locally.
++  virtual void NotifyExternalPlaybackPolicyChanged() {}
  
    void SetPlaybackRate(double aPlaybackRate);
    void SetPreservesPitch(bool aPreservesPitch);
-@@ -442,7 +449,13 @@
+@@ -446,7 +460,13 @@ class MediaDecoder : public DecoderDoctorLifeLogger<MediaDecoder> {
  
    AbstractThread* AbstractMainThread() const { return mAbstractMainThread; }
  

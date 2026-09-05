@@ -1,8 +1,8 @@
 diff --git a/dom/ipc/ContentChild.cpp b/dom/ipc/ContentChild.cpp
-index d77bf2ae523c..2d586d1c2f9c 100644
+index f8d5193c6b7e..7de629e32df5 100644
 --- a/dom/ipc/ContentChild.cpp
 +++ b/dom/ipc/ContentChild.cpp
-@@ -146,6 +146,73 @@
+@@ -147,6 +147,76 @@
  #include "nsRefreshDriver.h"
  #include "nsSandboxFlags.h"
  
@@ -28,9 +28,12 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyEnded(uintptr_t aPlayerId);
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyError(uintptr_t aPlayerId);
 +extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyProtected(uintptr_t aPlayerId);
++extern "C" MOZ_EXPORT void ReynardAVPlayerNotifyHostState(uintptr_t aPlayerId,
++                                                          uint32_t aKind,
++                                                          bool aValue);
 +// The FairPlay pair. Declared here even though this file never calls
 +// them, because that second extern "C" MOZ_EXPORT declaration is the
-+// one difference between the five symbols above - which link as `T`,
++// one difference between the six symbols above - which link as `T`,
 +// global - and these two, which linked as `t`, local, and could not be
 +// bound by the app linker.
 +//
@@ -76,7 +79,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
  #if defined(MOZ_SANDBOX)
  #  if defined(XP_WIN)
  #    include "mozilla/sandboxTarget.h"
-@@ -683,6 +750,11 @@ mozilla::ipc::IPCResult ContentChild::RecvSetXPCOMProcessAttributes(
+@@ -698,6 +768,11 @@ mozilla::ipc::IPCResult ContentChild::RecvSetXPCOMProcessAttributes(
    LookAndFeel::EnsureInit();
    InitSharedUASheets(std::move(aSharedUASheetHandle), aSharedUASheetAddress);
    InitXPCOM(aXPCOMInit, aInitialData, aIsReadyForBackgroundProcessing);
@@ -88,7 +91,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    InitGraphicsDeviceData(aXPCOMInit.contentDeviceData());
    RefPtr<net::ChildDNSService> dnsServiceChild =
        dont_AddRef(net::ChildDNSService::GetSingleton());
-@@ -1565,7 +1637,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+@@ -1619,7 +1694,7 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
      Endpoint<PImageBridgeChild>&& aImageBridge,
      Endpoint<PVRManagerChild>&& aVRBridge,
      Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -97,7 +100,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    MOZ_ASSERT(namespaces.Length() == 4);
    const uint32_t compositorManagerNamespace = namespaces[0];
    const uint32_t compositorBridgeNamespace = namespaces[1];
-@@ -1579,8 +1651,8 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
+@@ -1633,8 +1708,8 @@ mozilla::ipc::IPCResult ContentChild::RecvInitRendering(
    // should crash itself (because we are actually talking to the UI process). If
    // there are localized failures (e.g. failed to spawn a thread), then it
    // should MOZ_RELEASE_ASSERT or MOZ_CRASH as necessary instead.
@@ -108,7 +111,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1614,7 +1686,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+@@ -1668,7 +1743,7 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
      Endpoint<PImageBridgeChild>&& aImageBridge,
      Endpoint<PVRManagerChild>&& aVRBridge,
      Endpoint<PRemoteMediaManagerChild>&& aVideoManager,
@@ -117,7 +120,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
    MOZ_ASSERT(namespaces.Length() == 4);
    const uint32_t compositorManagerNamespace = namespaces[0];
    const uint32_t compositorBridgeNamespace = namespaces[1];
-@@ -1624,8 +1696,8 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
+@@ -1678,8 +1753,8 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRendering(
    nsTArray<RefPtr<BrowserChild>> tabs = BrowserChild::GetAll();
  
    // Re-establish singleton bridges to the compositor.
@@ -128,9 +131,7 @@ index d77bf2ae523c..2d586d1c2f9c 100644
      return GetResultForRenderingInitFailure(aCompositor.OtherChildID());
    }
    if (!CompositorManagerChild::CreateContentCompositorBridge(
-@@ -1673,6 +1745,149 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
-     }
-   }
+@@ -1729,6 +1804,164 @@ mozilla::ipc::IPCResult ContentChild::RecvReinitRenderingForDeviceReset() {
    return IPC_OK();
  }
  
@@ -211,6 +212,21 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +  return IPC_OK();
 +}
 +
++// AirPlay. Rare - a route change, a Siri Remote press - so it logs
++// every time. This call is also what keeps ReynardAVPlayerNotifyHostState
++// alive through the dead-strip: a Recv* caller inside libxul makes the
++// symbol reachable, so it needs no entry in AVPlayerDecoder.mm's anchor
++// array.
++mozilla::ipc::IPCResult ContentChild::RecvAVPlayerHostState(
++    const uint64_t& aPlayerId, const uint32_t& aKind, const bool& aValue) {
++  printf_stderr("avPlayer: recv hostState player=%llu kind=%u value=%d\n",
++                static_cast<unsigned long long>(aPlayerId), aKind,
++                aValue ? 1 : 0);
++  ReynardAVPlayerNotifyHostState(static_cast<uintptr_t>(aPlayerId), aKind,
++                                 aValue);
++  return IPC_OK();
++}
++
 +mozilla::ipc::IPCResult ContentChild::RecvAVPlayerEnded(
 +    const uint64_t& aPlayerId) {
 +  printf_stderr("avPlayer: recv ended player=%llu\n",
@@ -278,7 +294,9 @@ index d77bf2ae523c..2d586d1c2f9c 100644
 +#endif
 +
  #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
-@@ -1734,7 +1949,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
+ extern "C" {
+ CGError CGSSetDenyWindowServerConnections(bool);
+@@ -1788,7 +2021,7 @@ mozilla::ipc::IPCResult ContentChild::RecvSetProcessSandbox(
    sandboxEnabled = (GetEffectiveContentSandboxLevel() >= 1);
    DisconnectWindowServer(sandboxEnabled);
  #  elif defined(XP_IOS)

@@ -1,5 +1,5 @@
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 21a9c93a1325..2474b01edc02 100644
+index 21a9c93a1325..05aeafaca2e0 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -193,6 +193,7 @@
@@ -205,7 +205,7 @@ index 21a9c93a1325..2474b01edc02 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    return mLoadedOrigins->GetRemoteType();
  }
-@@ -8252,6 +8391,284 @@ bool ThreadsafeContentParentHandle::ValidatePrincipal(
+@@ -8252,6 +8391,297 @@ bool ThreadsafeContentParentHandle::ValidatePrincipal(
  }  // namespace dom
  }  // namespace mozilla
  
@@ -347,6 +347,19 @@ index 21a9c93a1325..2474b01edc02 100644
 +  printf_stderr("avPlayer: send protected key=%llu owner=%d sent=%d\n",
 +                static_cast<unsigned long long>(aKey), cp ? 1 : 0,
 +                sent ? 1 : 0);
++}
++
++// AirPlay: external playback came or went, or the receiver paused or
++// resumed the player on its own. A handful per session, so it logs
++// every time like the protected mark above.
++void ReynardAVPlayerSendHostState(uint64_t aKey, uint32_t aKind, bool aValue) {
++  dom::ContentParent* cp = AVPlayerOwner(aKey);
++  const bool sent =
++      cp && cp->SendAVPlayerHostState(aKey & 0xffffffff, aKind, aValue);
++  printf_stderr(
++      "avPlayer: send hostState key=%llu kind=%u value=%d owner=%d sent=%d\n",
++      static_cast<unsigned long long>(aKey), aKind, aValue ? 1 : 0,
++      cp ? 1 : 0, sent ? 1 : 0);
 +}
 +
 +void ReynardAVPlayerSendEnded(uint64_t aKey) {

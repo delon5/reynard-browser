@@ -1,5 +1,5 @@
 diff --git a/dom/media/mediaelement/HTMLMediaElement.cpp b/dom/media/mediaelement/HTMLMediaElement.cpp
-index dbf941c..6357b9b 100644
+index 99393980f577..7d7aa85c06d3 100644
 --- a/dom/media/mediaelement/HTMLMediaElement.cpp
 +++ b/dom/media/mediaelement/HTMLMediaElement.cpp
 @@ -13,6 +13,17 @@
@@ -20,7 +20,29 @@ index dbf941c..6357b9b 100644
  #include "CrossGraphPort.h"
  #include "DOMMediaStream.h"
  #include "DecoderDoctorDiagnostics.h"
-@@ -5747,6 +5758,29 @@ nsresult HTMLMediaElement::InitializeDecoderForChannel(
+@@ -5688,6 +5699,21 @@ void HTMLMediaElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
+         }
+       }
+     }
++#ifdef MOZ_WIDGET_UIKIT
++    // Reynard AirPlay: the three attributes Safari honours to keep an
++    // element off AirPlay video. None has a static atom, so the name is
++    // compared as a string - this runs once per attribute change, not
++    // per frame - and the decoder re-reads all three from the element.
++    // Before there is a decoder the attribute simply waits: Load pushes
++    // the answer once the player exists.
++    if (mDecoder &&
++        (aName->Equals(u"x-webkit-airplay"_ns) ||
++         aName->Equals(u"x-webkit-wirelessvideoplaybackdisabled"_ns) ||
++         aName->Equals(u"webkitwirelessvideoplaybackdisabled"_ns) ||
++         aName->Equals(u"disableremoteplayback"_ns))) {
++      mDecoder->NotifyExternalPlaybackPolicyChanged();
++    }
++#endif
+   }
+ 
+   // Since AfterMaybeChangeAttr may call DoLoad, make sure that it is called
+@@ -5941,6 +5967,29 @@ nsresult HTMLMediaElement::InitializeDecoderForChannel(
    }
  #endif
  
@@ -50,7 +72,9 @@ index dbf941c..6357b9b 100644
    RefPtr<ChannelMediaDecoder> decoder =
        ChannelMediaDecoder::Create(decoderInit, &diagnostics);
    if (!decoder) {
-@@ -7875,4 +7909,39 @@
+@@ -8096,8 +8145,43 @@ already_AddRefed<Promise> HTMLMediaElement::SetMediaKeys(
+                         fmt::ptr(mMediaKeys.get()), fmt::ptr(mDecoder.get())));
+ 
    if (MozAudioCaptured()) {
 +#ifdef MOZ_WIDGET_UIKIT
 +    // Reynard: FairPlay decrypts inside AVFoundation and Gecko never
@@ -90,10 +114,12 @@ index dbf941c..6357b9b 100644
      return nullptr;
 +    }
    }
-@@ -8160,8 +8229,28 @@
+ 
+   nsPIDOMWindowInner* win = OwnerDoc()->GetInnerWindow();
+@@ -8176,8 +8260,28 @@ void HTMLMediaElement::DispatchEncrypted(const nsTArray<uint8_t>& aInitData,
      return;
    }
-
+ 
 +  // Reynard: hand the page FairPlay's key URI even when the media is
 +  // cross-origin, because the page cannot ask for a licence without it.
 +  //
@@ -120,7 +146,7 @@ index dbf941c..6357b9b 100644
      event = MediaEncryptedEvent::Constructor(this, aInitDataType, aInitData);
    } else {
      event = MediaEncryptedEvent::Constructor(this);
-@@ -8701,6 +8790,28 @@
+@@ -8930,6 +9034,28 @@ CDMProxy* HTMLMediaElement::GetCDMProxy() const {
  };
  #endif
  

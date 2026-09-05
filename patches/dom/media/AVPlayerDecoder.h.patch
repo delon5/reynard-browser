@@ -1,9 +1,9 @@
 diff --git a/dom/media/AVPlayerDecoder.h b/dom/media/AVPlayerDecoder.h
 new file mode 100644
-index 000000000000..72f80c12573a
+index 000000000000..922bd4c3aed8
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.h
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,288 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -130,7 +130,13 @@ index 000000000000..72f80c12573a
 +  // and there is no layer for NativeLayerCA to host an AVPlayerLayer
 +  // in. The visible frames come from the AVPlayer, not from this
 +  // surface. Main thread only.
-+  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay);
++  //
++  // aForceOverRealFrames republishes even though real frames have been
++  // flowing, and even at the same size and mark: external playback
++  // wants the local picture blank (NotifyHostState, kind 0). It never
++  // overrides the protected-layer guard - see the definition.
++  void PublishPlaceholderFrame(const gfx::IntSize& aDisplay,
++                               bool aForceOverRealFrames = false);
 +
 +  // Told, not deduced. The app process is the only place that can see a
 +  // native-HLS FairPlay stream announce itself - its video output goes
@@ -138,6 +144,19 @@ index 000000000000..72f80c12573a
 +  // EME, so mCDMProxy stays null while the content is protected.
 +  // Republishes the placeholder carrying the DRM mark. Main thread only.
 +  void MarkProtectedByOutputStall();
++
++  // Facts the app process observed about our AVPlayer - see
++  // PContent.ipdl's AVPlayerHostState for the kinds. Kind 0 blanks the
++  // local picture and tells chrome, through a chrome-only DOM event on
++  // the element, that this element is (or is no longer) on AirPlay;
++  // kind 1 reflects a pause or play the receiver or a route loss made
++  // without the page. Main thread only.
++  void NotifyHostState(uint32_t aKind, bool aValue);
++
++  // The element's x-webkit-airplay / webkitwirelessvideoplaybackdisabled /
++  // disableremoteplayback changed (or the player was just created):
++  // re-read them and push opcode 7. Main thread only.
++  void NotifyExternalPlaybackPolicyChanged() override;
 +
 +  // Forwards the element's volume to the AVPlayer. See the definition
 +  // for the mute button and the "Block Audio Only" setting that both
@@ -151,6 +170,12 @@ index 000000000000..72f80c12573a
 +  // started flowing - which repainted magenta over working video,
 +  // seen as a frame of picture that flashes and vanishes.
 +  bool mHasPublishedRealFrame = false;
++  // Geometry of the last real frame, kept beside the latch so the
++  // black frame NotifyHostState paints while the picture is on the TV
++  // is published at the size already on screen: a placeholder at any
++  // other size is an intrinsic-size change, a reflow and a layer
++  // rebuild for nothing. Empty until the first real frame.
++  gfx::IntSize mLastRealFrameSize;
 +
 +  // Placeholder republish state. Protected content never latches
 +  // mHasPublishedRealFrame - its frames cannot be copied - so without
@@ -173,6 +198,16 @@ index 000000000000..72f80c12573a
 +  // Last volume actually sent, so a fading UI's per-frame changes do
 +  // not each cost an IPC hop. Negative until the first send.
 +  double mLastVolumeSent = -1.0;
++
++  // Mirror of AVPlayer.isExternalPlaybackActive, written by
++  // NotifyHostState kind 0. Nothing is undone on the inactive edge:
++  // the picture comes back through the frame callbacks, which have no
++  // guard, so this is a record rather than a switch.
++  bool mExternalPlaybackActive = false;
++  // Whether the element's attributes last let the player go external.
++  // -1 until the first push, like mLastVolumeSent, so Load's push is
++  // never gated away.
++  int8_t mLastExternalPlaybackAllowedSent = -1;
 +
 +  // Hooked purely to report that the pipeline got this far.
 +  //

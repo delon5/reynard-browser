@@ -1,10 +1,8 @@
 diff --git a/mobile/shared/chrome/geckoview/geckoview.js b/mobile/shared/chrome/geckoview/geckoview.js
+index c3963dcf6350..c903d63c35b4 100644
 --- a/mobile/shared/chrome/geckoview/geckoview.js
 +++ b/mobile/shared/chrome/geckoview/geckoview.js
-@@ -472,8 +472,13 @@
-             },
-             child: {
-               esModuleURI: "resource:///actors/GeckoViewContentChild.sys.mjs",
+@@ -475,6 +475,18 @@ function startup() {
                events: {
                  mozcaretstatechanged: { capture: true, mozSystemGroup: true },
                  pageshow: { mozSystemGroup: true },
@@ -13,5 +11,13 @@ diff --git a/mobile/shared/chrome/geckoview/geckoview.js b/mobile/shared/chrome/
 +                // DOMContentLoaded are both too late - see
 +                // GeckoViewContentChild.maybeInstallWebKitMediaKeysShim.
 +                DOMWindowCreated: {},
++                // Reynard AirPlay: chrome-only events AVPlayerDecoder raises
++                // on the media element when its app-process AVPlayer starts
++                // or stops external playback. Same shape as
++                // MozDOMFullscreen:Entered reaching MediaControlDelegate
++                // below. See GeckoViewContentChild.handleEvent.
++                MozReynardAirPlayActive: {},
++                MozReynardAirPlayInactive: {},
                },
              },
+             allFrames: true,
