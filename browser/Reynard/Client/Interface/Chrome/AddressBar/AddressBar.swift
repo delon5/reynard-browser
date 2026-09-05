@@ -15,6 +15,7 @@ protocol AddressBarDelegate: AnyObject {
     func addressBarMaximumPageZoomLevel(_ addressBar: AddressBar) -> Int
     func addressBar(_ addressBar: AddressBar, didRequestPageZoomLevel level: Int)
     func addressBarDidRequestWebsiteModeChange(_ addressBar: AddressBar)
+    func addressBarDidRequestAirPlay(_ addressBar: AddressBar)
     func addressBarDidRequestFindInPage(_ addressBar: AddressBar)
     func addressBarDidRequestWebsiteSettings(_ addressBar: AddressBar)
     func addressBarDidRequestSettings(_ addressBar: AddressBar)
@@ -345,10 +346,11 @@ final class AddressBar: UIView {
         applyState()
     }
     
-    func updateMenu(url: String?, usesDesktopWebsite: Bool?) {
+    func updateMenu(url: String?, usesDesktopWebsite: Bool?, airPlayTitle: String?) {
         pageMenuItems = AddressBarMenu.makeItems(
             selectedURL: url,
             usesDesktopWebsite: usesDesktopWebsite,
+            airPlayTitle: airPlayTitle,
             onShowAddons: { [weak self] in
                 guard let self else { return }
                 self.delegate?.addressBarDidRequestAddonList(self)
@@ -356,6 +358,10 @@ final class AddressBar: UIView {
             onChangeWebsiteMode: { [weak self] in
                 guard let self else { return }
                 self.delegate?.addressBarDidRequestWebsiteModeChange(self)
+            },
+            onAirPlay: { [weak self] in
+                guard let self else { return }
+                self.delegate?.addressBarDidRequestAirPlay(self)
             },
             onFindInPage: { [weak self] in
                 guard let self else { return }

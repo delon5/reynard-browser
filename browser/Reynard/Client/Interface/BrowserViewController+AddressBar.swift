@@ -5,6 +5,7 @@
 //  Created by Minh Ton on 16/6/26.
 //
 
+import AVFoundation
 import UIKit
 import GeckoView
 
@@ -39,8 +40,48 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         }
         browserChrome.updateAddressBarMenu(
             url: selectedURL,
-            usesDesktopWebsite: usesDesktopWebsite
+            usesDesktopWebsite: usesDesktopWebsite,
+            airPlayTitle: airPlayMenuTitle()
         )
+    }
+    
+    /// The page menu's AirPlay row title, or nil to leave the row out.
+    ///
+    /// Gated the way Safari gates its button - airplay-support.js
+    /// enables it only after hasPlayed: the page has to have registered
+    /// media with SystemMediaSession, unless the system route already
+    /// IS an AirPlay device, in which case the row is how the user gets
+    /// the audio back on the phone. The row is left out only when the
+    /// audio session's category has no AirPlay route to offer - .record,
+    /// or .playAndRecord without .allowAirPlay, which cubeb's own
+    /// capture and enumeration categories both carry - the same test
+    /// AirPlayController.presentPicker refuses under, so no row rather
+    /// than a row that does nothing.
+    ///
+    /// Re-evaluated from refreshAirPlayChrome as well as the usual
+    /// refreshAddressBar callers, because media starting on a page
+    /// that has finished loading changes nothing else in the bar.
+    private func airPlayMenuTitle() -> String? {
+        guard Prefs.AirPlaySettings.isEnabled,
+              !AirPlayController.audioSessionBlocksAirPlay() else {
+            return nil
+        }
+        // Not gated on "something has played": an inline HLS video
+        // brokered to AVPlayer never registers with SystemMediaSession
+        // (it has no audio track inside Gecko), so a hasPlayed test
+        // built on selectedSnapshot would hide the item for exactly the
+        // content AirPlay video exists for. The system picker is safe
+        // to open at any time, as it is from Control Center.
+        let airPlayState = AirPlayController.shared.state
+        if airPlayState.routeIsAirPlay,
+           let routeName = airPlayState.routeName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !routeName.isEmpty {
+            return String(
+                format: NSLocalizedString("AirPlay: %@", comment: "AirPlay route name"),
+                routeName
+            )
+        }
+        return NSLocalizedString("AirPlay", comment: "")
     }
     
     // MARK: - AddressBarDelegate
@@ -150,6 +191,18 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         }
         
         refreshAddressBar()
+    }
+    
+    func addressBarDidRequestAirPlay(_ addressBar: AddressBar) {
+        // Deferred like Find in Page below: the picker is a system sheet
+        // (or the app's own fallback sheet) presented from the top view
+        // controller, and presenting it while the menu overlay is still
+        // animating out stacks the two.
+        browserChrome.performAfterAddressBarMenuDismissal {
+            Task { @MainActor in
+                _ = await AirPlayController.shared.presentPicker(prioritizesVideo: true)
+            }
+        }
     }
     
     func addressBarDidRequestFindInPage(_ addressBar: AddressBar) {

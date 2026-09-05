@@ -68,6 +68,14 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     /// Zero height whenever the content view already reaches the bottom.
     private let pillUnderlayView = UIView()
     lazy var browserChrome = BrowserChrome()
+    /// "Playing on Apple TV" over the page while an AVPlayer is in
+    /// external playback. The local AVPlayerLayer draws nothing then,
+    /// so without this a casting tab is a black rectangle with no hint
+    /// of where the video went. Follows AirPlayController.stateDidChange
+    /// by itself; this owner places it, tells it about fullscreen, and
+    /// refreshes it when the selected tab's playback state changes.
+    /// Hidden until it has something to say.
+    private let airPlayStatusPill = AirPlayStatusPill()
     let addonPopupLoadingIndicator = UIActivityIndicatorView(style: .large)
     var addonPopupLoadingTimeoutWorkItem: DispatchWorkItem?
     lazy var addonPopupLoadingView: UIView = {
@@ -176,6 +184,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         
         applyGeckoPreferences()
         configureBrowserInterface()
+        configureAirPlayStatusPill()
         observeNotifications()
         contextMenuCoordinator.configure()
         downloadsCoordinator.startObservingStore()
@@ -185,6 +194,10 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         browserChrome.syncSidebarButton(splitViewController: splitViewController)
         applyUpdateMenuButtonBadge()
         
+        // Before the first tab exists, so a page's picker request is
+        // measured against the selected tab from the start - the
+        // controller answers only the tab on screen.
+        AirPlayController.shared.tabManager = tabManager
         tabManager.createInitialTab(openingScreen: Prefs.HomepageSettings.openingScreen)
         privateBrowsingLockCoordinator.lockInitialStateIfNeeded()
         refreshAddressBar()
@@ -407,6 +420,13 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         
         // HLS/FairPlay through AVFoundation
         AVPlayerPolicyController.applyAVPlayerHLS()
+        // AirPlay: the shim and Remote Playback prefs, and the host's
+        // external-playback policy. Same reason as the rest of this
+        // block - a pref pushed only on toggle reverts at the next
+        // launch - and the second half because the GeckoView framework
+        // cannot read Prefs for itself, so the app has to push the
+        // policy in.
+        AirPlayPolicyController.apply()
         
         // Tracking Protection
         TrackingProtectionPolicyController.applyEnhancedTrackingProtection()
@@ -439,6 +459,38 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     }
 
 
+    /// Above the content view only. The pill tracks the content view's
+    /// top edge (which is the safe area, the top toolbar's bottom or
+    /// the tab bar's bottom depending on the layout) so it never sits
+    /// on the address bar; the safe-area floor is for fullscreen, where
+    /// the content view runs to the very top of the screen and the
+    /// status bar is hidden but the notch is not.
+    private func configureAirPlayStatusPill() {
+        // The pill opens the picker on its own tap and follows
+        // AirPlayController.stateDidChange itself (AirPlayStatusPill);
+        // the owner only places it and feeds it the two facts it cannot
+        // observe - fullscreen and the selected tab's playback state.
+        airPlayStatusPill.translatesAutoresizingMaskIntoConstraints = false
+        view.insertSubview(airPlayStatusPill, aboveSubview: contentView)
+        NSLayoutConstraint.activate([
+            airPlayStatusPill.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            airPlayStatusPill.topAnchor.constraint(
+                greaterThanOrEqualTo: view.safeAreaLayoutGuide.topAnchor,
+                constant: 8
+            ),
+            airPlayStatusPill.topAnchor.constraint(
+                equalTo: contentView.topAnchor,
+                constant: 8
+            ).withPriority(.defaultHigh),
+            airPlayStatusPill.leadingAnchor.constraint(
+                greaterThanOrEqualTo: view.leadingAnchor,
+                constant: 16
+            ),
+        ])
+        airPlayStatusPill.isShowingFullscreenMedia = isShowingFullscreenMedia
+        airPlayStatusPill.refresh()
+    }
+    
     // MARK: - Browser Layout
     
     private func configureBrowserInterface() {
@@ -1004,6 +1056,40 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
             name: .newTabDisplayOptionDidChange,
             object: nil
         )
+        // Both AirPlay surfaces - the page-menu row and the pill - read
+        // AirPlayController.state AND the selected tab's playback state.
+        // The second signal matters because media starting on an
+        // already-loaded page changes nothing else refreshAddressBar's
+        // callers watch.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(airPlayStateDidChange),
+            name: AirPlayController.stateDidChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(selectedMediaPlaybackStateDidChange),
+            name: SystemMediaSession.selectedPlaybackStateDidChange,
+            object: nil
+        )
+    }
+    
+    /// Only the address bar here: the pill observes this notification
+    /// itself and, in fullscreen, announces the change with a short
+    /// linger. Its observer was registered first (the pill is built with
+    /// this controller), so a refresh() from here would land after it
+    /// and cancel that linger.
+    @objc private func airPlayStateDidChange() {
+        refreshAddressBar()
+    }
+    
+    /// The "AirPlay · X" line and the menu row both depend on the
+    /// selected tab's playback state, which the pill cannot observe on
+    /// its own.
+    @objc private func selectedMediaPlaybackStateDidChange() {
+        refreshAddressBar()
+        airPlayStatusPill.refresh()
     }
     
     @objc private func newTabDisplayOptionDidChange() {
@@ -1267,6 +1353,18 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         
         sidebarCoordinator.setFullscreen(fullScreen)
         isShowingFullscreenMedia = fullScreen
+        // Under screen mirroring AVFoundation keeps mirroring by
+        // default; usesExternalPlaybackWhileExternalScreenIsActive is
+        // what makes a fullscreen player switch to external playback
+        // instead (WebKit's updateDisableExternalPlayback). The host
+        // has no player-to-tab map, so the app pushes the answer for
+        // the one tab that can be fullscreen. Lands dark: the
+        // preference defaults to off until it has been seen on
+        // hardware.
+        AVPlayerHost.shared.setFullscreenExternalPlaybackPolicy(
+            fullScreen && Prefs.AirPlaySettings.usesExternalPlaybackInFullscreen
+        )
+        airPlayStatusPill.isShowingFullscreenMedia = fullScreen
         updateBrowserLayout(animated: false)
         UIApplication.shared.isIdleTimerDisabled = fullScreen
         requestContentKeyboardFocus(for: tabManager.selectedTab?.session)

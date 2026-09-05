@@ -80,6 +80,17 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
             key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
+            
+            // AirPlay
+            key("AirPlaySettings", "isEnabled"): true,
+            key("AirPlaySettings", "allowsVideo"): true,
+            key("AirPlaySettings", "usesExternalPlaybackInFullscreen"): false,
+            key("AirPlaySettings", "shimEnabled"): true,
+            key("AirPlaySettings", "shimAllHosts"): false,
+            key("AirPlaySettings", "shimExtraHosts"): "",
+            key("AirPlaySettings", "remotePlaybackAPI"): true,
+            key("AirPlaySettings", "pickerAlwaysUsesSheet"): false,
+            key("AirPlaySettings", "detachesVideoOutputWhileExternal"): false,
             key("PrivacySettings", "requiresAuthenticationForPrivateTabs"): false,
             key("CompatibilitySettings", "enablePerSiteUserAgentOverrides"): true,
             key("BrowsingSettings", "swipeUpForTabSwitcher"): true,
@@ -1515,6 +1526,124 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isJITHangBacktraceEnabled")
+            }
+        }
+    }
+    
+    // MARK: - AirPlay
+    /// Read only by AirPlayController and AirPlayPolicyController, which
+    /// push every value into the engine (media.reynard.airplay.*) and
+    /// AVPlayerHost. The GeckoView framework cannot see this store.
+    struct AirPlaySettings {
+        /// The whole feature as the user sees it: the page-menu item,
+        /// the status pill, route detection and page-initiated pickers.
+        /// Off leaves Control Center's AirPlay working as it does today;
+        /// the stall-detector grace in AVPlayerHost is a bug fix and
+        /// stays regardless.
+        static var isEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "isEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "isEnabled")
+            }
+        }
+        
+        /// Whether AVPlayer video may leave the phone. ANDed into every
+        /// player's allowsExternalPlayback; off is the kill switch that
+        /// keeps AirPlay audio-only, which is never worse than today's
+        /// cubeb route.
+        static var allowsVideo: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "allowsVideo")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "allowsVideo")
+            }
+        }
+        
+        /// usesExternalPlaybackWhileExternalScreenIsActive while the
+        /// selected tab is fullscreen: under screen mirroring the video
+        /// switches to external playback at full quality instead of
+        /// being mirrored. WebKit's default, but unverified on hardware,
+        /// so it lands off.
+        static var usesExternalPlaybackInFullscreen: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "usesExternalPlaybackInFullscreen")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "usesExternalPlaybackInFullscreen")
+            }
+        }
+        
+        /// The Safari AirPlay API (webkitShowPlaybackTargetPicker and
+        /// friends) for the streaming allowlist. Mirrored as
+        /// media.reynard.airplay.shim.enabled; read per document, so no
+        /// restart.
+        static var shimEnabled: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "shimEnabled")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "shimEnabled")
+            }
+        }
+        
+        /// Installs the shim on every host rather than the allowlist.
+        /// No UI row: a sandbox per subframe across the web is a cost,
+        /// and sites on the Android UA look for Cast, not AirPlay.
+        static var shimAllHosts: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "shimAllHosts")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "shimAllHosts")
+            }
+        }
+        
+        /// Comma-separated hosts added to the allowlist. No UI row;
+        /// editable through defaults, like webKitShimExtraHosts.
+        static var shimExtraHosts: String {
+            get {
+                return prefs.string(forSetting: "AirPlaySettings", key: "shimExtraHosts") ?? ""
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "shimExtraHosts")
+            }
+        }
+        
+        /// video.remote (the Remote Playback API) alongside the Safari
+        /// API. Mirrored as media.reynard.airplay.remote-playback.enabled.
+        static var remotePlaybackAPI: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "remotePlaybackAPI")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "remotePlaybackAPI")
+            }
+        }
+        
+        /// Skips the synthetic tap on the hidden AVRoutePickerView and
+        /// goes straight to the sheet. No UI row; the fallback for a
+        /// device where the tap stops presenting.
+        static var pickerAlwaysUsesSheet: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "pickerAlwaysUsesSheet")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "pickerAlwaysUsesSheet")
+            }
+        }
+        
+        /// Removes the AVPlayerItemVideoOutput while a player is
+        /// external, for a device where an attached output keeps
+        /// isExternalPlaybackActive from ever going true. No UI row.
+        static var detachesVideoOutputWhileExternal: Bool {
+            get {
+                return prefs.bool(forSetting: "AirPlaySettings", key: "detachesVideoOutputWhileExternal")
+            }
+            set {
+                prefs.set(newValue, forSetting: "AirPlaySettings", key: "detachesVideoOutputWhileExternal")
             }
         }
     }

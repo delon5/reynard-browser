@@ -23,6 +23,7 @@ struct SessionDelegates {
     var selectionAction: SelectionActionDelegate?
     var mediaSession: MediaSessionDelegate?
     var translations: TranslationsDelegate?
+    var airPlay: AirPlayDelegate?
     
     init(
         content: ContentDelegate? = nil,
@@ -33,7 +34,8 @@ struct SessionDelegates {
         prompt: PromptDelegate? = nil,
         selectionAction: SelectionActionDelegate? = nil,
         mediaSession: MediaSessionDelegate? = nil,
-        translations: TranslationsDelegate? = nil
+        translations: TranslationsDelegate? = nil,
+        airPlay: AirPlayDelegate? = nil
     ) {
         self.content = content
         self.navigation = navigation
@@ -44,5 +46,6 @@ struct SessionDelegates {
         self.selectionAction = selectionAction
         self.mediaSession = mediaSession
         self.translations = translations
+        self.airPlay = airPlay
     }
 }

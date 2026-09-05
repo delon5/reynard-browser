@@ -1781,6 +1781,36 @@
         }
       }
     },
+    "AirPlay" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AirPlay"
+          }
+        }
+      }
+    },
+    "AirPlay · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AirPlay · %@"
+          }
+        }
+      }
+    },
+    "AirPlay: %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AirPlay: %@"
+          }
+        }
+      }
+    },
     "All Downloads" : {
       "localizations" : {
         "en" : {
@@ -3170,6 +3200,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Choose a valid image and try again."
+          }
+        }
+      }
+    },
+    "Choose an AirPlay Device" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose an AirPlay Device"
           }
         }
       }
@@ -5359,6 +5399,36 @@
         }
       }
     },
+    "Exposes video.remote alongside the Safari API." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Exposes video.remote alongside the Safari API."
+          }
+        }
+      }
+    },
+    "Exposes webkitShowPlaybackTargetPicker and the AirPlay events to streaming sites." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Exposes webkitShowPlaybackTargetPicker and the AirPlay events to streaming sites."
+          }
+        }
+      }
+    },
+    "External Playback in Fullscreen" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "External Playback in Fullscreen"
+          }
+        }
+      }
+    },
     "Failed to enable JIT" : {
       "localizations" : {
         "en" : {
@@ -6372,6 +6442,16 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : ""
+          }
+        }
+      }
+    },
+    "Lets HLS video played through AVPlayer move to an Apple TV. Off keeps AirPlay audio-only." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lets HLS video played through AVPlayer move to an Apple TV. Off keeps AirPlay audio-only."
           }
         }
       }
@@ -8072,6 +8152,16 @@
         }
       }
     },
+    "Playing on %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Playing on %@"
+          }
+        }
+      }
+    },
     "Plays HLS streams, including FairPlay, through AVFoundation" : {
       "localizations" : {
         "en" : {
@@ -8516,6 +8606,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Reload"
+          }
+        }
+      }
+    },
+    "Remote Playback API" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remote Playback API"
           }
         }
       }
@@ -9173,6 +9273,16 @@
         }
       }
     },
+    "Safari AirPlay API" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Safari AirPlay API"
+          }
+        }
+      }
+    },
     "Save" : {
       "localizations" : {
         "en" : {
@@ -9593,6 +9703,16 @@
         }
       }
     },
+    "Send Video to AirPlay" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send Video to AirPlay"
+          }
+        }
+      }
+    },
     "Set as Default Browser" : {
       "localizations" : {
         "en" : {
@@ -9750,6 +9870,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Show Add-ons Button"
+          }
+        }
+      }
+    },
+    "Show AirPlay in the page menu and let pages offer it. Video needs HLS Playback (AVPlayer)." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show AirPlay in the page menu and let pages offer it. Video needs HLS Playback (AVPlayer)."
           }
         }
       }
@@ -10454,6 +10584,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Снять видео\n"
+          }
+        }
+      }
+    },
+    "Tap the AirPlay button to pick a device." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap the AirPlay button to pick a device."
           }
         }
       }
@@ -11223,6 +11363,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Unable to display this image."
+          }
+        }
+      }
+    },
+    "Under screen mirroring, fullscreen AVPlayer video plays on the TV at full quality." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Under screen mirroring, fullscreen AVPlayer video plays on the TV at full quality."
           }
         }
       }

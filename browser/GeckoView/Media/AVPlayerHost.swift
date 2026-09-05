@@ -61,6 +61,18 @@ private func avLog(_ message: String) {
 public final class AVPlayerHost: NSObject {
     public static let shared = AVPlayerHost()
 
+    /// Private: the C++ side reaches the one instance through
+    /// GeckoRuntimeImpl.avPlayerHost, never by constructing another.
+    /// The route and interruption observers are installed here rather
+    /// than in createPlayer because the stall-detector grace they arm
+    /// has to know the route BEFORE the first player exists - a route
+    /// already on AirPlay when a tab starts playing is the ordinary
+    /// case, not the edge case.
+    private override init() {
+        super.init()
+        installAudioRouteObservers()
+    }
+
     /// Players by opaque id. The decoder holds only the id, so a player
     /// outliving its decoder - or the reverse - cannot dereference
     /// anything freed.
@@ -77,6 +89,51 @@ public final class AVPlayerHost: NSObject {
     /// A licence rather than a key session, deliberately: every player
     /// has a session, only a protected one is ever given a CKC.
     private var lastProtectedPlayerId: UInt = 0
+    /// AirPlay policy, pushed by the app (AirPlayPolicyController through
+    /// the public setters below). Never read from Prefs here: this file
+    /// is in the GeckoView framework, which cannot see the app's
+    /// preference store, so the app decides and this host obeys. All
+    /// guarded by stateLock.
+    ///
+    /// The global default is "allowed": with nothing pushed yet the
+    /// ownership rule alone decides, which is the behaviour the
+    /// kill switch defaults to as well.
+    private var externalPlaybackAllowedGlobally = true
+    private var fullscreenExternalPlayback = false
+    private var detachesVideoOutputWhileExternal = false
+    /// Whether the current AVAudioSession route has an .airPlay output.
+    /// Written on the GCD main queue by the route-change observer and
+    /// seeded from currentRoute at install; read by the stall detector
+    /// on every display-link tick, which is exactly why it is cached -
+    /// AVAudioSession is never queried from the tick. Guarded by
+    /// stateLock.
+    private var audioRouteIsAirPlay = false
+    /// Set between an audio-session interruption's .began and .ended,
+    /// so a pause that lands in between is remembered as the
+    /// interruption's rather than the receiver's. Also cleared on
+    /// AirPlay route loss, and never set by iOS 17's route-disconnect
+    /// interruption, which has no .ended - see
+    /// audioSessionInterruptionDidChange. Guarded by stateLock.
+    private var audioInterruptionActive = false
+    /// True while any player reports isExternalPlaybackActive.
+    /// Recomputed under stateLock on every KVO edge and on destroy; the
+    /// app reads it to keep the content process alive and PiP away
+    /// while something is on the TV.
+    public private(set) var isAnyExternalPlaybackActive = false
+    /// Posted on the main queue with userInfo ["playerId": UInt,
+    /// "active": Bool] on every external-playback edge, including the
+    /// one destroy() implies.
+    public static let externalPlaybackDidChange =
+        Notification.Name("ReynardAVPlayerHost.ExternalPlaybackDidChange")
+    /// Item-time grace the stall detector grants an eligible player
+    /// before it will consider "no buffer" a DRM signal - see
+    /// noteProtectedStall. One constant on purpose: a receiver that
+    /// needs longer changes one number.
+    private static let airPlayStallGraceSeconds: Double = 3.0
+    /// How long after a receiver-attributed pause an interruption's
+    /// .began still claims that pause as its own. See
+    /// Player.lastReceiverPauseHostTime.
+    private static let interruptionPauseAttributionSeconds: CFTimeInterval = 1.0
     /// Parser sessions already created, by session id. One per content
     /// process; see parserAppendInitData. Held here rather than asking
     /// FairPlayStreamParser, so the create is decided under this host's
@@ -705,6 +762,59 @@ public final class AVPlayerHost: NSObject {
         /// Guarded by stateLock.
         var mutedRetryDone = false
 
+        /// Mirror of AVPlayer.isExternalPlaybackActive, written on the
+        /// GCD main queue by the KVO installed in observeExternalPlayback.
+        /// Guarded by stateLock so the policy setters, the ownership rule
+        /// and destroy can read it off any thread. The stall detector
+        /// deliberately does NOT rely on this mirror - see
+        /// noteProtectedStall, which reads the player directly.
+        var externalActive = false
+        /// Whether play(id) made this the one player allowed to go
+        /// external - see applyExternalPlaybackOwner for why
+        /// AVFoundation's default (every player allowed) is the wrong
+        /// answer for a browser. Guarded by stateLock.
+        var isExternalOwner = false
+        /// The page said x-webkit-airplay="deny" or one of its siblings.
+        /// Pushed by setExternalPlayback(_:allowed:) once the engine
+        /// carries opcode 7. Guarded by stateLock.
+        var deniedByElement = false
+        /// Item time at which the stall detector first saw this player
+        /// ELIGIBLE to go external (allowsExternalPlayback on an AirPlay
+        /// route), or -1 for "start counting at the next observed tick".
+        /// Reset to -1 on every edge that (re)asserts eligibility - the
+        /// route observer, the policy flip, the paused -> playing edge
+        /// in play(id) - on the external->local edge, and by seek(_:to:)
+        /// in either direction. Guarded by stateLock.
+        var externalEligibleSinceItemTime: Double = -1
+        /// The detach fallback removed videoOutput from the item, so the
+        /// external->local edge has something to put back. Main queue
+        /// only, like the output itself.
+        var videoOutputDetached = false
+        /// suspend() paused this player, so the timeControlStatus
+        /// observer must not read that pause as the Siri Remote's.
+        /// Guarded by stateLock.
+        var suspended = false
+        /// Last SETTLED timeControlStatus - .waitingToPlayAtSpecifiedRate
+        /// is never recorded - so the observer can tell a .playing ->
+        /// .paused edge (the receiver, or an interruption, even one that
+        /// lands mid-rebuffer) from the readiness replay, which reads as
+        /// .paused -> .paused. Guarded by stateLock.
+        var lastTimeControl: AVPlayer.TimeControlStatus = .paused
+        /// Set at an audio-session interruption's .began for a player
+        /// that was playing externally, so .ended + .shouldResume can
+        /// put it back - wantsPlayback alone cannot say, because the
+        /// pause AVFoundation applies for the interruption reaches
+        /// timeControlStatusDidChange looking exactly like the receiver's
+        /// and clears it. Guarded by stateLock.
+        var resumeAfterInterruption = false
+        /// Host time of the last pause timeControlStatusDidChange
+        /// attributed to the receiver, or -1. Lets an interruption's
+        /// .began recognise a pause that landed on the main queue a
+        /// moment BEFORE the notification did - the two arrive from
+        /// different queues and nothing orders them. Guarded by
+        /// stateLock.
+        var lastReceiverPauseHostTime: CFTimeInterval = -1
+
         init(player: AVPlayer, item: AVPlayerItem, asset: AVURLAsset,
              keySession: AVContentKeySession, delegate: ContentKeyDelegate?) {
             self.player = player
@@ -794,12 +904,29 @@ public final class AVPlayerHost: NSObject {
         let item = AVPlayerItem(asset: asset)
         let player = AVPlayer(playerItem: item)
         player.automaticallyWaitsToMinimizeStalling = true
+        // AVFoundation defaults allowsExternalPlayback to YES. In a
+        // browser every preloading tab would then compete for the
+        // receiver the moment the route is AirPlay; play(id) hands the
+        // flag to exactly one player instead (applyExternalPlaybackOwner).
+        // Off until then, so a player that never plays never goes
+        // external.
+        player.allowsExternalPlayback = false
+        // WebKit's updateDisableExternalPlayback: under screen mirroring
+        // an AVPlayer keeps rendering locally (and is mirrored at
+        // mirroring quality) unless this is set, and WebKit sets it only
+        // in fullscreen. The app pushes the fullscreen state through
+        // setFullscreenExternalPlaybackPolicy; this is the value for a
+        // player created mid-fullscreen.
+        player.usesExternalPlaybackWhileExternalScreenIsActive =
+            withState { fullscreenExternalPlayback }
+        player.externalPlaybackVideoGravity = .resizeAspect
 
         let entry = Player(player: player, item: item, asset: asset,
                            keySession: keySession, delegate: delegate)
         withState { players[id] = entry }
 
         observeMetadata(of: item, playerId: id, storingInto: entry)
+        observeExternalPlayback(of: player, playerId: id, storingInto: entry)
         startFrameDelivery(for: id)
         installClockReporting(for: id, entry: entry)
 
@@ -1020,6 +1147,71 @@ public final class AVPlayerHost: NSObject {
                 return
             }
             let player = entry.player
+            // External playback: the output starves BY DESIGN while the
+            // receiver renders - AVPlayerItemVideoOutput vends nothing
+            // for a player that is drawing on an Apple TV - and the
+            // clock keeps running, which is precisely the signature this
+            // detector treats as DRM. Keep the window pinned to "now" so
+            // nothing accumulates, and never latch: the latch is
+            // one-shot and turns a clear stream into a black
+            // AVPlayerLayer for the rest of the title.
+            //
+            // The player is asked DIRECTLY rather than through the
+            // externalActive mirror. The mirror is written by a KVO that
+            // hops to the main queue, and this tick can run before that
+            // hop lands; the property itself is the truth at this
+            // instant.
+            if player.isExternalPlaybackActive {
+                withState { entry.lastBufferItemTime = itemSeconds }
+                noteStallReason("external playback active")
+                return
+            }
+            // Grace for the join. Between the route moving to AirPlay
+            // and isExternalPlaybackActive admitting it the output has
+            // already gone quiet, and how long that gap lasts is the
+            // receiver's business - nothing here can measure it in
+            // advance, so it is bounded in ITEM time instead of guessed
+            // in wall time: a paused or rebuffering player does not
+            // advance item time and cannot burn the grace while nothing
+            // is happening. Eligible means the player is ALLOWED to go
+            // external (the owner, under the global switch, not denied
+            // by the page) on a route that HAS an AirPlay output; the
+            // route bit is cached by the route observer because
+            // AVAudioSession is not something to query at display-link
+            // rate. Counting starts at the first tick after the edge
+            // that made the player eligible - every such edge resets
+            // externalEligibleSinceItemTime to -1.
+            //
+            // Accepted cost: on an audio-only receiver (a HomePod) the
+            // player never goes external, so a genuinely protected
+            // stream latches after the grace plus today's window - about
+            // three seconds of item time later than it does today.
+            let eligible = player.allowsExternalPlayback
+                && withState { audioRouteIsAirPlay }
+            if eligible {
+                let grace = withState { () -> String? in
+                    if entry.externalEligibleSinceItemTime < 0
+                        || itemSeconds < entry.externalEligibleSinceItemTime {
+                        // Seeks in either direction restart this clock
+                        // through seek(_:to:); a backwards move that
+                        // got past that reset rebases here rather than
+                        // stretching the grace by the distance seeked.
+                        entry.externalEligibleSinceItemTime = itemSeconds
+                    }
+                    let elapsed = itemSeconds - entry.externalEligibleSinceItemTime
+                    guard elapsed < Self.airPlayStallGraceSeconds else {
+                        return nil
+                    }
+                    entry.lastBufferItemTime = itemSeconds
+                    return "AirPlay grace (\(coarse(elapsed))s of "
+                        + "\(Self.airPlayStallGraceSeconds) - route is AirPlay, "
+                        + "player allowed, not external yet)"
+                }
+                if let grace {
+                    noteStallReason(grace)
+                    return
+                }
+            }
             if player.timeControlStatus != .playing {
                 noteStallReason("player is not playing (timeControl="
                                 + "\(player.timeControlStatus.rawValue))")
@@ -1346,11 +1538,51 @@ public final class AVPlayerHost: NSObject {
     /// resumeIfWanted replays this once it becomes ready.
     @objc public func play(_ id: UInt) {
         avLog("HOST play(\(id))")
-        guard let entry = withState({ () -> Player? in
-            players[id]?.wantsPlayback = true
-            return players[id]
+        guard let picked = withState({ () -> (Player, Bool)? in
+            guard let entry = players[id] else {
+                return nil
+            }
+            let wasWanted = entry.wantsPlayback
+            entry.wantsPlayback = true
+            return (entry, wasWanted)
         }) else {
             return
+        }
+        let (entry, wasWanted) = picked
+        // Ownership and the grace move on the paused -> playing EDGE
+        // only. Gecko forwards every element.play() as a decoder Play()
+        // (HTMLMediaElement::PlayInternal issues it before it reads
+        // oldPaused), and pages re-issue play() while already playing -
+        // stall watchdogs, visibilitychange handlers, ad SDKs - so a
+        // redundant one from a background tab would otherwise take the
+        // receiver from the film the user is watching, and on an
+        // audio-only receiver would re-arm the grace often enough that
+        // a protected stream never latches. WebKit's playInternal
+        // short-circuits an already-playing session for the same
+        // reason. The receiver's own resume and the interruption replay
+        // set wantsPlayback in timeControlStatusDidChange before the
+        // element's Play() lands here, so they are not edges either -
+        // and that player is already the owner. A player refused the
+        // flag for being muted needs a real pause/play after unmuting;
+        // if unmute-while-playing should count, that belongs in
+        // setVolume, not here.
+        if !wasWanted {
+            // Before play(): the flag has to be on the player by the
+            // time AVFoundation decides where this playback goes.
+            applyExternalPlaybackOwner(id)
+            // A play on an eligible player restarts the stall grace
+            // even if the flag did not move - a receiver that was
+            // released by a pause has to be joined again, and that
+            // join is the gap the grace exists for. The other
+            // eligibility edges (route observer, policy flip,
+            // external->local) re-arm it themselves.
+            if entry.player.allowsExternalPlayback {
+                withState {
+                    if audioRouteIsAirPlay {
+                        entry.externalEligibleSinceItemTime = -1
+                    }
+                }
+            }
         }
         resumeFrameDelivery(for: entry)
         entry.player.play()
@@ -1389,7 +1621,16 @@ public final class AVPlayerHost: NSObject {
         }
         // wantsPlayback deliberately left alone: this is not the user
         // pausing, and resume has to be able to tell the two apart.
-        guard let entry = withState({ players[id] }) else {
+        //
+        // suspended is set BEFORE the pause reaches the player, so the
+        // timeControlStatus observer - which runs later, on the main
+        // queue - already knows this .paused is ours and not the Siri
+        // Remote's. Otherwise backgrounding while on the TV would be
+        // reported to the page as the receiver pausing.
+        guard let entry = withState({ () -> Player? in
+            players[id]?.suspended = true
+            return players[id]
+        }) else {
             return
         }
         entry.player.pause()
@@ -1401,8 +1642,10 @@ public final class AVPlayerHost: NSObject {
         // Only resume what was actually playing. Unconditionally calling
         // play() here would start a video the user had paused before
         // backgrounding.
-        guard let entry = withState({ players[id] }),
-              withState({ entry.wantsPlayback }) else {
+        guard let entry = withState({ () -> Player? in
+            players[id]?.suspended = false
+            return players[id]
+        }), withState({ entry.wantsPlayback }) else {
             return
         }
         resumeFrameDelivery(for: entry)
@@ -1413,6 +1656,16 @@ public final class AVPlayerHost: NSObject {
     /// that can make frames flow again routes through here: play,
     /// resume, seek, and the readiness replay in observeMetadata.
     private func resumeFrameDelivery(for entry: Player) {
+        // Not while the receiver renders. The output vends nothing for
+        // an externally-playing player, so an unparked link would run
+        // at display rate for the length of the film doing nothing -
+        // the Siri Remote's resume reaches play(id) and would do
+        // exactly that. The external->local edge unparks on its own
+        // (externalPlaybackDidChange), paused or not, so the frame the
+        // TV had is repainted.
+        guard !withState({ entry.externalActive }) else {
+            return
+        }
         setPullParked(false, for: entry)
     }
 
@@ -1452,6 +1705,596 @@ public final class AVPlayerHost: NSObject {
                 return
             }
             apply.0.isPaused = apply.1
+        }
+    }
+
+    // MARK: - External playback (AirPlay)
+
+    /// The observers behind the AirPlay behaviour. Installed once, from
+    /// init, on the shared audio session; both deliver on the GCD main
+    /// queue, where every piece of per-player state they touch is
+    /// already written. Nothing here activates or configures the
+    /// session - that stays with ensurePlaybackAudioSession and cubeb.
+    private func installAudioRouteObservers() {
+        let session = AVAudioSession.sharedInstance()
+        let seeded = Self.routeHasAirPlay(session.currentRoute)
+        withState { audioRouteIsAirPlay = seeded }
+        if seeded {
+            avLog("audio route is AirPlay at install")
+        }
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] note in
+            self?.audioRouteDidChange(note)
+        }
+        // Beside, not instead of, the logging observer that
+        // ensurePlaybackAudioSession installs: that one records every
+        // interruption for the capture and stays exactly as it is.
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] note in
+            self?.audioSessionInterruptionDidChange(note)
+        }
+    }
+
+    // nonisolated: reads only the route description handed in, and the
+    // class-level main-actor isolation would otherwise make passing this
+    // as a function value (previous.map) a warning.
+    private nonisolated static func routeHasAirPlay(_ route: AVAudioSessionRouteDescription) -> Bool {
+        return route.outputs.contains { $0.portType == .airPlay }
+    }
+
+    private static func describe(_ reason: AVAudioSession.RouteChangeReason) -> String {
+        switch reason {
+        case .newDeviceAvailable: return "newDeviceAvailable"
+        case .oldDeviceUnavailable: return "oldDeviceUnavailable"
+        case .categoryChange: return "categoryChange"
+        case .override: return "override"
+        case .wakeFromSleep: return "wakeFromSleep"
+        case .noSuitableRouteForCategory: return "noSuitableRouteForCategory"
+        case .routeConfigurationChange: return "routeConfigurationChange"
+        case .unknown: return "unknown"
+        @unknown default: return "reason \(reason.rawValue)"
+        }
+    }
+
+    /// Main queue. Two jobs. Keep the cached route bit the stall
+    /// detector reads, re-arming the grace on every player whenever the
+    /// route lands on AirPlay - on every such change, not only the edge
+    /// onto it, because a category change while already on the receiver
+    /// can make AVFoundation renegotiate the session, and the join is
+    /// the gap the grace covers. And pause what was playing on a
+    /// receiver that went away.
+    private func audioRouteDidChange(_ note: Notification) {
+        let info = note.userInfo ?? [:]
+        let reasonRaw = (info[AVAudioSessionRouteChangeReasonKey] as? NSNumber)?.uintValue ?? 0
+        let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw) ?? .unknown
+        let previous = info[AVAudioSessionRouteChangePreviousRouteKey]
+            as? AVAudioSessionRouteDescription
+        let previousWasAirPlay = previous.map(Self.routeHasAirPlay) ?? false
+        let current = AVAudioSession.sharedInstance().currentRoute
+        let isAirPlay = Self.routeHasAirPlay(current)
+        let (wasAirPlay, armed) = withState { () -> (Bool, Int) in
+            let was = audioRouteIsAirPlay
+            audioRouteIsAirPlay = isAirPlay
+            guard isAirPlay else {
+                return (was, 0)
+            }
+            for entry in players.values {
+                entry.externalEligibleSinceItemTime = -1
+            }
+            return (was, players.count)
+        }
+        // One line per notification, which is event rate, not tick rate.
+        // The port list is what says which of the two screens a capture
+        // was on when the picture went black.
+        let outputs = current.outputs
+            .map { "\($0.portType.rawValue):\($0.portName)" }
+            .joined(separator: ",")
+        avLog("audio route -> [\(outputs)] reason=\(Self.describe(reason))"
+              + (isAirPlay ? " - AirPlay, stall grace armed for \(armed) player(s)" : "")
+              + (wasAirPlay != isAirPlay ? " (was \(wasAirPlay ? "AirPlay" : "local"))" : ""))
+        // WebKit's OldDeviceUnavailable rule
+        // (MediaSessionManagerIOS.mm activeAudioRouteDidChange), scoped
+        // to AirPlay loss: only a previous route that HAD an AirPlay
+        // output pauses anything, so headphones and CarPlay keep
+        // today's behaviour for users who never touch AirPlay. A user
+        // who picks "iPhone" in the picker arrives under a different
+        // reason and pauses nothing - they asked for the move.
+        if reason == .oldDeviceUnavailable, previousWasAirPlay {
+            // A .began that reached the main queue before this
+            // notification must not outlive the route it was about:
+            // nothing comes back on a receiver that is gone, so there
+            // is nothing to resume and no interruption left to
+            // attribute later pauses to. The .began that arrives AFTER
+            // this is handled where it lands.
+            withState {
+                audioInterruptionActive = false
+                for entry in players.values {
+                    entry.resumeAfterInterruption = false
+                }
+            }
+            avLog("AirPlay route lost - pausing external players")
+            pauseExternalPlayersForRouteLoss()
+        }
+    }
+
+    /// Main queue. WebKit keeps the audio session for wireless playback
+    /// through an interruption and resumes when it ends with
+    /// .shouldResume (MediaSessionManagerIOS.mm). Only external players
+    /// are handled here: local playback's interruption handling is
+    /// unchanged - a pre-existing gap, out of this change's scope.
+    ///
+    /// The pause AVFoundation applies for the interruption reaches
+    /// timeControlStatusDidChange looking exactly like the receiver's
+    /// and clears wantsPlayback, so wantsPlayback alone cannot decide
+    /// what to resume. resumeAfterInterruption is set here for what was
+    /// playing at .began, and by the observer for a pause that lands
+    /// while the interruption is active; the host-time check below
+    /// covers the remaining order, a pause delivered to the main queue
+    /// a moment BEFORE this notification - the two come from different
+    /// queues and nothing sequences them.
+    private func audioSessionInterruptionDidChange(_ note: Notification) {
+        let info = note.userInfo ?? [:]
+        guard let typeRaw = (info[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue,
+              let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else {
+            return
+        }
+        switch type {
+        case .began:
+            // iOS 17 interrupts the Now Playing session when its route
+            // is disconnected (AVAudioSession's
+            // prefersInterruptionOnRouteDisconnect defaults on), and no
+            // .ended ever follows - there is no route to come back to.
+            // That is route loss, which audioRouteDidChange pauses and
+            // reports; read as an interruption it would leave
+            // audioInterruptionActive set for the life of the host,
+            // and every later Siri Remote pause would be attributed to
+            // an interruption and resumed at the next .ended. The key
+            // (iOS 14.5) and the reason (iOS 17) both stay inside the
+            // availability check for the iOS 13 deployment target.
+            if #available(iOS 17, *),
+               let reasonRaw = (info[AVAudioSessionInterruptionReasonKey] as? NSNumber)?.uintValue,
+               let reason = AVAudioSession.InterruptionReason(rawValue: reasonRaw),
+               reason == .routeDisconnected {
+                avLog("interruption began (route disconnected) - route loss, not an interruption")
+                return
+            }
+            let now = CACurrentMediaTime()
+            let marked = withState { () -> [UInt] in
+                audioInterruptionActive = true
+                // Every mark is re-derived from scratch: Apple does not
+                // guarantee a .began its matching .ended, and a mark
+                // left by an unpaired one would resume, at the next
+                // .ended, a video the user has since paused.
+                for entry in players.values {
+                    entry.resumeAfterInterruption = false
+                }
+                var ids: [UInt] = []
+                for (id, entry) in players where entry.externalActive {
+                    let recentPause = entry.lastReceiverPauseHostTime >= 0
+                        && now - entry.lastReceiverPauseHostTime
+                            < Self.interruptionPauseAttributionSeconds
+                    guard entry.wantsPlayback || recentPause else {
+                        continue
+                    }
+                    entry.resumeAfterInterruption = true
+                    ids.append(id)
+                }
+                return ids
+            }
+            if !marked.isEmpty {
+                avLog("interruption began while external - will resume \(marked)")
+            }
+        case .ended:
+            let optionsRaw = (info[AVAudioSessionInterruptionOptionKey] as? NSNumber)?.uintValue ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+                .contains(.shouldResume)
+            let resuming = withState { () -> [(key: UInt, value: Player)] in
+                audioInterruptionActive = false
+                var out: [(key: UInt, value: Player)] = []
+                for (id, entry) in players where entry.resumeAfterInterruption {
+                    entry.resumeAfterInterruption = false
+                    guard shouldResume, entry.externalActive else {
+                        continue
+                    }
+                    out.append((key: id, value: entry))
+                }
+                return out
+            }
+            // wantsPlayback is deliberately NOT set here. The play()
+            // lands in timeControlStatusDidChange as .playing with
+            // wantsPlayback false - the "resumed behind the element's
+            // back" branch - which sets it and tells the element, so
+            // the page sees the same pause/play pair WebKit's
+            // suspendPlayback/resumePlayback produce.
+            for (id, entry) in resuming {
+                entry.player.play()
+                avLog("externalPlayback[\(id)] interruption ended - play() re-issued")
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Two observations, appended to entry.observers so destroy
+    /// invalidates them. [weak self] only and the entry re-fetched by
+    /// id - the retain-cycle discipline observeMetadata documents.
+    /// .initial on the external one: a player built while the route is
+    /// already external is the ordinary "second episode" case.
+    private func observeExternalPlayback(of player: AVPlayer, playerId: UInt,
+                                         storingInto entry: Player) {
+        for observation in [
+            player.observe(\.isExternalPlaybackActive, options: [.initial, .new]) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.externalPlaybackDidChange(playerId)
+                }
+            },
+            player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.timeControlStatusDidChange(playerId)
+                }
+            },
+        ] {
+            entry.observers.append(observation)
+        }
+    }
+
+    /// Main queue. The one writer of the externalActive mirror.
+    private func externalPlaybackDidChange(_ id: UInt) {
+        guard let entry = withState({ players[id] }) else {
+            return
+        }
+        let active = entry.player.isExternalPlaybackActive
+        let changed = withState { () -> Bool in
+            guard entry.externalActive != active else {
+                return false
+            }
+            entry.externalActive = active
+            if !active {
+                // Reopen the stall window at the next observed tick -
+                // the "window opened at" branch - rather than measuring
+                // from the last LOCAL buffer, which was however long the
+                // TV had the picture ago. And forget the eligibility
+                // clock: whichever edge matters next re-arms it.
+                entry.lastBufferItemTime = -1
+                entry.externalEligibleSinceItemTime = -1
+            }
+            return true
+        }
+        guard changed else {
+            return
+        }
+        if active {
+            // Nothing will vend while the receiver renders. The 4 Hz
+            // periodic observer in installClockReporting keeps the clock
+            // moving for Gecko, so the element's currentTime and
+            // timeupdate carry on without the link.
+            setPullParked(true, for: entry)
+            if withState({ detachesVideoOutputWhileExternal }), !entry.videoOutputDetached {
+                entry.item.remove(entry.videoOutput)
+                entry.videoOutputDetached = true
+                avLog("externalPlayback[\(id)] video output detached (fallback)")
+            }
+        } else {
+            if entry.videoOutputDetached {
+                entry.item.add(entry.videoOutput)
+                entry.videoOutputDetached = false
+                avLog("externalPlayback[\(id)] video output re-attached")
+            }
+            // Paused or not. The local picture is the forced black
+            // placeholder from the kind 0 true edge, and only a pulled
+            // frame repaints it - AVPlayerLayer would show the paused
+            // frame here, and the pull has to run once for the same
+            // result. The idle backstop in noteIdleTick parks the link
+            // again for a paused player, the contract seek(_:to:)
+            // already relies on.
+            resumeFrameDelivery(for: entry)
+        }
+        let anyActive = recomputeAnyExternalPlaybackActive()
+        avLog("externalPlayback[\(id)] -> \(active) (any=\(anyActive))")
+        postExternalPlaybackDidChange(playerId: id, active: active)
+        // Build 2 call site: ReynardAVPlayerNotifyHostState
+        ReynardAVPlayerNotifyHostState(id, 0, active)
+    }
+
+    /// Main queue. Mirrors WebKit's timeControlStatusDidChange
+    /// (MediaPlayerPrivateAVFoundationObjC.mm), which returns early
+    /// unless the target is wireless: an Apple TV's Siri Remote pauses
+    /// and resumes the AVPlayer behind the element's back, and the
+    /// element's paused flag has to follow or the page's own controls
+    /// lie. Locally the element is the only thing that pauses the
+    /// player, so nothing is owed - and reporting there would fight
+    /// AVFoundation's background auto-pause of a layer-bound player.
+    private func timeControlStatusDidChange(_ id: UInt) {
+        guard let entry = withState({ players[id] }) else {
+            return
+        }
+        let status = entry.player.timeControlStatus
+        let (previous, external, suspended, wants) = withState {
+            () -> (AVPlayer.TimeControlStatus, Bool, Bool, Bool) in
+            let previous = entry.lastTimeControl
+            // Only SETTLED statuses are remembered. A Siri Remote pause
+            // that lands while the receiver rebuffers goes .playing ->
+            // .waiting -> .paused; recording the .waiting would make it
+            // read as .waiting -> .paused and go unreported, leaving
+            // wantsPlayback true for the next interruption's .ended to
+            // resume a video the user paused. Skipping it, the readiness
+            // replay still reads as .paused -> .paused and stays
+            // excluded, while WebKit's rule - any non-paused -> paused
+            // edge is the receiver's - holds for a real pause.
+            if status != .waitingToPlayAtSpecifiedRate {
+                entry.lastTimeControl = status
+            }
+            return (previous, entry.externalActive, entry.suspended,
+                    entry.wantsPlayback)
+        }
+        // The guards: pause(id) clears wantsPlayback BEFORE it pauses,
+        // so its .paused arrives with wants false and says nothing;
+        // suspend(id) marks suspended first; previous == .playing
+        // excludes the readiness replay in observeMetadata (its
+        // previous is .paused, since .waiting is never recorded); and
+        // an item that is not ready is not something a receiver is
+        // acting on.
+        guard external, !suspended, entry.item.status == .readyToPlay else {
+            return
+        }
+        if status == .paused, previous == .playing, wants {
+            // Not at the end of the item. AVPlayer pauses itself there
+            // (actionAtItemEnd), and reporting that as a host pause
+            // would reach Gecko's state machine before - or instead of
+            // - the end-of-stream it is about to be told about; an
+            // element paused short of EOS never fires 'ended', which is
+            // what a site's autoplay-next waits on. The element's own
+            // pause at the end still arrives through pause(id), as it
+            // does locally.
+            let duration = entry.item.duration
+            let now = entry.player.currentTime()
+            if duration.isValid, duration.isNumeric, now.isValid, now.isNumeric,
+               now.seconds >= duration.seconds - 0.5 {
+                avLog("externalPlayback[\(id)] paused at the end of the item - not the receiver")
+                return
+            }
+            let interruption = withState { () -> Bool in
+                entry.wantsPlayback = false
+                entry.lastReceiverPauseHostTime = CACurrentMediaTime()
+                if audioInterruptionActive {
+                    entry.resumeAfterInterruption = true
+                }
+                return audioInterruptionActive
+            }
+            setPullParked(true, for: entry)
+            avLog("externalPlayback[\(id)] paused behind the element's back "
+                  + (interruption ? "(interruption)" : "(receiver)"))
+            // Build 2 call site: ReynardAVPlayerNotifyHostState
+            ReynardAVPlayerNotifyHostState(id, 1, false)
+        } else if status == .playing, !wants {
+            withState { entry.wantsPlayback = true }
+            avLog("externalPlayback[\(id)] resumed behind the element's back")
+            // Build 2 call site: ReynardAVPlayerNotifyHostState
+            ReynardAVPlayerNotifyHostState(id, 1, true)
+        }
+    }
+
+    /// Last-played-wins. The public stand-in for WebKit's rule that only
+    /// the Now-Playing-eligible session gets the target
+    /// (MediaSessionManagerIOS.mm activeVideoRouteDidChange): the tab
+    /// the user pressed play in is the one on the TV, deterministically,
+    /// rather than whichever of several allowed players AVFoundation
+    /// happens to pick. A MUTED player never steals an active session,
+    /// nor the flag from an audible owner that still wants to play -
+    /// Gecko allows muted autoplay (Allowed_muted), so a background tab
+    /// preloading a trailer would otherwise silently take the receiver
+    /// from the film the user is watching, or be the one that joins it
+    /// when the user casts after the trailer started.
+    private func applyExternalPlaybackOwner(_ id: UInt) {
+        let outcome = withState { () -> (previous: UInt?, changed: Bool, refusedBy: UInt?) in
+            guard let entry = players[id] else {
+                return (nil, false, nil)
+            }
+            let previous = players.first { $0.value.isExternalOwner }?.key
+            if previous == id {
+                return (previous, false, nil)
+            }
+            let muted = entry.player.isMuted || entry.player.volume <= 0.001
+            if muted {
+                // Never take an ACTIVE receiver from anyone...
+                if let active = players.first(where: {
+                    $0.value !== entry && $0.value.externalActive
+                }) {
+                    return (previous, false, active.key)
+                }
+                // ...nor the flag from an audible owner that still
+                // wants to play on a local route. That owner is the
+                // session AVFoundation must join when the user picks a
+                // receiver LATER - film first, cast second is the
+                // common order - and a muted trailer holding the flag
+                // in between would be what appears on the TV. WebKit:
+                // a muted element is never Now-Playing eligible
+                // (MediaElementSession::canShowControlsManager). A
+                // paused or muted previous owner still yields.
+                if let previous, let owner = players[previous], owner.wantsPlayback,
+                   !(owner.player.isMuted || owner.player.volume <= 0.001) {
+                    return (previous, false, previous)
+                }
+            }
+            for (pid, other) in players {
+                other.isExternalOwner = (pid == id)
+            }
+            return (previous, true, nil)
+        }
+        if let refusedBy = outcome.refusedBy {
+            avLog("externalPlayback[\(id)] muted - not taking the receiver from \(refusedBy)")
+            return
+        }
+        guard outcome.changed else {
+            return
+        }
+        avLog("externalPlayback owner -> \(id)"
+              + (outcome.previous.map { " (was \($0))" } ?? ""))
+        reapplyExternalPlaybackPolicy()
+    }
+
+    /// Pushes the three-way decision - global switch, ownership, the
+    /// page's own deny - onto the player. Also the one place the grace
+    /// is re-armed for a flag that just came on under an AirPlay route:
+    /// that is the edge AVFoundation joins the receiver on.
+    private func applyExternalPlaybackPolicy(to entry: Player, id: UInt) {
+        let (allowed, routeIsAirPlay) = withState { () -> (Bool, Bool) in
+            (externalPlaybackAllowedGlobally && entry.isExternalOwner
+                && !entry.deniedByElement,
+             audioRouteIsAirPlay)
+        }
+        guard entry.player.allowsExternalPlayback != allowed else {
+            return
+        }
+        entry.player.allowsExternalPlayback = allowed
+        if allowed, routeIsAirPlay {
+            withState { entry.externalEligibleSinceItemTime = -1 }
+        }
+        avLog("externalPlayback[\(id)] allowsExternalPlayback -> \(allowed)")
+    }
+
+    private func reapplyExternalPlaybackPolicy() {
+        for (id, entry) in withState({ Array(players) }) {
+            applyExternalPlaybackPolicy(to: entry, id: id)
+        }
+    }
+
+    /// Under the lock; returns the new value.
+    private func recomputeAnyExternalPlaybackActive() -> Bool {
+        return withState {
+            isAnyExternalPlaybackActive = players.values.contains { $0.externalActive }
+            return isAnyExternalPlaybackActive
+        }
+    }
+
+    /// Main-queue delivery from wherever the edge was seen: the KVO
+    /// handlers are already there; destroy arrives on Gecko's main
+    /// thread, which in the app process is the same thread and in a
+    /// content process is not.
+    private func postExternalPlaybackDidChange(playerId: UInt, active: Bool) {
+        let post = {
+            NotificationCenter.default.post(
+                name: Self.externalPlaybackDidChange,
+                object: nil,
+                userInfo: ["playerId": playerId, "active": active])
+        }
+        if Thread.isMainThread {
+            post()
+        } else {
+            DispatchQueue.main.async(execute: post)
+        }
+    }
+
+    // MARK: - AirPlay policy, pushed by the app
+
+    /// The global kill switch (Prefs.AirPlaySettings.allowsVideo, in the
+    /// app). Off: every player's allowsExternalPlayback is false, so an
+    /// AirPlay route carries audio only - never worse than the cubeb
+    /// route is today.
+    public func setExternalPlaybackAllowed(_ allowed: Bool) {
+        let changed = withState { () -> Bool in
+            guard externalPlaybackAllowedGlobally != allowed else {
+                return false
+            }
+            externalPlaybackAllowedGlobally = allowed
+            return true
+        }
+        guard changed else {
+            return
+        }
+        avLog("externalPlayback allowed globally -> \(allowed)")
+        reapplyExternalPlaybackPolicy()
+    }
+
+    /// usesExternalPlaybackWhileExternalScreenIsActive for every live
+    /// player and for the ones created from now on. WebKit ties it to
+    /// fullscreen (updateDisableExternalPlayback); the app owns the
+    /// tab -> fullscreen map this host has no view of, so it pushes the
+    /// answer.
+    public func setFullscreenExternalPlaybackPolicy(_ fullscreen: Bool) {
+        let (changed, live) = withState { () -> (Bool, [(key: UInt, value: Player)]) in
+            let changed = fullscreenExternalPlayback != fullscreen
+            fullscreenExternalPlayback = fullscreen
+            return (changed, Array(players))
+        }
+        guard changed else {
+            return
+        }
+        avLog("externalPlayback fullscreen policy -> \(fullscreen)")
+        for (id, entry) in live
+        where entry.player.usesExternalPlaybackWhileExternalScreenIsActive != fullscreen {
+            entry.player.usesExternalPlaybackWhileExternalScreenIsActive = fullscreen
+            avLog("externalPlayback[\(id)] usesExternalPlaybackWhileExternalScreenIsActive"
+                  + " -> \(fullscreen)")
+        }
+    }
+
+    /// The A1 fallback: if an attached AVPlayerItemVideoOutput turns out
+    /// to starve AND block, the app flips this and the output is
+    /// detached on the external edge and put back on the way home. Off
+    /// by default; takes effect at the next edge, not on players
+    /// already external.
+    public func setDetachesVideoOutputWhileExternal(_ on: Bool) {
+        let changed = withState { () -> Bool in
+            guard detachesVideoOutputWhileExternal != on else {
+                return false
+            }
+            detachesVideoOutputWhileExternal = on
+            return true
+        }
+        guard changed else {
+            return
+        }
+        avLog("externalPlayback detaches video output while external -> \(on)")
+    }
+
+    /// The page's own answer - x-webkit-airplay="deny" and its siblings -
+    /// relayed by the decoder through opcode 7. Inert until the engine's
+    /// protocol declares the selector; nothing here waits on it.
+    @objc(setExternalPlayback:allowed:)
+    public func setExternalPlayback(_ id: UInt, allowed: Bool) {
+        guard let entry = withState({ () -> Player? in
+            players[id]?.deniedByElement = !allowed
+            return players[id]
+        }) else {
+            avLog("externalPlayback[\(id)] element policy for a player that does not exist")
+            return
+        }
+        avLog("externalPlayback[\(id)] element policy -> \(allowed ? "allowed" : "denied")")
+        applyExternalPlaybackPolicy(to: entry, id: id)
+    }
+
+    /// Pause every player that wanted playback when a receiver went
+    /// away - WebKit's OldDeviceUnavailable rule (every session that
+    /// canProduceAudio), scoped to AirPlay loss by the caller, see
+    /// audioRouteDidChange. Deliberately NOT filtered on the
+    /// externalActive mirror: that mirror is written by a KVO hop with
+    /// no ordering against the route-change notification, and when
+    /// AVFoundation's false edge lands first the mirror is already
+    /// clear while the player rolls on through the phone's speaker -
+    /// the outcome this exists to prevent. The previous route had the
+    /// receiver, so every player that wanted to play had its audio
+    /// there. Public so the app can drive it from its own route
+    /// observer as well; a second call finds nothing left to pause.
+    public func pauseExternalPlayersForRouteLoss() {
+        let playing = withState {
+            Array(players.filter { $0.value.wantsPlayback && !$0.value.suspended })
+        }
+        for (id, entry) in playing {
+            // wantsPlayback first, so the timeControlStatus observer
+            // reads the .paused that follows as ours, not the receiver's.
+            withState { entry.wantsPlayback = false }
+            entry.player.pause()
+            setPullParked(true, for: entry)
+            avLog("externalPlayback[\(id)] route lost - paused")
+            // Build 2 call site: ReynardAVPlayerNotifyHostState
+            ReynardAVPlayerNotifyHostState(id, 1, false)
         }
     }
 
@@ -1497,9 +2340,25 @@ public final class AVPlayerHost: NSObject {
         }
         entry.item.remove(entry.videoOutput)
         entry.observers.forEach { $0.invalidate() }
+        // The KVO that would have reported the external->local edge was
+        // just invalidated, and the entry is already out of players, so
+        // the app-facing truth is recomputed here by hand. External
+        // playback itself ends with replaceCurrentItem(nil) below; the
+        // system route stays on the receiver, as it does in Safari when
+        // a casting tab is closed.
+        let wasExternal = withState { () -> Bool in
+            guard entry.externalActive else { return false }
+            entry.externalActive = false
+            return true
+        }
         entry.player.pause()
         entry.player.replaceCurrentItem(with: nil)
         entry.keySession.removeContentKeyRecipient(entry.asset)
+        if wasExternal {
+            let anyActive = recomputeAnyExternalPlaybackActive()
+            avLog("externalPlayback[\(id)] -> false (destroyed; any=\(anyActive))")
+            postExternalPlaybackDidChange(playerId: id, active: false)
+        }
         avLog("destroyed \(id)")
     }
 
@@ -1733,6 +2592,14 @@ public final class AVPlayerHost: NSObject {
         withState {
             entry.lastBufferItemTime =
                 (seconds.isFinite && seconds >= 0) ? seconds : -1
+            // A seek in EITHER direction restarts the AirPlay join
+            // grace at the landing tick, as it restarts the window
+            // above. The grace only rebases itself on a backwards
+            // move; a forward one would count the distance seeked as
+            // elapsed, collapse the grace, and hand a receiver that is
+            // still joining to the one-second window - the same
+            // one-shot latch this rebase exists to keep from firing.
+            entry.externalEligibleSinceItemTime = -1
         }
         entry.player.seek(
             to: CMTime(seconds: seconds, preferredTimescale: 600)
@@ -1763,6 +2630,16 @@ public final class AVPlayerHost: NSObject {
                     self.withState {
                         if landedSeconds > entry.lastBufferItemTime {
                             entry.lastBufferItemTime = landedSeconds
+                        }
+                        // Same forward-only rule for the grace clock: a
+                        // tick between the seek and this landing can
+                        // have re-armed it at the OLD position, which
+                        // the reset at seek start could not foresee.
+                        // The next eligible tick reopens it at the
+                        // landed position.
+                        if entry.externalEligibleSinceItemTime >= 0,
+                           landedSeconds > entry.externalEligibleSinceItemTime {
+                            entry.externalEligibleSinceItemTime = -1
                         }
                     }
                 }

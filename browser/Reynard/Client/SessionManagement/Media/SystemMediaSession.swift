@@ -40,6 +40,19 @@ final class SystemMediaSession: MediaSessionDelegate {
     /// would fight over the same command targets.
     static let shared = SystemMediaSession()
     
+    /// Posted on the main queue when the SELECTED tab's playback state
+    /// changes - including from "no media at all" to .none, which is
+    /// the first callback a page's media makes. The AirPlay chrome
+    /// (page-menu row, pill) keys on the selected tab having played
+    /// and on it playing now, and nothing else it can observe fires
+    /// when media starts on a page that has finished loading.
+    ///
+    /// Deliberately NOT posted from every observer call:
+    /// onPositionState reaches notifyStateChanged several times a
+    /// second, and the observer protocol is PiP's, which wants those.
+    static let selectedPlaybackStateDidChange =
+        Notification.Name("Reynard.SystemMediaSessionSelectedPlaybackStateDidChange")
+    
     enum PlaybackState {
         case none
         case paused
@@ -77,6 +90,9 @@ final class SystemMediaSession: MediaSessionDelegate {
     private var playbackHistory: [ObjectIdentifier] = []
     private var commandTargets: [Any] = []
     weak var observer: SystemMediaSessionObserver?
+    /// What selectedPlaybackStateDidChange last reported; nil means
+    /// "no snapshot", which is distinct from a snapshot in .none.
+    private var lastPostedSelectedPlaybackState: PlaybackState?
     
     struct Snapshot {
         let session: GeckoSession
@@ -157,6 +173,7 @@ final class SystemMediaSession: MediaSessionDelegate {
         }
         if selectedSession === session {
             observer?.systemMediaSessionStateDidChange(self)
+            postSelectedPlaybackStateIfChanged()
         }
         releaseAudioSessionIfIdleInBackground()
     }
@@ -290,6 +307,7 @@ final class SystemMediaSession: MediaSessionDelegate {
     func select(session: GeckoSession) {
         revalidate()
         selectedSession = session
+        postSelectedPlaybackStateIfChanged()
         guard let state = sessionStates[ObjectIdentifier(session)],
               state.playbackState != .none else {
             return
@@ -324,6 +342,29 @@ final class SystemMediaSession: MediaSessionDelegate {
             activateMostRecentPlayingSession()
         }
         observer?.systemMediaSessionStateDidChange(self)
+        postSelectedPlaybackStateIfChanged()
+    }
+    
+    /// Pauses every session that reports itself playing, through the
+    /// same GeckoView:MediaSession:Pause the lock screen's pause
+    /// command takes.
+    ///
+    /// For AirPlay route loss: when the receiver goes away the phone's
+    /// speaker would otherwise take over mid-sentence, and WebKit's
+    /// OldDeviceUnavailable rule (MediaSessionManagerIOS) pauses
+    /// instead. AVPlayers pause themselves in the host; this covers the
+    /// Gecko-decoded media the host never sees.
+    func pausePlayingSessions() {
+        var paused = 0
+        for state in sessionStates.values {
+            guard let session = state.session,
+                  state.playbackState == .playing else {
+                continue
+            }
+            session.mediaSession.pause()
+            paused += 1
+        }
+        logger(String(format: "mediaSession: pausePlayingSessions - paused %d of %d", paused, sessionStates.count))
     }
     
     func onPositionState(session: GeckoSession, state: MediaSessionPositionState) {
@@ -365,6 +406,16 @@ final class SystemMediaSession: MediaSessionDelegate {
             return
         }
         observer?.systemMediaSessionStateDidChange(self)
+        postSelectedPlaybackStateIfChanged()
+    }
+    
+    private func postSelectedPlaybackStateIfChanged() {
+        let playbackState = selectedSnapshot?.playbackState
+        guard playbackState != lastPostedSelectedPlaybackState else {
+            return
+        }
+        lastPostedSelectedPlaybackState = playbackState
+        NotificationCenter.default.post(name: Self.selectedPlaybackStateDidChange, object: self)
     }
     
     private func activate(_ session: GeckoSession, state: SessionState) {
@@ -437,6 +488,16 @@ final class SystemMediaSession: MediaSessionDelegate {
             nowPlayingCenter.playbackState = .stopped
             apply(MediaSessionFeatures())
         }
+        // An AVPlayer on an AirPlay receiver is playing without any
+        // Media Session state to say so - the states above are Gecko's
+        // view, and the host's players report nothing here. Releasing
+        // the session would end the playback on the TV. WebKit keeps
+        // the session while any element is playing to a wireless
+        // target (MediaSessionManagerIOS::sessionWillEndPlayback).
+        guard !AVPlayerHost.shared.isAnyExternalPlaybackActive else {
+            logger("mediaSession: backgrounded with an AVPlayer in external playback - audio session kept")
+            return
+        }
         try? AVAudioSession.sharedInstance().setActive(
             false,
             options: .notifyOthersOnDeactivation
@@ -468,6 +529,12 @@ final class SystemMediaSession: MediaSessionDelegate {
             $0.session != nil && $0.playbackState == .playing
         }
         guard !anyPlaying else {
+            return
+        }
+        // Same fence as applicationDidEnterBackground: a player on an
+        // AirPlay receiver is not in these states.
+        guard !AVPlayerHost.shared.isAnyExternalPlaybackActive else {
+            logger("mediaSession: playback stopped while backgrounded but an AVPlayer is in external playback - audio session kept")
             return
         }
         try? AVAudioSession.sharedInstance().setActive(

@@ -134,7 +134,12 @@ public class GeckoSession {
     public var pictureInPictureDisplayLayer: CALayer? {
         return pictureInPictureHandler.displayLayer
     }
-    
+    private lazy var airPlayHandler = newAirPlayHandler(self)
+    public var airPlayDelegate: AirPlayDelegate? {
+        get { airPlayHandler.delegate }
+        set { airPlayHandler.delegate = newValue }
+    }
+
     public func notifyScreenOrientationChanged(to orientation: UIInterfaceOrientation) {
         window?.updateScreenOrientation(orientation.rawValue)
     }
@@ -155,6 +160,7 @@ public class GeckoSession {
         translationsHandler,
         autofillHandler,
         pictureInPictureHandler,
+        airPlayHandler,
     ]
     
     // MARK: - Lifecycle
@@ -283,7 +289,13 @@ public class GeckoSession {
         mediaSessionDelegate = nil
         translationsDelegate = nil
         pictureInPictureDelegate = nil
-        
+        // Before the delegate is dropped, like mediaSessionDelegate's
+        // onDeactivated above: the app counts availability watchers per
+        // session, and a closed session that never says so would keep
+        // the route detector running for a page that is gone.
+        airPlayDelegate?.onSessionClosed(session: self)
+        airPlayDelegate = nil
+
         guard let window else {
             return
         }

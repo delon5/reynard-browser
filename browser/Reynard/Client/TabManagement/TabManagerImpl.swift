@@ -259,8 +259,23 @@ final class TabManagerImplementation: NSObject, TabManager {
     /// rule above opens it again if the tab is returned to.
     ///
     /// Least recently selected first, and deliberately generous: this
-    /// only fires well past what a transition can survive.
+    /// only fires well past what a transition can survive. Fenced while
+    /// an AVPlayer is on an AirPlay receiver, for the reason below.
     private func retireSessionsBeyondCap(keeping selected: Tab) {
+        // Not while an AVPlayer is on an AirPlay receiver. The casting
+        // page is rarely the selected one, an inline AVPlayer element
+        // registers with neither PiP nor SystemMediaSession (no audio
+        // track inside Gecko - see SessionManager.hasSystemMediaSession),
+        // so evictSessionIfNeeded's isMediaPriority cannot single it
+        // out, and closing its session destroys the brokered player and
+        // the picture on the TV. Only sleepBackgroundedTabs consults
+        // hasSystemMediaSession; this runs in the FOREGROUND on every
+        // selection. Same identity-free reasoning, bounded cost: the
+        // sweep runs again on the next selection or backgrounding.
+        guard !AVPlayerHost.shared.isAnyExternalPlaybackActive else {
+            logger("tabRetire: NOT retiring - an AVPlayer is in external playback")
+            return
+        }
         let live = (regularTabs + privateTabs)
             .filter { $0 !== selected && $0.session.isOpen() }
         guard live.count > Self.liveSessionCap else {
@@ -726,7 +741,13 @@ final class TabManagerImplementation: NSObject, TabManager {
             // is this manager's delegate - the engine offers a
             // translation per session and the bar follows the
             // selected tab.
-            translations: delegate as? TranslationsDelegate
+            translations: delegate as? TranslationsDelegate,
+            // Page-initiated AirPlay (the picker, availability
+            // watching). One app-wide controller rather than one per
+            // tab: routes are a system-wide fact, and the controller
+            // itself refuses any tab but the selected one. CarPlay
+            // sessions set their delegates by hand and get none.
+            airPlay: AirPlayController.shared
         )
     }
     

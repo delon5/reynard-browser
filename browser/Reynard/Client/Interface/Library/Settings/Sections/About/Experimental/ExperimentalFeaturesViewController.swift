@@ -14,6 +14,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     private enum Section: CaseIterable {
         case features
+        case airPlay
         case carPlayScripts
         case backgroundKeepAlive
         case diagnosticLogs
@@ -23,6 +24,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             switch self {
             case .features:
                 return SettingsSectionText()
+            case .airPlay:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("AirPlay", comment: ""),
+                    footerTitle: NSLocalizedString("Show AirPlay in the page menu and let pages offer it. Video needs HLS Playback (AVPlayer).", comment: "")
+                )
             case .carPlayScripts:
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("CarPlay", comment: ""),
@@ -59,6 +65,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case pillFloats
         case hideUpdateNotification
         case hideUpdateAvailableBanner
+        case airPlay
+        case airPlayVideo
+        case airPlayFullscreen
+        case airPlayShim
+        case airPlayRemote
         case carPlayScriptsEnabled
         case manageCarPlayScripts
         case backgroundAudioKeepAlive
@@ -72,6 +83,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
             switch self {
             case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats, .hideUpdateNotification, .hideUpdateAvailableBanner:
                 return .features
+            case .airPlay, .airPlayVideo, .airPlayFullscreen, .airPlayShim, .airPlayRemote:
+                return .airPlay
             case .carPlayScriptsEnabled, .manageCarPlayScripts:
                 return .carPlayScripts
             case .backgroundAudioKeepAlive:
@@ -90,6 +103,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let pillFloatsSwitch = UISwitch()
     private let hideUpdateNotificationSwitch = UISwitch()
     private let hideUpdateAvailableBannerSwitch = UISwitch()
+    private let airPlaySwitch = UISwitch()
+    private let airPlayVideoSwitch = UISwitch()
+    private let airPlayFullscreenSwitch = UISwitch()
+    private let airPlayShimSwitch = UISwitch()
+    private let airPlayRemoteSwitch = UISwitch()
     private let carPlayScriptsSwitch = UISwitch()
     private let backgroundAudioKeepAliveSwitch = UISwitch()
     private let debugLogFileSwitch = UISwitch()
@@ -195,6 +213,35 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("Hide Update Available Banner", comment: ""),
                 accessoryView: hideUpdateAvailableBannerSwitch
             )
+        case .airPlay:
+            return switchCell(
+                title: NSLocalizedString("AirPlay", comment: ""),
+                accessoryView: airPlaySwitch
+            )
+        case .airPlayVideo:
+            return switchCell(
+                title: NSLocalizedString("Send Video to AirPlay", comment: ""),
+                subtitle: NSLocalizedString("Lets HLS video played through AVPlayer move to an Apple TV. Off keeps AirPlay audio-only.", comment: ""),
+                accessoryView: airPlayVideoSwitch
+            )
+        case .airPlayFullscreen:
+            return switchCell(
+                title: NSLocalizedString("External Playback in Fullscreen", comment: ""),
+                subtitle: NSLocalizedString("Under screen mirroring, fullscreen AVPlayer video plays on the TV at full quality.", comment: ""),
+                accessoryView: airPlayFullscreenSwitch
+            )
+        case .airPlayShim:
+            return switchCell(
+                title: NSLocalizedString("Safari AirPlay API", comment: ""),
+                subtitle: NSLocalizedString("Exposes webkitShowPlaybackTargetPicker and the AirPlay events to streaming sites.", comment: ""),
+                accessoryView: airPlayShimSwitch
+            )
+        case .airPlayRemote:
+            return switchCell(
+                title: NSLocalizedString("Remote Playback API", comment: ""),
+                subtitle: NSLocalizedString("Exposes video.remote alongside the Safari API.", comment: ""),
+                accessoryView: airPlayRemoteSwitch
+            )
         case .carPlayScriptsEnabled:
             return switchCell(
                 title: NSLocalizedString("Run Scripts on CarPlay", comment: ""),
@@ -259,6 +306,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         switch sectionRows[indexPath.row] {
         case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats, .hideUpdateNotification, .hideUpdateAvailableBanner,
+             .airPlay, .airPlayVideo, .airPlayFullscreen, .airPlayShim, .airPlayRemote,
              .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
              .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
@@ -281,6 +329,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         pillFloatsSwitch.addTarget(self, action: #selector(pillFloatsSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
         hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
+        airPlaySwitch.addTarget(self, action: #selector(airPlaySwitchDidChange(_:)), for: .valueChanged)
+        airPlayVideoSwitch.addTarget(self, action: #selector(airPlayVideoSwitchDidChange(_:)), for: .valueChanged)
+        airPlayFullscreenSwitch.addTarget(self, action: #selector(airPlayFullscreenSwitchDidChange(_:)), for: .valueChanged)
+        airPlayShimSwitch.addTarget(self, action: #selector(airPlayShimSwitchDidChange(_:)), for: .valueChanged)
+        airPlayRemoteSwitch.addTarget(self, action: #selector(airPlayRemoteSwitchDidChange(_:)), for: .valueChanged)
         carPlayScriptsSwitch.addTarget(self, action: #selector(carPlayScriptsSwitchDidChange(_:)), for: .valueChanged)
         backgroundAudioKeepAliveSwitch.addTarget(self, action: #selector(backgroundAudioKeepAliveSwitchDidChange(_:)), for: .valueChanged)
         debugLogFileSwitch.addTarget(self, action: #selector(debugLogFileSwitchDidChange(_:)), for: .valueChanged)
@@ -296,6 +349,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         pillFloatsSwitch.isOn = Prefs.AppearanceSettings.pillFloatsOverPage
         hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
         hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
+        airPlaySwitch.isOn = Prefs.AirPlaySettings.isEnabled
+        airPlayVideoSwitch.isOn = Prefs.AirPlaySettings.allowsVideo
+        airPlayFullscreenSwitch.isOn = Prefs.AirPlaySettings.usesExternalPlaybackInFullscreen
+        airPlayShimSwitch.isOn = Prefs.AirPlaySettings.shimEnabled
+        airPlayRemoteSwitch.isOn = Prefs.AirPlaySettings.remotePlaybackAPI
         carPlayScriptsSwitch.isOn = Prefs.ExperimentalSettings.isCarPlayScriptsEnabled
         backgroundAudioKeepAliveSwitch.isOn = Prefs.ExperimentalSettings.isBackgroundAudioKeepAliveEnabled
         debugLogFileSwitch.isOn = Prefs.ExperimentalSettings.isJITDebugLogEnabled
@@ -387,6 +445,42 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     // back there from here picks up the new value naturally.
     @objc private func hideUpdateAvailableBannerSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.hidesUpdateAvailableBanner = sender.isOn
+    }
+    
+    // MARK: - AirPlay
+    
+    // None of these prompt for a restart. The Swift half (menu item,
+    // pill, detector, the players' allowsExternalPlayback) is applied
+    // live by AirPlayController, and the engine half is read per
+    // document from media.reynard.airplay.*, so a page loaded after the
+    // flip sees the new value and one loaded before keeps the old one -
+    // which is what a reload is for, not a relaunch.
+    @objc private func airPlaySwitchDidChange(_ sender: UISwitch) {
+        Prefs.AirPlaySettings.isEnabled = sender.isOn
+        AirPlayPolicyController.apply()
+    }
+    
+    @objc private func airPlayVideoSwitchDidChange(_ sender: UISwitch) {
+        Prefs.AirPlaySettings.allowsVideo = sender.isOn
+        AirPlayPolicyController.apply()
+    }
+    
+    // Turning this off applies at once; turning it on is picked up at
+    // the next fullscreen transition, the only place that knows whether
+    // a tab is fullscreen right now.
+    @objc private func airPlayFullscreenSwitchDidChange(_ sender: UISwitch) {
+        Prefs.AirPlaySettings.usesExternalPlaybackInFullscreen = sender.isOn
+        AirPlayPolicyController.apply()
+    }
+    
+    @objc private func airPlayShimSwitchDidChange(_ sender: UISwitch) {
+        Prefs.AirPlaySettings.shimEnabled = sender.isOn
+        AirPlayPolicyController.apply()
+    }
+    
+    @objc private func airPlayRemoteSwitchDidChange(_ sender: UISwitch) {
+        Prefs.AirPlaySettings.remotePlaybackAPI = sender.isOn
+        AirPlayPolicyController.apply()
     }
     
     // MARK: - DDI Storage Reset

@@ -104,6 +104,7 @@ final class SessionManager {
         session.selectionActionDelegate = delegates.selectionAction
         session.mediaSessionDelegate = delegates.mediaSession
         session.translationsDelegate = delegates.translations
+        session.airPlayDelegate = delegates.airPlay
     }
     
     func adopt(
@@ -200,9 +201,24 @@ final class SessionManager {
         // the lock screen: plain backgrounded audio failed this guard
         // and had the content process producing it torn down about
         // 1.65s after backgrounding.
+        //
+        // ADDED the external-playback arm. An AVPlayer-backed element
+        // exposes no audio track to Gecko (AVPlayerDemuxer is video
+        // only - the sound is AVPlayer's), so HTMLMediaElement::IsAudible
+        // is false, the media-control key listener never starts for an
+        // inline element, and SystemMediaSession never hears about the
+        // page at all. Fullscreen and PiP elements do register and are
+        // covered by the arms above; a page AirPlaying HLS video inline
+        // fails all three, and sleepBackgroundedTabs would close the
+        // casting tab when it is not the selected one - which destroys
+        // the brokered player (ContentParent::ActorDestroy ->
+        // ReynardAVPlayerForgetOwner) and with it the picture on the TV.
+        // The host knows the truth per player, and this predicate stays
+        // identity-free like the others.
         return pictureInPictureSession != nil
             || SystemMediaSession.shared.prioritySession != nil
             || SystemMediaSession.shared.hasNowPlayingSession
+            || AVPlayerHost.shared.isAnyExternalPlaybackActive
     }
     
     /// Exposed for tab eviction, which must not sleep a tab whose

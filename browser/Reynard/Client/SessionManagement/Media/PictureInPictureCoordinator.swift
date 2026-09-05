@@ -253,6 +253,15 @@ final class PictureInPictureCoordinator: NSObject, PictureInPictureCoordinating 
     }
     
     private func eligibleSession() -> EligibleSession? {
+        // WebKit's WebAVPlayerController policy: a player on an AirPlay
+        // receiver has no picture to put in a window, and the two
+        // presentations fight over who owns the video. The existing 3s
+        // stand-down (disarmAutomaticStartIfItNeverHappened) handles an
+        // auto-start refused here.
+        guard !AVPlayerHost.shared.isAnyExternalPlaybackActive else {
+            logger("pipGate: an AVPlayer is in external playback - PiP and AirPlay video are mutually exclusive")
+            return nil
+        }
         guard let snapshot = mediaSession.selectedSnapshot else {
             logger("pipGate: no selectedSnapshot - nothing is registered as playing")
             return nil

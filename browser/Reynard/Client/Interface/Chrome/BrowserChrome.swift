@@ -578,8 +578,8 @@ final class BrowserChrome: UIView {
         )
     }
     
-    func updateAddressBarMenu(url: String?, usesDesktopWebsite: Bool?) {
-        addressBar.updateMenu(url: url, usesDesktopWebsite: usesDesktopWebsite)
+    func updateAddressBarMenu(url: String?, usesDesktopWebsite: Bool?, airPlayTitle: String?) {
+        addressBar.updateMenu(url: url, usesDesktopWebsite: usesDesktopWebsite, airPlayTitle: airPlayTitle)
     }
     
     func setAddressBarLoadingProgress(_ progress: Float, isLoading: Bool) {

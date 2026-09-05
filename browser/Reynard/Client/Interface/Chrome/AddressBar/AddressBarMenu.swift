@@ -24,8 +24,10 @@ enum AddressBarMenu {
     static func makeItems(
         selectedURL: String?,
         usesDesktopWebsite: Bool?,
+        airPlayTitle: String?,
         onShowAddons: @escaping () -> Void,
         onChangeWebsiteMode: @escaping () -> Void,
+        onAirPlay: @escaping () -> Void,
         onFindInPage: @escaping () -> Void,
         onWebsiteSettings: @escaping () -> Void,
         onSettings: @escaping () -> Void,
@@ -60,6 +62,26 @@ enum AddressBarMenu {
                 image: UIImage(named: isDesktop ? "reynard.smartphone" : "reynard.desktopcomputer"),
                 startsSection: false,
                 action: onChangeWebsiteMode
+            ))
+        }
+        // AirPlay. The caller decides whether there is a title at all
+        // (BrowserViewController+AddressBar.airPlayMenuTitle: the
+        // preference, the audio-session category, and whether the page
+        // has played anything - Safari's button only lights up after
+        // hasPlayed), and the row is gated on url?.host like Find in
+        // Page below, because there is nothing to send from the
+        // homepage.
+        //
+        // A plain item, not a row hosting a live AVRoutePickerView: the
+        // picker is presented AFTER the menu has dismissed (see
+        // addressBarDidRequestAirPlay), so nothing here has to agree
+        // with the menu about who owns the dismissal.
+        if let airPlayTitle, url?.host != nil {
+            items.append(Item(
+                title: airPlayTitle,
+                image: UIImage(systemName: "airplayvideo"),
+                startsSection: true,
+                action: onAirPlay
             ))
         }
         // Find in Page. Placed for a loaded page only - there is nothing
