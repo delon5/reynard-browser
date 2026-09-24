@@ -1,9 +1,9 @@
 diff --git a/ipc/glue/NSExtensionUtils.mm b/ipc/glue/NSExtensionUtils.mm
 new file mode 100644
-index 000000000000..b7a945773461
+index 000000000000..f4cc84ee06f1
 --- /dev/null
 +++ b/ipc/glue/NSExtensionUtils.mm
-@@ -0,0 +1,659 @@
+@@ -0,0 +1,678 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -118,6 +118,23 @@ index 000000000000..b7a945773461
 +                                  DISPATCH_QUEUE_SERIAL);
 +    dispatch_queue_set_specific(queue, &sExtensionLaunchQueueSpecific,
 +                                &sExtensionLaunchQueueSpecific, NULL);
++  });
++  return queue;
++}
++
++// Where a launch's completion handler is CALLED. Upstream b994246b (#368)
++// moved completions off ExtensionLaunchQueue because a slow handler there
++// holds up every other launch queued behind it. Unlike upstream, only the
++// call moves: the `completed` latch below stays on ExtensionLaunchQueue,
++// which owns it, so the interruption and invalidation handlers - which
++// enqueue their `completed` check on that queue ahead of completeOnce -
++// still see the pre-event state.
++static dispatch_queue_t ExtensionCompletionQueue() {
++  static dispatch_queue_t queue;
++  static dispatch_once_t onceToken;
++  dispatch_once(&onceToken, ^{
++    queue = dispatch_queue_create(
++        "me.minh-ton.Reynard.ExtensionCompletionQueue", DISPATCH_QUEUE_SERIAL);
 +  });
 +  return queue;
 +}
@@ -298,8 +315,10 @@ index 000000000000..b7a945773461
 +          return;
 +        }
 +        completed = true;
-+        completion(error);
-+        [completion release];
++        dispatch_async(ExtensionCompletionQueue(), ^{
++          completion(error);
++          [completion release];
++        });
 +      });
 +    };
 +
