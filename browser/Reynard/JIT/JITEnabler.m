@@ -727,14 +727,29 @@ static void jitHangBacktraceHandler(int signalNumber) {
         }
         
         if (hasTXMSupport) {
-            registerJITEndpointForPID(pid, @"10.7.0.1", 49152);
-            
             DebugSession *persistentSession = malloc(sizeof(*persistentSession));
             if (!persistentSession) {
                 freeDebugSession(&session);
                 if (error) *error = MakeError(SessionAllocationFailed);
                 return NO;
             }
+            
+            // MOVED - was the first statement of this branch, above the
+            // malloc. See fix_appside_lifetime_leaks.py's docstring.
+            //
+            // Registering first meant the malloc-failure path returned
+            // with the pid already in monitoredEndpointsByPID() and
+            // nothing left to take it out: unregisterJITEndpointForPID
+            // has exactly one caller in the tree, runDebugService's
+            // teardown, and runDebugService is only ever reached with a
+            // persistentSession that exists - which on that path it
+            // does not. Bounded, because resetJITEndpointMonitor clears
+            // the whole map later, but there is no reason to register
+            // before the one call here that can fail.
+            //
+            // Below the check, the registration happens only on the
+            // path that actually starts the loop that unregisters it.
+            registerJITEndpointForPID(pid, @"10.7.0.1", 49152);
             
             *persistentSession = session;
             session.adapter = NULL;
@@ -885,6 +900,68 @@ static void jitHangBacktraceHandler(int signalNumber) {
     return liveDebugSessionCount();
 }
 
+// ADDED - see fix_appside_lifetime_leaks.py's docstring. An
+// INSTRUMENT, NOT A FIX, and the docstring says at length why.
+//
+// retiredProviders is drained in exactly two places: closeSharedTunnel
+// and dealloc. dealloc is unreachable in practice - JITEnabler is a
+// dispatch_once singleton - and closeSharedTunnel runs only when all
+// four of closeTunnelForSuspension's gates read clear
+// (attachInFlightCount, orphanedAttachCount, vAttachInFlightSince,
+// liveDebugSessionCount). Those gates latch: an orphaned attach that
+// never expires, or a vAttach marker never cleared, and the list is
+// never drained again for the life of the process. Every retired
+// AdapterHandle is then held to the end, and each further tunnel
+// failure adds another.
+//
+// No free is added, deliberately, and the FFI contract is why rather
+// than mere caution. Every RSD connect BORROWS the adapter and does
+// not consume it - debug_proxy_connect_rsd does
+//     let provider_ref = unsafe { &mut (*provider).0 };
+// (ffi/src/debug_proxy.rs:140, and the identical shape in
+// remote_server.rs:81, lockdown.rs:82, heartbeat.rs:80 and
+// mobile_image_mounter.rs:83), while adapter_free is a plain
+// Box::from_raw. So the caller owns the handle, must free it exactly
+// once, and must NOT free it while anything still holds that &mut.
+//
+// That splits this list in two. A retired provider an orphaned attach
+// may still be inside is CONTRACT-REQUIRED to stay alive - freeing it
+// is a free underneath a live &mut, which is the EXC_BAD_ACCESS at
+// 0x7466654c ("Left") that fix_provider_use_after_free.py was written
+// for. Only a provider no call is inside, with no remaining path to
+// adapter_free, is genuinely leaked - and closeSharedTunnel IS that
+// path, so in the normal shape nothing here leaks at all.
+//
+// The two are indistinguishable from this file. An orphan is orphaned
+// precisely because nothing hears from it again, so "no call is inside
+// this one" is never established here, and a time-based drain would be
+// a guess about the duration of a call whose defining property is that
+// it did not return. Under this contract a wrong guess is a free
+// against a live borrow, not a recoverable mistake. So this reports
+// the growth rather than acting on it.
+//
+// High-water-mark rather than once-only: one line per new maximum is
+// what distinguishes "a few retirements, then a drain" from
+// "climbing forever", and the climb is the whole question. It is
+// self-limiting - the count grows by one at a time and only on a
+// retirement, so this can appear no more often than the tunnel dies.
+//
+// Both callers already run inside providerQueue, a serial queue, which
+// is the only thing that touches the high-water mark below - no lock
+// of its own, exactly the argument that already covers
+// retiredProviders itself.
+static const NSUInteger kRetiredProviderWarnThreshold = 8;
+static NSUInteger sLastWarnedRetiredCount = 0;
+
+static void warnIfRetiredProvidersUnbounded(NSUInteger retiredCount) {
+    if (retiredCount < kRetiredProviderWarnThreshold) return;
+    if (retiredCount <= sLastWarnedRetiredCount) return;
+    sLastWarnedRetiredCount = retiredCount;
+    logger([NSString stringWithFormat:
+        @"tunnelRetireUnbounded: %lu retired provider(s) held - each still owns an AdapterHandle. Any that an orphaned call is still inside MUST be held (the RSD connects borrow the adapter with &mut and do not consume it); the rest are leaked, and nothing here can tell which is which. Only closeSharedTunnel frees them, and it runs only when all four of closeTunnelForSuspension's gates read clear - a count that keeps climbing means a gate has latched.",
+        (unsigned long)retiredCount]);
+}
+
 // Deliberately does NOT call freeDeviceProvider on the current
 // sharedProvider before clearing it - see
 // fix_invalidate_provider_on_timeout.py's docstring for the full
@@ -909,6 +986,7 @@ static void jitHangBacktraceHandler(int signalNumber) {
         if (self.sharedProvider) {
             [self.retiredProviders addObject:[NSValue valueWithPointer:self.sharedProvider]];
             logger([NSString stringWithFormat:@"tunnelRetire: timeout invalidated the cached provider - retired, %lu now waiting for a tunnel close", (unsigned long)self.retiredProviders.count]);
+            warnIfRetiredProvidersUnbounded(self.retiredProviders.count);
         }
         self.sharedProvider = NULL;
         self.didEnsureDDIMounted = NO;
@@ -937,6 +1015,7 @@ static void jitHangBacktraceHandler(int signalNumber) {
             // freed here. See fix_retired_provider_freed.py.
             [self.retiredProviders addObject:[NSValue valueWithPointer:provider]];
             logger([NSString stringWithFormat:@"tunnelRetire: transport failure invalidated the cached provider - retired, %lu now waiting for a tunnel close", (unsigned long)self.retiredProviders.count]);
+            warnIfRetiredProvidersUnbounded(self.retiredProviders.count);
             self.sharedProvider = NULL;
             self.didEnsureDDIMounted = NO;
             invalidated = YES;
