@@ -2238,11 +2238,22 @@ extension TabManagerImplementation: ContentDelegate {
     func onCookieBannerHandled(session: GeckoSession) {}
     
     func onExternalResponse(session: GeckoSession, response: ExternalResponseInfo) async -> Bool {
-        return await delegate?.tabManager(
+        // Retained BEFORE the decision, so a tab closed while the user is
+        // still choosing defers its close too. Released straight away if
+        // the download does not start - the engine sends no completion
+        // for a response it never captured - and otherwise on completion,
+        // which the engine sends for success, failure and a cancel during
+        // progress alike. See SessionManager.retainExternalResponse.
+        sessionManager.retainExternalResponse(for: session)
+        let shouldStart = await delegate?.tabManager(
             self,
             shouldStartExternalResponse: response,
             for: session
         ) ?? false
+        if !shouldStart {
+            sessionManager.releaseExternalResponse(for: session)
+        }
+        return shouldStart
     }
     
     func onExternalResponseProgress(
@@ -2263,6 +2274,7 @@ extension TabManagerImplementation: ContentDelegate {
             didCompleteExternalResponseAt: localFilePath,
             succeeded: succeeded
         )
+        sessionManager.releaseExternalResponse(for: session)
     }
     
     func onSavePdf(session: GeckoSession, request: SavePdfInfo) {

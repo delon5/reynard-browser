@@ -50,6 +50,14 @@ final class SessionManager {
         session: GeckoSession,
         perform: (SessionManager) -> Void
     )?
+    /// Downloads (external responses) in flight per session, and the
+    /// close or discard each session was given while one was running.
+    /// See retainExternalResponse(for:).
+    private var externalResponseReferenceCounts: [ObjectIdentifier: Int] = [:]
+    private var deferredExternalResponseCleanups: [ObjectIdentifier: (
+        session: GeckoSession,
+        perform: (SessionManager) -> Void
+    )] = [:]
     weak var applicationStateObserver: SessionManagerApplicationStateObserver?
     weak var pictureInPictureHandler: SessionManagerPictureInPictureHandler?
     
@@ -458,10 +466,64 @@ final class SessionManager {
         }
     }
     
+    // MARK: - External Responses
+
+    /// Ported from upstream 088404ec (#357). A download runs on its
+    /// source tab's session, so closing or sleeping that tab closed the
+    /// session and stalled the download. While any download is in flight
+    /// the close or discard is deferred and runs when the last one ends.
+    func retainExternalResponse(for session: GeckoSession) {
+        externalResponseReferenceCounts[ObjectIdentifier(session), default: 0] += 1
+    }
+
+    func releaseExternalResponse(for session: GeckoSession) {
+        let identifier = ObjectIdentifier(session)
+        guard let count = externalResponseReferenceCounts[identifier] else {
+            return
+        }
+        if count > 1 {
+            externalResponseReferenceCounts[identifier] = count - 1
+            return
+        }
+        externalResponseReferenceCounts.removeValue(forKey: identifier)
+        guard let cleanup = deferredExternalResponseCleanups.removeValue(forKey: identifier) else {
+            return
+        }
+        logger("sessionCleanup: last download finished - running the deferred close")
+        performCleanup(for: cleanup.session, cleanup.perform)
+    }
+
+    /// Keeps a session whose tab is gone running for its download. The
+    /// same activation activate(_:) performs - including the
+    /// off-main-thread commit latch, so a tab-less session cannot commit
+    /// while the scene is inactive - but WITHOUT focus: nothing on screen
+    /// belongs to it any more. Upstream calls setActive directly, which
+    /// here would bypass the latch.
+    private func keepSessionActiveForExternalResponse(_ session: GeckoSession) {
+        guard session.isOpen() else {
+            return
+        }
+        sessionsRequestedActive[ObjectIdentifier(session)] = session
+        session.setOffMainThreadCommitsSuspended(
+            !isPhoneSceneActive && !isCommitLatchExempt(session)
+        )
+        session.setActive(isApplicationForeground || mustStayActive(session))
+        session.setFocused(false)
+    }
+
     private func performCleanup(
         for session: GeckoSession,
         _ perform: @escaping (SessionManager) -> Void
     ) {
+        let identifier = ObjectIdentifier(session)
+        if externalResponseReferenceCounts[identifier] != nil {
+            if deferredExternalResponseCleanups[identifier] == nil {
+                deferredExternalResponseCleanups[identifier] = (session, perform)
+                logger("sessionCleanup: a download is still running on this session - close deferred until it ends")
+            }
+            keepSessionActiveForExternalResponse(session)
+            return
+        }
         if let pendingCleanup {
             if pendingCleanup.session !== session {
                 perform(self)
