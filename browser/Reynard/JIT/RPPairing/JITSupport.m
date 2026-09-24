@@ -2629,6 +2629,109 @@ static BOOL tunnelRetryWait(double seconds, unsigned int generationAtEntry) {
     return atomic_load(&sTunnelTeardownGeneration) == generationAtEntry;
 }
 
+// ADDED - see fix_tunnel_retry_cooloff.py.
+//
+// The budget above is per CALL and shared nothing with the next one, so
+// against an endpoint that is simply refusing, every caller paid the
+// whole 9.0s over again on the same serial providerQueue. One foreground
+// sends six at it - prewarm at willEnterForeground, prewarm at
+// didBecomeActive, the JIT-less probe, and up to three slot-holding
+// attaches - which is 54 seconds of retry to establish a fact the first
+// nine seconds already established.
+//
+// And an attempt is not confined to this queue. tunnel_create_rppairing
+// goes through run_sync_local (idevice ffi/src/lib.rs:265-272), which
+// holds the process-global LOCAL_RUNTIME_GUARD mutex (:174) for the
+// whole call - the same lock every attach's remote_server_connect_rsd
+// and debug_proxy_connect_rsd and the DDI mount take. So each attempt
+// blocks attaches that were never behind providerQueue at all. The lock
+// is released between attempts (the backoff sleeps here hold nothing),
+// so what these repeated budgets really cost is repeated windows of
+// process-wide FFI contention.
+//
+// WHO PAYS WHAT, because getting this backwards would delete the rescue
+// path: the FIRST caller still runs the complete budget, every attempt
+// and every backoff. That is the caller the 2026-09-01 capture shows
+// rescuing a foreground ("tunnelRetry: succeeded on attempt 6 after
+// 3.2s"). This is a note it LEAVES BEHIND once it has been refused on
+// every attempt of the full budget, and only the SECOND through Nth
+// caller reads it.
+//
+// 3.0s because that is the lower edge of the 3.0-8.4s reconnect band
+// this endpoint has actually been measured at - the fastest it has ever
+// been seen to go from refusing to accepting. Below that the suppressed
+// window contains no observed recovery at all; above it the next real
+// arrival waits longer than it should for its own full budget, which is
+// the thing that actually finds a returning endpoint. The first caller's
+// 9.0s already spans the whole band, so a note only ever means "refused
+// across more than the widest reconnect on record".
+static const double kTunnelRefusalCoolOffSeconds = 3.0;
+
+// Serial and private to the three accessors below, so the deadline and
+// the generation it belongs to are always read and written together.
+// Same idiom as debugSessionStateQueue above rather than a second kind
+// of lock in this file.
+static dispatch_queue_t tunnelRefusalStateQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.minh-ton.Reynard.JITSupport.TunnelRefusalStateQueue", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// 0.0 means no cool-off stands. Only ever touched on the queue above.
+static CFAbsoluteTime sTunnelRefusedUntil = 0.0;
+static unsigned int sTunnelRefusedAtGeneration = 0;
+
+// Seconds of cool-off left, or 0.0 when the caller should run the whole
+// budget. Clears a note that can no longer apply as it goes, so a stale
+// one is never examined twice.
+//
+// The generation is what ties a note to one foreground. Every background
+// teardown bumps it (requestDetachForAllDebugSessions, synchronously),
+// so a note taken before a background can never be honoured after one -
+// which is the "clear it on a foreground transition" this needs, out of
+// the counter that is already here instead of new lifecycle state. The
+// app cannot foreground without having backgrounded, and nothing calls
+// createDeviceProvider in between: prewarmSharedTunnel and
+// probeSharedTunnelWithCompletion both return early when
+// applicationForegroundFromAnyQueue() is NO.
+static double tunnelRefusalCoolOffRemaining(unsigned int currentGeneration, CFAbsoluteTime now) {
+    __block double remaining = 0.0;
+    dispatch_sync(tunnelRefusalStateQueue(), ^{
+        if (sTunnelRefusedUntil <= 0.0) {
+            return;
+        }
+        if (sTunnelRefusedAtGeneration != currentGeneration || now >= sTunnelRefusedUntil) {
+            sTunnelRefusedUntil = 0.0;
+            return;
+        }
+        remaining = sTunnelRefusedUntil - now;
+    });
+    return remaining;
+}
+
+// Written ONLY where a caller has been refused on every attempt of a
+// complete budget. Never on a teardown abort - that call proved nothing
+// about the endpoint, it only got out of closeSharedTunnel's way - and
+// never on a permanent failure, which returns on attempt 1 and never
+// reaches the loop's exits.
+static void noteTunnelRefusedForWholeBudget(unsigned int generation, CFAbsoluteTime now) {
+    dispatch_sync(tunnelRefusalStateQueue(), ^{
+        sTunnelRefusedUntil = now + kTunnelRefusalCoolOffSeconds;
+        sTunnelRefusedAtGeneration = generation;
+    });
+}
+
+// Any success retires the note at once: the endpoint is answering, so
+// nothing queued behind this call should be failing fast on it.
+static void clearTunnelRefusalCoolOff(void) {
+    dispatch_sync(tunnelRefusalStateQueue(), ^{
+        sTunnelRefusedUntil = 0.0;
+    });
+}
+
 DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *targetAddress, NSError **error) {
     static const double backoff[] = { 0.15, 0.30, 0.50, 0.75, 1.00 };
     static const size_t backoffCount = sizeof(backoff) / sizeof(backoff[0]);
@@ -2638,14 +2741,82 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
     const CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     const CFAbsoluteTime deadline = started + kTunnelRetryBudgetSeconds;
     unsigned long attempt = 0;
+    NSError *lastAttemptError = nil;
+
+    // ADDED - fix_tunnel_retry_cooloff.py, part (a).
+    //
+    // The ONLY early exit, and it fires only on a note another call left
+    // behind after being refused across a whole budget. A first caller
+    // cannot take this branch: there is nothing to read until some call
+    // has already spent the full 9.0s. That asymmetry is the entire
+    // point - the first caller is the one that rescues the foreground,
+    // and it still pays every attempt and every backoff below.
+    const double coolOffLeft = tunnelRefusalCoolOffRemaining(generationAtEntry, started);
+    if (coolOffLeft > 0.0) {
+        logger([NSString stringWithFormat:
+            @"tunnelRetry: coolOff - a caller ahead of this one was refused for the whole %.1fs budget, %.1fs of cool-off left; failing fast instead of re-running it",
+            kTunnelRetryBudgetSeconds, coolOffLeft]);
+        if (error) {
+            // Same domain and code the budget-exhausted path returns, so
+            // callers see one kind of tunnel failure. Deliberately does
+            // NOT say "Connection refused": that is the string
+            // tunnelFailureIsTransient matches, and this is not an
+            // attempt result.
+            *error = [NSError errorWithDomain:ErrorDomain code:TunnelCreateFailed userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to create RPPairing tunnel: the endpoint refused every attempt of a full %.1fs budget moments ago, %.1fs of cool-off left", kTunnelRetryBudgetSeconds, coolOffLeft]
+            }];
+        }
+        return NULL;
+    }
 
     for (;;) {
+        // ADDED - fix_tunnel_retry_cooloff.py, part (b).
+        //
+        // The budget bounds when an attempt may START, and an attempt's
+        // own duration is unbounded - this file records a
+        // tunnel_create_rppairing that ran ~89s - so an attempt entered
+        // at or past the deadline spends budget that is already spent.
+        //
+        // It does not only cost this queue. That call holds the idevice
+        // crate's process-global LOCAL_RUNTIME_GUARD for its whole
+        // duration (ffi/src/lib.rs:174, taken in run_sync_local at
+        // :265-272), which is the same mutex every other pid's
+        // remote_server_connect_rsd and debug_proxy_connect_rsd need -
+        // on the CONCURRENT attachWorkQueue, inside a 10s scene-update
+        // budget.
+        //
+        // The scheduling check further down stops one being planned;
+        // this is the invariant, and it is what catches a backoff whose
+        // slices overslept. The attempt > 0 guard says out loud that the
+        // FIRST attempt is never affected - it could not be, since the
+        // deadline is 9.0s past the CFAbsoluteTimeGetCurrent() that set
+        // `started`, but this loop must not have to be re-derived to see
+        // that.
+        if (attempt > 0) {
+            const CFAbsoluteTime beforeAttempt = CFAbsoluteTimeGetCurrent();
+            if (beforeAttempt >= deadline) {
+                logger([NSString stringWithFormat:
+                    @"tunnelRetry: giving up after %lu attempt(s) over %.1fs - the %.1fs budget was already spent when attempt %lu came up, not starting it; %.1fs cool-off armed",
+                    attempt, beforeAttempt - started, kTunnelRetryBudgetSeconds, attempt + 1, kTunnelRefusalCoolOffSeconds]);
+                noteTunnelRefusedForWholeBudget(generationAtEntry, beforeAttempt);
+                if (error) *error = lastAttemptError;
+                return NULL;
+            }
+        }
+
         NSError *attemptError = nil;
         DeviceProvider *provider =
             createDeviceProviderOnce(pairingFilePath, targetAddress, &attemptError);
         attempt++;
+        // ADDED - hoisted so the pre-attempt exit above can report the
+        // real reason the last attempt failed rather than a bare NULL.
+        lastAttemptError = attemptError;
 
         if (provider) {
+            // ADDED - the endpoint is answering. Retire any note left by
+            // an earlier call so nothing behind this one fails fast on
+            // it.
+            clearTunnelRefusalCoolOff();
             if (attempt > 1) {
                 logger([NSString stringWithFormat:
                     @"tunnelRetry: succeeded on attempt %lu after %.1fs",
@@ -2673,15 +2844,46 @@ DeviceProvider *createDeviceProvider(NSString *pairingFilePath, NSString *target
         const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (now >= deadline) {
             logger([NSString stringWithFormat:
-                @"tunnelRetry: giving up after %lu attempt(s) over %.1fs - still refused",
-                attempt, now - started]);
+                @"tunnelRetry: giving up after %lu attempt(s) over %.1fs - still refused; %.1fs cool-off armed",
+                attempt, now - started, kTunnelRefusalCoolOffSeconds]);
+            // ADDED - fix_tunnel_retry_cooloff.py. Here and at the two
+            // other budget-exhausted exits only: this call was refused
+            // on every attempt of a complete budget, which is the one
+            // fact worth handing to the callers queued behind it.
+            noteTunnelRefusedForWholeBudget(generationAtEntry, now);
             if (error) *error = attemptError;
             return NULL;
         }
 
         double wait = backoff[attempt - 1 < backoffCount ? attempt - 1 : backoffCount - 1];
-        if (now + wait > deadline) {
-            wait = deadline - now;
+        // CHANGED - fix_tunnel_retry_cooloff.py, part (b). Was:
+        //
+        //     if (now + wait > deadline) { wait = deadline - now; }
+        //
+        // which slept exactly to the deadline and then started one more
+        // attempt from it, making the real worst case the 9.0s budget
+        // PLUS a whole attempt of unbounded duration - and that attempt
+        // holds LOCAL_RUNTIME_GUARD (see the pre-attempt check above)
+        // against every other attach in the process while it runs.
+        //
+        // The cost is the tail: the loop stops at the last point a whole
+        // backoff still fits, giving up at most one backoff earlier than
+        // before - <=1.0s worst case, 216ms at the 7ms attempt cost the
+        // capture shows. With those numbers the twelfth attempt starts
+        // at +8.777s and the loop ends at +8.784s; the only attempt lost
+        // is the one the old clamp started at exactly +9.000s. The
+        // observed reconnect band tops out at 8.4s, so an endpoint
+        // coming back anywhere in it is still caught. And a caller
+        // arriving after the cool-off runs a fresh FULL budget, which is
+        // a better use of those seconds than one clamped attempt at the
+        // wire.
+        if (now + wait >= deadline) {
+            logger([NSString stringWithFormat:
+                @"tunnelRetry: giving up after %lu attempt(s) over %.1fs - %.0fms of the %.1fs budget left, too little to start attempt %lu; %.1fs cool-off armed",
+                attempt, now - started, (deadline - now) * 1000.0, kTunnelRetryBudgetSeconds, attempt + 1, kTunnelRefusalCoolOffSeconds]);
+            noteTunnelRefusedForWholeBudget(generationAtEntry, now);
+            if (error) *error = attemptError;
+            return NULL;
         }
         logger([NSString stringWithFormat:
             @"tunnelRetry: attempt %lu refused, retrying in %.0fms (%.1fs of budget left)",
