@@ -23,13 +23,16 @@ final class PermissionCoordinator: NSObject, PermissionEmbedderDelegate {
     private static let log = OSLog(subsystem: "com.minh-ton.Reynard", category: "SitePermissions")
     private let permissionStore: SitePermissionStore
     private let promptPresenter: PermissionPromptPresenting
+    private let onPromptFinished: ((GeckoSession) -> Void)?
     
     init(
         permissionStore: SitePermissionStore = .shared,
-        promptPresenter: PermissionPromptPresenting
+        promptPresenter: PermissionPromptPresenting,
+        onPromptFinished: ((GeckoSession) -> Void)? = nil
     ) {
         self.permissionStore = permissionStore
         self.promptPresenter = promptPresenter
+        self.onPromptFinished = onPromptFinished
     }
     
     // MARK: - Permission Restoration
@@ -119,6 +122,7 @@ final class PermissionCoordinator: NSObject, PermissionEmbedderDelegate {
                 cancelTitle: NSLocalizedString("Don’t Allow", comment: ""),
                 for: session
             )
+            onPromptFinished?(session)
             let action: SitePermissionAction = allowed ? .allowed : .blocked
             persistAction(action, for: sitePermission, host: host, session: session)
             applyPermission(action, to: sitePermission, permission: permission)
@@ -151,6 +155,7 @@ final class PermissionCoordinator: NSObject, PermissionEmbedderDelegate {
             cancelTitle: NSLocalizedString("Cancel", comment: ""),
             for: session
         )
+        onPromptFinished?(session)
         let action: SitePermissionAction = allowed ? .allowed : .blocked
         for permission in requestedPermissions {
             persistAction(action, for: permission, host: request.host, session: session)

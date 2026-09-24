@@ -44,8 +44,9 @@ final class TabManagerImplementation: NSObject, TabManager {
     private lazy var selectionActionCoordinator = SelectionActionCoordinator(
         presenter: selectionActionPresenter
     )
-    private let permissionCoordinator = PermissionCoordinator(
-        promptPresenter: PermissionPromptPresenter()
+    private lazy var permissionCoordinator = PermissionCoordinator(
+        promptPresenter: PermissionPromptPresenter(),
+        onPromptFinished: requestContentKeyboardFocus
     )
     private lazy var externalAppLinkRouter = ExternalAppLinkRouter(
         isAutomaticRoutingEnabled: { Prefs.BrowsingSettings.openLinksInApps },
