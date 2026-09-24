@@ -165,7 +165,31 @@ final class TabManagerImplementation: NSObject, TabManager {
         // thread, BEHIND the very hang it would fix; this runs the
         // same recovery from the watchdog's queue instead. See
         // fix_resume_stopped_children_on_foreground_hang.py.
+        //
+        // FIRST now, ahead of the interrupt + cancel below. See
+        // fix_queue_stalls_on_hang_path.py. Its opening move is
+        // clearDebuggerTeardownRequest, an async onto
+        // debugSessionStateQueue, and lifting that standing request is
+        // what lets recovered loops re-arm instead of draining. Called
+        // here it is first on that queue; called after the escalation
+        // it was third, behind a blocking write per live proxy.
         JITController.shared.recoverStoppedChildrenAfterForegroundHang()
+
+        // MOVED here from the tail of performEmergencyFlush, which is
+        // where these two used to run - i.e. BEFORE the recovery above.
+        // Nothing else changed order: the emergency tab write and
+        // killStoppedChildren still happen first, inside the flush.
+        //
+        // Consequence worth knowing: performEmergencyFlush returns
+        // early when there is no tab snapshot or an empty one, and
+        // `self` may be gone entirely. In those cases the escalation
+        // used to be skipped and now is not. That is wanted - both
+        // branches mean "no tab data to write", which says nothing
+        // about JIT state, the recovery above already ran
+        // unconditionally there, and neither call blocks this thread.
+        JITEnabler.interruptLiveDebugSessions()
+        JITEnabler.cancelAllDebugSessionCalls()
+        logger("hangRecovery: HangWatchdog escalation - recovery queued first, now interrupting live sessions and cancelling in-flight calls")
     }
     
     private var memoryWarningObservationToken: NSObjectProtocol?
@@ -621,22 +645,23 @@ final class TabManagerImplementation: NSObject, TabManager {
             selectedTabMode: snapshot.selectedTabMode
         )
 
-        // The tabs are safe; the process is not. The watchdog fires at
-        // two seconds and iOS terminates at ten, so roughly eight
-        // seconds of the scene-update budget are left here and nothing
-        // was using them. A child a supervision session has stopped
-        // cannot answer the synchronous XPC the foreground handshake is
-        // waiting on, and interrupting the loops and cancelling their
-        // in-flight calls is the one lever available from this queue.
-        // It is not a guaranteed save - it is the difference between
-        // spending the remaining budget and spending none of it.
+        // MOVED - the interrupt + cancel escalation that used to end
+        // this function now runs from the hangWatchdog closure, one
+        // level up, AFTER recoverStoppedChildrenAfterForegroundHang
+        // instead of before it. See fix_queue_stalls_on_hang_path.py.
         //
-        // Both calls are safe from a background thread and neither can
-        // touch the main thread, which is stuck by definition.
-        // See fix_hang_watchdog_recovery.py.
-        JITEnabler.interruptLiveDebugSessions()
-        JITEnabler.cancelAllDebugSessionCalls()
-        logger("tabFlush: HangWatchdog escalation - interrupted live sessions, cancelled in-flight calls")
+        // Both of those calls enqueue onto debugSessionStateQueue, and
+        // so does the first thing the recovery does
+        // (clearDebuggerTeardownRequest). Running them here put the
+        // recovery's cheap, useful block third on that serial queue,
+        // behind a per-proxy blocking write into a transport this path
+        // has already established is dead.
+        //
+        // Moved UP into the closure rather than pulling the recovery
+        // DOWN into here: this function has two early returns for a
+        // missing or empty tab snapshot, and the recovery is the one
+        // call that can save the process - it must not be gated on
+        // whether there were tabs to write.
     }
     
     private func tabs(for mode: TabMode) -> [Tab] {

@@ -1140,11 +1140,50 @@ void interruptAttachingDebugSessions(void) {
 // in-flight read and desyncs the connection permanently. That was
 // measured at 1 successful detach in 10.
 void interruptLiveDebugSessions(void) {
-    __block NSUInteger liveCount = 0;
-    __block NSUInteger interruptedCount = 0;
+    // CHANGED - dispatch_async, not dispatch_sync. See
+    // fix_queue_stalls_on_hang_path.py.
+    //
+    // Exactly the change cancelAllDebugSessionCalls below already
+    // carries, for exactly its reasons. The one live caller is the
+    // HangWatchdog escalation in TabManagerImpl, which called this
+    // synchronously and then waited on a per-proxy BLOCKING
+    // debug_proxy_send_raw for every live session - into a transport
+    // that is dead by construction on that path, since the escalation
+    // only runs because a child is wedged and its debugger transport
+    // is gone. Behind that critical section sat the cancel dispatched
+    // one statement later, every loop's shouldDetachDebugSessionPID,
+    // closeTunnelForSuspension's liveDebugSessionCount, and the hang
+    // recovery's own per-pid hasActiveDebugSessionForPID.
+    //
+    // And that wait could not be broken. debug_proxy_send_raw goes
+    // through the Rust run_sync, which blocks on rx.recv() with no
+    // timeout and is NOT registered in IN_FLIGHT_CALLS - so the
+    // debug_proxy_cancel this escalation issues one statement later
+    // cannot abort it (cancel only reaches debug_proxy_send_command
+    // and debug_proxy_read_response). Verified in support/idevice
+    // @42dd7217, ffi/src/debug_proxy.rs:348 and ffi/src/lib.rs:178.
+    //
+    // Nothing needs it synchronous: the function is void, and the one
+    // caller's next statement is cancelAllDebugSessionCalls, which is
+    // itself an async onto THIS queue. Both blocks land on one serial
+    // queue in program order, so interrupt-then-cancel is unchanged.
+    //
+    // The FFI call stays INSIDE the block, deliberately. That is the
+    // lifetime invariant documented above debugSessionProxies() and
+    // again on cancelAllDebugSessionCalls: unregisterDebugSessionProxy
+    // uses this queue and runs before freeDebugSession, so a proxy
+    // still in the dictionary has not been freed. The dictionary is
+    // read INSIDE the block, at execution time - hoisting the walk or
+    // snapshotting the pointers outside would break precisely this.
+    logger(@"interruptLiveDebugSessions: dispatched - the send loop runs on the state queue, the caller is not blocked");
 
-    dispatch_sync(debugSessionStateQueue(), ^{
-        liveCount = debugSessionProxies().count;
+    dispatch_async(debugSessionStateQueue(), ^{
+        // Plain block locals now rather than __block, and the summary
+        // logger moved inside so it still reports real numbers.
+        // liveCount is therefore sampled when the block RUNS rather
+        // than when the call was made; nothing consumes it but the log.
+        NSUInteger liveCount = debugSessionProxies().count;
+        NSUInteger interruptedCount = 0;
 
         for (NSValue *proxyValue in debugSessionProxies().allValues) {
             DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
@@ -1158,9 +1197,9 @@ void interruptLiveDebugSessions(void) {
             }
             interruptedCount++;
         }
-    });
 
-    logger([NSString stringWithFormat:@"interruptLiveDebugSessions: %lu live session(s), interrupted %lu", (unsigned long)liveCount, (unsigned long)interruptedCount]);
+        logger([NSString stringWithFormat:@"interruptLiveDebugSessions: %lu live session(s), interrupted %lu", (unsigned long)liveCount, (unsigned long)interruptedCount]);
+    });
 }
 
 static void unregisterDebugSessionProxy(int32_t pid) {
