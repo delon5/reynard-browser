@@ -155,6 +155,15 @@ final class AttachLedger {
         attachedPIDs.removeAll()
     }
 
+    /// Undoes markAttached for one pid whose attach was abandoned at its
+    /// slot because the app went inactive while it queued. The deferred
+    /// drain skips attached pids, so without this a pid given back to
+    /// the drain would never be taken by it.
+    func clearAttached(_ pid: Int32) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        attachedPIDs.remove(pid)
+    }
+
     func attachedSnapshot() -> Set<Int32> {
         dispatchPrecondition(condition: .onQueue(queue))
         return attachedPIDs
