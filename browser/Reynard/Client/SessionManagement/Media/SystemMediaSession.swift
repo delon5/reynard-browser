@@ -87,6 +87,10 @@ final class SystemMediaSession: MediaSessionDelegate {
     private let nowPlayingCenter = MPNowPlayingInfoCenter.default()
     private let commandCenter = MPRemoteCommandCenter.shared()
     private var sessionStates: [ObjectIdentifier: SessionState] = [:]
+    /// Sessions this object paused for an audio-session interruption, and
+    /// may resume when it ends with .shouldResume. See
+    /// handleAudioSessionInterruption.
+    private var interruptedPlaybackSessions: Set<ObjectIdentifier> = []
     private var playbackHistory: [ObjectIdentifier] = []
     private var commandTargets: [Any] = []
     weak var observer: SystemMediaSessionObserver?
@@ -166,6 +170,12 @@ final class SystemMediaSession: MediaSessionDelegate {
     init() {
         registerRemoteCommands()
         apply(MediaSessionFeatures())
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
     }
     
     deinit {
@@ -174,6 +184,11 @@ final class SystemMediaSession: MediaSessionDelegate {
         }
         sessionStates.values.forEach { $0.artworkTask?.cancel() }
         unregisterRemoteCommands()
+        NotificationCenter.default.removeObserver(
+            self,
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
     }
     
     func onActivated(session: GeckoSession) {
@@ -192,6 +207,7 @@ final class SystemMediaSession: MediaSessionDelegate {
         logger(String(format: "mediaSession: onDeactivated %@ (wasActive=%@)", deactivatingTitle, wasActive ? "YES" : "NO"))
         sessionStates.removeValue(forKey: identifier)?.artworkTask?.cancel()
         playbackHistory.removeAll { $0 == identifier }
+        interruptedPlaybackSessions.remove(identifier)
         
         if wasActive {
             activateMostRecentPlayingSession()
@@ -530,6 +546,91 @@ final class SystemMediaSession: MediaSessionDelegate {
         logger(anyPaused
             ? "mediaSession: backgrounded with only paused media - audio session released, card kept"
             : "mediaSession: backgrounded with no playback - cleared")
+    }
+
+    // MARK: - Audio-session interruptions
+
+    /// Ported from upstream 424d3263 (#373) and 76011a9b (#429).
+    ///
+    /// A call, Siri or an alarm interrupts the shared audio session, and
+    /// until now nothing told the page: its media stayed "playing" with no
+    /// audio, and nothing restarted it afterwards. Now every playing
+    /// session is paused through its Media Session when the interruption
+    /// begins, and exactly those are resumed when it ends - but only if
+    /// iOS says .shouldResume.
+    ///
+    /// Two "interruptions" are not ones, and are skipped - the same rule
+    /// AVPlayerHost's handler already applies:
+    ///   - .routeDisconnected (iOS 17+) is a route loss; AirPlayController
+    ///     pauses on that itself, and it never gets an .ended to resume.
+    ///   - .appWasSuspended (iOS 14.5+) is iOS reporting, on resume, that
+    ///     the app WAS suspended. Pausing then would stop media just as
+    ///     the user returns.
+    ///
+    /// AVPlayerHost separately resumes AVPlayers that were casting over
+    /// AirPlay. Both acting on one element is harmless: both pause at
+    /// .began and both only resume with .shouldResume.
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        let info = notification.userInfo ?? [:]
+        guard let typeValue = (info[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+        switch type {
+        case .began:
+            if let notReally = Self.nonInterruptionReason(info) {
+                logger("mediaSession: interruption began from \(notReally), not a real interruption - not pausing")
+                return
+            }
+            interruptedPlaybackSessions.removeAll()
+            for (identifier, state) in sessionStates where state.playbackState == .playing {
+                guard let session = state.session else { continue }
+                interruptedPlaybackSessions.insert(identifier)
+                session.mediaSession.pause()
+            }
+            logger(String(format: "mediaSession: interruption began - paused %ld playing session(s)", interruptedPlaybackSessions.count))
+        case .ended:
+            let sessionsToResume = interruptedPlaybackSessions
+            interruptedPlaybackSessions.removeAll()
+            let optionsValue = (info[AVAudioSessionInterruptionOptionKey] as? NSNumber)?.uintValue ?? 0
+            guard AVAudioSession.InterruptionOptions(rawValue: optionsValue).contains(.shouldResume) else {
+                logger(String(format: "mediaSession: interruption ended without shouldResume - leaving %ld session(s) paused", sessionsToResume.count))
+                return
+            }
+            var resumed = 0
+            for identifier in sessionsToResume {
+                guard let state = sessionStates[identifier],
+                      state.playbackState != .none else {
+                    continue
+                }
+                state.session?.mediaSession.play()
+                resumed += 1
+            }
+            logger(String(format: "mediaSession: interruption ended - resumed %ld session(s)", resumed))
+        @unknown default:
+            return
+        }
+    }
+
+    /// Why an interruption notification is not a real interruption, or nil.
+    private static func nonInterruptionReason(_ info: [AnyHashable: Any]) -> String? {
+        if #available(iOS 14.5, *) {
+            guard let raw = (info[AVAudioSessionInterruptionReasonKey] as? NSNumber)?.uintValue,
+                  let reason = AVAudioSession.InterruptionReason(rawValue: raw) else {
+                return nil
+            }
+            if reason == .appWasSuspended {
+                return "the app's own suspension"
+            }
+            if #available(iOS 17, *), reason == .routeDisconnected {
+                return "a route loss"
+            }
+            return nil
+        }
+        if (info[AVAudioSessionInterruptionWasSuspendedKey] as? NSNumber)?.boolValue == true {
+            return "the app's own suspension"
+        }
+        return nil
     }
 
     /// Releases the shared audio session when the app is backgrounded
