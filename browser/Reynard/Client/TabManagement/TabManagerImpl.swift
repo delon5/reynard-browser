@@ -27,6 +27,7 @@ final class TabManagerImplementation: NSObject, TabManager {
         return tabs(for: selectedTabMode)[safe: selectedTabIndex]
     }
     
+    private var sessionStateFlushTask = UIBackgroundTaskIdentifier.invalid
     private lazy var requestContentKeyboardFocus: (GeckoSession) -> Void = { [weak self] session in
         guard let self else { return }
         self.delegate?.tabManager(self, didRequestContentKeyboardFocusFor: session)
@@ -429,6 +430,59 @@ final class TabManagerImplementation: NSObject, TabManager {
     // MARK: - Application Lifecycle
     
     func applicationWillResignActive() {
+        persistSessionStateBeforeSuspension()
+    }
+
+    /// Ported from upstream c3e85a0e, adapted: our onSessionStateChange
+    /// only caches state on the tab, so the persist is ours to trigger.
+    ///
+    /// The selected tab's latest state - its scroll position, form data -
+    /// only reaches the app when the engine answers a flush, and the flush
+    /// we send on deactivation is fire-and-forget. Resigning active is the
+    /// last moment the app certainly runs before a suspension or a
+    /// swipe-kill from the app switcher, so the selected tab's state was
+    /// routinely missing from what got persisted. Here the flush is
+    /// awaited, then the tabs are persisted and the write waited for, all
+    /// under a background task.
+    ///
+    /// Only the selected tab: every other tab was flushed when it was
+    /// deselected, while its session was still live. Not a private tab:
+    /// its state is never persisted. Also runs for a Control Centre pull
+    /// or a notification, where it is cheap and harmless.
+    private func persistSessionStateBeforeSuspension() {
+        guard sessionStateFlushTask == .invalid,
+              let tab = selectedTab,
+              !tab.isPrivate,
+              tab.session.isOpen() else {
+            return
+        }
+        let session = tab.session
+        let application = UIApplication.shared
+        sessionStateFlushTask = application.beginBackgroundTask(withName: "SessionStateFlush") { [weak self] in
+            self?.endSessionStateFlushTask()
+        }
+        Task { @MainActor [weak self] in
+            do {
+                try await session.flushSessionStateAndWait()
+                logger("sessionState: selected tab flushed before suspension - persisting")
+            } catch {
+                logger("sessionState: flush before suspension did not confirm (\(error)) - persisting what we have")
+            }
+            guard let self else {
+                return
+            }
+            self.persistState()
+            self.store.flushPendingWrites()
+            self.endSessionStateFlushTask()
+        }
+    }
+
+    private func endSessionStateFlushTask() {
+        guard sessionStateFlushTask != .invalid else {
+            return
+        }
+        UIApplication.shared.endBackgroundTask(sessionStateFlushTask)
+        sessionStateFlushTask = .invalid
     }
     
     func applicationDidBecomeActive() {

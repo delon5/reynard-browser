@@ -145,6 +145,13 @@ final class TabManagementStore {
         return .regular
     }
     
+    /// Returns once every write already queued on stateQueue has run.
+    /// persistTabs is asynchronous; a caller about to be suspended uses
+    /// this so the write lands before it goes (upstream c3e85a0e).
+    func flushPendingWrites() {
+        stateQueue.sync {}
+    }
+
     func persistTabs(
         regularTabs: [Tab],
         privateTabs: [Tab],

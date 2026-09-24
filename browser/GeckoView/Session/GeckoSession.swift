@@ -435,6 +435,18 @@ public class GeckoSession {
     public func flushSessionState() {
         dispatcher.dispatch(type: "GeckoView:FlushSessionState", message: nil)
     }
+
+    /// flushSessionState(), but returns only once the engine confirms the
+    /// flush is done - GeckoViewTab answers after requestTabStateFlush()
+    /// resolves (patches/mobile/shared/modules/geckoview/
+    /// GeckoViewTab.sys.mjs.patch, from upstream c3e85a0e). The
+    /// fire-and-forget version returns before the state exists, so it
+    /// cannot be followed by a persist. Bounded by EventDispatcher.query's
+    /// timeout: against an engine without the patch this throws after
+    /// `timeout` rather than hanging.
+    public func flushSessionStateAndWait(timeout: TimeInterval = 2) async throws {
+        _ = try await dispatcher.query(type: "GeckoView:FlushSessionState", timeout: timeout)
+    }
     
     /// Restores a previously-saved state to this session; only data
     /// that was saved (history, scroll position, and form data) is
