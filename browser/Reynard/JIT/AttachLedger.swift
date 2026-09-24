@@ -95,9 +95,16 @@ final class AttachLedger {
     /// path. See fix_inflight_gate_survives_prune.py's docstring. A
     /// running FFI call does not end when its target dies, and this set
     /// is what closeTunnelForSuspension reads before freeing the adapter
-    /// (JITController.swift:432), so the only fact that may retire an
-    /// entry is the call returning - which clearAttachInFlight already
-    /// does from a defer, bounded by enableJITMaxWaitSeconds.
+    /// - its first gate, `ledger.attachInFlightCount()` - so the only
+    /// fact that may retire an entry is the call returning, which
+    /// clearAttachInFlight already does from a defer, bounded by
+    /// enableJITMaxWaitSeconds.
+    ///
+    /// CORRECTED - see fix_swift_deadcode_and_stale_comments.py. This
+    /// cited "JITController.swift:432", which was already the wrong
+    /// line at bc4d369 and moved again when round 1 grew that file. The
+    /// symbol is given instead of a number, deliberately: that is the
+    /// failure this correction exists to stop repeating.
     private var attachInFlightPIDs: Set<Int32> = []
 
     init(confinedTo queue: DispatchQueue) {
@@ -299,8 +306,15 @@ final class AttachLedger {
     /// ever attached it. Ordered by pid so successive dumps diff.
     func childCensus() -> [(pid: Int32, type: String, attached: Bool)] {
         dispatchPrecondition(condition: .onQueue(queue))
-        return childTypes.keys.sorted().map {
-            (pid: $0, type: childTypes[$0] ?? "?", attached: attachedPIDs.contains($0))
+        // CHANGED from `childTypes.keys.sorted().map { childTypes[$0] ??
+        // "?" }` - see fix_swift_deadcode_and_stale_comments.py. The
+        // keys came from childTypes itself in the same expression, under
+        // the dispatchPrecondition above on a serial queue, so the
+        // lookup could not miss and "?" could not print. Iterating the
+        // dictionary directly drops the fallback without reaching for a
+        // force-unwrap.
+        return childTypes.sorted { $0.key < $1.key }.map {
+            (pid: $0.key, type: $0.value, attached: attachedPIDs.contains($0.key))
         }
     }
 

@@ -96,38 +96,13 @@ final class DDIManager: NSObject {
         return receipt == validationReceipt(for: plan)
     }
     
-    /// TEMPORARY DIAGNOSTIC — checks the downloaded manifest's own
-    /// ProductBuildVersion against the version this same, hosted DDI
-    /// source was confirmed to be at when last independently verified
-    /// (June 2026, via pymobiledevice3's own LATEST_DDI_BUILD_ID
-    /// constant: "17E5179g"). A real, separate log from a genuinely
-    /// successful mount showed a different, older version
-    /// ("16E5121h") — direct, concrete confirmation that DDI build
-    /// versions do change over time, and a stale/mismatched version is
-    /// a real, plausible explanation for "Error -28: BadBuildManifest"
-    /// specifically failing during the live TSS negotiation step
-    /// (see JITSupport.m's ensureDDIMounted and the investigation notes
-    /// from this session for the full reasoning). This only reports
-    /// what it finds — doesn't change any actual JIT behavior, and is
-    /// safe to leave in or remove freely.
-    func checkDDIVersionStaleness() -> String {
-        guard let plan = try? makeDownloadPlan(),
-              let manifestItem = plan.items.first(where: { $0.destinationURL.lastPathComponent == "BuildManifest.plist" }),
-              fileManager.fileExists(atPath: manifestItem.destinationURL.path),
-              let data = try? Data(contentsOf: manifestItem.destinationURL),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-            return "Could not read/parse the downloaded manifest to check its version."
-        }
-        
-        let knownGoodVersion = "17E5179g"
-        let actualVersion = plist["ProductBuildVersion"] as? String ?? "(missing)"
-        
-        if actualVersion == knownGoodVersion {
-            return "DDI ProductBuildVersion: \(actualVersion) — matches the known-current version. Staleness is NOT the cause."
-        } else {
-            return "DDI ProductBuildVersion: \(actualVersion) — does NOT match the known-current version (\(knownGoodVersion)). This IS a plausible, genuine cause of the mount failure."
-        }
-    }
+    // REMOVED checkDDIVersionStaleness() - see
+    // fix_swift_deadcode_and_stale_comments.py. Exactly one occurrence
+    // repo-wide, its own definition; its doc opened "TEMPORARY
+    // DIAGNOSTIC" and closed "safe to leave in or remove freely". It
+    // compared the downloaded BuildManifest's ProductBuildVersion
+    // against a hardcoded "17E5179g" and returned a sentence nobody
+    // ever read.
     
     func ensureRequiredDDIFiles(
         progress: @escaping (Double) -> Void,
@@ -171,11 +146,17 @@ final class DDIManager: NSObject {
         stateQueue.async {
             // CHANGED - a cancel with no download in flight no longer
             // deletes DDI storage. See fix_ddi_cleanup_preserves_valid_image.py.
-            guard let active = self.activeDownload else {
+            guard self.activeDownload != nil else {
                 return
             }
             
-            active.currentTask?.cancel()
+            // REMOVED an `active.currentTask?.cancel()` that stood here
+            // - see fix_swift_deadcode_and_stale_comments.py.
+            // finishActiveDownloadLocked below re-reads
+            // self.activeDownload and cancels currentTask itself. Both
+            // run on this same serial stateQueue with nothing between
+            // them, so it was the same task cancelled twice. The guard
+            // no longer binds `active` because nothing here used it.
             self.finishActiveDownloadLocked(result: .failure(DDIError.cancelled), shouldCleanup: true)
         }
     }

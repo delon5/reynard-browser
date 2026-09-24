@@ -185,7 +185,19 @@ if getenv("RUST_LOG") == nil {
 if let reynardRustLog = getenv("RUST_LOG") {
     fputs("reynardWR: RUST_LOG=\(String(cString: reynardRustLog))\n", stderr)
 } else {
-    fputs("reynardWR: RUST_LOG is NOT SET\n", stderr)
+    // CORRECTED from "RUST_LOG is NOT SET" - see
+    // fix_swift_deadcode_and_stale_comments.py.
+    //
+    // The setenv three lines above runs whenever getenv returned nil,
+    // so by the time this branch can be reached the variable HAS been
+    // set - unless setenv itself failed. "NOT SET" described a state
+    // this code had just made impossible, and would have sent whoever
+    // read it looking at the environment instead of at errno.
+    //
+    // Kept rather than deleted for that same reason: the branch is
+    // reachable, just only on a setenv failure, and this file's whole
+    // purpose here is proving the webrender log route is alive.
+    fputs("reynardWR: RUST_LOG could NOT be set - setenv failed, errno=\(errno)\n", stderr)
 }
 // NOT a second route - see mse_fix_160e's docstring. This used to set
 // MOZ_LOG=webrender:4, and log_to_gecko RETURNS TRUE for any module
@@ -246,10 +258,21 @@ if startupMode.usesUIKitOnlyStartup {
     // only way out was another build. Deleting fps-render-probe.on in
     // Files recovers this one, so a bad result costs a file rather than a
     // cycle. The segment is Apple's, from the FPS Server SDK.
-    // directories, not ReynardDirectories.shared: on iOS 13 unsandboxed
-    // builds configureUnsandboxedAppDataDirectories above has already
-    // repointed these, and the probe must read the same Documents the
-    // user dropped the segment into.
+    // CORRECTED - see fix_swift_deadcode_and_stale_comments.py.
+    //
+    // This used to say "directories, not ReynardDirectories.shared: on
+    // iOS 13 unsandboxed builds configureUnsandboxedAppDataDirectories
+    // above has already repointed these". They are the same thing:
+    // `let directories = ReynardDirectories.shared` is a few lines up,
+    // and there is no other assignment to it in this file.
+    //
+    // Nor could that function repoint anything. ReynardDirectories is a
+    // STRUCT and it is taken by value, so the callee gets a copy; all
+    // it does with the copy is read `caches` and setenv MOZ_APP_DATA and
+    // MOZ_LOCAL_APP_DATA. `documents` is untouched on every path.
+    //
+    // The local is kept because it reads better than repeating the
+    // singleton, not because the two differ.
     let documents = directories.documents
     let renderProbeMarker = documents.appendingPathComponent("fps-render-probe.on")
     if FileManager.default.fileExists(atPath: renderProbeMarker.path) {

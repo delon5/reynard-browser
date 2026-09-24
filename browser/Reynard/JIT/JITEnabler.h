@@ -160,8 +160,15 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 ///
 /// Call this from every write of that flag and from nowhere else - it
 /// is a copy of a decision made in Swift, not an independent judgement
-/// about the application state. prewarmSharedTunnel is the only
-/// reader. See fix_prewarm_checks_foreground.py.
+/// about the application state. See fix_prewarm_checks_foreground.py.
+///
+/// CORRECTED - see fix_swift_deadcode_and_stale_comments.py. This said
+/// "prewarmSharedTunnel is the only reader". There are TWO, both
+/// through applicationForegroundFromAnyQueue(): prewarmSharedTunnel and
+/// probeSharedTunnelWithCompletion: above, which skips its build and
+/// reports NO if the app left the foreground while the probe was
+/// queued. A third reader is cheap to add and must go through the same
+/// accessor - the flag is queue-confined, not atomic.
 + (void)setApplicationForeground:(BOOL)foreground NS_SWIFT_NAME(setApplicationForeground(_:));
 
 // Timestamp of when the most recent vAttach FFI call started, if it

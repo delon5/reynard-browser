@@ -1978,12 +1978,42 @@ final class JITController {
                 return
             }
 
-            // DIAGNOSTIC - prime suspect. cancelPreflightWatchdog is
-            // called only from attachToProcess, never from
-            // attachToHelperProcess, so when the Helper path performs
-            // the attach this watchdog is never cancelled and fires
-            // anyway - consuming the single-use pipe with a FALSE
-            // report even though the attach itself succeeded.
+            // The genuine timeout, and the only path that burns the
+            // single-use report pipe with a FALSE from here.
+            //
+            // CORRECTED - see
+            // fix_swift_deadcode_and_stale_comments.py. What stood here
+            // called this the "prime suspect" for a FALSE landing on a
+            // pid the Helper path had just attached successfully:
+            // "cancelPreflightWatchdog is called only from
+            // attachToProcess, never from attachToHelperProcess". The
+            // first half is true; the conclusion does not follow,
+            // because that scenario is unreachable in BOTH orderings.
+            // schedulePreflightWatchdog has three call sites - the
+            // deferred drain in applicationDidBecomeActive,
+            // childProcessDidStart, and this closure's own retry - and
+            // each arms the watchdog on the same attachQueue hop as
+            // ledger.markAttached(pid). So:
+            //
+            //   Helper claims first - it marks the pid attached, so
+            //     childProcessDidStart lands in "already claimed -
+            //     skipping the native attach" and RETURNS BEFORE
+            //     schedulePreflightWatchdog. No watchdog is ever armed
+            //     for that pid.
+            //
+            //   Native claims first - markAttached and the watchdog go
+            //     up together, so the Helper drain's isAttached dedup
+            //     (fix_dedupe_attach_paths.py) sets skipReason "already
+            //     attached by the native path" and attachToHelperProcess
+            //     is never called.
+            //
+            // A pid with an armed watchdog is therefore never attached
+            // by the Helper path, and this line means what it says:
+            // nobody attached this pid in time. Two things reach it -
+            // an attach that never got a slot inside the deferral cap,
+            // and one that started and overran preflightTimeoutSeconds
+            // of running time. The "deferring" and "hit the deferral
+            // cap" lines above tell those two apart.
             logger(String(format: "preflightWatchdog: pid %d reporting FALSE - watchdog timed out and was never cancelled", pid))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             self.handleJITFailure(error: NSError(domain: "Reynard.JIT", code: Int(ETIMEDOUT), userInfo: nil))
@@ -2247,8 +2277,34 @@ final class JITController {
     // rejected by guard 1.
     //
     // Each return to foreground while latched runs one silent tunnel
-    // probe (the same getProvider call prewarm uses - ~16ms against a
-    // refusing endpoint, per the captured log). Only a probe that
+    // probe - the same getProvider call prewarm uses.
+    //
+    // CORRECTED from "~16ms against a refusing endpoint, per the
+    // captured log" - see fix_swift_deadcode_and_stale_comments.py.
+    // Sixteen milliseconds was one unretried attempt, and
+    // createDeviceProvider has not worked that way since
+    // fix_retry_tunnel_create.py. What it costs now has two cases,
+    // both in JITSupport.m:
+    //
+    //   first caller after a refusal window - up to
+    //     kTunnelRetryBudgetSeconds (9.0), five backoff steps, aborted
+    //     early only by a background teardown generation bump;
+    //   a caller arriving inside kTunnelRefusalCoolOffSeconds (3.0) of
+    //     one that burned the whole budget - fails fast, and says so:
+    //     "tunnelRetry: coolOff" (fix_tunnel_retry_cooloff.py).
+    //
+    // Both are given as CONSTANTS with their current values beside
+    // them, not as bare figures - naming them is what this line lacked
+    // when it went stale, and it is what makes the next change to
+    // either one greppable. A probe that succeeds against a cached
+    // provider still returns immediately.
+    //
+    // None of it blocks a thread of ours that matters: this runs on a
+    // global utility queue and reports back on main, so the cost is
+    // latency to the un-latch. Read the real figure per attempt off
+    // "tunnelRetry: giving up after N attempt(s) over X.Xs".
+    //
+    // Only a probe that
     // SUCCEEDS changes anything: both latches clear, so the NEXT
     // content process attaches normally. Processes already running
     // stay interpreted - reloading a tab replaces its process, which
@@ -2377,6 +2433,39 @@ extension JITController {
     }
     
     func startListeningForHelperAttachRequests() {
+        // ADDED - see fix_swift_deadcode_and_stale_comments.py.
+        //
+        // helperAttachPollingLifecycleTokens had exactly two occurrences
+        // in this file - its declaration and the assignment below - and
+        // nothing ever passed them to removeObserver. The choice was to
+        // delete the property or to make it earn its keep. This is the
+        // second, because a second call to this method is not harmless:
+        //
+        //   - CFNotificationCenterAddObserver below would register the
+        //     Darwin callback a second time, so every "request posted"
+        //     notification would run processPendingHelperAttachRequests
+        //     twice;
+        //   - the two block observers would be replaced in this array
+        //     while NotificationCenter still holds the old pair, and
+        //     with no token left there is no way to remove them - both
+        //     copies then fire on every background and foreground;
+        //   - startHelperAttachPollingTimer() at the end would overwrite
+        //     helperAttachPollingTimer WITHOUT invalidating what is in
+        //     it, leaking a repeating 3s Timer for the life of the
+        //     process. That is precisely the leak the comment on that
+        //     property says this pause/resume pair exists to end.
+        //
+        // Non-empty tokens IS "already listening": the array is written
+        // only below, and only once both observers are registered.
+        //
+        // There is ONE caller today - start(), itself called once from
+        // main.swift - so this guards a future one rather than a live
+        // bug, and the log line below should never appear.
+        guard helperAttachPollingLifecycleTokens.isEmpty else {
+            logger("helperRequestDelivery: startListening called again - already listening, ignoring")
+            return
+        }
+        
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             nil,
@@ -2479,8 +2568,17 @@ extension JITController {
     
     // Called on the main thread (the run loop this observer was
     // registered on) - immediately dispatches to attachQueue so the
-    // actual enableJIT call, which can take up to the full 20s
-    // watchdog budget, never blocks it. Processes every pending
+    // actual enableJIT call never blocks it.
+    //
+    // CORRECTED from "the full 20s watchdog budget" - see
+    // fix_swift_deadcode_and_stale_comments.py. boundedEnableJIT waits
+    // enableJITMaxWaitSeconds, which has been 90.0 since
+    // fix_global_enablejit_guard_and_extended_wait.py retired the 20s
+    // bound - 20 was abandoning calls just as the idevice runtime was
+    // about to recover from one of its ~19.5s stalls. So the main thread
+    // is being spared up to ninety seconds here, not twenty. The
+    // constant is named rather than the number repeated, so the next
+    // change to it does not strand this comment too. Processes every pending
     // request file found, not just one - Darwin notifications can
     // coalesce multiple posts under load, so this scans rather than
     // assumes exactly one request is waiting. Also opportunistically

@@ -91,14 +91,20 @@ IdeviceFfiError *debug_proxy_send_command(DebugProxyHandle *handle,
                                           char **response);
 IdeviceFfiError *debug_proxy_read_response(DebugProxyHandle *handle,
                                            char **response);
-// Signature taken verbatim from the idevice library's own generated
-// header - see fix_batch_prepare_memory_region.py. Needed to pipeline
-// region preparation instead of issuing one serialised round trip per
-// packet.
 // Aborts any in-flight call on this proxy, releasing the thread blocked
 // inside it. See fix_debug_proxy_cancellation.py.
 IdeviceFfiError *debug_proxy_cancel(DebugProxyHandle *handle);
 
+// Signature taken verbatim from the idevice library's own generated
+// header - see fix_batch_prepare_memory_region.py. Needed to pipeline
+// region preparation instead of issuing one serialised round trip per
+// packet.
+//
+// MOVED down one declaration - see
+// fix_swift_deadcode_and_stale_comments.py. It sat above
+// debug_proxy_cancel, which is cancellation and belongs to
+// fix_debug_proxy_cancellation.py; this is the batching primitive that
+// provenance is about.
 IdeviceFfiError *debug_proxy_send_raw(DebugProxyHandle *handle,
                                       const uint8_t *data,
                                       uintptr_t len);

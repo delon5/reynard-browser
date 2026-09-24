@@ -503,10 +503,14 @@ static void scheduleSelfDebuggedCheck(int attemptsRemaining) {
     });
 }
 
-// Runs in every process that loads this translation unit. Gated to the
-// Helper extension, which is the debuggee - the main app is the
-// debugger and never carries CS_DEBUGGED, so checking there would
-// always and correctly read false.
+// The "Runs in every process ... Gated to the Helper extension" note
+// that stood here has MOVED onto ReynardStartSelfDebuggedReporting,
+// the constructor that actually carries that gate - see
+// fix_swift_deadcode_and_stale_comments.py. Sitting here it read as
+// documenting the child heartbeat below, whose own constructor
+// ReynardStartChildHeartbeat is UNGATED and runs in every process that
+// links this file.
+
 // ADDED - see fix_child_heartbeat_instrument.py's docstring.
 //
 // Two keys per process, ticked from two different queues, so a reader can
@@ -773,6 +777,14 @@ static void ReynardStartChildHeartbeat(void) {
     startChildHeartbeat();
 }
 
+// Runs in every process that loads this translation unit. Gated to the
+// Helper extension, which is the debuggee - the main app is the
+// debugger and never carries CS_DEBUGGED, so checking there would
+// always and correctly read false.
+//
+// MOVED here from above the child-heartbeat block - see
+// fix_swift_deadcode_and_stale_comments.py. The bundle-ID suffix test
+// below IS the gate it describes.
 __attribute__((constructor))
 static void ReynardStartSelfDebuggedReporting(void) {
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
@@ -986,11 +998,26 @@ static void registerDebugSessionPID(int32_t pid) {
     
     addPIDToSharedActiveSessions(pid);
     
-    // DIAGNOSTIC - the single most informative unmeasured bit. Every
-    // other signal so far confirms Reynard's own side of the
-    // handshake; this confirms whether the KERNEL agrees the target is
-    // actually debugged, which is the hard precondition for JIT.
-    logger([NSString stringWithFormat:@"registerDebugSessionPID: pid %d CS_DEBUGGED=%@", pid, processIsDebugged(pid) ? @"YES" : @"NO"]);
+    // REMOVED a "registerDebugSessionPID: pid %d CS_DEBUGGED=%@" line
+    // - see fix_swift_deadcode_and_stale_comments.py.
+    //
+    // It called processIsDebugged(pid) on someone else's pid, which is
+    // csops(CS_OPS_STATUS) on another process, which the app sandbox
+    // refuses with EPERM - "confirmed on device 8 times out of 8", as
+    // the revert note at hasAnyActiveJITSessionAcrossProcesses says, and
+    // as dumpDebugLoopState already says on its own account ("every
+    // answer was a failed read printed as NO").
+    //
+    // Always someone else's pid: this runs only from runDebugService,
+    // which only the main app reaches, and the main app is the DEBUGGER.
+    // The Helper's self-enable stopped calling enableJITForPID: when it
+    // moved to delegating the attach back to the main app.
+    //
+    // So it printed NO for every healthy session - a second log line per
+    // attach, and the misleading one of the two. The honest version of
+    // this measurement is scheduleSelfDebuggedCheck above, which asks
+    // about getpid() inside the Helper and records the answer in the App
+    // Group.
 }
 
 static void unregisterDebugSessionPID(int32_t pid) {
@@ -1365,10 +1392,29 @@ BOOL hasActiveDebugSessionForPID(int32_t pid) {
 //
 // debugSessionProxies() rather than activeDebugSessionPIDs(): the proxies
 // are the handles, and handles are what a free can pull out from under a
-// caller. Registered at the top of runDebugService and unregistered only
-// after the loop's last FFI call - after the detach and its 50ms retry,
-// not at "Debug loop ended" - so zero here means no loop is still
-// issuing calls on the adapter.
+// caller. Registered at the top of runDebugService and unregistered after
+// the loop's detach and its 50ms retry - not at "Debug loop ended".
+//
+// CORRECTED - see fix_swift_deadcode_and_stale_comments.py. This used to
+// claim the unregister happens "after the loop's LAST FFI call ... so
+// zero here means no loop is still issuing calls on the adapter". It is
+// not the last one. unregisterDebugSessionProxy(pid) runs immediately
+// BEFORE freeDebugSession(session), and for a runDebugService session
+// that is two more FFI calls - debug_proxy_free and remote_server_free -
+// on handles debug_proxy_connect_rsd and remote_server_connect_rsd opened
+// off provider->adapter. (session->adapter and session->handshake are
+// deliberately left NULL for these sessions, so freeDebugSession's other
+// two branches are skipped; see connectDebugSession.)
+//
+// That order is REQUIRED, not an oversight. cancelAllDebugSessionCalls
+// walks this same map under this same queue, and its own comment states
+// the invariant it needs: "a registered proxy has not been freed and a
+// freed one is no longer registered". Swapping the two would trade this
+// window for a use-after-free in the cancel path, which is worse.
+//
+// So read zero for what it is: no loop is still in its command loop, its
+// detach, or the retry. It does NOT mean no loop is inside an FFI call
+// at all - those two frees sit outside this gate.
 //
 // Same dispatch_sync onto debugSessionStateQueue as
 // hasActiveDebugSessionForPID above, which is what stops the count being
@@ -2088,9 +2134,21 @@ void runDebugService(int32_t pid, DebugSession *session) {
                 // tunnel they all have. Stop content processes trapping
                 // before one of them freezes waiting for an answer that
                 // is not coming.
-                if (connectionFailed) {
-                    setDebuggerListeningState(0);
-                }
+                //
+                // UNWRAPPED - see
+                // fix_swift_deadcode_and_stale_comments.py. This was
+                // `if (connectionFailed) { ... }` sitting directly under
+                // the `connectionFailed = YES` above it.
+                // connectionFailed is a stack local of runDebugService
+                // and no writer sits between the two statements, so the
+                // test was provably always true.
+                //
+                // The PROCESS-WIDE key deliberately, not
+                // setDebugSessionListeningForPID: this is one of the two
+                // paths that genuinely know the SHARED transport is gone,
+                // which fix_detach_disarms_only_its_own_pid.py names as
+                // untouched for exactly that reason.
+                setDebuggerListeningState(0);
                 if (!isNotConnectedError(commandError)) logger([NSString stringWithFormat:@"Debug loop ended for pid %d: %@ (iteration %ld, call took %.0fms)", pid, commandError.localizedDescription ?: @"continue failed", (long)debugServiceIteration, continueCallDuration * 1000.0]);
                 break;
             }

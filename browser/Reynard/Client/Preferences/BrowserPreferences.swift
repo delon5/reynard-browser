@@ -78,7 +78,6 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
-            key("ExperimentalSettings", "interruptsAttachingSessionsOnResign"): true,
             key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             
             // AirPlay
@@ -1437,26 +1436,16 @@ final class BrowserPreferences {
             }
         }
         
-        /// Plays inaudible audio so iOS does not suspend the app,
-        /// keeping the JIT debug tunnel and its sessions alive while
-        /// backgrounded. Off by default - it is real battery drain.
-        /// See fix_background_audio_keepalive.py.
-        /// Sends the GDB interrupt byte to any attach still in flight
-        /// when the app resigns active. A target stopped by vAttach
-        /// cannot answer the synchronous XPC iOS sends every extension,
-        /// and the watchdog kills the app for it.
-        ///
-        /// Experimental: it may do nothing, since the target is already
-        /// stopped rather than running. See
-        /// fix_interrupt_attaching_sessions.py.
-        static var interruptsAttachingSessionsOnResign: Bool {
-            get {
-                return prefs.bool(forSetting: "ExperimentalSettings", key: "interruptsAttachingSessionsOnResign")
-            }
-            set {
-                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "interruptsAttachingSessionsOnResign")
-            }
-        }
+        // REMOVED interruptsAttachingSessionsOnResign - see
+        // fix_swift_deadcode_and_stale_comments.py. Its only reader was
+        // a branch in sceneWillResignActive whose body
+        // fix_delay_cancel_after_detach.py had already emptied to
+        // `_ = ()`, and it never had a settings row. The default above
+        // goes with it.
+        //
+        // The "Plays inaudible audio" doc block that used to sit here,
+        // orphaned above the wrong var, has been moved down onto
+        // isBackgroundAudioKeepAliveEnabled where it belongs.
         
         /// Whether scripts run on pages shown on the CarPlay
         /// display. Off by default - the display is glanced at while
@@ -1511,6 +1500,20 @@ final class BrowserPreferences {
             }
         }
         
+        /// Plays inaudible audio so iOS does not suspend the app,
+        /// keeping the JIT debug tunnel and its sessions alive while
+        /// backgrounded. Off by default - it is real battery drain.
+        /// See fix_background_audio_keepalive.py.
+        ///
+        /// MOVED here - see fix_swift_deadcode_and_stale_comments.py.
+        /// It had drifted up above interruptsAttachingSessionsOnResign,
+        /// which this script removes; leaving it there would have
+        /// stranded it on cancelsDebugSessionsOnBackground instead.
+        ///
+        /// Read BackgroundAudioKeepAlive.shared.isActive, not this, for
+        /// any decision about whether the app will actually survive a
+        /// background: the preference can be true while the engine is
+        /// dead. See fix_background_skip_predicates.py.
         static var isBackgroundAudioKeepAliveEnabled: Bool {
             get {
                 return prefs.bool(forSetting: "ExperimentalSettings", key: "isBackgroundAudioKeepAliveEnabled")

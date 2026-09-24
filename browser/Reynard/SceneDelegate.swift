@@ -84,19 +84,28 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // fix_defer_attaches_while_inactive.py.
         JITController.shared.applicationWillResignActive()
         
-        // Any attach still in flight has its target stopped, and iOS is
-        // about to message every extension synchronously. See
-        // fix_interrupt_attaching_sessions.py.
-        if Prefs.ExperimentalSettings.interruptsAttachingSessionsOnResign {
-            // REMOVED - see fix_delay_cancel_after_detach.py.
-            //
-            // This logged "0 attach(es) in flight, interrupted 0" on
-            // every one of its twenty-odd invocations, so it never had
-            // anything to interrupt and has never done anything. The
-            // registry and the C function remain, unreferenced, so
-            // restoring the experiment is one line.
-            _ = ()
-        }
+        // REMOVED the interruptsAttachingSessionsOnResign branch that
+        // used to be here - see
+        // fix_swift_deadcode_and_stale_comments.py.
+        //
+        // fix_delay_cancel_after_detach.py had already emptied its body
+        // to `_ = ()`, leaving a preference read and a branch around
+        // nothing. Its own note recorded why: the interrupt logged
+        // "0 attach(es) in flight, interrupted 0" on every one of its
+        // twenty-odd invocations.
+        //
+        // The preference goes with it. Five occurrences repo-wide, all
+        // of them this branch, its default and its accessor; nothing
+        // under Client/Interface/ reads it, so there is no settings row
+        // left pointing at a key that no longer exists.
+        //
+        // And there is nothing left for it to gate.
+        // fix_delete_dead_transport_code.py removed the whole mechanism
+        // this toggle used to drive - interruptAttachingDebugSessions(),
+        // its JITSupport.h declaration, its JITEnabler class method, the
+        // attachingDebugSessionProxies table it read, and the
+        // register/unregister pair that filled it on every attach. These
+        // two lines were the last trace of the feature.
         
         // REMOVED the cancelAllDebugSessionCalls() call that used to be
         // here - see fix_cancel_only_on_real_teardown.py.
@@ -654,37 +663,73 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // ADDED - see fix_no_teardown_while_system_media_active.py's
         // docstring.
         //
-        // requestDetachForAllDebugSessions is not a passive flag-setter -
-        // it calls interruptLiveDebugSessions, which sends the GDB
-        // interrupt byte to every target and STOPS it. Doing that to the
-        // process rendering Picture in Picture contradicts what the
-        // coordinator logs one line earlier:
+        // REWRITTEN - see fix_swift_deadcode_and_stale_comments.py.
+        // Every load-bearing sentence that stood here had gone false,
+        // and this comment is the ONLY stated reason the guard exists,
+        // so it is replaced rather than deleted. What was here:
         //
-        //   22:42:01.439  pipLife: didStart - PiP is now active, its
-        //                 content process must stay alive in the background
-        //   22:42:01.906  requestDetachForAllDebugSessions: for 8 session(s)
-        //   22:42:01.906  interruptLiveDebugSessions: 8 live, interrupted 8
+        //   "requestDetachForAllDebugSessions is not a passive
+        //    flag-setter - it calls interruptLiveDebugSessions, which
+        //    sends the GDB interrupt byte to every target and STOPS
+        //    it", with a capture of "interruptLiveDebugSessions: 8
+        //    live, interrupted 8".
         //
-        // The audio stuttered for the 18 seconds PiP was up, and the
-        // census on the way back showed all ten children at session=NO.
+        //     It has not done that since
+        //     fix_no_interrupt_at_background.py. That call is now a
+        //     REMOVED block ending in
+        //       backgroundInterrupt: skipped - not stopping live
+        //       targets to deliver a detach flag they can read on
+        //       their own
+        //     Nothing goes over the wire and no target is stopped.
         //
-        // hasSystemMediaSession rather than hasPictureInPictureSession,
-        // deliberately: its own doc comment covers PiP AND the
-        // now-playing entry that CarPlay and the lock screen drive their
-        // transport controls from, and notes that under CarPlay losing
-        // the content process is worse than a paused video - the head
-        // unit keeps showing controls for a page that no longer exists.
-        // Backgrounded audio has the same requirement as PiP.
+        //   "hasSystemMediaSession rather than
+        //    hasPictureInPictureSession"
+        //     names a value the predicate no longer reads - see the
+        //     hasPlayingSystemMediaSession note on
+        //     shouldPreserveJITAcrossBackground
+        //     (fix_background_skip_predicates.py).
         //
-        // setDebuggerListening(false) above still runs, so children stop
-        // trapping either way and a region needed during playback is
-        // simply prepared interpreted - the same trade that fix already
-        // makes at every background. Only the interrupt and the detach
-        // are skipped. The loops stay alive, parked in their continue,
-        // and the next background after media stops tears down normally.
-        // CHANGED - fix_media_keeps_its_trapping.py routes this through
-        // the shared predicate. Same value as before; the point is that
-        // this and the listening flag above can no longer diverge.
+        //   "setDebuggerListening(false) above still runs, so children
+        //    stop trapping either way"
+        //     it does NOT run on this branch. The same predicate gates
+        //     it one block up (fix_media_keeps_its_trapping.py), which
+        //     is the whole point of routing both through it.
+        //
+        // THE REAL JUSTIFICATION.
+        //
+        // requestDetachForAllDebugSessions is still not passive. What it
+        // does now, all of it in JITSupport.m:
+        //
+        //   - unions every active pid into the detach set. A loop parked
+        //     in its continue does not see that until its target next
+        //     TRAPS - which, for a process that is still compiling, is
+        //     exactly what happens next. It then sends D, exits and
+        //     unregisters, and the trap after that has nobody;
+        //   - sets sDebuggerTeardownRequested, which is STICKY, so an
+        //     attach landing afterwards joins the teardown instead of
+        //     re-arming the debugger behind it - runDebugService checks
+        //     it at the top and refuses;
+        //   - bumps sTunnelTeardownGeneration, aborting an in-flight
+        //     tunnel retry.
+        //
+        // For a content process that keeps executing JavaScript in the
+        // background - PiP, CarPlay, the lock-screen transport - losing
+        // its loop is exactly what must not happen, BECAUSE trapping is
+        // deliberately left on for it one block above. A child that hits
+        // brk #0xf00d with no loop to service it stays STOPPED, and a
+        // stopped extension cannot answer the synchronous XPC iOS sends
+        // every extension on the next transition. 0x8BADF00D.
+        //
+        // The sticky flag is the durable half: without this skip, a
+        // content process that spawns while PiP is up would get no JIT
+        // at all for the rest of the background, however long the media
+        // keeps the app awake.
+        //
+        // Routed through shouldPreserveJITAcrossBackground so this and
+        // the listening flag cannot disagree - see
+        // fix_media_keeps_its_trapping.py. They MUST take the same
+        // branch: trapping on with the loops gone is the SIGBUS
+        // combination that predicate's own doc comment describes.
         if shouldPreserveJITAcrossBackground(for: browserViewController) {
             logger("backgroundTeardown: skipping the debug-session detach - PiP or system media is live and its content process must keep running")
         } else {
