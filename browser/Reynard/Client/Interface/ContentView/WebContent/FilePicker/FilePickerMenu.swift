@@ -77,7 +77,9 @@ extension FilePicker {
         }
         for action in availableActions {
             alert.addAction(UIAlertAction(title: title(for: action), style: .default) { [weak self] _ in
-                self?.pendingMenuAction = action
+                self?.launchFollowupPicker {
+                    self?.performAction(action)
+                }
             })
         }
         alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel))
@@ -99,7 +101,9 @@ extension FilePicker {
             image: UIImage(named: symbol),
             attributes: canPerform(action) ? [] : .disabled
         ) { [weak self] _ in
-            self?.pendingMenuAction = action
+            self?.launchFollowupPicker {
+                self?.performAction(action)
+            }
         }
     }
     
@@ -163,14 +167,17 @@ extension FilePicker {
         }
     }
     
+    func launchFollowupPicker(_ action: @escaping @MainActor () -> Void) {
+        launchedFollowupPicker = true
+        DispatchQueue.main.async(execute: action)
+    }
+    
     func handleMenuDismissed() {
         anchorButton?.removeFromSuperview()
         anchorButton = nil
-        if let action = pendingMenuAction {
-            pendingMenuAction = nil
-            performAction(action)
-        } else {
-            finish(with: nil)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.launchedFollowupPicker else { return }
+            self.finish(with: nil)
         }
     }
 }

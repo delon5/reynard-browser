@@ -86,7 +86,7 @@ final class FilePicker: NSObject {
     var continuation: CheckedContinuation<[String: Any]?, Never>?
     var anchorButton: FilePickerMenuAnchorButton?
     weak var presentedController: UIViewController?
-    var pendingMenuAction: PickerAction?
+    var launchedFollowupPicker = false
     var isCompletingPicker = false
     
     // MARK: - Lifecycle
@@ -134,7 +134,6 @@ final class FilePicker: NSObject {
     func cancelAndDismiss() {
         anchorButton?.removeFromSuperview()
         anchorButton = nil
-        pendingMenuAction = nil
         presentedController?.dismiss(animated: false)
         presentedController = nil
         finish(with: nil)
