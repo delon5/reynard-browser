@@ -27,13 +27,19 @@ extension TabOverviewCollection: UICollectionViewDataSource, UICollectionViewDel
             return insertionPlaceholderCell(in: collectionView, at: indexPath)
         }
         
+        let tabCard = collectionView.dequeueReusableCell(
+            withReuseIdentifier: TabOverviewCard.reuseIdentifier,
+            for: indexPath
+        ) as! TabOverviewCard
+        
         guard let tabMode = tabMode(for: collectionView),
-              tabs(for: tabMode).indices.contains(indexPath.item),
-              let tabCard = collectionView.dequeueReusableCell(
-                withReuseIdentifier: TabOverviewCard.reuseIdentifier,
-                for: indexPath
-              ) as? TabOverviewCard else {
-            return UICollectionViewCell()
+              tabs(for: tabMode).indices.contains(indexPath.item) else {
+            // A properly dequeued cell, because UIKit throws on one that
+            // was not (upstream ab8c22f3) - but hidden, because a reused
+            // cell would otherwise flash the tab it last showed until the
+            // data source catches up.
+            tabCard.isHidden = true
+            return tabCard
         }
         
         tabCard.isHidden = false

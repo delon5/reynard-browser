@@ -354,16 +354,21 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
-        if sidebarCoordinator.refreshHostVisibility() {
-            return
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.isViewLoaded,
+                  self.view.window != nil,
+                  !self.sidebarCoordinator.refreshHostVisibility() else {
+                return
+            }
+            self.syncBrowserNavigationChrome(animated: false)
+            self.browserChrome.syncSidebarButton(splitViewController: self.splitViewController)
+            self.refreshAddressBar()
+            self.updateBrowserLayout(animated: false)
+            self.tabOverview.invalidateCollectionLayouts()
+            self.tabBar.invalidateLayout()
+            self.tabOverview.refreshForCurrentOrientation()
         }
-        syncBrowserNavigationChrome(animated: false)
-        browserChrome.syncSidebarButton(splitViewController: splitViewController)
-        refreshAddressBar()
-        updateBrowserLayout(animated: false)
-        tabOverview.invalidateCollectionLayouts()
-        tabBar.invalidateLayout()
-        tabOverview.refreshForCurrentOrientation()
     }
     
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
