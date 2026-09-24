@@ -290,6 +290,28 @@ static void jitHangBacktraceHandler(int signalNumber) {
             if (auxURL.path.length > 0) helperPath = auxURL.path;
         }
         
+        // ADDED - see fix_delete_dead_errors_and_helper_code.py.
+        //
+        // All three probes above missed, so helperPath names a file the
+        // lines directly above have just proved is not there. Spawning
+        // it anyway produced -ENOENT, then a copy-to-temp retry whose
+        // source does not exist either, and finally
+        // TSPtraceHelperAttachFailed - "ptrace_jit failed to attach to
+        // the child process" for what is really "ptrace_jit is not in
+        // the bundle". TSPtraceHelperMissing already carries the true
+        // sentence and had never once been constructed; this is the
+        // place it was written for.
+        //
+        // ABSENT only, never "present but not executable": a file that
+        // exists with the wrong mode still goes down the existing
+        // spawnRoot/-EACCES/copy-and-chmod-0755 retry below, which can
+        // actually fix that case.
+        if (![[NSFileManager defaultManager] fileExistsAtPath:helperPath]) {
+            logger([NSString stringWithFormat:@"ptrace_jit missing: nothing at %@ (bundle, Resources or auxiliary executable)", helperPath]);
+            if (error) *error = MakeError(TSPtraceHelperMissing);
+            return NO;
+        }
+        
         int result = spawnRoot(helperPath, @[[NSString stringWithFormat:@"%d", pid]]);
         logger([NSString stringWithFormat:@"ptrace_jit result %d", result]);
         

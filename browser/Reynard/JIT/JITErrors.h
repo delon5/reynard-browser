@@ -11,31 +11,29 @@ NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT NSErrorDomain const ErrorDomain;
 
-FOUNDATION_EXPORT NSString *const ErrorCategory;
-
-typedef NS_ENUM(NSInteger, ErrorGroup) {
-    ErrorGroupUnknown = 0,
-    ErrorGroupSharedSetup = 1,
-    ErrorGroupModernPath = 2,
-    ErrorGroupPairing = 3,
-    ErrorGroupProtocol = 4,
-    ErrorGroupTrollStore = 5,
-};
-
+// REMOVED ErrorGroup, ErrorGroupForCode and the ErrorCategory userInfo
+// key - see fix_delete_dead_errors_and_helper_code.py. A repo-wide grep
+// for either name found seventeen hits and not one reader: MakeError
+// computed the group, stored it under userInfo[ErrorCategory], and
+// nothing ever asked for it back.
 typedef NS_ERROR_ENUM(ErrorDomain, ErrorCode){
+    // -6 (HeartbeatConnectFailed) and -8 (ProcessControlCreateFailed)
+    // were removed by the same script - neither was ever passed to
+    // MakeError, so neither could reach a log or a user. The two numbers
+    // are retired rather than recycled, so an old capture's "Error -6"
+    // can never come to mean something new.
+    
     // Pairing and bootstrap setup
     PairingFileMissing = -1,
     InvalidTargetAddress = -2,
     DeviceProviderAllocationFailed = -3,
     DeviceProviderCreateFailed = -4,
     PairingFileReadFailed = -5,
-    HeartbeatConnectFailed = -6,
     
     // RSD service bootstrap
     LockdowndConnectFailed = -7,
     
     // Attach
-    ProcessControlCreateFailed = -8,
     RemoteServerConnectFailed = -9,
     DebugProxyConnectFailed = -10,
     NoAckConfigureFailed = -11,
@@ -72,7 +70,6 @@ typedef NS_ERROR_ENUM(ErrorDomain, ErrorCode){
 };
 
 NSString *ErrorDescription(ErrorCode code);
-ErrorGroup ErrorGroupForCode(ErrorCode code);
 NSError *MakeError(ErrorCode code);
 
 NS_ASSUME_NONNULL_END

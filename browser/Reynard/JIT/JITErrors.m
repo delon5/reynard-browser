@@ -8,7 +8,6 @@
 #import "JITErrors.h"
 
 NSErrorDomain const ErrorDomain = @"Reynard.JIT";
-NSString *const ErrorCategory = @"ErrorCategory";
 
 NSString *ErrorDescription(ErrorCode code) {
     switch (code) {
@@ -22,12 +21,8 @@ NSString *ErrorDescription(ErrorCode code) {
             return @"Failed to create device provider.";
         case PairingFileReadFailed:
             return @"Failed to read pairing file for provider.";
-        case HeartbeatConnectFailed:
-            return @"Failed to connect heartbeat service.";
         case LockdowndConnectFailed:
             return @"Failed to connect lockdownd service over RSD.";
-        case ProcessControlCreateFailed:
-            return @"Failed to create process control client.";
         case RemoteServerConnectFailed:
             return @"Failed to connect remote server.";
         case DebugProxyConnectFailed:
@@ -79,54 +74,17 @@ NSString *ErrorDescription(ErrorCode code) {
     return @"Unknown error.";
 }
 
-ErrorGroup ErrorGroupForCode(ErrorCode code) {
-    switch (code) {
-        case PairingFileMissing:
-        case PairingFileReadFailed:
-            return ErrorGroupPairing;
-        case InvalidTargetAddress:
-        case DeviceProviderAllocationFailed:
-        case DeviceProviderCreateFailed:
-        case HeartbeatConnectFailed:
-        case DDIMountPathResolveFailed:
-        case DDIFileReadFailed:
-        case ImageMounterConnectFailed:
-        case EndpointConnectivityLost:
-            return ErrorGroupSharedSetup;
-        case LockdowndConnectFailed:
-        case ProcessControlCreateFailed:
-        case RemoteServerConnectFailed:
-        case DebugProxyConnectFailed:
-        case NoAckConfigureFailed:
-        case AttachDebugProxyFailed:
-        case SessionAllocationFailed:
-        case UniqueChipIDReadFailed:
-        case UniqueChipIDInvalid:
-        case ModernDDIMountFailed:
-        case TunnelCreateFailed:
-            return ErrorGroupModernPath;
-        case TSPtraceHelperMissing:
-        case TSPtraceHelperAttachFailed:
-        case TSPtraceHelperTerminated:
-            return ErrorGroupTrollStore;
-        case DebugCommandCreateFailed:
-        case DebugCommandSendFailed:
-        case UnexpectedRegisterWriteResponse:
-        case UnexpectedNoAckResponse:
-        case MemoryPrepareReadFailed:
-        case UnexpectedPrepareRegionResponse:
-        case DDIMountStateQueryFailed:
-            return ErrorGroupProtocol;
-    }
-    
-    return ErrorGroupUnknown;
-}
-
+// REMOVED ErrorGroupForCode - see
+// fix_delete_dead_errors_and_helper_code.py. Forty-two lines of switch
+// walked on every error construction to produce a value with no reader.
+//
+// One of its answers was also wrong: DDIMountStateQueryFailed (-23) is a
+// Developer Disk Image mount failure and it was filed under
+// ErrorGroupProtocol, next to the debugserver packet errors. Nobody
+// noticed, because nobody read the group. Deleting the function retires
+// the miscategorisation with it.
 NSError *MakeError(ErrorCode code) {
     return [NSError errorWithDomain:ErrorDomain
                                code:code
-                           userInfo:@{
-        NSLocalizedDescriptionKey: ErrorDescription(code),
-        ErrorCategory: @(ErrorGroupForCode(code)),
-    }];
+                           userInfo:@{NSLocalizedDescriptionKey: ErrorDescription(code)}];
 }

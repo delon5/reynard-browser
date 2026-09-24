@@ -21,7 +21,6 @@ typedef struct DebugserverCommandHandle DebugserverCommandHandle;
 // them was a startHeartbeat with no caller.
 typedef struct ImageMounterHandle ImageMounterHandle;
 typedef struct LockdowndClientHandle LockdowndClientHandle;
-typedef struct ProcessControlHandle ProcessControlHandle;
 typedef struct RemoteServerHandle RemoteServerHandle;
 typedef struct RpPairingFileHandle RpPairingFileHandle;
 typedef struct RsdHandshakeHandle RsdHandshakeHandle;
@@ -77,13 +76,12 @@ IdeviceFfiError *remote_server_connect_rsd(AdapterHandle *provider,
                                            RemoteServerHandle **handle);
 void remote_server_free(RemoteServerHandle *handle);
 
-IdeviceFfiError *process_control_new(RemoteServerHandle *server,
-                                     ProcessControlHandle **handle);
-void process_control_free(ProcessControlHandle *handle);
-IdeviceFfiError *
-process_control_disable_memory_limit(ProcessControlHandle *handle,
-                                     uint64_t pid);
-
+// REMOVED process_control_new / process_control_free /
+// process_control_disable_memory_limit and the ProcessControlHandle
+// typedef - see fix_delete_dead_errors_and_helper_code.py. JITEnabler.m
+// took the calls out (its own REMOVED note says so); the declarations
+// outlived them by a whole architecture. Repo-wide, every surviving
+// mention of the four is prose inside a comment.
 IdeviceFfiError *debug_proxy_connect_rsd(AdapterHandle *provider,
                                          RsdHandshakeHandle *handshake,
                                          DebugProxyHandle **handle);
@@ -117,7 +115,10 @@ void idevice_error_free(IdeviceFfiError *err);
 void idevice_string_free(char *string);
 
 void plist_free(plist_t plist);
-void plist_get_string_val(plist_t node, char **val);
+// REMOVED plist_get_string_val - see
+// fix_delete_dead_errors_and_helper_code.py. Declared, never called: the
+// tree's one lockdownd_get_value (JITSupport.m, UniqueChipID) reads its
+// node with plist_get_uint_val below.
 void plist_get_uint_val(plist_t node, uint64_t *val);
 
 // Copied directly from idevice.h (the underlying Rust library's own

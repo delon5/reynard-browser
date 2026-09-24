@@ -14,17 +14,27 @@ import Foundation
 
 @MainActor
 private final class ProcessBootstrap {
-	private static var retainedConnections: [NSXPCConnection] = []
-	private static var retainedContexts: [NSExtensionContext] = []
-	private static var retainedProcesses: [any GeckoProcessExtension] = []
+	// One reference each rather than three arrays - see
+	// fix_delete_dead_errors_and_helper_code.py. Their only job is to keep
+	// the bootstrap's objects alive for the life of the process, and
+	// didBootstrap below latches on ENTRY to start(), so the assignments
+	// there run at most once: an array could never hold a second element.
+	// Nothing ever read any of the three.
+	private static var retainedConnection: NSXPCConnection?
+	private static var retainedContext: NSExtensionContext?
+	private static var retainedProcess: (any GeckoProcessExtension)?
 	private static var heartbeatTimer: DispatchSourceTimer?
-	// One bootstrap per process. Nothing here enforced that before: the
-	// retained* arrays grew unboundedly, heartbeatTimer was overwritten
-	// (which leaks the old timer rather than cancelling it - libdispatch
-	// retains an active source), and childMain would run a second Gecko
-	// init in the same process. Worse, the host invalidates a duplicate
-	// incoming connection, which trips invalidationHandler below and takes
-	// the whole process down - killing the healthy first child with it.
+	// One bootstrap per process. Nothing here enforced that before:
+	// heartbeatTimer was overwritten (which leaks the old timer rather
+	// than cancelling it - libdispatch retains an active source), and
+	// childMain would run a second Gecko init in the same process. Worse,
+	// the host invalidates a duplicate incoming connection, which trips
+	// invalidationHandler below and takes the whole process down - killing
+	// the healthy first child with it.
+	//
+	// This list used to open with "the retained* arrays grew unboundedly".
+	// That described the code before the latch below and stopped being
+	// true the moment the latch landed.
 	private static var didBootstrap = false
 
 	static func start(
@@ -133,9 +143,9 @@ private final class ProcessBootstrap {
 		timer.resume()
 		heartbeatTimer = timer
 
-		retainedContexts.append(context)
-		retainedProcesses.append(process)
-		retainedConnections.append(connection)
+		retainedContext = context
+		retainedProcess = process
+		retainedConnection = connection
 
 		GeckoRuntime.childMain(xpcConnection: xpcConnection, process: process)
 
