@@ -160,12 +160,17 @@ final class TabManagementStore {
                 sessionState: $0.state.sessionState?.jsonString()
             )
         }
+        // Never for private tabs. A session-state blob is the page's
+        // history, scroll position and FORM DATA; writing it to disk for a
+        // private tab keeps exactly what private browsing promises not to.
+        // Private tabs still restore by URL. Rows written before this are
+        // purged by the next persist, which rewrites every row.
         let persistedPrivateTabs = privateTabs.map {
             PersistedTab(
                 id: $0.id,
                 title: $0.title,
                 url: $0.url,
-                sessionState: $0.state.sessionState?.jsonString()
+                sessionState: nil
             )
         }
         
@@ -262,7 +267,7 @@ final class TabManagementStore {
             }
             let persistedPrivateTabs = privateTabs.map {
                 PersistedTab(id: $0.id, title: $0.title, url: $0.url,
-                             sessionState: carried[$0.id])
+                             sessionState: nil)
             }
             
             guard self.executeLocked("BEGIN IMMEDIATE TRANSACTION;") else {
