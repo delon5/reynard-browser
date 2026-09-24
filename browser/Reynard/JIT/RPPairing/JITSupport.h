@@ -107,18 +107,6 @@ void setDebugSessionListeningForPID(int32_t pid, BOOL listening);
 /// see fix_split_cancel_from_detach.py.
 void cancelAllDebugSessionCalls(void);
 
-/// Registers a proxy whose vAttach is still in flight, so it can be
-/// interrupted if the app resigns active mid-attach. See
-/// fix_interrupt_attaching_sessions.py.
-void registerAttachingDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy);
-void unregisterAttachingDebugSessionProxy(int32_t pid);
-
-/// Sends the GDB interrupt byte (0x03) to every in-flight attach. A
-/// target stopped by vAttach cannot answer the synchronous XPC iOS
-/// sends every extension on a lifecycle transition, and the watchdog
-/// kills the app for it.
-void interruptAttachingDebugSessions(void);
-
 /// Whether this pid still has a live runDebugService loop. Used to
 /// find processes that lost their session during suspension - see
 /// fix_reattach_orphaned_sessions_on_foreground.py.
@@ -151,6 +139,13 @@ BOOL detachDebuggerSession(DebugProxyHandle *debugProxy, int32_t pid);
 
 void runDebugService(int32_t pid, DebugSession *session);
 
+/// NO-OPS since fix_delete_dead_transport_code.py deleted the endpoint
+/// connectivity monitor behind them. That monitor was already switched
+/// off by a compile-time constant, and its only output - the
+/// notification "me-minh-ton.jit.endpoint-monitor-failed" - has no
+/// observer anywhere in the repo. These three are kept as symbols so
+/// their existing call sites still compile; they cost nothing now, not
+/// even the queue hop they used to pay on every attach and teardown.
 void registerJITEndpointForPID(int32_t pid, NSString *targetAddress,
                                uint16_t port);
 void unregisterJITEndpointForPID(int32_t pid);

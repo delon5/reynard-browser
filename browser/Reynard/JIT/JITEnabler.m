@@ -601,16 +601,17 @@ static void jitHangBacktraceHandler(int signalNumber) {
         logger([NSString stringWithFormat:@"enableJITForPID: starting attach command for pid %d", pid]);
         [JITEnabler markVAttachStarted];
         
-        // Visible to interruptAttachingDebugSessions for exactly the
-        // duration of the call - see
-        // fix_interrupt_attaching_sessions.py. The target is stopped
-        // throughout, and that is the window in which a lifecycle
-        // transition kills the app.
-        registerAttachingDebugSessionProxy(pid, session.debugProxy);
-        
+        // CHANGED - fix_delete_dead_transport_code.py removed the
+        // registerAttachingDebugSessionProxy / unregister pair that
+        // used to bracket this call. Each was a dispatch_sync onto
+        // debugSessionStateQueue - the busiest serial queue in the
+        // process - paid on every attach, to maintain a table whose
+        // only reader, interruptAttachingDebugSessions, had no caller
+        // anywhere in the repo. Both hops sat inside the
+        // attachCallStart/attachCallEnd window, so they were being
+        // reported as attach latency.
         BOOL attachSucceeded = sendDebugCommand(session.debugProxy, attachCommand, &attachResponse, &commandError);
         
-        unregisterAttachingDebugSessionProxy(pid);
         [JITEnabler markVAttachFinished];
         CFAbsoluteTime attachCallEnd = CFAbsoluteTimeGetCurrent();
         if (!attachSucceeded) {
@@ -884,10 +885,6 @@ static void jitHangBacktraceHandler(int signalNumber) {
 
 + (NSString *)runStateForPID:(int32_t)pid {
     return childProcessRunState(pid);
-}
-
-+ (void)interruptAttachingDebugSessions {
-    interruptAttachingDebugSessions();
 }
 
 + (BOOL)hasActiveDebugSessionForPID:(int32_t)pid {

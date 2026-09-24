@@ -94,10 +94,6 @@ NS_SWIFT_NAME(enableJIT(forPID:hasTXMSupport:));
 /// fix_stop_trapping_on_background.py.
 + (void)setDebuggerListening:(BOOL)listening NS_SWIFT_NAME(setDebuggerListening(_:));
 
-/// Sends the GDB interrupt byte to every in-flight attach. Gated on
-/// the Experimental toggle by the caller.
-+ (void)interruptAttachingDebugSessions NS_SWIFT_NAME(interruptAttachingDebugSessions());
-
 /// Whether this pid still has a live debug loop. Wraps the C function
 /// in JITSupport.h, which Swift cannot see directly.
 + (BOOL)hasActiveDebugSessionForPID:(int32_t)pid NS_SWIFT_NAME(hasActiveDebugSession(forPID:));

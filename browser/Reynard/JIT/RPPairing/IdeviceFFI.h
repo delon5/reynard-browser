@@ -15,7 +15,10 @@
 typedef struct AdapterHandle AdapterHandle;
 typedef struct DebugProxyHandle DebugProxyHandle;
 typedef struct DebugserverCommandHandle DebugserverCommandHandle;
-typedef struct HeartbeatClientHandle HeartbeatClientHandle;
+// HeartbeatClientHandle, and the four heartbeat_* declarations that used
+// it, were removed - see fix_delete_dead_transport_code.py. Nothing
+// assigned a heartbeat client, and the only code that called through
+// them was a startHeartbeat with no caller.
 typedef struct ImageMounterHandle ImageMounterHandle;
 typedef struct LockdowndClientHandle LockdowndClientHandle;
 typedef struct ProcessControlHandle ProcessControlHandle;
@@ -64,14 +67,6 @@ IdeviceFfiError *image_mounter_mount_personalized_rsd(
                                                       const uint8_t *trust_cache, size_t trust_cache_len,
                                                       const uint8_t *build_manifest, size_t build_manifest_len,
                                                       const void *info_plist, uint64_t unique_chip_id);
-
-IdeviceFfiError *heartbeat_connect_rsd(AdapterHandle *provider,
-                                       RsdHandshakeHandle *handshake,
-                                       HeartbeatClientHandle **client);
-IdeviceFfiError *heartbeat_get_marco(HeartbeatClientHandle *client,
-                                     uint64_t interval, uint64_t *new_interval);
-IdeviceFfiError *heartbeat_send_polo(HeartbeatClientHandle *client);
-void heartbeat_client_free(HeartbeatClientHandle *handle);
 
 void adapter_free(AdapterHandle *handle);
 

@@ -35,16 +35,15 @@
 
 static const uint16_t rppairingPort = 49152;
 
+// CHANGED - fix_delete_dead_transport_code.py dropped heartbeatClient
+// and heartbeatRunning. Nothing in the tree ever assigned the former a
+// non-NULL value; the latter was only read by a startHeartbeat block
+// that had no caller, and only cleared by freeDeviceProvider one line
+// before it free()d the struct the block was still polling.
 struct DeviceProvider {
     AdapterHandle *adapter;
     RsdHandshakeHandle *handshake;
-    HeartbeatClientHandle *heartbeatClient;
-    BOOL heartbeatRunning;
 };
-
-static dispatch_source_t endpointMonitorTimer = nil;
-static NSUInteger endpointMonitorCursor = 0;
-static BOOL endpointFailureLatched = NO;
 
 dispatch_queue_t debugServiceQueue(void) {
     static dispatch_queue_t queue;
@@ -60,15 +59,6 @@ dispatch_queue_t debugSessionStateQueue(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         queue = dispatch_queue_create("com.minh-ton.Reynard.JITSupport.DebugSessionStateQueue", DISPATCH_QUEUE_SERIAL);
-    });
-    return queue;
-}
-
-static dispatch_queue_t endpointMonitorQueue(void) {
-    static dispatch_queue_t queue;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        queue = dispatch_queue_create("com.minh-ton.Reynard.JITSupport.EndpointMonitorQueue", DISPATCH_QUEUE_SERIAL);
     });
     return queue;
 }
@@ -1055,81 +1045,19 @@ static void registerDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy) {
     });
 }
 
-// ADDED - see fix_interrupt_attaching_sessions.py.
+// Interrupts every LIVE session. See fix_interrupt_before_detach.py.
 //
-// Proxies whose vAttach is still IN FLIGHT. Deliberately separate from
-// debugSessionProxies: registering a half-built session there would
-// expose it to cancelAllDebugSessionCalls and
-// requestDetachForAllDebugSessions, both of which assume a complete
-// session.
-static NSMutableDictionary<NSNumber *, NSValue *> *attachingDebugSessionProxies(void) {
-    static NSMutableDictionary<NSNumber *, NSValue *> *proxies = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        proxies = [NSMutableDictionary dictionary];
-    });
-    return proxies;
-}
-
-void registerAttachingDebugSessionProxy(int32_t pid, DebugProxyHandle *proxy) {
-    if (pid <= 0 || !proxy) return;
-
-    dispatch_sync(debugSessionStateQueue(), ^{
-        attachingDebugSessionProxies()[@(pid)] = [NSValue valueWithPointer:proxy];
-    });
-}
-
-void unregisterAttachingDebugSessionProxy(int32_t pid) {
-    if (pid <= 0) return;
-
-    dispatch_sync(debugSessionStateQueue(), ^{
-        [attachingDebugSessionProxies() removeObjectForKey:@(pid)];
-    });
-}
-
-// Sends the GDB interrupt byte to every target whose vAttach has not
-// yet returned.
+// DELETED alongside this, see fix_delete_dead_transport_code.py: the
+// twin this used to be defined by contrast with,
+// interruptAttachingDebugSessions, which did the same thing for
+// attaches still IN FLIGHT - plus the attachingDebugSessionProxies
+// table it read and the register/unregister pair that filled it. A
+// repo-wide grep found its definition, its JITSupport.h declaration,
+// its JITEnabler class-method declaration and forwarder, its own log
+// string and two comments about itself. No call site, in ObjC or Swift.
 //
-// vAttach stops its target for the ~1012ms the call takes, and iOS
-// messages every extension SYNCHRONOUSLY on a lifecycle transition. A
-// stopped extension cannot reply, so the main thread blocks and the
-// watchdog kills the app - confirmed from a log ending mid-attach with
-// two attaches in flight and neither reply ever arriving.
-//
-// 0x03 is out-of-band: handled outside the request/response sequence,
-// so unlike injecting a "$c#63" packet it cannot desync a connection
-// another thread is parked reading. StikDebug sends exactly this byte
-// to interrupt a running target.
-//
-// It may well do nothing here, since our target is already stopped
-// rather than running - hence the toggle.
-void interruptAttachingDebugSessions(void) {
-    __block NSUInteger interruptedCount = 0;
-    __block NSUInteger attachingCount = 0;
-
-    dispatch_sync(debugSessionStateQueue(), ^{
-        attachingCount = attachingDebugSessionProxies().count;
-
-        for (NSValue *proxyValue in attachingDebugSessionProxies().allValues) {
-            DebugProxyHandle *proxy = (DebugProxyHandle *)proxyValue.pointerValue;
-            if (!proxy) continue;
-
-            uint8_t interruptByte = 0x03;
-            IdeviceFfiError *interruptError = debug_proxy_send_raw(proxy, &interruptByte, 1);
-            if (interruptError) {
-                idevice_error_free(interruptError);
-                continue;
-            }
-            interruptedCount++;
-        }
-    });
-
-    logger([NSString stringWithFormat:@"interruptAttachingDebugSessions: %lu attach(es) in flight, interrupted %lu", (unsigned long)attachingCount, (unsigned long)interruptedCount]);
-}
-
-// Interrupts every LIVE session, as opposed to
-// interruptAttachingDebugSessions which handles attaches still in
-// flight. See fix_interrupt_before_detach.py.
+// THIS function is the live one: it walks debugSessionProxies(), and is
+// called from JITEnabler.m's forwarder and TabManagerImpl.swift:567.
 //
 // A loop blocked in sendDebugCommand(@"c") cannot see a detach request,
 // because that flag is only read at the top of an iteration. 0x03 makes
@@ -1462,71 +1390,6 @@ static BOOL shouldDetachDebugSessionPID(int32_t pid) {
         shouldDetach = [detachRequestedDebugSessionPIDs() containsObject:@(pid)];
     });
     return shouldDetach;
-}
-
-// TEST - genuinely reverted to minh-ton's original behavior (stop on
-// ANY error), not the earlier, flawed test (which set heartbeatRunning
-// = NO too late - right before ensureDDIMounted - when the heartbeat
-// could already have been mid-call at that exact moment, so the flag
-// never actually stopped anything in flight). This is the real,
-// precise difference from upstream: our heartbeat retries on any
-// error except one specific message, keeping itself alive and
-// contending for the connection indefinitely; theirs dies permanently
-// on the very first error. Testing whether THAT is what actually
-// matters for tonight's isDDIMounted hang specifically - the earlier
-// same-change test (noted below, now removed) was against a
-// different, later, discrete error (BadBuildManifest), not this
-// silent hang, which wasn't even isolated until later in this session.
-static void startHeartbeat(DeviceProvider *provider) {
-    dispatch_queue_t heartbeatQueue = dispatch_queue_create("com.minh-ton.Reynard.JITSupport.ProviderHeartbeatQueue",DISPATCH_QUEUE_SERIAL);
-    provider->heartbeatRunning = YES;
-    
-    dispatch_async(heartbeatQueue, ^{
-        uint64_t currentInterval = 2;
-        int iteration = 0;
-        while (provider->heartbeatRunning) {
-            iteration++;
-            uint64_t newInterval = 0;
-            // TIMING TEST - heartbeat_get_marco/heartbeat_send_polo
-            // both go through the same LOCAL_RUNTIME_GUARD mutex as
-            // ensureDDIMounted's own FFI calls. This logging exists
-            // to test whether the intermittent lockdownd_connect_rsd
-            // stall correlates with heartbeat legitimately holding
-            // that guard for a long time - e.g. if the device
-            // negotiated a long currentInterval - rather than any
-            // call actually being stuck.
-            CFAbsoluteTime marcoStart = CFAbsoluteTimeGetCurrent();
-            logger([NSString stringWithFormat:@"heartbeat: iteration %d starting heartbeat_get_marco with currentInterval=%llu", iteration, (unsigned long long)currentInterval]);
-            IdeviceFfiError *ffiError = heartbeat_get_marco(provider->heartbeatClient, currentInterval, &newInterval);
-            CFAbsoluteTime marcoEnd = CFAbsoluteTimeGetCurrent();
-            
-            if (!provider->heartbeatRunning) break;
-            
-            if (ffiError) {
-                logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_get_marco FAILED after %.0fms, dying permanently (minh-ton behavior)", iteration, (marcoEnd - marcoStart) * 1000.0]);
-                idevice_error_free(ffiError);
-                break;
-            }
-            
-            logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_get_marco succeeded after %.0fms, device returned newInterval=%llu", iteration, (marcoEnd - marcoStart) * 1000.0, (unsigned long long)newInterval]);
-            
-            CFAbsoluteTime poloStart = CFAbsoluteTimeGetCurrent();
-            ffiError = heartbeat_send_polo(provider->heartbeatClient);
-            CFAbsoluteTime poloEnd = CFAbsoluteTimeGetCurrent();
-            if (ffiError) {
-                logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_send_polo FAILED after %.0fms, dying permanently (minh-ton behavior)", iteration, (poloEnd - poloStart) * 1000.0]);
-                idevice_error_free(ffiError);
-                break;
-            }
-            logger([NSString stringWithFormat:@"heartbeat: iteration %d heartbeat_send_polo succeeded after %.0fms", iteration, (poloEnd - poloStart) * 1000.0]);
-            
-            // currentInterval is deliberately NOT updated from
-            // newInterval here - matching the original code exactly,
-            // which always reuses the fixed value of 2 for every
-            // call. newInterval is logged above for diagnostic
-            // purposes only.
-        }
-    });
 }
 
 // MARK: RPPairing JIT enablement on 17.4+
@@ -2701,11 +2564,15 @@ static DeviceProvider *createDeviceProviderOnce(NSString *pairingFilePath, NSStr
     
     // REMOVED the entire heartbeat_connect_rsd / heartbeat_get_marco /
     // heartbeat_send_polo / startHeartbeat sequence here - see
-    // fix_remove_heartbeat_contention.py's docstring. provider's
-    // heartbeatClient field is simply never set now (stays NULL from
-    // calloc's own zero-init below); freeDeviceProvider's existing
-    // `if (provider->heartbeatClient)` cleanup check already safely
-    // no-ops on that, without needing any further changes.
+    // fix_remove_heartbeat_contention.py's docstring.
+    //
+    // CORRECTED - fix_delete_dead_transport_code.py. The rest of this
+    // comment used to point at DeviceProvider's heartbeatClient field,
+    // and at the guard on it that freeDeviceProvider used to open
+    // with, as what made that removal safe. Neither exists any more:
+    // the field, the heartbeatRunning flag beside it, startHeartbeat
+    // itself and the four heartbeat_* FFI declarations are all gone,
+    // so there is nothing left here to keep NULL.
     
     DeviceProvider *provider = calloc(1, sizeof(*provider));
     if (!provider) {
@@ -2838,9 +2705,15 @@ void freeDebugSession(DebugSession *session) {
 }
 
 void freeDeviceProvider(DeviceProvider *provider) {
+    // CHANGED - fix_delete_dead_transport_code.py removed the two
+    // heartbeat lines that used to open this body. heartbeatClient was
+    // never assigned a non-NULL value anywhere in the tree - the
+    // provider is calloc'd and only adapter and handshake are ever set -
+    // so that guard could not fire. heartbeatRunning was the latch a
+    // startHeartbeat block polled, and clearing it here was never a
+    // synchronisation: the block held the raw provider pointer and this
+    // function free()s it three lines later.
     if (!provider) return;
-    provider->heartbeatRunning = NO;
-    if (provider->heartbeatClient) { heartbeat_client_free(provider->heartbeatClient); provider->heartbeatClient = NULL; }
     if (provider->handshake) { rsd_handshake_free(provider->handshake); provider->handshake = NULL; }
     if (provider->adapter) { adapter_free(provider->adapter); provider->adapter = NULL; }
     free(provider);
@@ -3065,258 +2938,70 @@ cleanup:
     return success;
 }
 
-// MARK: Endpoint Connectivity Monitoring
-
-static NSMutableDictionary<NSNumber *, NSDictionary<NSString *, id> *> *monitoredEndpointsByPID(void) {
-    static NSMutableDictionary<NSNumber *, NSDictionary<NSString *, id> *> *endpoints;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        endpoints = [NSMutableDictionary dictionary];
-    });
-    return endpoints;
-}
-
-static NSMutableDictionary<NSString *, NSNumber *> *endpointFailureCounts(void) {
-    static NSMutableDictionary<NSString *, NSNumber *> *failureCounts;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        failureCounts = [NSMutableDictionary dictionary];
-    });
-    return failureCounts;
-}
-
-static void stopEndpointMonitorLocked(void) {
-    if (!endpointMonitorTimer) return;
-    dispatch_source_cancel(endpointMonitorTimer);
-    endpointMonitorTimer = nil;
-}
-
-static BOOL probeTCPEndpoint(NSString *targetAddress, uint16_t port, NSTimeInterval timeoutSeconds, int *errorCodeOut) {
-    if (errorCodeOut) *errorCodeOut = 0;
-    
-    int socketFD = socket(AF_INET, SOCK_STREAM, 0);
-    if (socketFD < 0) {
-        if (errorCodeOut) *errorCodeOut = errno;
-        return NO;
-    }
-    
-    int noSigPipe = 1;
-    setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
-    
-    int noDelay = 1;
-    setsockopt(socketFD, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
-    
-    int flags = fcntl(socketFD, F_GETFL, 0);
-    if (flags < 0 || fcntl(socketFD, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(socketFD);
-        if (errorCodeOut) *errorCodeOut = errno;
-        return NO;
-    }
-    
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    
-    if (inet_pton(AF_INET, targetAddress.UTF8String, &address.sin_addr) != 1) {
-        close(socketFD);
-        if (errorCodeOut) *errorCodeOut = EINVAL;
-        return NO;
-    }
-    
-    int connectResult = connect(socketFD, (const struct sockaddr *)&address, sizeof(address));
-    if (connectResult == 0) {
-        close(socketFD);
-        return YES;
-    }
-    
-    if (errno != EINPROGRESS) {
-        if (errorCodeOut) *errorCodeOut = errno;
-        close(socketFD);
-        return NO;
-    }
-    
-    struct timeval timeoutValue;
-    timeoutValue.tv_sec = (time_t)timeoutSeconds;
-    timeoutValue.tv_usec = (suseconds_t)((timeoutSeconds - timeoutValue.tv_sec) * 1000000.0);
-    
-    fd_set writeSet;
-    FD_ZERO(&writeSet);
-    FD_SET(socketFD, &writeSet);
-    
-    int selectResult = select(socketFD + 1, NULL, &writeSet, NULL, &timeoutValue);
-    if (selectResult <= 0) {
-        if (errorCodeOut) *errorCodeOut = (selectResult == 0 ? ETIMEDOUT : errno);
-        close(socketFD);
-        return NO;
-    }
-    
-    int socketError = 0;
-    socklen_t socketErrorLength = sizeof(socketError);
-    if (getsockopt(socketFD, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorLength) != 0) {
-        if (errorCodeOut) *errorCodeOut = errno;
-        close(socketFD);
-        return NO;
-    }
-    
-    close(socketFD);
-    
-    if (socketError != 0 && errorCodeOut) *errorCodeOut = socketError;
-    return socketError == 0;
-}
-
-static NSDictionary<NSString *, id> *endpointEntryForKey(NSString *endpointKey, NSNumber **pidOut) {
-    __block NSDictionary<NSString *, id> *matchedEntry = nil;
-    __block NSNumber *matchedPID = nil;
-    
-    [monitoredEndpointsByPID()
-     enumerateKeysAndObjectsUsingBlock:^(NSNumber * _Nonnull pid, NSDictionary<NSString *, id> * _Nonnull entry, BOOL * _Nonnull stop) {
-        NSString *candidateKey = entry[@"key"];
-        if (![candidateKey isEqualToString:endpointKey]) return;
-        matchedEntry = entry;
-        matchedPID = pid;
-        *stop = YES;
-    }];
-    
-    if (pidOut) *pidOut = matchedPID;
-    return matchedEntry;
-}
-
-static void postEndpointConnectivityFailure(NSNumber *pid, NSString *targetAddress, NSNumber *portNumber, NSError *error) {
-    NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithCapacity:4];
-    if (pid) userInfo[@"pid"] = pid;
-    if (targetAddress) userInfo[@"address"] = targetAddress;
-    if (portNumber) userInfo[@"port"] = portNumber;
-    if (error) userInfo[@"error"] = error;
-    
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"me-minh-ton.jit.endpoint-monitor-failed" object:nil userInfo:userInfo];
-    });
-}
-
-static void performEndpointMonitorTick(void) {
-    NSDictionary<NSNumber *, NSDictionary<NSString *, id> *> *entriesByPID = monitoredEndpointsByPID();
-    if (entriesByPID.count == 0) {
-        [endpointFailureCounts() removeAllObjects];
-        endpointMonitorCursor = 0;
-        stopEndpointMonitorLocked();
-        return;
-    }
-    
-    NSMutableOrderedSet<NSString *> *uniqueEndpointKeys = [NSMutableOrderedSet orderedSet];
-    for (NSDictionary<NSString *, id> *entry in entriesByPID.allValues) {
-        NSString *endpointKey = entry[@"key"];
-        if (endpointKey.length > 0) [uniqueEndpointKeys addObject:endpointKey];
-    }
-    
-    if (uniqueEndpointKeys.count == 0) return;
-    if (endpointMonitorCursor >= uniqueEndpointKeys.count) endpointMonitorCursor = 0;
-    
-    NSString *endpointKey = uniqueEndpointKeys[endpointMonitorCursor];
-    endpointMonitorCursor = (endpointMonitorCursor + 1) % uniqueEndpointKeys.count;
-    
-    NSNumber *samplePID = nil;
-    NSDictionary<NSString *, id> *endpointEntry = endpointEntryForKey(endpointKey, &samplePID);
-    NSString *targetAddress = endpointEntry[@"address"];
-    NSNumber *portNumber = endpointEntry[@"port"];
-    
-    if (targetAddress.length == 0 || !portNumber) return;
-    
-    uint16_t port = (uint16_t)portNumber.unsignedShortValue;
-    BOOL endpointHealthy = probeTCPEndpoint(targetAddress, port, 0.35, NULL);
-    
-    if (endpointHealthy) {
-        [endpointFailureCounts() removeObjectForKey:endpointKey];
-        return;
-    }
-    
-    NSMutableDictionary<NSString *, NSNumber *> *failureCounts = endpointFailureCounts();
-    NSUInteger failureCount = [failureCounts[endpointKey] unsignedIntegerValue] + 1;
-    failureCounts[endpointKey] = @(failureCount);
-    
-    if (failureCount < 2) return;
-    
-    endpointFailureLatched = YES;
-    stopEndpointMonitorLocked();
-    
-    NSError *connectivityError = MakeError(EndpointConnectivityLost);
-    postEndpointConnectivityFailure(samplePID, targetAddress, portNumber, connectivityError);
-}
-
-static void startEndpointMonitorLocked(void) {
-    // DISABLED - see fix_disable_unconsumed_endpoint_monitor.py.
-    //
-    // This monitor's entire output is one NSNotification,
-    // "me-minh-ton.jit.endpoint-monitor-failed", and nothing anywhere
-    // in the codebase observes it - the recovery it was built to
-    // trigger was never wired up. Its cost is real, though: a dispatch
-    // timer opening a TCP probe socket every single second for as long
-    // as any endpoint is registered, foreground and background alike.
-    // Flip the constant once a consumer actually registers for the
-    // notification; until then, starting the timer buys nothing.
-    static const BOOL kEndpointMonitorHasConsumer = NO;
-    if (!kEndpointMonitorHasConsumer) return;
-    if (endpointMonitorTimer || endpointFailureLatched) return;
-    
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, endpointMonitorQueue());
-    if (!timer) return;
-    
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), (uint64_t)NSEC_PER_SEC, NSEC_PER_MSEC * 100);
-    dispatch_source_set_event_handler(timer, ^{
-        performEndpointMonitorTick();
-    });
-    
-    endpointMonitorTimer = timer;
-    dispatch_resume(timer);
-}
+// MARK: JIT endpoint registration
+//
+// DELETED - see fix_delete_dead_transport_code.py.
+//
+// What lived here was a TCP connectivity monitor: a 1Hz dispatch timer
+// on its own serial queue that round-robined the registered endpoints,
+// opened a non-blocking probe socket to one of them per tick with a
+// 350ms select() timeout, counted consecutive failures, and on the
+// second one latched itself off and posted the notification
+// "me-minh-ton.jit.endpoint-monitor-failed".
+//
+// Two independent reasons it was already dead:
+//
+//   1. startEndpointMonitorLocked opened with
+//          static const BOOL kEndpointMonitorHasConsumer = NO;
+//          if (!kEndpointMonitorHasConsumer) return;
+//      so the timer was never created, endpointMonitorTimer stayed nil
+//      for the life of the process, and the tick never ran.
+//   2. Nothing observes the notification. A repo-wide grep for
+//      "me-minh-ton.jit.endpoint-monitor-failed" across .m .h .mm .c
+//      .swift .patch .plist .pbxproj found the postNotificationName
+//      call and the comment recording (1). There is no addObserver for
+//      it anywhere - the recovery it was built to trigger was never
+//      written.
+//
+// With the tick gone the two tables had no reader left. Every surviving
+// reference to endpointFailureCounts and monitoredEndpointsByPID only
+// REMOVED entries; the one line that ever inserted a failure count was
+// inside the tick, so the table was provably always empty and the
+// removals were no-ops on nothing. endpointMonitorCursor,
+// endpointFailureLatched, endpointMonitorTimer and endpointMonitorQueue
+// followed for the same reason, one grep at a time.
+//
+// The three entry points below are KEPT, deliberately, even though
+// their bodies are now empty. They have four real call sites -
+// runDebugService here in this file, and JITEnabler.m's attach path and
+// detachAllJITSessions - and removing a public function is a wider
+// blast radius than emptying one. What actually cost something is gone:
+// register and unregister each paid a dispatch_async hop onto
+// endpointMonitorQueue on EVERY attach and EVERY teardown, and reset
+// paid a dispatch_sync, all to maintain a table nothing read.
+//
+// If a consumer is ever written, git history has the whole thing - but
+// note what comes back with it. probeTCPEndpoint did
+//
+//      fd_set writeSet;
+//      FD_ZERO(&writeSet);
+//      FD_SET(socketFD, &writeSet);
+//
+// with no check that socketFD < FD_SETSIZE. fd_set is a fixed 1024-bit
+// bitmap and FD_SET is an unchecked store into it, so the first probe
+// taken once this process held 1024 or more descriptors would have
+// written past writeSet into the adjacent stack. It never fired only
+// because the timer never started. Fix that before re-enabling anything.
 
 void registerJITEndpointForPID(int32_t pid, NSString *targetAddress, uint16_t port) {
-    if (pid <= 0 || targetAddress.length == 0 || port == 0) return;
-    
-    dispatch_async(endpointMonitorQueue(), ^{
-        NSString *endpointKey = [NSString stringWithFormat:@"%@:%u", targetAddress, port];
-        monitoredEndpointsByPID()[@(pid)] = @{
-            @"key": endpointKey,
-            @"address": [targetAddress copy],
-            @"port": @(port),
-        };
-        
-        [endpointFailureCounts() removeObjectForKey:endpointKey];
-        // Previously, once any single endpoint failure latched this
-        // flag, the entire monitoring system stayed permanently
-        // disabled for the rest of the app's session — every future
-        // tab, including ones with a perfectly healthy connection,
-        // silently lost this safety net for good. A genuinely new PID
-        // registering here means a fresh JIT attachment just succeeded,
-        // which deserves its own real chance at being monitored rather
-        // than staying blocked by a past failure that may have been
-        // specific to a since-closed tab's own, now-irrelevant
-        // connection.
-        endpointFailureLatched = NO;
-        startEndpointMonitorLocked();
-    });
+    (void)pid;
+    (void)targetAddress;
+    (void)port;
 }
 
 void unregisterJITEndpointForPID(int32_t pid) {
-    if (pid <= 0) return;
-    
-    dispatch_async(endpointMonitorQueue(), ^{
-        [monitoredEndpointsByPID() removeObjectForKey:@(pid)];
-        
-        if (monitoredEndpointsByPID().count == 0) {
-            [endpointFailureCounts() removeAllObjects];
-            endpointMonitorCursor = 0;
-            stopEndpointMonitorLocked();
-        }
-    });
+    (void)pid;
 }
 
 void resetJITEndpointMonitor(void) {
-    dispatch_sync(endpointMonitorQueue(), ^{
-        [monitoredEndpointsByPID() removeAllObjects];
-        [endpointFailureCounts() removeAllObjects];
-        endpointMonitorCursor = 0;
-        endpointFailureLatched = NO;
-        stopEndpointMonitorLocked();
-    });
 }
