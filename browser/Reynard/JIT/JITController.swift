@@ -149,7 +149,77 @@ final class JITController {
     // pid queued behind one attach burning the full 90s bound better
     // than any smaller number would, without being unbounded.
     private static let preflightWatchdogMaxDeferrals = 12
-    private var hasHandledFailure = false
+    
+    // ADDED - fix_latch_boolean_synchronisation.py.
+    //
+    // The four values below were plain stored properties read from
+    // whatever thread happened to ask. Each has exactly one WRITING
+    // context, and that was never the problem:
+    //
+    //   hasHandledFailure    main thread only - start() before
+    //                        UIApplicationMain, handleJITFailure's main
+    //                        hop, and the tunnel probe's completion,
+    //                        which JITEnabler.m delivers on the main
+    //                        queue.
+    //   isJITLessModeActive  main thread only - activateJITLessMode
+    //                        from the failure sheet's button, and that
+    //                        same probe completion.
+    //   isTunnelUnavailable  attachQueue only - recordAttachOutcome and
+    //   consecutiveAttach-   the probe completion's own attachQueue
+    //   Failures             hop.
+    //
+    // The reads are the problem. childProcessDidStart's guard 1 reads
+    // the first two on whatever thread posts
+    // geckoRuntimeChildProcessDidStart - which is not always the main
+    // one, as the Thread.isMainThread branch a few lines above that
+    // guard is this file's own evidence - and that guard decides
+    // whether a vAttach is started at all. The Helper gate and the
+    // preflight watchdog's retry read them on attachQueue, the
+    // hang-recovery path on MainThreadHangWatchdog's queue, and
+    // JITSettingsSection.refreshDisplayedState reads the two
+    // private(set) ones on the main thread while attachQueue is the
+    // writer of the second.
+    //
+    // RANKED HONESTLY: nothing tears. Three aligned Bools and an Int on
+    // arm64 are single loads and stores and the CPU does not split
+    // them, so no read has ever returned a value that was never
+    // written. What this closes is a stale read - a latch set a moment
+    // ago that the reading thread has no reason to observe - and a real
+    // Swift exclusivity / TSan violation on the stored properties. A
+    // correctness fix, not a crash fix.
+    //
+    // Shaped like applicationActiveLock below, which this file added for
+    // the same reason: private storage, an accessor any queue may call,
+    // and a private setter function for the two whose setter has to
+    // stay private. The lock is held for one load or one store and
+    // nothing else - never across logger(), which writes to a file
+    // under a lock of its own (the hazard closed in round 1 at
+    // schedulePreflightWatchdog's "Unlocked BEFORE logging"), and never
+    // across attachQueue, preflightWatchdogLock, orphanedAttachLock,
+    // enableJITInFlightLock or applicationActiveLock. Nothing nests
+    // inside it, so it cannot be one end of a cycle.
+    private let latchLock = NSLock()
+    private var hasHandledFailureStorage = false
+    private var isJITLessModeActiveStorage = false
+    private var isTunnelUnavailableStorage = false
+    private var consecutiveAttachFailuresStorage = 0
+    
+    // Deliberately the SAME NAME as the stored property it replaces,
+    // so every read site is routed through the lock without being
+    // edited and none can be missed by accident. Wholly private, so it
+    // can be a plain computed get/set and not one call site moves.
+    private var hasHandledFailure: Bool {
+        get {
+            latchLock.lock()
+            defer { latchLock.unlock() }
+            return hasHandledFailureStorage
+        }
+        set {
+            latchLock.lock()
+            hasHandledFailureStorage = newValue
+            latchLock.unlock()
+        }
+    }
     
     // The deferred-attach state (see
     // fix_defer_attaches_while_inactive.py: vAttach STOPS its target,
@@ -158,7 +228,23 @@ final class JITController {
     // also lives in the ledger: no attach is STARTED unless the app is
     // active, and pids arriving meanwhile are held and attached on
     // return.
-    private(set) var isJITLessModeActive = false
+    //
+    // Was private(set). JITSettingsSection.refreshDisplayedState reads
+    // it on the main thread, so the getter stays internal and the write
+    // moves to setJITLessModeActive(_:) below - the same split
+    // isApplicationActiveFromAnyQueue / setApplicationActiveMirror(_:)
+    // uses a few lines down.
+    var isJITLessModeActive: Bool {
+        latchLock.lock()
+        defer { latchLock.unlock() }
+        return isJITLessModeActiveStorage
+    }
+    
+    private func setJITLessModeActive(_ active: Bool) {
+        latchLock.lock()
+        isJITLessModeActiveStorage = active
+        latchLock.unlock()
+    }
     
     /// Whether the debugger tunnel currently looks dead.
     ///
@@ -166,8 +252,33 @@ final class JITController {
     /// one-way latch that also detaches everything. This is reporting
     /// only, and it clears itself the moment an attach succeeds - a
     /// tunnel that dies over a suspension comes back on its own.
-    private(set) var isTunnelUnavailable = false
-    private var consecutiveAttachFailures = 0
+    ///
+    /// Written on attachQueue and read by JITSettingsSection on the
+    /// main thread, which is the pairing that made the lock necessary.
+    var isTunnelUnavailable: Bool {
+        latchLock.lock()
+        defer { latchLock.unlock() }
+        return isTunnelUnavailableStorage
+    }
+    
+    private func setTunnelUnavailable(_ unavailable: Bool) {
+        latchLock.lock()
+        isTunnelUnavailableStorage = unavailable
+        latchLock.unlock()
+    }
+    
+    private var consecutiveAttachFailures: Int {
+        get {
+            latchLock.lock()
+            defer { latchLock.unlock() }
+            return consecutiveAttachFailuresStorage
+        }
+        set {
+            latchLock.lock()
+            consecutiveAttachFailuresStorage = newValue
+            latchLock.unlock()
+        }
+    }
     
     /// How many consecutive failures before saying so. Three is past
     /// any single unlucky process and still well inside the burst of
@@ -510,12 +621,16 @@ final class JITController {
     /// the main thread, which is the one that is stuck.
     func recoverStoppedChildrenAfterForegroundHang() {
         // Read here, on the caller's thread, and used for the log line
-        // only. Both are plain Bools written from the main queue -
-        // start(), handleJITFailure's main hop, the tunnel-recovery
-        // probe's completion - and already read from several queues
-        // without synchronisation. Reading them here is the same
-        // unsynchronised read the attachQueue version did, minus the
-        // wait.
+        // only. Both are written from the main queue - start(),
+        // handleJITFailure's main hop, the tunnel-recovery probe's
+        // completion - and read from several other queues, including
+        // this one, which is MainThreadHangWatchdog's.
+        //
+        // CHANGED - fix_latch_boolean_synchronisation.py. That last
+        // sentence used to end "without synchronisation", and it was
+        // true. Both accessors take latchLock now, so reading them from
+        // this thread is defined rather than merely benign. The read
+        // itself is unchanged, and so is everything it feeds.
         let jitLess = isJITLessModeActive
         let latchedFailure = hasHandledFailure
 
@@ -1097,8 +1212,26 @@ final class JITController {
             return
         }
         
-        guard !isJITLessModeActive, !hasHandledFailure else {
-            logger(String(format: "childProcessDidStart: pid %d reporting FALSE - guard 1 (isJITLessModeActive=%@, hasHandledFailure=%@)", pid, isJITLessModeActive ? "YES" : "NO", hasHandledFailure ? "YES" : "NO"))
+        // CHANGED - fix_latch_boolean_synchronisation.py. Read ONCE
+        // each, into locals, instead of twice each.
+        //
+        // This is the read the finding is about. childProcessDidStart
+        // arrives on the geckoRuntimeChildProcessDidStart notification,
+        // on whatever thread posted it - the Thread.isMainThread branch
+        // above is this file's own evidence that it is sometimes not
+        // the main one - and neither latch is written from here. Both
+        // accessors take latchLock now, so the guard acts on the value
+        // the writing thread last stored.
+        //
+        // Snapshotting also closes a smaller thing: the guard used to
+        // read the pair and the message below re-read it, so a clear
+        // landing in between could print a guard-1 rejection whose own
+        // explanation says nothing was latched. That line was reachable
+        // and is now impossible.
+        let jitLess = isJITLessModeActive
+        let latchedFailure = hasHandledFailure
+        guard !jitLess, !latchedFailure else {
+            logger(String(format: "childProcessDidStart: pid %d reporting FALSE - guard 1 (isJITLessModeActive=%@, hasHandledFailure=%@)", pid, jitLess ? "YES" : "NO", latchedFailure ? "YES" : "NO"))
             ReportJITStatusForChild(pid, false, newJITRuntimeInfo())
             return
         }
@@ -1754,9 +1887,17 @@ final class JITController {
                     //
                     // isJITLessModeActive/hasHandledFailure are read here
                     // the same way childProcessDidStart's guard 1 reads
-                    // them, off their writing queue - deliberately
-                    // unchanged, this is not the place to alter that
-                    // contract.
+                    // them, off their writing queue.
+                    //
+                    // CHANGED - fix_latch_boolean_synchronisation.py.
+                    // That contract is the thing it altered: both go
+                    // through latchLock now, so this reads what the
+                    // main thread last stored rather than whatever this
+                    // core happened to be holding. The lock is taken
+                    // and dropped inside each accessor, sequentially and
+                    // well before the preflightWatchdogLock this closure
+                    // takes further down - the two never overlap, and
+                    // neither is ever held across the other.
                     let rejection: String?
                     if JITEnabler.hasActiveDebugSession(forPID: pid) {
                         rejection = "it already has a live debug session - a second one would make the first invisible to the tunnel close"
@@ -2022,27 +2163,46 @@ final class JITController {
                     logger("tunnelHealth: an attach succeeded - tunnel is back, clearing the degraded state")
                 }
                 self.consecutiveAttachFailures = 0
-                self.isTunnelUnavailable = false
+                // CHANGED - fix_latch_boolean_synchronisation.py. The
+                // setter function, because the getter has to stay
+                // readable from JITSettingsSection on the main thread.
+                // Every read of it, here and below, is unchanged: the
+                // accessor kept the property's name.
+                self.setTunnelUnavailable(false)
                 return
             }
             
+            // Still a read-modify-write over two lock acquisitions
+            // rather than one atomic step, and still correct:
+            // attachQueue is serial and is the ONLY writer of these two
+            // counters - this function and the tunnel probe's own
+            // attachQueue hop. The lock is for the readers on other
+            // queues, not for this increment.
             self.consecutiveAttachFailures += 1
             guard self.consecutiveAttachFailures >= Self.tunnelFailureThreshold,
                   !self.isTunnelUnavailable else {
                 return
             }
             
-            self.isTunnelUnavailable = true
+            self.setTunnelUnavailable(true)
             logger(String(format: "tunnelHealth: %d consecutive attach failures - reporting the tunnel as unavailable", self.consecutiveAttachFailures))
         }
     }
     
     private func activateJITLessMode() {
+        // Check-then-act over two lock acquisitions, and safe:
+        // activateJITLessMode runs on the main thread (the failure
+        // sheet's primary action), and the only other writer of this
+        // latch - the tunnel probe's completion - is delivered on the
+        // main queue by JITEnabler.m. The lock is for the readers on
+        // attachQueue and on the notification thread, not for this
+        // guard.
         guard !isJITLessModeActive else {
             return
         }
         
-        isJITLessModeActive = true
+        // CHANGED - fix_latch_boolean_synchronisation.py.
+        setJITLessModeActive(true)
         attachQueue.async {
             dispatchPrecondition(condition: .onQueue(self.attachQueue))
             self.cancelAllPreflightWatchdogs()
@@ -2117,14 +2277,18 @@ final class JITController {
                 return
             }
             logger("jitRecovery: tunnel is back - clearing the JIT-less latch, new content processes will attach")
+            // CHANGED - fix_latch_boolean_synchronisation.py. Both
+            // clears now go through latchLock, which is what makes
+            // childProcessDidStart's guard 1 - running on the
+            // notification thread - actually see the recovery.
             self.hasHandledFailure = false
-            self.isJITLessModeActive = false
+            self.setJITLessModeActive(false)
             // The probe's success is the same evidence recordAttachOutcome
             // treats as "tunnel is back"; reset the health counters on
             // their own queue like it does.
             self.attachQueue.async {
                 self.consecutiveAttachFailures = 0
-                self.isTunnelUnavailable = false
+                self.setTunnelUnavailable(false)
             }
             NotificationCenter.default.post(name: .jitlessModeDidDeactivate, object: nil)
         }
@@ -2537,10 +2701,14 @@ extension JITController {
                     // write into the executable region takes a SIGBUS.
                     //
                     // The flags are read the way the rest of this file
-                    // reads them - plainly, no lock. This block runs on
-                    // attachQueue (asserted above), which is where
-                    // recoverStoppedChildrenAfterForegroundHang reads the
-                    // same pair.
+                    // reads them - through the accessors
+                    // fix_latch_boolean_synchronisation.py put on them.
+                    // This block runs on attachQueue (asserted above),
+                    // which is not the writing context of either latch:
+                    // both are written on the main thread. The lock is
+                    // what makes these two reads mean anything. The
+                    // comment here used to say "plainly, no lock", and
+                    // that was one of the three that misled the review.
                     let jitLessLatched = self.isJITLessModeActive
                     let failureLatched = self.hasHandledFailure
                     let jitEnabled = self.usePtraceJIT() || Prefs.JITSettings.isJITEnabled
