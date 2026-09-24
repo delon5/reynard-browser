@@ -1,8 +1,8 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15bed3e..a28a4a80e20e 100644
+index 9ca6e15bed3e..5e1d6194bf28 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-@@ -18,6 +18,5297 @@ const SCROLL_BEHAVIOR_AUTO = 1;
+@@ -18,6 +18,5335 @@ const SCROLL_BEHAVIOR_AUTO = 1;
  const SCREEN_ORIENTATION_PORTRAIT = 0;
  const SCREEN_ORIENTATION_LANDSCAPE = 1;
  
@@ -2437,7 +2437,10 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
 +      // the thing that was tapped - an svg inside the fullscreen
 +      // button is a tap on that button.
 +      var REYNARD_STRICT_SELECTOR =
-+        "button, [role=button], a[href], input, select, summary, label";
++        "button, [role=button], a[href], input, select, summary, label, " +
++        "[role=link], [role=menuitem], [role=menuitemradio], " +
++        "[role=menuitemcheckbox], [role=option], [role=radio], " +
++        "[role=checkbox], [role=switch], [role=tab], [role=slider]";
 +
 +      // WHICH video the tap is about. The first one in DOM order is
 +      // often a hero reel or a preview sitting above the real player,
@@ -2642,12 +2645,44 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
 +      // nothing else on it to swallow.
 +      var reynardSwallowed = 0;
 +      var reynardSwallowLogged = false;
-+      // HAS A PICTURE TAP ON THIS PAGE EVER ASKED TO PAUSE - see
-+      // mse_fix_144's docstring. Counted by the veto below, which
-+      // declines exactly those pauses. Until it has, nothing is
-+      // swallowed: a page whose picture tap only summons the controls
-+      // must keep it.
-+      var reynardSheetPauses = 0;
++      // FROM THE FIRST TAP, ON THE SITES WHERE A PICTURE TAP PAUSES -
++      // the 2026-09-24 correction.
++      //
++      // This used to arm itself from the pause veto below: the first
++      // picture tap's pause() was DECLINED, and only then were later
++      // taps swallowed. Declining is what broke Netflix and Disney+.
++      // Their own controls flip to "paused" before they call pause(),
++      // so a declined pause left the controls showing paused over a
++      // playing video - and their play button then called play() on a
++      // video already playing, got no "play" event, and never offered
++      // pause again. One desync, and the controls were dead until a
++      // reload. The veto no longer declines anything.
++      //
++      // So the tap has to be stopped BEFORE the page sees it, from the
++      // first one, and only where a picture tap is known to pause and a
++      // mouse move is known to summon the controls. Prime Video is NOT
++      // here: its picture tap only summons the controls, and swallowing
++      // it made them unreachable (mse_fix_144's docstring).
++      var REYNARD_SWALLOW_FROM_FIRST_TAP_HOSTS = [
++        "netflix.com",
++        "disneyplus.com",
++        "tv.apple.com",
++        "max.com",
++        "hbomax.com",
++      ];
++      var reynardSwallowFromFirstTap = (function () {
++        var host = String(location.hostname || "");
++        for (var i = 0; i < REYNARD_SWALLOW_FROM_FIRST_TAP_HOSTS.length; i++) {
++          var domain = REYNARD_SWALLOW_FROM_FIRST_TAP_HOSTS[i];
++          if (
++            host === domain ||
++            host.slice(-(domain.length + 1)) === "." + domain
++          ) {
++            return true;
++          }
++        }
++        return false;
++      })();
 +
 +      function reynardDescribeElement(t) {
 +        if (!t) {
@@ -2730,10 +2765,17 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
 +          // is not a control; it does not say the page pauses when it
 +          // is tapped, and only the second one earns taking the tap
 +          // away.
-+          if (!reynardSheetPauses) {
++          if (!reynardSwallowFromFirstTap) {
 +            return;
 +          }
-+          e.preventDefault();
++          // Not touchstart: cancelling it cancels the scroll that starts
++          // there, and on a browse page a playing billboard trailer is
++          // "the picture". Stopping propagation keeps the page's own
++          // handler off it; cancelling touchend is what suppresses the
++          // compatibility click that would toggle playback.
++          if (e.type !== "touchstart") {
++            e.preventDefault();
++          }
 +          e.stopImmediatePropagation();
 +          reynardSwallowed++;
 +          // FIRST AND EVERY TENTH - see mse_fix_141's docstring. Once
@@ -2994,7 +3036,7 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
 +          reynardTaps++;
 +          var nth = reynardTaps;
 +          var judged = reynardJudgeTap(t);
-+          var stopped = !judged[0] && reynardSheetPauses > 0;
++          var stopped = !judged[0] && reynardSwallowFromFirstTap;
 +          var head =
 +            "TAP " +
 +            nth +
@@ -3076,28 +3118,24 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
 +            !reynardLastTapWasControl &&
 +            Date.now() - reynardLastTapAt < 800
 +          ) {
++            // OBSERVED, NOT DECLINED - the 2026-09-24 correction. A
++            // declined pause leaves the page's controls believing the
++            // video is paused while it plays, and on Netflix and
++            // Disney+ that desync killed the controls. The pause now
++            // happens. On the sites where it should not, the tap is
++            // stopped before the page sees it (reynardSwallowFromFirstTap),
++            // so seeing this line on one of them means the swallow
++            // missed a route.
 +            debug(
-+              "PAUSE() DECLINED - the tap was on " +
++              "PAUSE() after a picture tap - allowed, the tap was on " +
 +                reynardDescribeElement(reynardLastTapTarget) +
-+                ", not a control " +
++                " (swallowing on this site: " +
++                (reynardSwallowFromFirstTap ? "yes" : "no") +
++                ") " +
 +                reynardWho(this) +
 +                " by " +
 +                reynardCaller()
 +            );
-+            // AND THE NEXT ONE DOES NOT GET THIS FAR - see
-+            // mse_fix_144's docstring. This line is the proof that a
-+            // picture tap on this page asks to pause, which is the
-+            // only thing that justifies taking the tap away from it.
-+            if (!reynardSheetPauses) {
-+              debug(
-+                "TAP SWALLOW ARMED FOR THIS PAGE - a tap on the picture " +
-+                  "asked to pause, so the next one is stopped before the " +
-+                  "page sees it and its button cannot disagree with the " +
-+                  "element."
-+              );
-+            }
-+            reynardSheetPauses++;
-+            return undefined;
 +          }
 +          debug(
 +            "PAUSE() " +
@@ -5300,7 +5338,7 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
  const lazy = {};
  
  ChromeUtils.defineESModuleGetters(lazy, {
-@@ -67,6 +5358,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -67,6 +5396,616 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return windowUtils.SCROLL_MODE_SMOOTH;
    }
  
@@ -5917,7 +5955,7 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -184,6 +6085,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -184,6 +6123,21 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
        case "ContainsFormData": {
          return this.containsFormData();
        }
@@ -5939,7 +5977,7 @@ index 9ca6e15bed3e..a28a4a80e20e 100644
      }
  
      return null;
-@@ -199,11 +6115,396 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +6153,396 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
  
