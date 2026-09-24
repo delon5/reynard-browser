@@ -1248,6 +1248,14 @@ final class JITController {
             
             if isRecoverable {
                 logger(String(format: "attachToProcess: pid %d failure is recoverable (code %d) - not latching, the next attach gets a fresh provider", pid, failureCode))
+            } else if failureCode == ESRCH {
+                // enableJITForPID's vAttach reply check: debugserver
+                // refused THIS target (exited, or already held). A
+                // per-child outcome - the transport and the setup are
+                // fine, and the next child should still try. See
+                // fix_validate_vattach_response.py and the review
+                // amendment that routed it here.
+                logger(String(format: "attachToProcess: pid %d attach was refused for this child only - not latching", pid))
             } else {
                 handleJITFailure(error: error ?? NSError(domain: "Reynard.JIT", code: -1, userInfo: nil))
             }
