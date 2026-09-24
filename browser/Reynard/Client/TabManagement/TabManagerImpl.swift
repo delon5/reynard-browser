@@ -1965,6 +1965,14 @@ extension TabManagerImplementation: ContentDelegate {
         }
         
         let tab = tabs(for: location.mode)[location.index]
+        
+        guard !title.isEmpty || (
+            tab.state.restoreState == .none &&
+            !tab.state.isSuppressingInitialBlankPageLoad
+        ) else {
+            return
+        }
+        
         tab.title = title
         if !tab.isPrivate,
            let url = remoteURL(from: tab.url) {
