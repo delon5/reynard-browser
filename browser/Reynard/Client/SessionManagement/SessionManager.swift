@@ -221,6 +221,49 @@ final class SessionManager {
             || AVPlayerHost.shared.isAnyExternalPlaybackActive
     }
     
+    /// hasSystemMediaSession's stricter twin, for the JIT teardown.
+    ///
+    /// ADDED - see fix_background_skip_predicates.py.
+    ///
+    /// The same three arms, with the now-playing one requiring ACTUAL
+    /// playback. The card outlives playback by design:
+    /// SystemMediaSession.applicationDidEnterBackground keeps it for
+    /// merely paused media - but releases the audio session in the same
+    /// breath, and says so:
+    ///
+    ///   mediaSession: backgrounded with only paused media -
+    ///                 audio session released, card kept
+    ///
+    /// So hasSystemMediaSession stays true for an app that now holds no
+    /// assertion at all, and everything the JIT half skips on the
+    /// strength of it is skipped for nothing: trapping stays armed, the
+    /// loops die with the tunnel, and the pairing socket rides the
+    /// suspension.
+    ///
+    /// The PiP and priority arms are carried over unchanged. Those are
+    /// registrations of a system-hosted surface that holds the app up by
+    /// its own mechanism rather than through our audio session, and a
+    /// PiP video is not always reported to us as playing.
+    ///
+    /// hasSystemMediaSession itself is untouched: tab eviction must stay
+    /// paused-tolerant, which is a different question with a different
+    /// cost - memory, not an unrecoverable fault.
+    ///
+    /// The external-playback arm is the third condition under which the
+    /// app keeps its audio session: both places in SystemMediaSession
+    /// that release it also refuse to while an AVPlayer is on an AirPlay
+    /// receiver, because such a player is not in the media-session
+    /// states hasPlayingSession reads. Without it this predicate would
+    /// report "nothing is holding the app up" for an app that is being
+    /// held up by AirPlay, and the JIT teardown would run under a
+    /// session that stays live - casting tabs interpreted for nothing.
+    var hasPlayingSystemMediaSession: Bool {
+        return pictureInPictureSession != nil
+            || SystemMediaSession.shared.prioritySession != nil
+            || SystemMediaSession.shared.hasPlayingSession
+            || AVPlayerHost.shared.isAnyExternalPlaybackActive
+    }
+    
     /// Exposed for tab eviction, which must not sleep a tab whose
     /// session is one of these.
     func isMediaPriority(_ session: GeckoSession?) -> Bool {
