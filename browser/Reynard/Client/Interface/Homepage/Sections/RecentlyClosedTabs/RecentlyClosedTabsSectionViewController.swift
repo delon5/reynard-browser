@@ -170,6 +170,12 @@ final class RecentlyClosedTabsSectionViewController: UIViewController {
             name: .homepageSettingsDidChange,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(homepageSettingsDidChange),
+            name: .recentlyClosedTabsDidClear,
+            object: nil
+        )
     }
     
     @objc private func homepageSettingsDidChange() {

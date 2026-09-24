@@ -222,6 +222,13 @@ final class ClearBrowsingDataViewController: SettingsTableViewController {
             clearOpenedTabs()
         }
         
+        // Recently closed tabs are browsing history: each holds a URL, a
+        // title and its navigation history. Clearing history left them
+        // behind, still listed on the homepage (upstream c1ee71cd).
+        if selectedCategories.contains(.browsingHistory) {
+            TabManagementStore.shared.clearRecentlyClosedTabs()
+        }
+        
         Task {
             await clearSelectedEngineData(for: selectedCategories)
         }

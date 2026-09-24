@@ -467,6 +467,12 @@ final class TabManagementStore {
         tabIDs.forEach { tabID in
             NavigationHistoryStore.shared.removeNavigationHistory(for: tabID)
         }
+        // Posted on main: the homepage section only re-reads the list on
+        // load and on appear, so a clear made from Settings otherwise
+        // leaves the cleared titles on screen until it next appears.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .recentlyClosedTabsDidClear, object: nil)
+        }
         return true
     }
     
