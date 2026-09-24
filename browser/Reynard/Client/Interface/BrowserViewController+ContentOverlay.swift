@@ -106,7 +106,7 @@ extension BrowserViewController: ContentOverlayCoordinatorHost, SearchOverlayCoo
     }
     
     var homepageTabActions: ContextMenuTabActions {
-        return ContextMenuTabActions(tabManager: tabManager)
+        return ContextMenuTabActions(tabManager: tabManager, sessionManager: sessionManager)
     }
     
     func openURLFromHomepage(_ url: URL, disposition: TabOpenDisposition) {

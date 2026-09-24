@@ -18,7 +18,7 @@ extension BrowserViewController: ContextMenuCoordinatorHost {
     }
     
     var contextMenuTabActions: ContextMenuTabActions {
-        return ContextMenuTabActions(tabManager: tabManager)
+        return ContextMenuTabActions(tabManager: tabManager, sessionManager: sessionManager)
     }
     
     var contextMenuSelectedTabIsPrivate: Bool {
