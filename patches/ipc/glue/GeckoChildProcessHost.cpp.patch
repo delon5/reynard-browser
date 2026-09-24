@@ -2,21 +2,24 @@ diff --git a/ipc/glue/GeckoChildProcessHost.cpp b/ipc/glue/GeckoChildProcessHost
 index 47e3c55ccada..4ddab56d261f 100644
 --- a/ipc/glue/GeckoChildProcessHost.cpp
 +++ b/ipc/glue/GeckoChildProcessHost.cpp
-@@ -32,6 +32,13 @@
+@@ -32,6 +32,16 @@
  #include "prenv.h"
  #include "prerror.h"
  
 +#ifdef XP_IOS
++#  include <dispatch/dispatch.h>
++#  include <memory>
 +#  include <unistd.h>
 +#  include <stdio.h>
 +#  include <unordered_map>
++#  include "mozilla/ScopeExit.h"
 +#  include "mozilla/widget/GeckoViewRuntimeSupport.h"
 +#endif
 +
  #if defined(MOZ_SANDBOX)
  #  include "mozilla/SandboxSettings.h"
  #  include "nsAppDirectoryServiceDefs.h"
-@@ -97,6 +104,8 @@
+@@ -97,6 +107,8 @@
  #include "nscore.h"  // for NS_FREE_PERMANENT_DATA
  #include "nsIThread.h"
  
@@ -25,13 +28,63 @@ index 47e3c55ccada..4ddab56d261f 100644
  using mozilla::MonitorAutoLock;
  using mozilla::Preferences;
  using mozilla::StaticMutexAutoLock;
-@@ -128,13 +137,51 @@ namespace ipc {
+@@ -128,13 +140,101 @@ namespace ipc {
  
  LazyLogModule gChildProcessLifecycleLog("ChildProcessLifecycle");
  
 +#ifdef XP_IOS
 +static StaticMutex sChildJITPipeMutex;
 +static std::unordered_map<int32_t, UniqueFileHandle> sChildJITPipeWriters;
++
++// ADDED - see fix_gecko_lifetime_and_lock_hold.py's docstring, M21.
++//
++// The readiness pipe's write end is registered in DoLaunch's bootstrap
++// reply and taken back out by exactly one function in this file:
++// widget::ReportJITStatusForChild, just below, which is single-use per
++// pid. Nothing removed an entry when a child died, so every child that
++// was never reported on - every non-content child, and every content
++// child torn down before its report - held one open fd and one map
++// entry for the life of the parent process.
++//
++// erase() on a key that was never inserted is a no-op, so every
++// teardown path can call this unconditionally, including with an
++// already-zeroed process handle and including twice.
++static void ForgetChildJITPipe(int32_t aPid) {
++  StaticMutexAutoLock lock(sChildJITPipeMutex);
++  sChildJITPipeWriters.erase(aPid);
++}
++
++// ADDED - see fix_gecko_lifetime_and_lock_hold.py's docstring, C4.
++//
++// Take the caller's ExtensionProcess and invalidate it from a global
++// queue. Two callers need this, for two different reasons, and both
++// are deadlock avoidance rather than politeness:
++//
++//  * ~GeckoChildProcessHost holds mHandleLock across its whole
++//    teardown block. NSExtensionProcess::Invalidate() dispatch_syncs
++//    onto ExtensionLaunchQueue and kills the extension from there, so
++//    calling it inline parks every mHandleLock reader behind a
++//    cross-queue round trip plus a SIGKILL.
++//  * The bootstrap reply block runs on the child's own libxpc
++//    connection queue, and -invalidate releases the NSXPCConnection
++//    wrapping that same connection. NSExtensionUtils.mm documents that
++//    as unsafe from the connection's own handler queue.
++//
++// The block owns the only remaining reference, so the ExtensionProcess
++// outlives whatever handed it over. Takes a reference and empties it,
++// so callers cannot leave a dangling second owner behind.
++static void InvalidateExtensionProcessOffQueue(
++    Maybe<NSExtensionProcess>& aProcess) {
++  if (!aProcess) {
++    return;
++  }
++
++  auto owned = std::make_shared<NSExtensionProcess>(*aProcess);
++  aProcess.reset();
++  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
++    owned->Invalidate();
++  });
++}
 +
 +}  // namespace ipc
 +
@@ -78,7 +131,7 @@ index 47e3c55ccada..4ddab56d261f 100644
    DarwinObjectPtr<xpc_connection_t> mXPCConnection;
    UniqueBEProcessCapabilityGrant mForegroundCapabilityGrant;
  #endif
-@@ -353,6 +400,7 @@ class IosProcessLauncher : public PosixProcessLauncher {
+@@ -353,6 +453,7 @@ class IosProcessLauncher : public PosixProcessLauncher {
    virtual RefPtr<ProcessLaunchPromise> DoLaunch() override;
  
    DarwinObjectPtr<xpc_object_t> mBootstrapMessage;
@@ -86,18 +139,31 @@ index 47e3c55ccada..4ddab56d261f 100644
  };
  typedef IosProcessLauncher ProcessLauncher;
  #  else
-@@ -433,8 +481,8 @@ GeckoChildProcessHost::~GeckoChildProcessHost() {
+@@ -433,10 +534,21 @@ GeckoChildProcessHost::~GeckoChildProcessHost() {
      if (mForegroundCapabilityGrant) {
        mForegroundCapabilityGrant.reset();
      }
 -    if (mExtensionKitProcess) {
 -      mExtensionKitProcess->Invalidate();
++    // C4 - this whole block runs under mHandleLock (the scope above
++    // opens with `mozilla::AutoWriteLock hLock`), and Invalidate()
++    // dispatch_syncs onto ExtensionLaunchQueue, so inline it blocks
++    // every mHandleLock reader for a cross-queue round trip. Nothing
++    // here needs the teardown finished by the time the destructor
++    // returns, and the child is about to be reaped anyway.
 +    if (mNSExtensionProcess) {
-+      mNSExtensionProcess->Invalidate();
++      InvalidateExtensionProcessOffQueue(mNSExtensionProcess);
      }
      if (mXPCConnection) {
        xpc_connection_cancel(mXPCConnection.get());
-@@ -792,7 +840,7 @@ bool GeckoChildProcessHost::AsyncLaunch(
+     }
++
++    // M21 - the host is going away, so nothing will ever report JIT
++    // status for this pid again. Its readiness-pipe write end would
++    // otherwise stay open for the life of the parent process.
++    ForgetChildJITPipe(static_cast<int32_t>(mChildProcessHandle));
+ #endif
+@@ -792,7 +904,7 @@ bool GeckoChildProcessHost::AsyncLaunch(
                      this->mChildTask = aResults.mChildTask;
  #endif
  #ifdef XP_IOS
@@ -106,9 +172,30 @@ index 47e3c55ccada..4ddab56d261f 100644
                      this->mXPCConnection = aResults.mXPCConnection;
                      this->mForegroundCapabilityGrant =
                          std::move(aResults.mForegroundCapabilityGrant);
-@@ -946,6 +994,26 @@ bool GeckoChildProcessHost::InitializeChannel(
+@@ -946,6 +1058,53 @@ bool GeckoChildProcessHost::InitializeChannel(
  
  void GeckoChildProcessHost::SetAlreadyDead() {
++#if defined(XP_IOS)
++  // C4 - declared BEFORE the write lock so that it is destroyed AFTER
++  // it. NSExtensionProcess::Invalidate() dispatch_syncs onto
++  // ExtensionLaunchQueue and kills the extension from there; run under
++  // the lock, every mHandleLock reader waits out that whole round
++  // trip. The member is still cleared under the lock below - it is
++  // MOZ_GUARDED_BY(mHandleLock) and cannot be touched outside it - so
++  // only the ObjC teardown moves, and it still completes before this
++  // function returns. Callers see no ordering change.
++  //
++  // Upstream's lock is function-scoped and the rest of this body is
++  // not ours to reindent, which is why this is a ScopeExit rather than
++  // an inner scope like ForceInvalidateForTermination below.
++  Maybe<NSExtensionProcess> deadExtensionProcess;
++  auto invalidateAfterUnlock = mozilla::MakeScopeExit([&] {
++    if (deadExtensionProcess) {
++      deadExtensionProcess->Invalidate();
++    }
++  });
++#endif
++
    mozilla::AutoWriteLock handleLock(mHandleLock);
 +
 +#if defined(XP_IOS)
@@ -121,42 +208,73 @@ index 47e3c55ccada..4ddab56d261f 100644
 +    mForegroundCapabilityGrant.reset();
 +  }
 +  if (mNSExtensionProcess) {
-+    mNSExtensionProcess->Invalidate();
++    // C4 - handed to the ScopeExit above; invalidated after unlock.
++    deadExtensionProcess.emplace(*mNSExtensionProcess);
 +    mNSExtensionProcess.reset();
 +  }
 +  if (mXPCConnection) {
 +    xpc_connection_cancel(mXPCConnection.get());
 +    mXPCConnection = nullptr;
 +  }
++
++  // M21 - the child is dead, so its readiness pipe will never be
++  // claimed. Without this its write end stays open for the life of
++  // the parent.
++  ForgetChildJITPipe(static_cast<int32_t>(mChildProcessHandle));
 +#endif
 +
    if (mChildProcessHandle &&
        mChildProcessHandle != base::kInvalidProcessHandle) {
      // The destructor logs this too, but only one of the two runs, as both are
-@@ -962,6 +1030,30 @@ void GeckoChildProcessHost::SetAlreadyDead() {
+@@ -962,6 +1121,55 @@ void GeckoChildProcessHost::SetAlreadyDead() {
    mChildProcessHandle = 0;
  }
  
 +#if defined(XP_IOS)
 +void GeckoChildProcessHost::ForceInvalidateForTermination() {
-+  mozilla::AutoWriteLock handleLock(mHandleLock);
++  // C4 - the ObjC teardown must not run under mHandleLock. It
++  // dispatch_syncs onto ExtensionLaunchQueue and SIGKILLs the
++  // extension from there, and nsAppShell's ApplicationWillTerminate
++  // drives this one host at a time, serially, on the main thread,
++  // inside GetAll - which holds the process-list StaticMutex for the
++  // whole loop. Everything the write lock actually protects stays in
++  // the inner scope; the extension is handed to a local and
++  // invalidated once the lock is gone.
++  //
++  // Still SYNCHRONOUS, deliberately. This is the app-termination path
++  // and its entire purpose is that every extension is dead before the
++  // process is; work posted to another queue here would simply never
++  // run.
++  Maybe<NSExtensionProcess> deadExtensionProcess;
 +
-+  if (mForegroundCapabilityGrant) {
-+    mForegroundCapabilityGrant.reset();
-+  }
-+  if (mNSExtensionProcess) {
-+    mNSExtensionProcess->Invalidate();
-+    mNSExtensionProcess.reset();
-+  }
-+  if (mXPCConnection) {
-+    xpc_connection_cancel(mXPCConnection.get());
-+    mXPCConnection = nullptr;
++  {
++    mozilla::AutoWriteLock handleLock(mHandleLock);
++
++    if (mForegroundCapabilityGrant) {
++      mForegroundCapabilityGrant.reset();
++    }
++    if (mNSExtensionProcess) {
++      deadExtensionProcess.emplace(*mNSExtensionProcess);
++      mNSExtensionProcess.reset();
++    }
++    if (mXPCConnection) {
++      xpc_connection_cancel(mXPCConnection.get());
++      mXPCConnection = nullptr;
++    }
++
++    // M21 - the app is terminating; release the readiness pipe with
++    // everything else.
++    ForgetChildJITPipe(static_cast<int32_t>(mChildProcessHandle));
++
++    if (mChildProcessHandle &&
++        mChildProcessHandle != base::kInvalidProcessHandle) {
++      base::CloseProcessHandle(mChildProcessHandle);
++      mChildProcessHandle = 0;
++    }
 +  }
 +
-+  if (mChildProcessHandle &&
-+      mChildProcessHandle != base::kInvalidProcessHandle) {
-+    base::CloseProcessHandle(mChildProcessHandle);
-+    mChildProcessHandle = 0;
++  if (deadExtensionProcess) {
++    deadExtensionProcess->Invalidate();
 +  }
 +}
 +#endif
@@ -164,7 +282,7 @@ index 47e3c55ccada..4ddab56d261f 100644
  void BaseProcessLauncher::GetChildLogName(const char* origLogName,
                                            nsACString& buffer) {
  #ifdef XP_WIN
-@@ -1415,20 +1507,24 @@ Result<Ok, LaunchError> IosProcessLauncher::DoSetup() {
+@@ -1415,20 +1623,41 @@ Result<Ok, LaunchError> IosProcessLauncher::DoSetup() {
  }
  
  RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
@@ -181,16 +299,33 @@ index 47e3c55ccada..4ddab56d261f 100644
    xpc_dictionary_set_string(bootstrapMessage.get(), "message-name",
                              "bootstrap");
  
-+  // Pass a dedicated readiness pipe to each child so it can block
-+  // JIT startup until the host-side attach flow reports success or failure.
-+  int jitReadyPipe[2] = {-1, -1};
-+  if (pipe(jitReadyPipe) != 0) {
-+    return ProcessLaunchPromise::CreateAndReject(LaunchError("pipe"), __func__);
++  // Pass a dedicated readiness pipe to the child so it can block JIT
++  // startup until the host-side attach flow reports success or failure.
++  //
++  // M21 - CONTENT CHILDREN ONLY. IOSBootstrap.mm reads this fd inside
++  // `if (isContentProcess)` and nowhere else, and the app only ever
++  // reports status for content pids (attachToHelperProcess, and the
++  // Helper appex is the content host). For a gpu/rdd/socket/utility
++  // child the write end was registered below and then never claimed -
++  // one fd and one map entry held for the life of the parent process,
++  // per child, forever.
++  //
++  // A child launched without the key finds no "jit-ready-fd", leaves
++  // gJITReadySignalFd at -1, and WaitForJITReadySignal returns false on
++  // its first line without waiting. That is what a non-content child
++  // already gets today: it calls JS::DisableJitBackend()
++  // unconditionally and never looks at the pipe.
++  if (mProcessType == GeckoProcessType_Content) {
++    int jitReadyPipe[2] = {-1, -1};
++    if (pipe(jitReadyPipe) != 0) {
++      return ProcessLaunchPromise::CreateAndReject(LaunchError("pipe"),
++                                                   __func__);
++    }
++    UniqueFileHandle jitReadyReadFd(jitReadyPipe[0]);
++    mJITReadySignalWriteFd = UniqueFileHandle(jitReadyPipe[1]);
++    xpc_dictionary_set_fd(bootstrapMessage.get(), "jit-ready-fd",
++                          jitReadyReadFd.get());
 +  }
-+  UniqueFileHandle jitReadyReadFd(jitReadyPipe[0]);
-+  mJITReadySignalWriteFd = UniqueFileHandle(jitReadyPipe[1]);
-+  xpc_dictionary_set_fd(bootstrapMessage.get(), "jit-ready-fd",
-+                        jitReadyReadFd.get());
 +
    DarwinObjectPtr<xpc_object_t> environDict =
 -      AdoptDarwinObject(xpc_dictionary_create_empty());
@@ -198,7 +333,7 @@ index 47e3c55ccada..4ddab56d261f 100644
    for (auto& [envKey, envValue] : mLaunchOptions->env_map) {
      xpc_dictionary_set_string(environDict.get(), envKey.c_str(),
                                envValue.c_str());
-@@ -1441,7 +1537,7 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+@@ -1441,7 +1670,7 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
    xpc_dictionary_set_fd(bootstrapMessage.get(), "stderr", STDERR_FILENO);
  
    DarwinObjectPtr<xpc_object_t> argsArray =
@@ -207,7 +342,7 @@ index 47e3c55ccada..4ddab56d261f 100644
    for (auto& argv : mChildArgs.mArgs) {
      xpc_array_set_string(argsArray.get(), XPC_ARRAY_APPEND, argv.c_str());
    }
-@@ -1449,7 +1545,7 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+@@ -1449,7 +1678,7 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
    xpc_dictionary_set_value(bootstrapMessage.get(), "argv", argsArray.get());
  
    DarwinObjectPtr<xpc_object_t> fdsArray =
@@ -216,7 +351,7 @@ index 47e3c55ccada..4ddab56d261f 100644
    for (auto& file : mChildArgs.mFiles) {
      xpc_array_set_fd(fdsArray.get(), XPC_ARRAY_APPEND, file.get());
    }
-@@ -1457,12 +1553,12 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+@@ -1457,12 +1686,12 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
    xpc_dictionary_set_value(bootstrapMessage.get(), "fds", fdsArray.get());
  
    DarwinObjectPtr<xpc_object_t> sendRightsArray =
@@ -231,7 +366,7 @@ index 47e3c55ccada..4ddab56d261f 100644
      xpc_dictionary_set_mach_send(sendRightWrapper.get(), "port",
                                   sendRight.get());
      xpc_array_set_value(sendRightsArray.get(), XPC_ARRAY_APPEND,
-@@ -1474,34 +1570,36 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+@@ -1474,34 +1703,42 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
                             sendRightsArray.get());
  
    auto promise = MakeRefPtr<ProcessLaunchPromise::Private>(__func__);
@@ -282,12 +417,18 @@ index 47e3c55ccada..4ddab56d261f 100644
        }
 -    });
 -    xpc_connection_resume(self->mResults.mXPCConnection.get());
++      // Rejecting means mResults never reaches the host, so nothing
++      // else breaks the handler retain cycle that keeps the
++      // ExtensionProcess - and the NSExtension request behind it -
++      // alive. See InvalidateExtensionProcessOffQueue for why this is
++      // never called inline from here.
++      InvalidateExtensionProcessOffQueue(self->mResults.mNSExtensionProcess);
 +      return;
 +    }
  
      // Send our bootstrap message to the content and wait for it to reply with
      // the task port before resolving.
-@@ -1511,22 +1609,28 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+@@ -1511,22 +1748,38 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
      xpc_connection_send_message_with_reply(
          self->mResults.mXPCConnection.get(), bootstrapMessage.get(), nullptr,
          ^(xpc_object_t reply) {
@@ -305,6 +446,10 @@ index 47e3c55ccada..4ddab56d261f 100644
 +                  LaunchError("xpc_connection_send_message_with_reply error"),
 +                  __func__);
 +            }
++            // Covered by NSXPC's own invalidation handler in practice -
++            // the connection is broken here - but not guaranteed to be.
++            InvalidateExtensionProcessOffQueue(
++                self->mResults.mNSExtensionProcess);
              return;
            }
  
@@ -322,10 +467,16 @@ index 47e3c55ccada..4ddab56d261f 100644
 +                      "xpc_connection_send_message_with_reply non-dictionary"),
 +                  __func__);
 +            }
++            // The one path of the three where nothing else cleans up:
++            // the connection is fine, the child merely replied with the
++            // wrong type, so no interruption or invalidation handler
++            // fires and the extension request survives.
++            InvalidateExtensionProcessOffQueue(
++                self->mResults.mNSExtensionProcess);
              return;
            }
  
-@@ -1539,10 +1643,30 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
+@@ -1539,10 +1792,35 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
            // this point, so we should be able to trust it.
            pid_t pid =
                static_cast<pid_t>(xpc_dictionary_get_int64(reply, "pid"));
@@ -338,8 +489,13 @@ index 47e3c55ccada..4ddab56d261f 100644
 +                  static_cast<int>(pid), processType);
 +          fflush(stderr);
 +
-+          // Register pipe
-+          {
++          // Register the readiness pipe, if this child was given one.
++          //
++          // M21 - guarded, because DoLaunch above only creates a pipe
++          // for content children. Without the guard every other child
++          // would still insert an empty handle under its pid and the
++          // map would grow without bound for the life of the process.
++          if (self->mJITReadySignalWriteFd) {
 +            StaticMutexAutoLock lock(sChildJITPipeMutex);
 +            sChildJITPipeWriters.insert_or_assign(
 +                static_cast<int32_t>(pid),

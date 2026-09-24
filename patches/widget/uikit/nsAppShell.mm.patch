@@ -107,7 +107,7 @@ index 13436918ecd2..730587bf1a5d 100644
  @end
  
  @implementation AppShellDelegate
-@@ -58,9 +121,68 @@ - (BOOL)application:(UIApplication*)application
+@@ -58,9 +121,81 @@ - (BOOL)application:(UIApplication*)application
      didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
    ALOG("[AppShellDelegate application:didFinishLaunchingWithOptions:]");
  
@@ -153,6 +153,19 @@ index 13436918ecd2..730587bf1a5d 100644
 +    HandleMemoryPressure(dispatch_source_get_data(mMemoryPressureSource));
 +  });
 +  dispatch_resume(mMemoryPressureSource);
++
++  // Construct the watcher here, on the main thread, so the
++  // memory-pressure handler above never has to construct it from
++  // inside a pressure event.
++  //
++  // KEEP THE RefPtr - see fix_gecko_lifetime_and_lock_hold.py's
++  // docstring. `watcher` reads as an unused variable and it is not:
++  // nsAvailableMemoryWatcherBase::GetSingleton() returns
++  // already_AddRefed, and this binding is the only thing that takes
++  // ownership of that +1 and releases it at scope exit. Replacing it
++  // with a bare call leaks a reference on every launch and trips
++  // already_AddRefed's "have neglected to take ownership" assertion
++  // in a debug build.
 +  RefPtr<nsAvailableMemoryWatcherBase> watcher =
 +      nsAvailableMemoryWatcherBase::GetSingleton();
 +
@@ -176,7 +189,7 @@ index 13436918ecd2..730587bf1a5d 100644
  - (void)applicationWillTerminate:(UIApplication*)application {
    ALOG("[AppShellDelegate applicationWillTerminate:]");
    ApplicationWillTerminate(/* aCallExit */ false);
-@@ -68,15 +190,166 @@ - (void)applicationWillTerminate:(UIApplication*)application {
+@@ -68,15 +203,166 @@ - (void)applicationWillTerminate:(UIApplication*)application {
  
  - (void)applicationDidBecomeActive:(UIApplication*)application {
    ALOG("[AppShellDelegate applicationDidBecomeActive:]");
@@ -344,7 +357,7 @@ index 13436918ecd2..730587bf1a5d 100644
  }
  @end
  
-@@ -281,7 +554,12 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
+@@ -281,7 +567,12 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
    ALOG("nsAppShell::Run");
  
    nsresult rv = NS_OK;
@@ -358,7 +371,7 @@ index 13436918ecd2..730587bf1a5d 100644
      char argv[1][4] = {"app"};
      UIApplicationMain(1, (char**)argv, nil, @"AppShellDelegate");
      // UIApplicationMain doesn't exit. :-(
-@@ -298,7 +576,10 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
+@@ -298,7 +589,10 @@ - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {
  
    mTerminated = true;
  
@@ -370,7 +383,7 @@ index 13436918ecd2..730587bf1a5d 100644
      // Dispatch a native event to the main queue to terminate. XPCOM doesn't
      // like being shut down from within an XPCOM runnable, so we cannot use
      // `NS_DispatchToMainThread` here.
-@@ -318,6 +599,11 @@ static void ApplicationWillTerminate(bool aCallExit) {
+@@ -318,6 +612,11 @@ static void ApplicationWillTerminate(bool aCallExit) {
      return;
    }
  
@@ -382,7 +395,7 @@ index 13436918ecd2..730587bf1a5d 100644
    // Perform the steps which would normally happen after nsAppShell::Run, such
    // as `~ScopedXPCOMStartup`, as UIApplicationMain will never shutdown.
    if (nsCOMPtr<nsIAppStartup> appStartup = components::AppStartup::Service()) {
-@@ -331,12 +617,19 @@ static void ApplicationWillTerminate(bool aCallExit) {
+@@ -331,12 +630,19 @@ static void ApplicationWillTerminate(bool aCallExit) {
  
    gDirServiceProvider->DoShutdown();
  

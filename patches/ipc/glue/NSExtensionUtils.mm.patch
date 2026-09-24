@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..f4cc84ee06f1
 --- /dev/null
 +++ b/ipc/glue/NSExtensionUtils.mm
-@@ -0,0 +1,678 @@
+@@ -0,0 +1,716 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -540,6 +540,25 @@ index 000000000000..f4cc84ee06f1
 +}
 +
 +- (void)invalidate {
++  // CHANGED - see fix_gecko_lifetime_and_lock_hold.py's docstring, C5.
++  //
++  // The listener pair is handed OUT of the queue-confined section and
++  // torn down below, off ExtensionLaunchQueue.
++  // -listener:shouldAcceptNewConnection: arrives on NSXPCListener's own
++  // queue and calls RunOnExtensionLaunchQueueSync, so if
++  // -[NSXPCListener invalidate] waits for an in-flight delegate
++  // callback to return - undocumented either way - running it while
++  // holding this queue deadlocks the two against each other. Moving it
++  // out removes the question instead of answering it, and it is the
++  // same rule the connection handlers above already follow.
++  //
++  // Works on the re-entrant paths too. The interruption and
++  // invalidation handlers call -invalidate from ExtensionLaunchQueue
++  // itself, where RunOnExtensionLaunchQueueSync runs its block inline;
++  // dispatch_async does not block, so being on that queue is fine.
++  __block NSXPCListener* listenerOut = nil;
++  __block ExtensionConnectionDelegate* listenerDelegateOut = nil;
++
 +  RunOnExtensionLaunchQueueSync(^{
 +    mInvalidated = true;
 +
@@ -574,18 +593,37 @@ index 000000000000..f4cc84ee06f1
 +      mRequestIdentifier = nil;
 +    }
 +
-+    if (mListener) {
-+      [mListener setDelegate:nil];
-+      [mListener invalidate];
-+      [mListener release];
-+      mListener = nil;
-+    }
++    // Ownership of these two moves to the locals; the ivars are cleared
++    // here, on the queue that owns them. mInvalidated is already set,
++    // so a connection arriving during the teardown below is refused by
++    // the accept handler's first check. __block, so this stack block
++    // does not retain them - the +1 each ivar held is what the async
++    // block releases.
++    listenerOut = mListener;
++    mListener = nil;
++    listenerDelegateOut = mListenerDelegate;
++    mListenerDelegate = nil;
++  });
 +
-+    if (mListenerDelegate) {
-+      [mListenerDelegate setConnectionHandler:nil];
-+      [mListenerDelegate release];
-+      mListenerDelegate = nil;
-+    }
++  NSXPCListener* listener = listenerOut;
++  ExtensionConnectionDelegate* listenerDelegate = listenerDelegateOut;
++  if (!listener && !listenerDelegate) {
++    return;
++  }
++
++  // Plain (non-__block) captures, so the copied block takes its own
++  // reference to each and holds it until the block is destroyed; the
++  // releases inside balance the ivars' +1. Nothing here captures self,
++  // so this is safe on the -dealloc -> -invalidate path. Order is
++  // unchanged from before: the delegate's handler is cleared LAST,
++  // because clearing it releases the handler block's reference to this
++  // object and must not happen while the listener is still live.
++  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
++    [listener setDelegate:nil];
++    [listener invalidate];
++    [listener release];
++    [listenerDelegate setConnectionHandler:nil];
++    [listenerDelegate release];
 +  });
 +}
 +
