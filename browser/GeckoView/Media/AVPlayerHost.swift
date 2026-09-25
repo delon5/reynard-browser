@@ -2113,25 +2113,20 @@ public final class AVPlayerHost: NSObject {
             }
             let muted = entry.player.isMuted || entry.player.volume <= 0.001
             if muted {
-                // Never take an ACTIVE receiver from anyone...
-                if let active = players.first(where: {
-                    $0.value !== entry && $0.value.externalActive
-                }) {
-                    return (previous, false, active.key)
-                }
-                // ...nor the flag from an audible owner that still
-                // wants to play on a local route. That owner is the
-                // session AVFoundation must join when the user picks a
-                // receiver LATER - film first, cast second is the
-                // common order - and a muted trailer holding the flag
-                // in between would be what appears on the TV. WebKit:
-                // a muted element is never Now-Playing eligible
-                // (MediaElementSession::canShowControlsManager). A
-                // paused or muted previous owner still yields.
-                if let previous, let owner = players[previous], owner.wantsPlayback,
-                   !(owner.player.isMuted || owner.player.volume <= 0.001) {
-                    return (previous, false, previous)
-                }
+                // NEVER - see
+                // fix_airplay_muted_player_never_takes_the_tv.py's
+                // docstring. WebKit: a muted element is never
+                // Now-Playing eligible
+                // (MediaElementSession::canShowControlsManager), and
+                // that is the whole rule. This used to apply it only
+                // against another AVPlayer, and the film the user is
+                // watching is often not one - on tv.apple.com it plays
+                // through the MSE parser - so in capture 9b6be92c the
+                // page's muted autoplay trailer was the only player
+                // here, took the flag, and was what went to the TV,
+                // silent, while the film played on the phone. 0 means
+                // no other owner to name.
+                return (previous, false, previous ?? 0)
             }
             for (pid, other) in players {
                 other.isExternalOwner = (pid == id)
@@ -2139,7 +2134,9 @@ public final class AVPlayerHost: NSObject {
             return (previous, true, nil)
         }
         if let refusedBy = outcome.refusedBy {
-            avLog("externalPlayback[\(id)] muted - not taking the receiver from \(refusedBy)")
+            avLog("externalPlayback[\(id)] muted - a muted player never "
+                  + "takes the receiver"
+                  + (refusedBy != 0 ? " (owner stays \(refusedBy))" : ""))
             return
         }
         guard outcome.changed else {
@@ -2578,9 +2575,48 @@ public final class AVPlayerHost: NSObject {
             return
         }
         let clamped = max(0.0, min(1.0, volume))
+        let wasMuted = entry.player.isMuted || entry.player.volume <= 0.001
         entry.player.volume = Float(clamped)
         entry.player.isMuted = clamped <= 0.0
         avLog("setVolume(\(id)) -> \(clamped)")
+        externalOwnershipAfterVolumeChange(id, entry: entry,
+                                           wasMuted: wasMuted)
+    }
+
+    /// Muting is not a one-time fact, so neither is ownership.
+    ///
+    /// ADDED - see fix_airplay_muted_player_never_takes_the_tv.py's
+    /// docstring. A player that goes silent gives the flag up - unless
+    /// it is already on the receiver, because muting what is on the TV
+    /// must not pull it back to the phone. A player that becomes
+    /// audible while it wants to play takes the flag, exactly as
+    /// play(id) would have: a muted autoplay the user then unmutes.
+    ///
+    /// Only on that TRANSITION. A volume change on a player that was
+    /// already audible - a page setting 0.5, or fading its sound in -
+    /// leaves ownership where play() put it; otherwise it would pull the
+    /// receiver away from whichever player is on the TV.
+    private func externalOwnershipAfterVolumeChange(_ id: UInt,
+                                                    entry: Player,
+                                                    wasMuted: Bool) {
+        let muted = entry.player.isMuted || entry.player.volume <= 0.001
+        if muted {
+            let released = withState { () -> Bool in
+                guard entry.isExternalOwner, !entry.externalActive else {
+                    return false
+                }
+                entry.isExternalOwner = false
+                return true
+            }
+            if released {
+                avLog("externalPlayback[\(id)] muted - gives up the "
+                      + "receiver")
+                reapplyExternalPlaybackPolicy()
+            }
+        } else if wasMuted,
+                  withState({ entry.wantsPlayback && !entry.isExternalOwner }) {
+            applyExternalPlaybackOwner(id)
+        }
     }
 
     @objc public func seek(_ id: UInt, to seconds: Double) {
