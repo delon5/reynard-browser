@@ -7691,6 +7691,10 @@ public final class FairPlayStreamParser: NSObject {
         var adoptTrimmed = 0
         var adoptDumped = 0
         var adoptGateHeld = 0
+        // Set inside the handover when the sink carries another key
+        // session's protection - see
+        // fix_safeguard_inherited_sink_raises_at_adopt.py.
+        var inheritedFrom: String?
         let handover = withState {
             () -> (old: AVSampleBufferDisplayLayer?, observer: NSObjectProtocol?,
                    queue: DispatchQueue?, carried: Int, held: Int,
@@ -7717,7 +7721,25 @@ public final class FairPlayStreamParser: NSObject {
             // playing through, which is the 1-2s of black 175 exists to
             // prevent. The last adopter owns it; anyone else tearing
             // down leaves it alone.
+            // WHOSE PROTECTION IS ON IT - see
+            // fix_safeguard_inherited_sink_raises_at_adopt.py. Read under
+            // the state lock this closure already holds.
+            let adopterSession = entries[sessionOf(streamKey)]?.keySession
             Self.freshSinkLock.lock()
+            if let adopterSession {
+                if Self.protectedSink !== sink {
+                    // First adoption of this layer object: whoever takes
+                    // it establishes its protection.
+                    Self.protectedSink = sink
+                    Self.protectedBy = adopterSession
+                    Self.protectedByStream = streamKey
+                } else if Self.protectedBy !== adopterSession {
+                    // Same layer, different key session - or the one
+                    // that protected it is gone, which reads as nil.
+                    inheritedFrom = Self.protectedByStream
+                        ?? "a stream no longer known"
+                }
+            }
             Self.compositorSink = sink
             Self.compositorSinkOwner = streamKey
             // ADDED - see mse_fix_201's docstring. An adoption is the
@@ -7825,6 +7847,33 @@ public final class FairPlayStreamParser: NSObject {
                     slot.needsSyncSample)
         }
         guard let handover else { return }
+
+        // AND IF THE SINK CARRIES ANOTHER KEY SESSION'S PROTECTION, ASK
+        // FOR A FRESH ONE - see
+        // fix_safeguard_inherited_sink_raises_at_adopt.py's docstring.
+        //
+        // Raised exactly as addRecipient raises it for a refusal, which
+        // this is the silent form of: AVFoundation can accept the layer
+        // into this session and then decode nothing. Both locks are
+        // released here. Once per adoption - a re-offer of the same
+        // layer takes the "already using this layer" return above.
+        if let inheritedFrom {
+            Self.freshSinkLock.lock()
+            Self.freshSinkWanted = true
+            Self.freshSinkAskedBy = "stream \(streamKey) display layer "
+                + "(inherited from \(inheritedFrom))"
+            Self.freshSinkAskedAt = Self.hostNow()
+            Self.freshSinkLock.unlock()
+            Self.log("stream \(streamKey) adopted an INHERITED SINK - its "
+                     + "content protection was established by "
+                     + "\(inheritedFrom) under a different key session. "
+                     + "Asking the compositor for a fresh one.")
+            Self.keyDelegateQueue.asyncAfter(
+                deadline: .now() + Self.freshSinkGap
+            ) {
+                Self.reportUnansweredSinkRequest()
+            }
+        }
 
         // Before it is fed, in that order: qavc handed to a sink that is
         // not a content key recipient is 360 x "FAILED TO DECODE".
@@ -8436,6 +8485,24 @@ public final class FairPlayStreamParser: NSObject {
     /// And the stream that took it - see the adopt site for why identity
     /// alone is not enough.
     private static var compositorSinkOwner: String?
+
+    /// WHO FIRST ESTABLISHED CONTENT PROTECTION ON THE SINK - see
+    /// fix_safeguard_inherited_sink_raises_at_adopt.py's docstring.
+    ///
+    /// compositorSinkOwner is cleared when its stream goes - that is
+    /// what raises mse_fix_186's fresh-sink request - so by the time
+    /// the next site adopts, nothing remembers whose protection the
+    /// layer carries. These do, and noteSinkOwnerGone leaves them
+    /// alone.
+    ///
+    /// The key session OBJECT, not its name: capture f8803d5a rebuilt
+    /// child-8's key session under the same name. Weak, so a destroyed
+    /// session reads as nil and compares as different; a freshly built
+    /// sink is a new object and is always recorded afresh. Guarded by
+    /// freshSinkLock, like compositorSink.
+    private static weak var protectedSink: AVSampleBufferDisplayLayer?
+    private static weak var protectedBy: AVContentKeySession?
+    private static var protectedByStream: String?
 
     /// The stream holding the compositor's sink has been torn down.
     ///
