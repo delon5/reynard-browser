@@ -1031,8 +1031,13 @@ public final class FairPlayStreamParser: NSObject {
                 if let layer = slot.displayLayer,
                    let recipient = (layer as AnyObject)
                     as? AVContentKeyRecipient {
+                    // The recycle is the one place an element's own sink
+                    // meets a different key session - see
+                    // stage2_one_sink_per_element.py's docstring.
+                    let element = withState { elementOfSink(layer) }
                     Self.addRecipient(fresh, recipient: recipient,
-                                      label: "stream \(key) display layer")
+                                      label: "stream \(key) display layer",
+                                      element: element)
                 }
                 if let renderer = slot.audioRenderer,
                    let recipient = (renderer as AnyObject)
@@ -1564,7 +1569,8 @@ public final class FairPlayStreamParser: NSObject {
     @discardableResult
     fileprivate static func addRecipient(_ session: AVContentKeySession,
                                          recipient: AVContentKeyRecipient,
-                                         label: String) -> Bool {
+                                         label: String,
+                                         element: UInt64 = 0) -> Bool {
         if let failure = GeckoRuntimeBridge.catchException(from: {
             session.addContentKeyRecipient(recipient)
         }) {
@@ -1580,7 +1586,13 @@ public final class FairPlayStreamParser: NSObject {
             // build another. Only a display layer: an audio renderer is
             // built per stream and never shared, so a refusal there
             // means something else and must not throw the sink away.
-            if label.contains("display layer") {
+            if label.contains("display layer"), element != 0 {
+                // AN ELEMENT'S OWN SINK - see
+                // stage2_one_sink_per_element.py's docstring. That
+                // element alone gets a new one; the app-wide flag below
+                // is the key-less fallback sink's and is left alone.
+                askFreshSink(forElement: element, by: label)
+            } else if label.contains("display layer") {
                 freshSinkLock.lock()
                 freshSinkWanted = true
                 // ADDED - see mse_fix_201's docstring. Recorded so the
@@ -4686,6 +4698,16 @@ public final class FairPlayStreamParser: NSObject {
                          + "holds")
                 adopt(parkedSink)
             }
+            // AND ITS ELEMENT'S OWN SINK - see
+            // stage2_one_sink_per_element.py's docstring. The compositor
+            // builds an element's sink when its placeholder frame
+            // arrives, which can be before this stream had a picture -
+            // adopt() then held it - or for the SourceBuffer this one
+            // replaces, whose sink is still on screen with nothing to
+            // rebuild it. Either way this is the stream's first display
+            // layer, and that sink is where its picture belongs. A no-op
+            // for a stream with no element.
+            claimElementSink(streamKey)
         }
         guard let layer = withState({ slot.displayLayer }) else {
             return
@@ -7446,7 +7468,13 @@ public final class FairPlayStreamParser: NSObject {
         let waiting = shared.withState { () -> String? in
             for (key, slot) in shared.streamParsers
             where slot.displayLayer != nil && slot.supersededBy == nil
-                    && slot.lastSampleAt > cutoff {
+                    && slot.lastSampleAt > cutoff
+                    // Not an element's stream - see
+                    // stage2_one_sink_per_element.py's docstring. Its
+                    // sink is its element's, held or claimed, and the
+                    // app-wide ask this chase raises could only ever
+                    // rebuild the key-less fallback.
+                    && (shared.streamElements[key] ?? 0) == 0 {
                 if slot.displayLayer !== sinkNow {
                     return key
                 }
@@ -7513,11 +7541,23 @@ public final class FairPlayStreamParser: NSObject {
         // fallback is the most recently fed overall rather than the
         // busiest, because the busiest is precisely what chose a corpse.
         let cutoff = Self.hostNow() - Self.livenessWindow
+        // ONE SINK PER ELEMENT - see stage2_one_sink_per_element.py's
+        // docstring. An offer that names its element is that element's
+        // own sink and goes to that element's streams ONLY - nothing
+        // below guesses across elements for it. Remembered first, so a
+        // stream of the element with no picture yet takes it the moment
+        // it has one. An offer with no element - a content process
+        // built without stage 1 - is chosen for exactly as before.
+        let keyed = offered ?? 0
+        if keyed != 0 {
+            withState { rememberElementSink(sink, element: keyed) }
+        }
         let chosen = withState { () -> (key: String, fedAt: Double)? in
             var best: (key: String, fedAt: Double, seen: Int)?
             var any: (key: String, fedAt: Double, seen: Int)?
             for (key, slot) in streamParsers
-            where slot.displayLayer != nil && slot.supersededBy == nil {
+            where slot.displayLayer != nil && slot.supersededBy == nil
+                    && (keyed == 0 || streamElements[key] == keyed) {
                 let candidate = (key: key, fedAt: slot.lastSampleAt,
                                  seen: slot.videoSeen)
                 if any == nil || candidate.fedAt > any!.fedAt
@@ -7536,6 +7576,17 @@ public final class FairPlayStreamParser: NSObject {
             return (picked.key, picked.fedAt)
         }
         guard let chosen else {
+            if keyed != 0 {
+                // Held, not chased - see stage2_one_sink_per_element.py's
+                // docstring. claimElementSink hands it over when the
+                // first of this element's streams builds a display
+                // layer, which is the first moment one can take it.
+                Self.log("the compositor offered element "
+                         + "\(Self.describeElement(keyed))'s own sink "
+                         + "before any of its streams had a picture - held "
+                         + "for that element")
+                return
+            }
             // CHANGED - see mse_fix_208's docstring. "A resize offers
             // another one" was the whole recovery, and a resize is not
             // something the page owes anybody. Capture 11946c21: this
@@ -7750,8 +7801,24 @@ public final class FairPlayStreamParser: NSObject {
             // fix_safeguard_inherited_sink_raises_at_adopt.py. Read under
             // the state lock this closure already holds.
             let adopterSession = entries[sessionOf(streamKey)]?.keySession
+            // PER ELEMENT for an element's own sink - see
+            // stage2_one_sink_per_element.py's docstring. The same test
+            // as the app-wide statics below, kept on the element's own
+            // record.
+            if keyed != 0, let adopterSession {
+                let record = elementSinks[keyed] ?? ElementSink()
+                elementSinks[keyed] = record
+                if record.protectedSink !== sink {
+                    record.protectedSink = sink
+                    record.protectedBy = adopterSession
+                    record.protectedByStream = streamKey
+                } else if record.protectedBy !== adopterSession {
+                    inheritedFrom = record.protectedByStream
+                        ?? "a stream no longer known"
+                }
+            }
             Self.freshSinkLock.lock()
-            if let adopterSession {
+            if keyed == 0, let adopterSession {
                 if Self.protectedSink !== sink {
                     // First adoption of this layer object: whoever takes
                     // it establishes its protection.
@@ -7765,13 +7832,20 @@ public final class FairPlayStreamParser: NSObject {
                         ?? "a stream no longer known"
                 }
             }
-            Self.compositorSink = sink
-            Self.compositorSinkOwner = streamKey
-            // ADDED - see mse_fix_201's docstring. An adoption is the
-            // answer to the ask, whoever made it: the sink is one slot,
-            // so one arriving satisfies whatever was waiting for one.
-            Self.freshSinkAskedBy = nil
-            Self.freshSinkAskedAt = 0
+            // The key-less fallback sink's bookkeeping only - see
+            // stage2_one_sink_per_element.py's docstring. An element's
+            // own sink has no app-wide owner for mse_fix_186 to watch,
+            // and answers none of 201's app-wide asks.
+            if keyed == 0 {
+                Self.compositorSink = sink
+                Self.compositorSinkOwner = streamKey
+                // ADDED - see mse_fix_201's docstring. An adoption is the
+                // answer to the ask, whoever made it: the sink is one
+                // slot, so one arriving satisfies whatever was waiting
+                // for one.
+                Self.freshSinkAskedBy = nil
+                Self.freshSinkAskedAt = 0
+            }
             Self.freshSinkLock.unlock()
             slot.failObserver = nil
             slot.drainArmed = false
@@ -7882,7 +7956,16 @@ public final class FairPlayStreamParser: NSObject {
         // into this session and then decode nothing. Both locks are
         // released here. Once per adoption - a re-offer of the same
         // layer takes the "already using this layer" return above.
-        if let inheritedFrom {
+        if let inheritedFrom, keyed != 0 {
+            // That element alone - see stage2_one_sink_per_element.py.
+            Self.log("stream \(streamKey) adopted an INHERITED SINK - "
+                     + "element \(Self.describeElement(keyed))'s own sink "
+                     + "carries content protection \(inheritedFrom) "
+                     + "established under a different key session")
+            Self.askFreshSink(forElement: keyed,
+                              by: "stream \(streamKey) display layer "
+                                  + "(inherited from \(inheritedFrom))")
+        } else if let inheritedFrom {
             Self.freshSinkLock.lock()
             Self.freshSinkWanted = true
             Self.freshSinkAskedBy = "stream \(streamKey) display layer "
@@ -8654,6 +8737,46 @@ public final class FairPlayStreamParser: NSObject {
         freshSinkLock.lock()
         let wanted = freshSinkWanted
         freshSinkWanted = false
+        freshSinkLock.unlock()
+        return wanted
+    }
+
+    /// Elements whose own sink has to be rebuilt.
+    ///
+    /// ADDED - see stage2_one_sink_per_element.py's docstring. The
+    /// per-element form of freshSinkWanted, guarded by the same lock.
+    /// An entry is read and cleared only by the poll or the sink block
+    /// acting for THAT element, so a request cannot be consumed by a
+    /// reader that has nothing to do with it - which is how mse_fix_214's
+    /// quiet reader lost the one capture f8803d5a needed. An element
+    /// with no layer on screen keeps its request until it has one.
+    private static var freshSinkWantedFor: Set<UInt64> = []
+
+    /// Ask the compositor for a fresh sink for ONE element.
+    fileprivate static func askFreshSink(forElement element: UInt64,
+                                         by label: String) {
+        freshSinkLock.lock()
+        freshSinkWantedFor.insert(element)
+        freshSinkLock.unlock()
+        log("\(label) - asking the compositor for a fresh sink for "
+            + "element \(describeElement(element)) alone")
+        keyDelegateQueue.asyncAfter(deadline: .now() + freshSinkGap) {
+            freshSinkLock.lock()
+            let unread = freshSinkWantedFor.contains(element)
+            freshSinkLock.unlock()
+            if unread {
+                log("element \(describeElement(element))'s request for a "
+                    + "fresh sink is unread after \(freshSinkGap)s - that "
+                    + "element has no protected layer on screen for the "
+                    + "compositor to rebuild. It is kept for the next one.")
+            }
+        }
+    }
+
+    @objc(wantsFreshSinkForElement:)
+    public static func wantsFreshSink(forElement element: UInt64) -> Bool {
+        freshSinkLock.lock()
+        let wanted = freshSinkWantedFor.remove(element) != nil
         freshSinkLock.unlock()
         return wanted
     }
@@ -10011,6 +10134,80 @@ public final class FairPlayStreamParser: NSObject {
     /// state lock.
     private var streamElements: [String: UInt64] = [:]
 
+    /// Each element's own compositor sink - see
+    /// stage2_one_sink_per_element.py's docstring.
+    ///
+    /// Remembered PER ELEMENT, not per stream, because a page can
+    /// replace a SourceBuffer under the same element and the
+    /// replacement must find the sink the compositor already built:
+    /// nothing rebuilds the layer to offer it again. Weak, because
+    /// NativeLayerCA's table owns each sink and a stream feeding one
+    /// holds its own reference - an entry goes nil only when neither
+    /// needs it. The protection fields are the per-element form of
+    /// fix_safeguard_inherited_sink_raises_at_adopt.py's statics, so two
+    /// elements' sinks never overwrite each other's history. Guarded by
+    /// the state lock.
+    private final class ElementSink {
+        weak var sink: AVSampleBufferDisplayLayer?
+        weak var protectedSink: AVSampleBufferDisplayLayer?
+        weak var protectedBy: AVContentKeySession?
+        var protectedByStream: String?
+    }
+    private var elementSinks: [UInt64: ElementSink] = [:]
+
+    /// Under the state lock: the compositor offered this sink for this
+    /// element. Entries whose sink has gone are dropped on the way.
+    fileprivate func rememberElementSink(_ sink: AVSampleBufferDisplayLayer,
+                                         element: UInt64) {
+        elementSinks = elementSinks.filter {
+            $0.key == element || $0.value.sink != nil
+        }
+        let record = elementSinks[element] ?? ElementSink()
+        record.sink = sink
+        elementSinks[element] = record
+    }
+
+    /// Under the state lock: which element's own sink a layer is, or 0.
+    fileprivate func elementOfSink(_ layer: AnyObject) -> UInt64 {
+        for (element, record) in elementSinks where record.sink === layer {
+            return element
+        }
+        return 0
+    }
+
+    /// Give a stream its element's own sink, if the compositor has built
+    /// one and the stream is not already on it.
+    ///
+    /// ADDED - see stage2_one_sink_per_element.py's docstring. Called
+    /// when a stream builds its first display layer - the moment it can
+    /// take a sink - and when a stream learns its element late.
+    /// Replaces, for an element's sink, both mse_fix_208's chase and fix
+    /// 14's parked sink: the sink is the element's, so there is nothing
+    /// to chase and nothing to park.
+    fileprivate func claimElementSink(_ streamKey: String) {
+        let found = withState {
+            () -> (element: UInt64, sink: AVSampleBufferDisplayLayer)? in
+            guard let element = streamElements[streamKey], element != 0,
+                  let sink = elementSinks[element]?.sink,
+                  let slot = streamParsers[streamKey],
+                  slot.supersededBy == nil,
+                  slot.displayLayer != nil,
+                  slot.displayLayer !== sink else { return nil }
+            // Fed RIGHT NOW, for the reason the parked-sink claim gives:
+            // adopt() takes the most recently fed of the element's
+            // streams, and this call is ahead of the intake that stamps
+            // the stream's first sample.
+            slot.lastSampleAt = Self.hostNow()
+            return (element, sink)
+        }
+        guard let found else { return }
+        Self.log("stream \(streamKey) takes element "
+                 + "\(Self.describeElement(found.element))'s own sink - "
+                 + "the compositor built it for this element before this "
+                 + "stream had a picture to put in it")
+        adopt(found.sink, element: found.element)
+    }
+
     /// "child-13#4", as the content process and NativeLayerCA print it.
     fileprivate static func describeElement(_ element: UInt64) -> String {
         guard element != 0 else { return "none" }
@@ -10030,6 +10227,9 @@ public final class FairPlayStreamParser: NSObject {
         Self.log("stream \(key) is element \(Self.describeElement(element))"
                  + (was.map { " - it was \(Self.describeElement($0))" }
                     ?? ""))
+        // A stream that learned its element after building a display
+        // layer - see stage2_one_sink_per_element.py's docstring.
+        claimElementSink(key)
     }
 
     /// A retired stream's element goes with it.
@@ -10325,8 +10525,14 @@ public final class FairPlayStreamParser: NSObject {
                      + "cannot decode in it and the sink has to change")
             return
         }
+        // Which element's own sink this is, if it is one - see
+        // stage2_one_sink_per_element.py's docstring. Read before the
+        // call: addRecipient touches AVFoundation, which never happens
+        // under the state lock.
+        let element = withState { elementOfSink(layer) }
         guard Self.addRecipient(keySession, recipient: recipient,
-                                label: "stream \(streamKey) display layer")
+                                label: "stream \(streamKey) display layer",
+                                element: element)
         else { return }
         Self.log("stream \(streamKey) display layer added as a content key "
                  + "recipient - recipients now "

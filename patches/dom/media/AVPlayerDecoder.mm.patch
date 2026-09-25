@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..0385fba02e86
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,3467 @@
+@@ -0,0 +1,3493 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1143,6 +1143,32 @@ index 000000000000..0385fba02e86
 +                  answer ? "resolved" : "NOT AVAILABLE - sink never rebuilt");
 +  }
 +  return answer ? answer(parser, selector) : false;
++}
++
++// Does ONE element's own sink need rebuilding?
++//
++// ADDED - see stage2_one_sink_per_element.py's docstring. The
++// per-element twin of the query above: the same shape, the same thread,
++// and the same failure rule - unresolved, it answers false and the
++// element keeps its sink.
++bool ReynardMSEWantsFreshSinkFor(uint64_t aElement) {
++  static bool looked = false;
++  static Class parser = nil;
++  static SEL selector = nullptr;
++  static BOOL (*answer)(Class, SEL, unsigned long long) = nullptr;
++  if (!looked) {
++    looked = true;
++    parser = NSClassFromString(@"ReynardFairPlayStreamParser");
++    selector = NSSelectorFromString(@"wantsFreshSinkForElement:");
++    if (parser && [parser respondsToSelector:selector]) {
++      answer = (BOOL (*)(Class, SEL, unsigned long long))[parser
++          methodForSelector:selector];
++    }
++    printf_stderr("mseLayer: per-element fresh-sink query %s\n",
++                  answer ? "resolved"
++                         : "NOT AVAILABLE - element sinks never rebuilt");
++  }
++  return answer ? answer(parser, selector, aElement) : false;
 +}
 +
 +void ReynardAVPlayerBrokerCreate(uint64_t aKey, const nsCString& aUrl) {
