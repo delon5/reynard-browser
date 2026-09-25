@@ -2,7 +2,7 @@ diff --git a/gfx/layers/NativeLayerCA.mm b/gfx/layers/NativeLayerCA.mm
 index 5760a816612b..dcaf8a911223 100644
 --- a/gfx/layers/NativeLayerCA.mm
 +++ b/gfx/layers/NativeLayerCA.mm
-@@ -39,6 +39,72 @@ - (void)setContentsOpaque:(BOOL)opaque;
+@@ -39,6 +39,73 @@ - (void)setContentsOpaque:(BOOL)opaque;
  @end
  
  namespace mozilla {
@@ -21,8 +21,9 @@ index 5760a816612b..dcaf8a911223 100644
 +
 +// The same, for the other protected route. Defined in the same file, and
 +// hands the layer to FairPlayStreamParser instead of to an AVPlayer,
-+// because MSE has no player to hand it to.
-+void ReynardMSEAttachLayer(void* aLayer);
++// because MSE has no player to hand it to. aElement is the element key
++// read off the frame - see stage1_carry_the_element_key.py's docstring.
++void ReynardMSEAttachLayer(void* aLayer, uint64_t aElement);
 +
 +// Whether that route is still producing a picture. Defined beside the
 +// two above - see mse_fix_177's docstring. Answers from the compositor
@@ -75,7 +76,7 @@ index 5760a816612b..dcaf8a911223 100644
  namespace layers {
  
  using gfx::DataSourceSurface;
-@@ -167,6 +233,7 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
+@@ -167,6 +234,7 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
  
    [mOnscreenRootCALayer release];
    [mOffscreenRootCALayer release];
@@ -83,7 +84,7 @@ index 5760a816612b..dcaf8a911223 100644
  }
  
  already_AddRefed<NativeLayer> NativeLayerRootCA::CreateLayer(
-@@ -238,12 +305,279 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
+@@ -238,12 +306,279 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
      layersCA.AppendElement(std::move(layerCA));
    }
  
@@ -363,7 +364,7 @@ index 5760a816612b..dcaf8a911223 100644
  void NativeLayerRootCA::SetBackingScale(float aBackingScale) {
    MutexAutoLock lock(mMutex);
  
-@@ -287,6 +621,10 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
+@@ -287,6 +622,10 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
                         mWindowIsFullscreen);
    mMutatedOnscreenLayerStructure = false;
  
@@ -374,7 +375,7 @@ index 5760a816612b..dcaf8a911223 100644
    mCommitPending = false;
  
    if (StaticPrefs::gfx_webrender_debug_dump_native_layer_tree_to_file()) {
-@@ -320,6 +658,11 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
+@@ -320,6 +659,11 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
      EmitTelemetryForVideoLowPower(videoLowPower);
    }
  
@@ -386,7 +387,7 @@ index 5760a816612b..dcaf8a911223 100644
    return true;
  }
  
-@@ -389,6 +732,19 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
+@@ -389,6 +733,19 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
      WhichRepresentation aRepresentation, CALayer* aRootCALayer,
      const nsTArray<RefPtr<NativeLayerCA>>& aSublayers,
      bool aMutatedLayerStructure, bool aWindowIsFullscreen) {
@@ -406,7 +407,7 @@ index 5760a816612b..dcaf8a911223 100644
    UpdateType updateRequired =
        GetMaxUpdateRequired(aRepresentation, aSublayers, aMutatedLayerStructure);
    if (updateRequired == NativeLayerCA::UpdateType::OnlyVideo) {
-@@ -417,17 +773,96 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
+@@ -417,17 +774,96 @@ static void EmitTelemetryForVideoLowPower(VideoLowPowerType aVideoLowPower) {
    NSMutableArray<CALayer*>* sublayers =
        [NSMutableArray arrayWithCapacity:aSublayers.Length()];
    bool mustRebuild = updateRequired == UpdateType::All;
@@ -503,7 +504,7 @@ index 5760a816612b..dcaf8a911223 100644
  }
  
  SnapshotterCADelegate::~SnapshotterCADelegate() = default;
-@@ -924,11 +1359,53 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -924,11 +1360,53 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
  }
  
  bool NativeLayerCA::ShouldSpecializeVideo(const MutexAutoLock& aProofOfLock) {
@@ -557,7 +558,7 @@ index 5760a816612b..dcaf8a911223 100644
    // DRM video is supported in macOS 10.15 and beyond, and such video must use
    // a specialized video layer.
    if (mIsDRM) {
-@@ -1339,6 +1816,17 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1339,6 +1817,17 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    bool changedIsDRM = (mIsDRM != aIsDRM);
    mIsDRM = aIsDRM;
  
@@ -575,7 +576,7 @@ index 5760a816612b..dcaf8a911223 100644
    bool changedIsHDR = (mIsHDR != aIsHDR);
    mIsHDR = aIsHDR;
  
-@@ -1512,6 +2000,84 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1512,6 +2001,84 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    }
  
    auto& r = GetRepresentation(aRepresentation);
@@ -660,7 +661,7 @@ index 5760a816612b..dcaf8a911223 100644
    if (r.mMutatedSpecializeVideo) {
      *aMustRebuild = true;
    }
-@@ -1519,7 +2085,8 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1519,7 +2086,8 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    bool updateSucceeded = r.ApplyChanges(
        aUpdate, size, mIsOpaque, mPosition, mTransform, displayRect, mClipRect,
        mRoundedClipRect, mBackingScale, surfaceIsFlipped, mSamplingFilter,
@@ -670,7 +671,7 @@ index 5760a816612b..dcaf8a911223 100644
    bool hasExtentAfterUpdate = r.UnderlyingCALayer() != nullptr;
    if (hasExtentAfterUpdate != hadExtentBeforeUpdate) {
      *aMustRebuild = true;
-@@ -1527,6 +2094,35 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1527,6 +2095,35 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    return updateSucceeded;
  }
  
@@ -706,7 +707,7 @@ index 5760a816612b..dcaf8a911223 100644
  CALayer* NativeLayerCA::UnderlyingCALayer(WhichRepresentation aRepresentation) {
    MutexAutoLock lock(mMutex);
    return GetRepresentation(aRepresentation).UnderlyingCALayer();
-@@ -1534,12 +2130,38 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1534,12 +2131,38 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
  
  bool NativeLayerCARepresentation::EnqueueSurface(IOSurfaceRef aSurfaceRef,
                                                   bool aIsHDR) {
@@ -746,7 +747,7 @@ index 5760a816612b..dcaf8a911223 100644
      if (videoLayer.requiresFlushToResumeDecoding) {
        [videoLayer flush];
      }
-@@ -1645,6 +2267,11 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1645,6 +2268,11 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
    if (osValue != noErr) {
      MOZ_ASSERT(sampleBuffer == nullptr,
                 "Failed call shouldn't allocate memory.");
@@ -758,7 +759,7 @@ index 5760a816612b..dcaf8a911223 100644
  #ifdef NIGHTLY_BUILD
      if (StaticPrefs::gfx_core_animation_specialize_video_log()) {
        NSLog(@"VIDEO_LOG: EnqueueSurface failed on allocating sample buffer.");
-@@ -1712,7 +2339,10 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1712,7 +2340,10 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      bool aSurfaceIsFlipped, gfx::SamplingFilter aSamplingFilter,
      bool aSpecializeVideo, const CFTypeRefPtr<IOSurfaceRef>& aFrontSurface,
      const Maybe<gfx::DeviceColor>& aColor, bool aIsVideo, bool aIsDRM,
@@ -770,7 +771,7 @@ index 5760a816612b..dcaf8a911223 100644
    // If we have an OnlyVideo update, handle it and early exit.
    if (aUpdate == UpdateType::OnlyVideo) {
      // If we don't have any updates to do, exit early with success. This is
-@@ -1726,13 +2356,14 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1726,13 +2357,14 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
                 "Shouldn't attempt a OnlyVideo update in this case.");
  
      bool updateSucceeded = false;
@@ -786,7 +787,7 @@ index 5760a816612b..dcaf8a911223 100644
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;
-@@ -1749,7 +2380,23 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1749,7 +2381,23 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
  
    MOZ_ASSERT(aUpdate == UpdateType::All);
  
@@ -811,7 +812,7 @@ index 5760a816612b..dcaf8a911223 100644
      // Since specialize video changes the way we construct our wrapping and
      // content layers, we have to scrap them if this value has changed.
  #ifdef NIGHTLY_BUILD
-@@ -1793,7 +2440,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1793,7 +2441,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
        mRoundedClipCALayer.backgroundColor =
            CGColorCreateForDeviceColor(*aColor);
      } else {
@@ -820,7 +821,7 @@ index 5760a816612b..dcaf8a911223 100644
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
              StaticPrefs::gfx_core_animation_specialize_video_log()) {
-@@ -1802,6 +2449,196 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1802,6 +2450,218 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
            mLogNextVideoSurface = true;
          }
  #endif
@@ -852,6 +853,12 @@ index 5760a816612b..dcaf8a911223 100644
 +          // surface is HLS, which is what every build before this one
 +          // assumed, so that route is unchanged by construction.
 +          bool isMSE = false;
++          // WHICH ELEMENT - see stage1_carry_the_element_key.py's
++          // docstring. Stamped beside the route tag by the placeholder
++          // decoder: (child id << 32) | a serial for the element's
++          // ImageContainer, the same key SourceBuffer sends the parser
++          // for every stream of that element. 0 when absent.
++          uint64_t reynardElement = 0;
 +          if (IOSurfaceRef tagged = aFrontSurface.get()) {
 +            CFTypeRef mark =
 +                IOSurfaceCopyValue(tagged, CFSTR("ReynardProtectedMSE"));
@@ -859,9 +866,25 @@ index 5760a816612b..dcaf8a911223 100644
 +            if (mark) {
 +              CFRelease(mark);
 +            }
++            CFTypeRef element =
++                IOSurfaceCopyValue(tagged, CFSTR("ReynardMSEElement"));
++            if (element && CFGetTypeID(element) == CFNumberGetTypeID()) {
++              int64_t value = 0;
++              if (CFNumberGetValue((CFNumberRef)element, kCFNumberSInt64Type,
++                                   &value)) {
++                reynardElement = static_cast<uint64_t>(value);
++              }
++            }
++            if (element) {
++              CFRelease(element);
++            }
 +          }
-+          printf_stderr("NativeLayerCA: DRM layer - mse=%d onscreen=%d\n",
-+                        isMSE ? 1 : 0, aIsOnscreen ? 1 : 0);
++          printf_stderr(
++              "NativeLayerCA: DRM layer - mse=%d onscreen=%d "
++              "element=child-%llu#%llu\n",
++              isMSE ? 1 : 0, aIsOnscreen ? 1 : 0,
++              (unsigned long long)(reynardElement >> 32),
++              (unsigned long long)(reynardElement & 0xffffffffULL));
 +          if (isMSE) {
 +            // REUSE IT - see mse_fix_175's docstring. Capture 18ea1c94
 +            // shows the media controls coming up and this branch
@@ -968,7 +991,7 @@ index 5760a816612b..dcaf8a911223 100644
 +              mContentCALayer = [reynardMSESink retain];
 +              printf_stderr("NativeLayerCA: %s the MSE sink\n",
 +                            reynardFresh ? "built" : "REUSING");
-+              ReynardMSEAttachLayer(mContentCALayer);
++              ReynardMSEAttachLayer(mContentCALayer, reynardElement);
 +              // AND NOTHING RE-ASKS ON THE WAY OUT. A post-attach
 +              // re-read of ReynardMSEWantsFreshSink sat here, built
 +              // on the belief that the refusal happens synchronously
@@ -1017,7 +1040,7 @@ index 5760a816612b..dcaf8a911223 100644
          mContentCALayer = [[AVSampleBufferDisplayLayer layer] retain];
          CMTimebaseRef timebase;
  #ifdef CMTIMEBASE_USE_SOURCE_TERMINOLOGY
-@@ -1815,6 +2652,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1815,6 +2675,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
          [(AVSampleBufferDisplayLayer*)mContentCALayer
              setControlTimebase:timebase];
          CFRelease(timebase);
@@ -1025,7 +1048,7 @@ index 5760a816612b..dcaf8a911223 100644
        } else {
  #ifdef NIGHTLY_BUILD
          if (aIsVideo &&
-@@ -1842,8 +2680,12 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -1842,8 +2703,12 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      }
    }
  
@@ -1040,7 +1063,7 @@ index 5760a816612b..dcaf8a911223 100644
    }
  
    bool shouldTintOpaqueness = StaticPrefs::gfx_core_animation_tint_opaque();
-@@ -2028,7 +2870,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -2028,7 +2893,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
      // *next* update will clear the video layer and setup a regular layer.
  
      IOSurfaceRef surface = aFrontSurface.get();
@@ -1049,7 +1072,7 @@ index 5760a816612b..dcaf8a911223 100644
        // If we just rebuilt our layer, ensure the first frame is visible by
        // forcing the layer contents to display that frame. Our call to
        // enqueueSampleBuffer will handle future async updates to the layer;
-@@ -2044,6 +2886,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
+@@ -2044,6 +2909,7 @@ CGColorRef CGColorCreateForDeviceColor(const gfx::DeviceColor& aColor) {
          // Set mMutatedSpecializeVideo, which will ensure that the next update
          // will rebuild the video layer.
          mMutatedSpecializeVideo = true;

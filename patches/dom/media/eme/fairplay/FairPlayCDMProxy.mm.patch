@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..e859b69f6239
 --- /dev/null
 +++ b/dom/media/eme/fairplay/FairPlayCDMProxy.mm
-@@ -0,0 +1,2292 @@
+@@ -0,0 +1,2461 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,6 +25,11 @@ index 000000000000..e859b69f6239
 +// only from wherever the proxy was made.
 +#include "mozilla/StaticMutex.h"
 +#include "mozilla/Debug.h"  // printf_stderr
++// The element registry - see stage1_carry_the_element_key.py's
++// docstring. ImageContainer is SupportsThreadSafeWeakPtr, which is what
++// lets the registry tell a live container from a dead one at the same
++// address.
++#include "ImageContainer.h"
 +
 +#import <AVFoundation/AVFoundation.h>
 +
@@ -1802,6 +1807,161 @@ index 000000000000..e859b69f6239
 +                                     segment);
 +}
 +
++// WHICH ELEMENT - see stage1_carry_the_element_key.py's docstring.
++//
++// The compositor is handed a protected frame and nothing else, so the
++// parser has had to GUESS which stream its layer is for, and the one
++// sink the whole app shares has been passed from site to site. WebKit
++// does not guess: each media player owns its own
++// AVSampleBufferDisplayLayer. Doing the same needs an identity that
++// reaches both ends, and the element's ImageContainer is it -
++// SourceBuffer reaches it through MediaDecoder::GetImageContainer(),
++// the placeholder decoder through CreateDecoderParams::mImageContainer,
++// and MediaFormatReader hands the decoder that same object.
++//
++// A SERIAL, NOT THE ADDRESS. HTMLMediaElement::ResetState drops the
++// VideoFrameContainer on every load(), so each new video gets a new
++// container, and the allocator may put it where the last one was. An
++// address would give the next video the last one's identity - and
++// later the last one's sink, which is the bug this is here to end. The
++// table holds a WEAK pointer, and ThreadSafeWeakPtr compares by the
++// object's weak reference, not its address: a new container at a
++// recycled address never matches a dead one's entry.
++//
++// The key is (child id << 32) | serial. The child id is the number the
++// app side already calls child-N, so the key is unique across content
++// processes and reads directly against every other line.
++//
++// The main thread asks from SourceBuffer, the decoder factory's thread
++// from the placeholder - hence the lock. Sixteen slots, dead ones
++// reused first, then the least recently asked; a process with more
++// than sixteen live video elements can split one element's key, and
++// says so when it does.
++struct ReynardElementSlot {
++  ThreadSafeWeakPtr<layers::ImageContainer> mContainer;
++  uint32_t mSerial = 0;
++  uint64_t mAskedAt = 0;
++};
++static StaticMutex sReynardElementMutex;
++
++static uint64_t ReynardElementKeyFor(uintptr_t aContainer) {
++  auto* container = reinterpret_cast<layers::ImageContainer*>(aContainer);
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!container || !cc) {
++    return 0;
++  }
++  const uint64_t child = static_cast<uint64_t>(cc->GetID());
++  StaticMutexAutoLock lock(sReynardElementMutex);
++  static const size_t kSlots = 16;
++  // Allocated once and never freed, as ReynardInitDataTypes above is:
++  // a static with a destructor would run at exit, after the containers
++  // it points at.
++  static auto* sSlots = new ReynardElementSlot[kSlots];
++  static uint32_t sSerial = 0;
++  static uint64_t sClock = 0;
++  sClock++;
++  for (size_t i = 0; i < kSlots; i++) {
++    if (sSlots[i].mContainer == container) {
++      sSlots[i].mAskedAt = sClock;
++      return (child << 32) | sSlots[i].mSerial;
++    }
++  }
++  ReynardElementSlot* slot = nullptr;
++  for (size_t i = 0; i < kSlots && !slot; i++) {
++    if (sSlots[i].mContainer.IsDead()) {
++      slot = &sSlots[i];
++    }
++  }
++  if (!slot) {
++    slot = &sSlots[0];
++    for (size_t i = 1; i < kSlots; i++) {
++      if (sSlots[i].mAskedAt < slot->mAskedAt) {
++        slot = &sSlots[i];
++      }
++    }
++    printf_stderr(
++        "avPlayer: MSE element table full - child-%llu#%u gives up its "
++        "slot, and gets a new key if it is asked for again\n",
++        (unsigned long long)child, slot->mSerial);
++  }
++  if (++sSerial == 0) {
++    ++sSerial;
++  }
++  // The caller holds the container, so this reference is never the
++  // last one and its release below cannot destroy it under the lock.
++  slot->mContainer = RefPtr<layers::ImageContainer>(container);
++  slot->mSerial = sSerial;
++  slot->mAskedAt = sClock;
++  return (child << 32) | slot->mSerial;
++}
++
++// Tell the app side which element a SourceBuffer's picture belongs to.
++//
++// ADDED - see stage1_carry_the_element_key.py's docstring. Same message
++// and same contentId shape as the owner above - "sb-<stream>:<key>" -
++// under its own type string, so no IPDL change and no existing message
++// changes shape.
++//
++// Deduped per stream like the owner, but NEVER across an init segment:
++// a SourceBuffer always starts with one, so a new buffer at a recycled
++// address is always told, and a parser session rebuilt around a live
++// buffer relearns its element with the next one.
++void ReynardMSEForwardElement(uintptr_t aStreamId, uintptr_t aContainer,
++                              bool aIsInit) {
++  MOZ_ASSERT(NS_IsMainThread());
++  ::mozilla::dom::ContentChild* cc =
++      ::mozilla::dom::ContentChild::GetSingleton();
++  if (!cc) {
++    return;
++  }
++  const uint64_t element = ReynardElementKeyFor(aContainer);
++  if (!element) {
++    // An audio element has no container: nothing of it is ever drawn,
++    // so there is nothing for the compositor to match.
++    return;
++  }
++  struct ElementSent {
++    uintptr_t stream;
++    uint64_t element;
++  };
++  static const size_t kSlots = 8;
++  static ElementSent sSent[kSlots] = {};
++  static size_t sNext = 0;
++  ElementSent* slot = nullptr;
++  for (size_t i = 0; i < kSlots && !slot; i++) {
++    if (sSent[i].stream == aStreamId) {
++      slot = &sSent[i];
++    }
++  }
++  if (slot && slot->element == element && !aIsInit) {
++    return;
++  }
++  if (!slot) {
++    for (size_t i = 0; i < kSlots && !slot; i++) {
++      if (sSent[i].stream == 0) {
++        slot = &sSent[i];
++      }
++    }
++  }
++  if (!slot) {
++    slot = &sSent[sNext % kSlots];
++    sNext++;
++  }
++  slot->stream = aStreamId;
++  slot->element = element;
++  printf_stderr("avPlayer: MSE stream sb-%llu is element child-%llu#%llu\n",
++                (unsigned long long)aStreamId,
++                (unsigned long long)(element >> 32),
++                (unsigned long long)(element & 0xffffffffULL));
++  nsTArray<uint8_t> empty;
++  cc->SendAVPlayerKeyGenerateRequest(
++      0,
++      nsPrintfCString("sb-%llu:%llu", (unsigned long long)aStreamId,
++                      (unsigned long long)element),
++      nsCString("element"), empty);
++}
++
 +// The page removed that SourceBuffer, or dropped the MediaSource it
 +// lived on.
 +//
@@ -1835,6 +1995,15 @@ index 000000000000..e859b69f6239
 +                                     empty);
 +}
 +}  // namespace dom
++
++// The same key, for the placeholder decoder - see
++// stage1_carry_the_element_key.py's docstring. In namespace mozilla,
++// not mozilla::dom, because ReynardProtectedPlaceholderDecoder's
++// factory is, and a block-scope declaration names its enclosing
++// namespace. 0 outside a content process, or with no container.
++uint64_t ReynardMSEElementKey(uintptr_t aContainer) {
++  return dom::ReynardElementKeyFor(aContainer);
++}
 +
 +// The element's play state and volume, for the MSE parser route.
 +//

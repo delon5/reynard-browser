@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..0385fba02e86
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,3423 @@
+@@ -0,0 +1,3467 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1031,14 +1031,37 @@ index 000000000000..0385fba02e86
 +// Hops to main for the reason the player version does: a CALayer's tree
 +// belongs there and the compositor thread is where this is called from.
 +// The layer is retained across the hop.
-+void ReynardMSEAttachLayer(void* aLayer) {
++//
++// WITH THE ELEMENT - see stage1_carry_the_element_key.py's docstring.
++// aElement is the key ReynardProtectedPlaceholderDecoder stamped on the
++// frame this layer was built for, or 0 if the frame carried none. The
++// one-argument entry point below stays as the fallback for a parser
++// that predates it.
++void ReynardMSEAttachLayer(void* aLayer, uint64_t aElement) {
 +  if (!aLayer) {
 +    return;
 +  }
 +  id retained = [(id)aLayer retain];
 +  NS_DispatchToMainThread(
-+      NS_NewRunnableFunction("ReynardMSEAttachLayer", [retained]() {
++      NS_NewRunnableFunction("ReynardMSEAttachLayer", [retained, aElement]() {
 +        id parser = (id)NSClassFromString(@"ReynardFairPlayStreamParser");
++        SEL withElement =
++            NSSelectorFromString(@"adoptCompositorLayer:element:");
++        if (parser && [parser respondsToSelector:withElement]) {
++          NSNumber* element =
++              [[NSNumber alloc] initWithUnsignedLongLong:aElement];
++          [parser performSelector:withElement
++                       withObject:retained
++                       withObject:element];
++          [element release];
++          printf_stderr(
++              "mseLayer: handed the compositor's layer to the stream parser "
++              "for element child-%llu#%llu\n",
++              (unsigned long long)(aElement >> 32),
++              (unsigned long long)(aElement & 0xffffffffULL));
++          [retained release];
++          return;
++        }
 +        SEL selector = NSSelectorFromString(@"adoptCompositorLayer:");
 +        bool takes = parser && [parser respondsToSelector:selector];
 +        if (!takes) {
@@ -1400,6 +1423,27 @@ index 000000000000..0385fba02e86
 +                                     stringWithUTF8String:mseValue.get()]
 +                           owner:mseOwner
 +                          offset:mseOffset];
++      return;
++    }
++    // Which element's picture a SourceBuffer is - "sb-<stream>:<key>".
++    //
++    // ADDED - see stage1_carry_the_element_key.py's docstring. The key
++    // is the one the placeholder decoder stamps on the frame the
++    // compositor builds the video layer from, so the parser can match
++    // a layer to the streams it shows instead of guessing. mseValue and
++    // mseOwner above already split it at the colon.
++    if (aInitDataType.EqualsLiteral("element")) {
++      SEL setElement = @selector(parserSetStreamElement:stream:element:);
++      if (!host || ![host respondsToSelector:setElement]) {
++        printf_stderr(
++            "avPlayer: MSE element route unavailable for child %llu\n",
++            (unsigned long long)(aKey >> 32));
++        return;
++      }
++      [host parserSetStreamElement:static_cast<NSUInteger>(aKey >> 32)
++                            stream:[NSString
++                                       stringWithUTF8String:mseValue.get()]
++                           element:mseOwner];
 +      return;
 +    }
 +    // Where the element is playing - see mse_fix_102's docstring.

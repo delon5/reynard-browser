@@ -498,6 +498,17 @@ public final class AVPlayerHost: NSObject {
                                                    offset: offset)
     }
 
+    /// Which element's picture a stream is, keyed the way the compositor
+    /// sees it.
+    ///
+    /// ADDED - see stage1_carry_the_element_key.py's docstring.
+    @objc public func parserSetStreamElement(_ childId: UInt, stream: String,
+                                             element: UInt64) {
+        FairPlayStreamParser.shared.setStreamElement("child-\(childId)",
+                                                     stream: stream,
+                                                     element: element)
+    }
+
     /// The element's volume, for this child's parser session.
     @objc public func parserSetVolume(_ childId: UInt, owner: UInt64,
                                       volume: Double) {

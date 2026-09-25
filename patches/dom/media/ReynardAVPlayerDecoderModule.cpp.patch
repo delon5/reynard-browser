@@ -2,7 +2,7 @@ diff --git a/dom/media/ReynardAVPlayerDecoderModule.cpp b/dom/media/ReynardAVPla
 new file mode 100644
 --- /dev/null
 +++ b/dom/media/ReynardAVPlayerDecoderModule.cpp
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,313 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -121,8 +121,10 @@ new file mode 100644
 +  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ReynardProtectedPlaceholderDecoder,
 +                                        final);
 +
-+  explicit ReynardProtectedPlaceholderDecoder(const VideoInfo& aInfo)
-+      : mDisplay(aInfo.mDisplay) {}
++  // aElement - see stage1_carry_the_element_key.py's docstring.
++  ReynardProtectedPlaceholderDecoder(const VideoInfo& aInfo,
++                                     uint64_t aElement)
++      : mDisplay(aInfo.mDisplay), mElement(aElement) {}
 +
 +  RefPtr<InitPromise> Init() override {
 +    printf_stderr("mseDecoderRoute: protected placeholder decoder %dx%d\n",
@@ -229,6 +231,18 @@ new file mode 100644
 +    // one reads what the other writes.
 +    if (IOSurfaceRef ref = surface->GetIOSurfaceRef().get()) {
 +      IOSurfaceSetValue(ref, CFSTR("ReynardProtectedMSE"), kCFBooleanTrue);
++      // AND WHICH ELEMENT - see stage1_carry_the_element_key.py's
++      // docstring. Beside the route tag, for the same reason the route
++      // tag is here: it arrives with the frame the compositor builds
++      // the layer from, so there is nothing to race.
++      if (mElement) {
++        int64_t element = static_cast<int64_t>(mElement);
++        if (CFNumberRef number = CFNumberCreate(
++                kCFAllocatorDefault, kCFNumberSInt64Type, &element)) {
++          IOSurfaceSetValue(ref, CFSTR("ReynardMSEElement"), number);
++          CFRelease(number);
++        }
++      }
 +    } else {
 +      printf_stderr(
 +          "mseDecoderRoute: placeholder has no IOSurfaceRef - the "
@@ -245,6 +259,9 @@ new file mode 100644
 +  }
 +
 +  const gfx::IntSize mDisplay;
++  // (child id << 32) | the element's serial, from ReynardMSEElementKey.
++  // 0 if the element had none, and then nothing is stamped.
++  const uint64_t mElement;
 +  RefPtr<layers::Image> mImage;
 +};
 +
@@ -285,8 +302,17 @@ new file mode 100644
 +already_AddRefed<MediaDataDecoder>
 +ReynardAVPlayerDecoderModule::CreateProtectedPlaceholderDecoder(
 +    const CreateDecoderParams& aParams) {
++  // WHICH ELEMENT - see stage1_carry_the_element_key.py's docstring.
++  // Defined in FairPlayCDMProxy.mm, in namespace mozilla, which is what
++  // this block-scope declaration names.
++  extern uint64_t ReynardMSEElementKey(uintptr_t aContainer);
++  const uint64_t element = ReynardMSEElementKey(reinterpret_cast<uintptr_t>(
++      static_cast<layers::ImageContainer*>(aParams.mImageContainer)));
++  printf_stderr("mseDecoderRoute: placeholder for element child-%llu#%llu\n",
++                (unsigned long long)(element >> 32),
++                (unsigned long long)(element & 0xffffffffULL));
 +  return MakeAndAddRef<ReynardProtectedPlaceholderDecoder>(
-+      aParams.VideoConfig());
++      aParams.VideoConfig(), element);
 +}
 +
 +}  // namespace mozilla

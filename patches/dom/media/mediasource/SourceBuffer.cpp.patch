@@ -37,7 +37,7 @@ index a77dd302eba5..df3f80412ccf 100644
    AbortBufferAppend();
    if (mTrackBuffersManager) {
      mMediaSource->GetDecoder()->GetDemuxer()->DetachSourceBuffer(
-@@ -571,6 +599,219 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
+@@ -571,6 +599,233 @@ void SourceBuffer::AppendData(RefPtr<MediaByteBuffer>&& aData,
    MOZ_ASSERT(NS_IsMainThread());
    MSE_DEBUG("AppendData(aLength={})", aData->Length());
  
@@ -227,6 +227,20 @@ index a77dd302eba5..df3f80412ccf 100644
 +            reinterpret_cast<uintptr_t>(this),
 +            reinterpret_cast<uintptr_t>(mseOwner),
 +            mCurrentAttributes.GetApparentTimestampOffset());
++        // WHICH ELEMENT, AS THE COMPOSITOR WILL SEE IT - see
++        // stage1_carry_the_element_key.py's docstring. mseOwner is an
++        // address the compositor never sees. The element's
++        // ImageContainer is the one object the placeholder decoder holds
++        // too - MediaFormatReader hands it this same one - so it is the
++        // identity both ends can name. Resent with every init segment,
++        // which is what a new SourceBuffer always starts with.
++        extern void ReynardMSEForwardElement(
++            uintptr_t aStreamId, uintptr_t aContainer, bool aIsInit);
++        ReynardMSEForwardElement(
++            reinterpret_cast<uintptr_t>(this),
++            reinterpret_cast<uintptr_t>(
++                mseOwner ? mseOwner->GetImageContainer() : nullptr),
++            mseIsInit);
 +      }
 +      if (mseIsInit) {
 +        // WHICH ELEMENT owns this SourceBuffer.

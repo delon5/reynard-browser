@@ -741,6 +741,9 @@ public final class FairPlayStreamParser: NSObject {
     /// silent.
     @objc public func retireStream(_ sessionId: String, stream: String) {
         let key = sessionId + "|" + stream
+        // Whether or not a parser was ever built for it - see
+        // stage1_carry_the_element_key.py's docstring.
+        forgetStreamElement(key)
         guard let slot = withState({
             streamParsers.removeValue(forKey: key)
         }) else {
@@ -7345,12 +7348,28 @@ public final class FairPlayStreamParser: NSObject {
     /// session or a stream: it knows one bit about the frame and nothing
     /// about who produced it.
     @objc public static func adoptCompositorLayer(_ layer: CALayer) {
+        offerCompositorLayer(layer, element: 0)
+    }
+
+    /// The same, with the element the compositor built the layer for.
+    ///
+    /// ADDED - see stage1_carry_the_element_key.py's docstring. The key
+    /// NativeLayerCA read off the placeholder frame, or 0 if the frame
+    /// carried none. Stage 1 only reports it against the choice adopt()
+    /// already makes; which stream is chosen does not change yet.
+    @objc public static func adoptCompositorLayer(_ layer: CALayer,
+                                                  element: NSNumber) {
+        offerCompositorLayer(layer, element: element.uint64Value)
+    }
+
+    private static func offerCompositorLayer(_ layer: CALayer,
+                                             element: UInt64) {
         guard let sink = layer as? AVSampleBufferDisplayLayer else {
             log("the compositor offered a \(type(of: layer)) - not an "
                 + "AVSampleBufferDisplayLayer, so it is not ours to take")
             return
         }
-        shared.adopt(sink)
+        shared.adopt(sink, element: element)
     }
 
     /// Move the feed onto the offered layer.
@@ -7458,7 +7477,8 @@ public final class FairPlayStreamParser: NSObject {
             + "while nothing could take it (attempt \(attempt))")
     }
 
-    private func adopt(_ sink: AVSampleBufferDisplayLayer) {
+    private func adopt(_ sink: AVSampleBufferDisplayLayer,
+                       element offered: UInt64? = nil) {
         // Which stream? The one with a picture. There is normally exactly
         // one - a page plays one video at a time - and where there are
         // more, the busiest is the best guess available, since the
@@ -7538,6 +7558,11 @@ public final class FairPlayStreamParser: NSObject {
         // is playing means the guess is wrong.
         Self.log("the compositor's layer goes to \(streamKey), last fed "
                  + "\(Self.hostNow() - chosen.fedAt)s ago")
+        // nil for a claim that is not an offer - the parked-sink claim
+        // in the display-layer build - which has nothing to check.
+        if let offered {
+            reportElementMatch(streamKey, offered: offered)
+        }
         if withState({ streamParsers[streamKey]?.displayLayer === sink }) {
             Self.log("stream \(streamKey) is already using this layer")
             return
@@ -9969,6 +9994,81 @@ public final class FairPlayStreamParser: NSObject {
     /// at zero for the life of the stream, which is what let every
     /// element's clock reach every stream.
     private var pendingOwners: [String: (owner: UInt64, offset: Double)] = [:]
+
+    /// Which element's picture each stream is, in the compositor's terms.
+    ///
+    /// ADDED - see stage1_carry_the_element_key.py's docstring. Kept
+    /// apart from StreamParser on purpose: a parser that stops answering
+    /// is rebuilt as a new object, and a key living on it would go with
+    /// it, while the content process sends this once per init segment.
+    ///
+    /// Keyed by stream key and cleared ONLY when the stream is retired -
+    /// not when its session is destroyed. recycleSession destroys a
+    /// session and carries its live streams into the rebuilt one, and
+    /// nothing would teach them their element again until the page's
+    /// next init segment. Every SourceBuffer's end sends a retire, so
+    /// this does not outlive the page's own streams. Guarded by the
+    /// state lock.
+    private var streamElements: [String: UInt64] = [:]
+
+    /// "child-13#4", as the content process and NativeLayerCA print it.
+    fileprivate static func describeElement(_ element: UInt64) -> String {
+        guard element != 0 else { return "none" }
+        return "child-\(element >> 32)#\(element & 0xffff_ffff)"
+    }
+
+    /// The content process says which element a stream's picture is.
+    @objc public func setStreamElement(_ sessionId: String, stream: String,
+                                       element: UInt64) {
+        let key = sessionId + "|" + stream
+        let was = withState { () -> UInt64? in
+            let previous = streamElements[key]
+            streamElements[key] = element
+            return previous
+        }
+        guard was != element else { return }
+        Self.log("stream \(key) is element \(Self.describeElement(element))"
+                 + (was.map { " - it was \(Self.describeElement($0))" }
+                    ?? ""))
+    }
+
+    /// A retired stream's element goes with it.
+    fileprivate func forgetStreamElement(_ key: String) {
+        withState { _ = streamElements.removeValue(forKey: key) }
+    }
+
+    /// Is adopt()'s guess the element the compositor built the layer for?
+    ///
+    /// ADDED - see stage1_carry_the_element_key.py's docstring. LOG ONLY:
+    /// the choice is made exactly as before. When the two disagree this
+    /// names the streams that should have had the layer, which is the
+    /// cross-tab and cross-site failure caught in the act, and what
+    /// stage 2 replaces the guess with.
+    fileprivate func reportElementMatch(_ streamKey: String,
+                                        offered: UInt64) {
+        let found = withState { () -> (mine: UInt64, rightful: [String]) in
+            let mine = streamElements[streamKey] ?? 0
+            let rightful: [String] = offered == 0 ? [] : streamParsers.keys
+                .filter { streamElements[$0] == offered }
+                .sorted()
+            return (mine, rightful)
+        }
+        let verdict: String
+        if offered == 0 {
+            verdict = "the frame carried no element key"
+        } else if found.mine == 0 {
+            verdict = "the chosen stream has no element key yet"
+        } else if found.mine == offered {
+            verdict = "MATCH"
+        } else {
+            verdict = "WRONG ELEMENT - the layer's own streams are "
+                + (found.rightful.isEmpty
+                   ? "not built" : found.rightful.joined(separator: ", "))
+        }
+        Self.log("element check: the compositor built this layer for "
+                 + "\(Self.describeElement(offered)), and \(streamKey) is "
+                 + "\(Self.describeElement(found.mine)) - \(verdict)")
+    }
 
     /// Apply an owner that was waiting for this stream to exist.
     fileprivate func adoptPendingOwner(_ key: String) {
