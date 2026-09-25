@@ -5693,7 +5693,17 @@ public final class FairPlayStreamParser: NSObject {
                 let now = CMTimebaseGetTime(timebase).seconds
                 let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
                 let ranAhead = withState { () -> (late: Double, nth: Int)? in
-                    guard let slot = streamParsers[streamKey] else { return nil }
+                    // STILL THIS STREAM'S LAYER - see
+                    // fix_clk_correction_checks_the_layer.py's docstring.
+                    // The consume above checks this; the correction did
+                    // not, so an adopt() landing between the two rewound
+                    // the RETIRED layer's clock and realigned the
+                    // session's live audio to it - capture f8803d5a,
+                    // "CLOCK RAN AHEAD by 31.525s" on 0x131fb2ab0 at the
+                    // tv.apple.com adopt. Same test, same hold, so adopt
+                    // cannot land inside it.
+                    guard let slot = streamParsers[streamKey],
+                          slot.displayLayer === layer else { return nil }
                     if pts.isFinite {
                         slot.maxEnqueuedPTS = slot.maxEnqueuedPTS.isFinite
                             ? max(slot.maxEnqueuedPTS, pts) : pts
