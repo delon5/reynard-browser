@@ -3602,7 +3602,32 @@ public final class FairPlayStreamParser: NSObject {
             Self.log("stream \(stream) parser \(why) - building a new one")
             carriedInit = withState { existing.initSegment }
             entry.keySession.removeContentKeyRecipient(existing.recipient)
-            withState { streamParsers[key] = nil }
+            // AND ITS OBSERVERS - see
+            // fix_df9_df10_decode_failure_observer_leaks.py's docstring.
+            //
+            // Every other way out of streamParsers goes through
+            // tearDownStream, which removes these. This one did not, so
+            // the discarded slot's decode-failure observer stayed on its
+            // display layer - often the process-wide sink - under the
+            // same label the replacement will use, and every failure
+            // there was logged twice. Not routed through tearDownStream:
+            // this is a parser swap for a SourceBuffer that is still
+            // playing, and teardown would stop its drain and its clock.
+            //
+            // Taken and cleared with the slot's removal; removed from
+            // NotificationCenter after the lock is released, like every
+            // other removeObserver in this file.
+            let orphaned = withState { () -> [NSObjectProtocol] in
+                streamParsers[key] = nil
+                let tokens = [existing.failObserver,
+                              existing.audioFlushObserver].compactMap { $0 }
+                existing.failObserver = nil
+                existing.audioFlushObserver = nil
+                return tokens
+            }
+            for token in orphaned {
+                NotificationCenter.default.removeObserver(token)
+            }
             slot = nil
         }
         if slot == nil {
@@ -8822,8 +8847,31 @@ public final class FairPlayStreamParser: NSObject {
             log("stream \(label) FAILED TO DECODE: "
                 + String(describing: error))
         }
-        shared.withState {
-            shared.streamParsers[label]?.failObserver = observer
+        // STORE IT OR REMOVE IT - see
+        // fix_df9_df10_decode_failure_observer_leaks.py's docstring.
+        //
+        // The optional chain this replaces dropped the token silently
+        // when the slot was gone - adopt() calls here after its handover
+        // closure has released the lock - and NotificationCenter kept
+        // the block for good. Both callers set slot.displayLayer to
+        // this layer under the lock BEFORE calling, and nothing else
+        // writes it, so a slot that no longer holds this layer has moved
+        // on and this observer is for nothing.
+        let kept = shared.withState {
+            () -> (stored: Bool, previous: NSObjectProtocol?) in
+            guard let slot = shared.streamParsers[label],
+                  slot.displayLayer === layer else { return (false, nil) }
+            let previous = slot.failObserver
+            slot.failObserver = observer
+            return (true, previous)
+        }
+        if !kept.stored {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        // Replaced rather than overwritten: a token overwritten while
+        // still registered is the same leak.
+        if let previous = kept.previous {
+            NotificationCenter.default.removeObserver(previous)
         }
     }
 
