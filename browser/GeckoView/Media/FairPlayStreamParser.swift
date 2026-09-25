@@ -3537,6 +3537,12 @@ public final class FairPlayStreamParser: NSObject {
         var audioStandDownLogged = false
         /// Said once - see mse_fix_136's docstring.
         var audioHorizonLogged = false
+        /// What the drain has handed the audio renderer recently.
+        ///
+        /// ADDED - see fix_audio_refeed_after_automatic_flush.py's
+        /// docstring. The renderer throws its queue away on a route
+        /// change and expects it back; this is what it gets back.
+        var audioRecentlyFed: [CMSampleBuffer] = []
         var audioLastReport = ""
         /// When the audio renderer was last flushed out of .failed.
         ///
@@ -6892,6 +6898,14 @@ public final class FairPlayStreamParser: NSObject {
     /// 6db1f5c7 on the first check.
     fileprivate static let audioArmGrace: Double = 1.0
 
+    /// How much fed audio each stream keeps for an automatic flush.
+    ///
+    /// ADDED - see fix_audio_refeed_after_automatic_flush.py's
+    /// docstring. The drain never feeds further than feedAhead past the
+    /// synchronizer's clock, so the renderer never holds more than that
+    /// plus the buffer that crossed it; two seconds over is ample.
+    fileprivate static let audioRefeedSpan: Double = feedAhead + 2.0
+
     /// How far past the synchronizer's clock the head of the audio
     /// queue is, when that is further than the drain should go.
     ///
@@ -7086,6 +7100,28 @@ public final class FairPlayStreamParser: NSObject {
                 // WHEN - see mse_fix_135's docstring. This is what tells
                 // a working arm from a dead one.
                 slot.audioFedAt = Self.hostNow()
+                // KEPT FOR AN AUTOMATIC FLUSH - see
+                // fix_audio_refeed_after_automatic_flush.py's docstring.
+                // A backwards step means a new part of the timeline, so
+                // what was kept belongs to the old one and goes.
+                let fedAt = CMSampleBufferGetPresentationTimeStamp(sample)
+                    .seconds
+                if fedAt.isFinite {
+                    if let last = slot.audioRecentlyFed.last {
+                        let lastAt = CMSampleBufferGetPresentationTimeStamp(
+                            last).seconds
+                        if lastAt.isFinite, fedAt < lastAt - 1.0 {
+                            slot.audioRecentlyFed.removeAll()
+                        }
+                    }
+                    slot.audioRecentlyFed.append(sample)
+                    let oldest = fedAt - Self.audioRefeedSpan
+                    while let head = slot.audioRecentlyFed.first,
+                          CMSampleBufferGetPresentationTimeStamp(head)
+                            .seconds < oldest {
+                        slot.audioRecentlyFed.removeFirst()
+                    }
+                }
                 return slot.audioEnqueued
             }
             let report = "status=\(renderer.status.rawValue) "
@@ -7303,9 +7339,79 @@ public final class FairPlayStreamParser: NSObject {
             forName: name, object: renderer, queue: nil) { note in
             log("stream \(label) audio renderer FLUSHED AUTOMATICALLY: "
                 + String(describing: note.userInfo))
+            // AND GIVE IT BACK - see
+            // fix_audio_refeed_after_automatic_flush.py's docstring.
+            // Spelled as a string for the reason the name above is.
+            let from = (note.userInfo?[
+                "AVSampleBufferAudioRendererFlushTimeKey"] as? NSValue)?
+                .timeValue
+            shared.refeedAfterAutomaticFlush(label, from: from)
         }
         shared.withState {
             shared.streamParsers[label]?.audioFlushObserver = observer
+        }
+    }
+
+    /// The renderer threw away what it held; hand it back.
+    ///
+    /// ADDED - see fix_audio_refeed_after_automatic_flush.py's
+    /// docstring. WebKit re-enqueues from the current time on this
+    /// notification. What goes back is what this stream fed from the
+    /// flush time on - including the buffer the flush time falls inside
+    /// - up to the head of the pending queue, which still holds
+    /// everything after it. Bounded by the flush time plus the span as
+    /// well, so a kept sample from another part of the timeline can
+    /// never be replayed. No flush time: everything kept, still bounded
+    /// by the pending head.
+    fileprivate func refeedAfterAutomaticFlush(_ streamKey: String,
+                                               from flushedAt: CMTime?) {
+        guard let work = withState({
+            () -> (renderer: AVSampleBufferAudioRenderer,
+                   queue: DispatchQueue)? in
+            guard let slot = streamParsers[streamKey],
+                  let renderer = slot.audioRenderer,
+                  let queue = slot.audioQueue else { return nil }
+            return (renderer, queue)
+        }) else { return }
+        // ON THE AUDIO QUEUE, where the drain enqueues, so nothing is fed
+        // while this runs - and flushed once more first, so whatever the
+        // drain fed between AVFoundation's flush and this block is
+        // emptied too and every buffer below goes back exactly once.
+        // flush() must not race an enqueue(); this file's rule.
+        work.queue.async {
+            work.renderer.flush()
+            let parser = FairPlayStreamParser.shared
+            let back = parser.withState { () -> Int in
+                guard let slot = parser.streamParsers[streamKey] else {
+                    return 0
+                }
+                let from = flushedAt.map { $0.seconds }
+                    .flatMap { $0.isFinite ? $0 : nil } ?? -Double.infinity
+                let pendingHead = slot.audioPending.first.map {
+                    CMSampleBufferGetPresentationTimeStamp($0).seconds
+                }
+                let upTo = pendingHead.flatMap { $0.isFinite ? $0 : nil }
+                    ?? Double.infinity
+                let cap = from.isFinite
+                    ? from + Self.audioRefeedSpan : Double.infinity
+                let kept = slot.audioRecentlyFed.filter { sample in
+                    let at = CMSampleBufferGetPresentationTimeStamp(sample)
+                        .seconds
+                    let length = CMSampleBufferGetDuration(sample).seconds
+                    let end = at + (length.isFinite ? length : 0)
+                    return at.isFinite && end > from && at < upTo
+                        && at < cap
+                }
+                slot.audioRecentlyFed.removeAll()
+                slot.audioPending = kept + slot.audioPending
+                return kept.count
+            }
+            Self.log("stream \(streamKey) audio renderer flushed itself - "
+                     + "\(back) fed buffer(s) from "
+                     + (flushedAt.map { "\($0.seconds)" }
+                        ?? "an unknown time")
+                     + " put back in front of the queue")
+            parser.armAudioDrainIfNeeded(streamKey: streamKey)
         }
     }
 
