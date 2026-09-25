@@ -9165,6 +9165,32 @@ public final class FairPlayStreamParser: NSObject {
             if let timebase = slot.displayLayer?.controlTimebase {
                 CMTimebaseSetRate(timebase, rate: 0.0)
             }
+            // AND WHAT IT LEFT QUEUED - see
+            // fix_a4_teardown_flushes_the_video_sink.py's docstring.
+            //
+            // The audio renderer above is flushed; this never was. The
+            // compositor's sink outlives the stream - parked for the
+            // session's next one, or released to the next site - and
+            // whoever takes it inherits these frames. Capture f8803d5a:
+            // the 36 -11821s were netflix's leftovers (PTS 630-631,
+            // subtype cavc), decoded under tv.apple.com's clock.
+            //
+            // On the drain queue, like every video flush in this file:
+            // flush() must not race an enqueue. flush(), not
+            // flushAndRemoveImage(): the picture stays until the next
+            // tenant replaces it. Only the compositor's sink - a layer
+            // this parser built is removed below and nothing claims it.
+            if !slot.ownsDisplayLayer, let layer = slot.displayLayer {
+                Self.log("stream \(key) torn down - flushing the "
+                         + "compositor's sink so whatever claims it next "
+                         + "does not decode the samples this stream left "
+                         + "queued")
+                if let queue = slot.drainQueue {
+                    queue.async { layer.flush() }
+                } else {
+                    layer.flush()
+                }
+            }
         }
         if let observer = slot.failObserver {
             NotificationCenter.default.removeObserver(observer)
