@@ -9077,9 +9077,54 @@ public final class FairPlayStreamParser: NSObject {
                                 keySession: AVContentKeySession?,
                                 why: String) {
         keySession?.removeContentKeyRecipient(slot.recipient)
+        // WHO ELSE IS ON THIS LAYER - see
+        // fix_td4_teardown_checks_the_shared_sink.py's docstring.
+        //
+        // slot.displayLayer is never cleared, so it can still name the
+        // compositor's shared sink after another stream has adopted it -
+        // and a layer has one drain block and one control timebase,
+        // whoever set them last. Tearing down a stale stream must not
+        // take them away from a live one. The caller has already
+        // removed this slot, so every stream found here is somebody
+        // else.
+        //
+        // sameSession: any holder, live or parked, whose key session is
+        // ours - taking the layer out of THAT session stops them
+        // decrypting, and nothing puts a recipient back.
+        // live: any holder not superseded, in any session - it owns the
+        // drain and the clock. A parked holder is not playing, and
+        // unpark restarts both itself.
+        //
+        // Read under the state lock and acted on outside it: no
+        // AVFoundation call is made while the lock is held.
+        let layerHeldBy = withState {
+            () -> (live: String?, sameSession: String?) in
+            guard let layer = slot.displayLayer else { return (nil, nil) }
+            var live: String?
+            var sameSession: String?
+            for other in streamParsers.keys.sorted() {
+                guard let peer = streamParsers[other],
+                      peer.displayLayer === layer else { continue }
+                if live == nil, peer.supersededBy == nil {
+                    live = other
+                }
+                if sameSession == nil, sessionOf(other) == sessionOf(key) {
+                    sameSession = other
+                }
+            }
+            return (live, sameSession)
+        }
         if let layer = slot.displayLayer,
            let recipient = (layer as AnyObject) as? AVContentKeyRecipient {
-            keySession?.removeContentKeyRecipient(recipient)
+            if let peer = layerHeldBy.sameSession {
+                Self.log("stream \(key) torn down WITHOUT taking its "
+                         + "display layer out of key session "
+                         + "\(sessionOf(key)) - \(peer) is still on that "
+                         + "layer in the same session, and removing it "
+                         + "would stop \(peer) decrypting")
+            } else {
+                keySession?.removeContentKeyRecipient(recipient)
+            }
         }
         if let renderer = slot.audioRenderer {
             if let recipient = (renderer as AnyObject)
@@ -9103,12 +9148,23 @@ public final class FairPlayStreamParser: NSObject {
             }
         }
         slot.audioSynchronizer?.rate = 0
-        slot.displayLayer?.stopRequestingMediaData()
-        // The timebase too. destroySession never stopped it, so a torn
-        // down layer's clock carried on running - and adopt() and
-        // videoClock() both read timebases.
-        if let timebase = slot.displayLayer?.controlTimebase {
-            CMTimebaseSetRate(timebase, rate: 0.0)
+        if let peer = layerHeldBy.live {
+            // Their drain block and their clock - see
+            // fix_td4_teardown_checks_the_shared_sink.py's docstring.
+            // If this stream's own drain block is still the one
+            // installed, its next call finds the slot gone and stops
+            // requesting by itself (drainPending's identity check).
+            Self.log("stream \(key) torn down WITHOUT stopping its "
+                     + "display layer's drain or clock - \(peer) is "
+                     + "still playing through that layer")
+        } else {
+            slot.displayLayer?.stopRequestingMediaData()
+            // The timebase too. destroySession never stopped it, so a
+            // torn down layer's clock carried on running - and adopt()
+            // and videoClock() both read timebases.
+            if let timebase = slot.displayLayer?.controlTimebase {
+                CMTimebaseSetRate(timebase, rate: 0.0)
+            }
         }
         if let observer = slot.failObserver {
             NotificationCenter.default.removeObserver(observer)
