@@ -852,6 +852,19 @@ public final class AVPlayerHost: NSObject {
             return 0
         }
 
+        // WEB ONLY - see fix_avplayer_create_web_only.py. The URL comes
+        // from a content process over PContent and nothing on the way
+        // checks its scheme, while the frame fallback hands decoded
+        // pixels back to that process. An honest child only ever sends
+        // what its media element loaded; a compromised one could name a
+        // file:// path inside this container. Refused here, once, for
+        // every route. The scheme is logged, never the URL.
+        guard let scheme = parsed.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            avLog("refusing a player for a non-web URL scheme: \(parsed.scheme ?? "none")")
+            return 0
+        }
+
         let asset = AVURLAsset(url: parsed)
 
         // The whole reason this pipeline exists. addContentKeyRecipient
