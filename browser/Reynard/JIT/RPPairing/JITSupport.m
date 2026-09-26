@@ -188,7 +188,14 @@ static NSArray<NSNumber *> *readLiveJITSessionPIDs(int fd) {
     lseek(fd, 0, SEEK_SET);
     if (fileSize > 0 && fileSize < (1024 * 1024)) {
         NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)fileSize];
-        read(fd, data.mutableBytes, (size_t)fileSize);
+        // Exactly the bytes read, and nothing on a failed read - see
+        // fix_jit_session_pid_file_io_checked.py. A short read left the
+        // tail of the buffer zeroed and could cut a line in two.
+        ssize_t got = read(fd, data.mutableBytes, (size_t)fileSize);
+        if (got <= 0) {
+            return live;
+        }
+        data.length = (NSUInteger)got;
         NSString *contents = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         for (NSString *line in [contents componentsSeparatedByString:@"\n"]) {
             NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -214,7 +221,21 @@ static void writeJITSessionPIDs(int fd, NSArray<NSNumber *> *pids) {
     NSData *newData = [newContents dataUsingEncoding:NSUTF8StringEncoding];
     lseek(fd, 0, SEEK_SET);
     ftruncate(fd, 0);
-    write(fd, newData.bytes, newData.length);
+    // All of it or none of it - see fix_jit_session_pid_file_io_checked.py.
+    // A short write left a clipped last line for the next reader.
+    const uint8_t *bytes = newData.bytes;
+    NSUInteger written = 0;
+    while (written < newData.length) {
+        ssize_t n = write(fd, bytes + written, newData.length - written);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            ftruncate(fd, 0);
+            return;
+        }
+        written += (NSUInteger)n;
+    }
 }
 
 static void addPIDToSharedActiveSessions(int32_t pid) {
