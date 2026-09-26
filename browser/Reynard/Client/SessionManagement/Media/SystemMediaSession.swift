@@ -441,7 +441,20 @@ final class SystemMediaSession: MediaSessionDelegate {
     private func state(for session: GeckoSession) -> SessionState {
         let identifier = ObjectIdentifier(session)
         if let state = sessionStates[identifier] {
-            return state
+            // THE SAME OBJECT, not just the same address - see
+            // fix_media_session_state_checks_identity.py. ObjectIdentifier
+            // is the address, and revalidate() runs only on the playback
+            // callbacks, so a session allocated where a dead one was could
+            // inherit its entry here: the title landed on a state whose
+            // weak session was nil, hasPlayingSession ignored it, and the
+            // next revalidate() purged the metadata it had just been given.
+            if state.session === session {
+                return state
+            }
+            state.artworkTask?.cancel()
+            playbackHistory.removeAll { $0 == identifier }
+            interruptedPlaybackSessions.remove(identifier)
+            logger("mediaSession: replaced a stale state - a new session reused a dead one's address")
         }
         
         let state = SessionState(session: session)
