@@ -924,7 +924,13 @@ final class TabManagerImplementation: NSObject, TabManager {
         tab.favicon = cachedImage
         notifyUpdate(at: index, mode: mode, reason: .favicon)
         
+        // NOT FOR A PRIVATE TAB - see fix_private_tabs_skip_favicon_fetch.py.
+        // The cached lookup above is a local read and stays. The fetch
+        // below writes the origin and icon to AppData/Favicons and
+        // re-fetches the page from the app process, and a private tab
+        // may leave neither behind.
         guard cachedImage == nil,
+              !tab.isPrivate,
               let url = remoteURL(from: tab.url) else {
             return
         }
@@ -2287,7 +2293,10 @@ extension TabManagerImplementation: ContentDelegate {
     }
     
     func onWebAppManifest(session: GeckoSession, manifest: Any) {
+        // Same rule as scheduleFaviconUpdate - see
+        // fix_private_tabs_skip_favicon_fetch.py.
         guard let location = tabLocation(for: session),
+              !tabs(for: location.mode)[location.index].isPrivate,
               let url = remoteURL(from: tabs(for: location.mode)[location.index].url) else {
             return
         }
