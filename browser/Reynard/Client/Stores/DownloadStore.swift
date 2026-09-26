@@ -403,7 +403,11 @@ final class DownloadStore: NSObject {
                 }
             }
             
-            self.persistedDownloads.removeAll()
+            // REMOVED an unconditional `persistedDownloads.removeAll()` here -
+            // see fix_download_clear_keeps_older_entries.py. The branches
+            // above already removed exactly the entries in range; this
+            // emptied the manifest for a ranged clear as well, leaving the
+            // older files on disk with no entry pointing at them.
             self.savePersistedDownloadsLocked()
             self.postDidChange()
         }
@@ -652,7 +656,14 @@ final class DownloadStore: NSObject {
             .filter { !$0.isEmpty }
             .joined(separator: "-")
         
-        return sanitized.isEmpty ? NSLocalizedString("Download", comment: "") : sanitized
+        // "." and ".." are directories, not names - see
+        // fix_download_clear_keeps_older_entries.py. Both resolve to an
+        // existing path, so the uniqueness loop happened to rename them;
+        // fall back on purpose instead of by accident.
+        guard !sanitized.isEmpty, sanitized != ".", sanitized != ".." else {
+            return NSLocalizedString("Download", comment: "")
+        }
+        return sanitized
     }
     
     private func makeUniqueDestinationURLLocked(for fileName: String) -> URL {
