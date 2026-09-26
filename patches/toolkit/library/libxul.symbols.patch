@@ -1,12 +1,13 @@
 diff --git a/toolkit/library/libxul.symbols b/toolkit/library/libxul.symbols
-index e63e3e74426b..82c532da09f9 100644
+index e63e3e74426b..57337d0858de 100644
 --- a/toolkit/library/libxul.symbols
 +++ b/toolkit/library/libxul.symbols
-@@ -3,6 +3,18 @@ uprofiler_get
+@@ -3,6 +3,19 @@ uprofiler_get
  #ifdef XP_IOS
  MainProcessInit
  ChildProcessInit
 +ReportJITStatusForChild
++JITListeningSecret
 +GeckoViewSetBackingScaleOverride
 +ReynardAVPlayerNotifyMetadata
 +ReynardAVPlayerNotifyFrame
