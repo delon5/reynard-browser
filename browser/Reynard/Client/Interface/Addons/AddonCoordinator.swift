@@ -115,35 +115,15 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
         }
         
         guard let xpiURL = Bundle.main.url(forResource: "SafeAreaDetector-signed", withExtension: "xpi") else {
-            presentDiagnosticAlert(title: "SafeAreaDetector", message: "SafeAreaDetector-signed.xpi not found in app bundle — check it's added to Copy Bundle Resources under the Reynard target")
+            // Logged, not alerted - see fix_addon_diagnostic_alerts_to_log.py.
+            NSLog("[Reynard] SafeAreaDetector-signed.xpi not found in the app bundle - check Copy Bundle Resources")
             return
         }
         do {
             let addon = try await AddonRuntime.shared.install(url: xpiURL.absoluteString)
-            presentDiagnosticAlert(title: "SafeAreaDetector: Installed", message: "id: \(addon.id)\nisBuiltIn: \(addon.isBuiltIn)\n\nNow browse to any page and check for a second alert confirming the detection message was received.")
+            NSLog("[Reynard] SafeAreaDetector installed: id=%@ isBuiltIn=%d", addon.id, addon.isBuiltIn ? 1 : 0)
         } catch {
-            presentDiagnosticAlert(title: "SafeAreaDetector: Install Failed", message: "URI tried:\n\(xpiURL.absoluteString)\n\nError:\n\(String(describing: error))")
-        }
-    }
-    
-    /// Same on-screen diagnostic pattern proven useful earlier tonight —
-    /// bypasses logging entirely, which was genuinely unreliable to
-    /// check. Delayed slightly to give the app time to fully launch
-    /// before attempting to present anything.
-    @MainActor
-    private func presentDiagnosticAlert(title: String, message: String) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
-                  let rootViewController = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
-                return
-            }
-            var topViewController = rootViewController
-            while let presented = topViewController.presentedViewController {
-                topViewController = presented
-            }
-            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            topViewController.present(alert, animated: true)
+            NSLog("[Reynard] SafeAreaDetector install failed for %@: %@", xpiURL.absoluteString, String(describing: error))
         }
     }
     
@@ -160,7 +140,8 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
         // regardless of whether tab lookup or payload extraction
         // actually succeed, so a real answer either way, not just on
         // the success path.
-        presentDiagnosticAlert(title: "Native message received", message: "Raw payload:\n\(String(describing: message))")
+        // Logged, not alerted - see fix_addon_diagnostic_alerts_to_log.py.
+        NSLog("[Reynard] addon native message received: %@", String(describing: message))
         
         guard let dataSource,
               let index = dataSource.indexOfAddonTab(for: session),
