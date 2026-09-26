@@ -106,6 +106,9 @@ extension BrowserViewController: TabManagerDelegate {
            fullscreenSession !== selectedTab.session {
             applyFullscreenState(false, for: fullscreenSession)
         }
+        // Last, with the chrome settled underneath - see
+        // fix_private_lock_covers_every_route_into_private_tabs.py.
+        privateBrowsingLockCoordinator.noteTabSelection()
     }
     
     func tabManagerDidUpdateSafeAreaUsage(_ tabManager: TabManager) {

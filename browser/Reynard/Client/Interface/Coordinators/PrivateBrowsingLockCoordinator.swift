@@ -23,6 +23,9 @@ final class PrivateBrowsingLockCoordinator {
     private let tabManager: TabManager
 
     private(set) var isLocked = false
+    /// Whether the last selection noteTabSelection saw was a private
+    /// tab - see fix_private_lock_covers_every_route_into_private_tabs.py.
+    private var wasOnPrivateTabs = false
     private var presentedLockViewController: PrivateBrowsingLockViewController?
 
     /// One authentication at a time. LAContext cancels an in-flight
@@ -73,9 +76,15 @@ final class PrivateBrowsingLockCoordinator {
     /// restored session left the user on a private tab, this locks the app
     /// immediately so `presentLockIfNeeded` has something to enforce.
     func lockInitialStateIfNeeded() {
-        guard isProtectionEnabled, isEffectivelyOnPrivateTabs else {
+        // Locked whenever protection is on, not only when the app opens
+        // onto private tabs: a session that starts on regular tabs is
+        // otherwise never locked, and its private tabs are one last-tab
+        // close away. Presentation stays gated on being on private tabs.
+        // See fix_private_lock_covers_every_route_into_private_tabs.py.
+        guard isProtectionEnabled else {
             return
         }
+        wasOnPrivateTabs = isEffectivelyOnPrivateTabs
         isLocked = true
     }
 
@@ -187,6 +196,42 @@ final class PrivateBrowsingLockCoordinator {
     }
 
     // MARK: - Lock Screen
+
+    /// Every tab selection passes through here, from the chrome's
+    /// didSelectTabAt - see
+    /// fix_private_lock_covers_every_route_into_private_tabs.py. The tab
+    /// manager reaches a private tab on its own when the last regular tab
+    /// closes or all of them are cleared, and nothing asked for Face ID on
+    /// the way; the overview's route authenticates first, which clears
+    /// the lock, so its selection presents nothing here. Leaving private
+    /// tabs re-arms the lock for the next way back in.
+    func noteTabSelection() {
+        guard isProtectionEnabled else {
+            wasOnPrivateTabs = false
+            return
+        }
+        let onPrivateTabs = tabManager.selectedTabMode == .private
+        defer {
+            wasOnPrivateTabs = onPrivateTabs
+        }
+        guard onPrivateTabs else {
+            if wasOnPrivateTabs {
+                isLocked = true
+            }
+            return
+        }
+        guard isLocked, presentedLockViewController == nil else {
+            return
+        }
+        guard host?.viewIfLoaded?.window != nil else {
+            // Not on screen yet (launch): presentLockIfNeeded runs at
+            // didBecomeActive with the lock still armed.
+            return
+        }
+        logger("privateLock: selection landed on private tabs while locked - presenting")
+        showPrivacyCurtain()
+        presentLockIfNeeded(animated: false)
+    }
 
     private func presentLockScreen(animated: Bool) {
         guard let host else {
@@ -311,7 +356,13 @@ final class PrivateBrowsingLockCoordinator {
         } else {
             tabManager.selectTab(at: 0, mode: .regular)
         }
-        dismissLockScreen(unlocked: true)
+        // STILL LOCKED: nothing was authenticated. The lock screen and the
+        // curtain go because regular tabs are now on screen. See
+        // fix_private_lock_covers_every_route_into_private_tabs.py.
+        presentedLockViewController?.dismiss(animated: true)
+        presentedLockViewController = nil
+        hidePrivacyCurtain()
+        isLocked = true
     }
 
     private func dismissLockScreen(unlocked: Bool) {
