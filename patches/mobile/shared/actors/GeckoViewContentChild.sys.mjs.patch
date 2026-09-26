@@ -5977,7 +5977,7 @@ index 9ca6e15bed3e..5e1d6194bf28 100644
      }
  
      return null;
-@@ -199,11 +6153,396 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,11 +6153,411 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
  
@@ -6140,8 +6140,17 @@ index 9ca6e15bed3e..5e1d6194bf28 100644
 +      //
 +      // Defined on the SANDBOX, not the window: page script cannot
 +      // see it, while the shim's closures can.
++      // BOUNDED - see fix_shim_log_hooks_bounded.py. dump() from a
++      // content process lands in Documents/reynard_stdout.txt, which
++      // rotates only at launch, and every line the shim writes is
++      // driven by the page and carries text it controls.
++      let emeLogBudget = 20000;
 +      Cu.exportFunction(
-+        message => dump("webkitEME: " + message + "\n"),
++        message => {
++          if (emeLogBudget-- > 0) {
++            dump("webkitEME: " + String(message).slice(0, 2048) + "\n");
++          }
++        },
 +        sandbox,
 +        { defineAs: "__reynardEmeLog" }
 +      );
@@ -6223,8 +6232,14 @@ index 9ca6e15bed3e..5e1d6194bf28 100644
 +      });
 +      // Defined on the SANDBOX, not the window: page script cannot see
 +      // either, while the shim's closures can.
++      // BOUNDED, like the EME hook - see fix_shim_log_hooks_bounded.py.
++      let airPlayLogBudget = 20000;
 +      Cu.exportFunction(
-+        message => dump("airplay: " + message + "\n"),
++        message => {
++          if (airPlayLogBudget-- > 0) {
++            dump("airplay: " + String(message).slice(0, 2048) + "\n");
++          }
++        },
 +        sandbox,
 +        { defineAs: "__reynardAirPlayLog" }
 +      );
