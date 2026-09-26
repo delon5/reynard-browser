@@ -1631,10 +1631,10 @@ index 000000000000..0385fba02e86
 +      [host resume:playerId];
 +      break;
 +    case kAVPlayerSeek:
-+      [host seek:playerId to:aArg];
++      if (std::isfinite(aArg)) [host seek:playerId to:aArg];  // fix_broker_control_rejects_non_finite.py
 +      break;
 +    case kAVPlayerVolume:
-+      [host setVolume:playerId to:aArg];
++      if (std::isfinite(aArg)) [host setVolume:playerId to:aArg];
 +      break;
 +    case kAVPlayerSetExternalPlayback:
 +      // Optional on the protocol, like the FairPlay methods: a host
@@ -1692,10 +1692,10 @@ index 000000000000..0385fba02e86
 +      [host resume:playerId];
 +      break;
 +    case kAVPlayerSeek:
-+      [host seek:playerId to:aArg];
++      if (std::isfinite(aArg)) [host seek:playerId to:aArg];  // fix_broker_control_rejects_non_finite.py
 +      break;
 +    case kAVPlayerVolume:
-+      [host setVolume:playerId to:aArg];
++      if (std::isfinite(aArg)) [host setVolume:playerId to:aArg];
 +      break;
 +    case kAVPlayerSetExternalPlayback:
 +      // Optional on the protocol, like the FairPlay methods: a host
