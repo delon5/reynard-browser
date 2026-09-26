@@ -18,7 +18,21 @@ final class SelectionActionPresenter: SelectionActionPresenting {
         static let modernMenuVerticalOffset: CGFloat = 40
     }
     
-    private var menuHosts: [ObjectIdentifier: SelectionActionMenuHostView] = [:]
+    /// CHANGED - see fix_selection_menu_hosts_forget_dead_sessions.py.
+    /// The key is an address, so each entry also remembers WHICH session
+    /// it was made for; a dead session's entry is dropped the next time a
+    /// host is made, and an entry never answers for a different object at
+    /// the same address.
+    private final class MenuHostEntry {
+        weak var session: GeckoSession?
+        let host: SelectionActionMenuHostView
+        
+        init(session: GeckoSession, host: SelectionActionMenuHostView) {
+            self.session = session
+            self.host = host
+        }
+    }
+    private var menuHosts: [ObjectIdentifier: MenuHostEntry] = [:]
     private let onMenuDismissed: (GeckoSession) -> Void
     
     // MARK: - Lifecycle
@@ -60,17 +74,29 @@ final class SelectionActionPresenter: SelectionActionPresenting {
     // MARK: - Hosts
     
     private func existingMenuHost(for session: GeckoSession) -> SelectionActionMenuHostView? {
-        menuHosts[ObjectIdentifier(session)]
+        guard let entry = menuHosts[ObjectIdentifier(session)],
+              entry.session === session else {
+            return nil
+        }
+        return entry.host
     }
     
     private func menuHost(for session: GeckoSession) -> SelectionActionMenuHostView {
         let key = ObjectIdentifier(session)
-        if let host = menuHosts[key] {
-            return host
+        if let entry = menuHosts[key], entry.session === session {
+            return entry.host
+        }
+        
+        // Every entry whose session has died, and a stale one at this
+        // key, goes - host view and all. See
+        // fix_selection_menu_hosts_forget_dead_sessions.py.
+        for (deadKey, entry) in menuHosts where entry.session == nil || deadKey == key {
+            entry.host.dismissAndRemove()
+            menuHosts[deadKey] = nil
         }
         
         let host = SelectionActionMenuHostView(onDismissed: onMenuDismissed)
-        menuHosts[key] = host
+        menuHosts[key] = MenuHostEntry(session: session, host: host)
         return host
     }
     
