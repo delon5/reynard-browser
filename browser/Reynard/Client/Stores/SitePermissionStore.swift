@@ -147,7 +147,19 @@ final class SitePermissionStore {
     private let storage: StorageURLs
     private let stateQueue = DispatchQueue(label: "com.minh-ton.Reynard.SitePermissionStore.Queue", qos: .utility)
     private var database: OpaquePointer?
-    private var privateActions: [ObjectIdentifier: [String: [SitePermission: SitePermissionAction]]] = [:]
+    /// CHANGED - see fix_site_permission_private_actions_check_identity.py.
+    /// The key is an address, so each entry also remembers WHICH session it
+    /// was made for and is discarded when a different object turns up under
+    /// the same address. Touched only on stateQueue, like the rest.
+    private final class PrivateSessionActions {
+        weak var session: GeckoSession?
+        var byHost: [String: [SitePermission: SitePermissionAction]] = [:]
+        
+        init(session: GeckoSession) {
+            self.session = session
+        }
+    }
+    private var privateActions: [ObjectIdentifier: PrivateSessionActions] = [:]
     private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     
     // MARK: - Lifecycle
@@ -210,7 +222,7 @@ final class SitePermissionStore {
                 return SitePermissionResolution(action: .blocked, source: .systemDisabled)
             }
             if SitePermissionDecisionPolicy.storageScope(isPrivate: session.isPrivateMode) == .sessionOnly {
-                if let action = privateActions[ObjectIdentifier(session)]?[host]?[permission] {
+                if let action = privateActionsLocked(for: session, create: false)?.byHost[host]?[permission] {
                     return SitePermissionResolution(action: action, source: .privateSession)
                 }
                 return SitePermissionResolution(
@@ -266,7 +278,11 @@ final class SitePermissionStore {
         }
         
         stateQueue.sync {
-            privateActions[ObjectIdentifier(session)] = nil
+            let key = ObjectIdentifier(session)
+            if let existing = privateActions[key],
+               existing.session == nil || existing.session === session {
+                privateActions[key] = nil
+            }
         }
     }
     
@@ -428,7 +444,7 @@ final class SitePermissionStore {
     
     private func setActionLocked(_ action: SitePermissionAction, for permission: SitePermission, host: String, session: GeckoSession) -> Bool {
         if SitePermissionDecisionPolicy.storageScope(isPrivate: session.isPrivateMode) == .sessionOnly {
-            privateActions[ObjectIdentifier(session), default: [:]][host, default: [:]][permission] = action
+            privateActionsLocked(for: session, create: true)?.byHost[host, default: [:]][permission] = action
             return true
         } else {
             return upsertActionLocked(action, for: permission, host: host, updatedAt: Date())
@@ -436,14 +452,41 @@ final class SitePermissionStore {
     }
     
     private func removePrivateActionLocked(for permission: SitePermission, host: String, session: GeckoSession) {
-        let key = ObjectIdentifier(session)
-        privateActions[key]?[host]?[permission] = nil
-        if privateActions[key]?[host]?.isEmpty == true {
-            privateActions[key]?[host] = nil
+        guard let entry = privateActionsLocked(for: session, create: false) else {
+            return
         }
-        if privateActions[key]?.isEmpty == true {
+        entry.byHost[host]?[permission] = nil
+        if entry.byHost[host]?.isEmpty == true {
+            entry.byHost[host] = nil
+        }
+        if entry.byHost.isEmpty {
+            privateActions[ObjectIdentifier(session)] = nil
+        }
+    }
+    
+    /// The entry for THIS session, made if `create` and there is none. An
+    /// entry left under the same address by a session that died there is
+    /// dropped on the way - see
+    /// fix_site_permission_private_actions_check_identity.py.
+    private func privateActionsLocked(for session: GeckoSession, create: Bool) -> PrivateSessionActions? {
+        let key = ObjectIdentifier(session)
+        if let existing = privateActions[key] {
+            if existing.session === session {
+                return existing
+            }
+            os_log(
+                "Dropping private-session permissions left by a session that died at this address",
+                log: Self.log,
+                type: .info
+            )
             privateActions[key] = nil
         }
+        guard create else {
+            return nil
+        }
+        let created = PrivateSessionActions(session: session)
+        privateActions[key] = created
+        return created
     }
     
     private func deleteActionLocked(for permission: SitePermission, host: String) -> Bool {
