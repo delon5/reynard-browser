@@ -8108,6 +8108,21 @@ public final class FairPlayStreamParser: NSObject {
             queue.async { old.stopRequestingMediaData() }
         }
 
+        // WHAT THE LAST TENANT LEFT QUEUED - see
+        // fix_teardown_flush_rechecks_the_sink.py's docstring. On THIS
+        // stream's drain queue, ahead of its first enqueue, so the old
+        // frames are gone before the new ones arrive whatever order the
+        // old tenant's teardown flush lands in on ITS queue. flush(), not
+        // flushAndRemoveImage(): the picture stays until this stream
+        // replaces it. A no-op on a fresh sink.
+        if let queue = handover.queue {
+            queue.async { sink.flush() }
+        } else {
+            sink.flush()
+        }
+        Self.log("stream \(streamKey) adopted the compositor's layer - "
+                 + "flushed on its own drain queue before feeding it")
+
         // Deregistered here rather than at retirement, which only ever
         // runs for the overlay - so superseded compositor layers stayed
         // registered and the recipient count climbed with every
@@ -9565,7 +9580,31 @@ public final class FairPlayStreamParser: NSObject {
                          + "does not decode the samples this stream left "
                          + "queued")
                 if let queue = slot.drainQueue {
-                    queue.async { layer.flush() }
+                    queue.async {
+                        // AT EXECUTION TIME, NOT DECISION TIME - see
+                        // fix_teardown_flush_rechecks_the_sink.py's
+                        // docstring. This queue is the torn-down slot's,
+                        // and a stream that adopted the sink meanwhile
+                        // feeds it from its own. That stream flushed on
+                        // that queue when it adopted, so this one steps
+                        // aside rather than dropping its first frames.
+                        // The same identity re-check drainPending makes.
+                        let claimedBy = self.withState { () -> String? in
+                            for (other, peer) in self.streamParsers
+                            where peer.displayLayer === layer
+                                && peer.supersededBy == nil {
+                                return other
+                            }
+                            return nil
+                        }
+                        if let claimedBy {
+                            Self.log("stream \(key) teardown flush skipped - "
+                                     + "\(claimedBy) took the sink first and "
+                                     + "flushed it on its own queue")
+                            return
+                        }
+                        layer.flush()
+                    }
                 } else {
                     layer.flush()
                 }
