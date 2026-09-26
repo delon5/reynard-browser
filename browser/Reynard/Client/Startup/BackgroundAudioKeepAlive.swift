@@ -187,6 +187,16 @@ final class BackgroundAudioKeepAlive {
     }
     
     @objc private func handleInterruption(_ notification: Notification) {
+        // ON MAIN - see fix_keepalive_handlers_on_main.py. The selector
+        // form delivers on the posting thread, and engine/player are
+        // otherwise only touched from main (the health-check Timer).
+        // Same shape as SystemMediaSession's handler.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.handleInterruption(notification)
+            }
+            return
+        }
         guard isRunning,
               let info = notification.userInfo,
               let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -200,6 +210,13 @@ final class BackgroundAudioKeepAlive {
     }
     
     @objc private func handleMediaServicesReset(_ notification: Notification) {
+        // ON MAIN - see fix_keepalive_handlers_on_main.py.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.handleMediaServicesReset(notification)
+            }
+            return
+        }
         guard isRunning else {
             return
         }
