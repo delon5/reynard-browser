@@ -625,7 +625,10 @@ final class HistoryStore {
             return []
         }
         
-        let conditions = Array(repeating: "(title LIKE ? COLLATE NOCASE OR stripped_url LIKE ? COLLATE NOCASE OR host LIKE ? COLLATE NOCASE)", count: tokens.count)
+        // ESCAPE, because escapedLikePattern backslash-escapes the token and
+        // SQLite's LIKE has no default escape character - see
+        // fix_like_escape_clause.py. Same form as BookmarkStore's prefix search.
+        let conditions = Array(repeating: "(title LIKE ? COLLATE NOCASE ESCAPE '\\' OR stripped_url LIKE ? COLLATE NOCASE ESCAPE '\\' OR host LIKE ? COLLATE NOCASE ESCAPE '\\')", count: tokens.count)
             .joined(separator: " AND ")
         let sql = """
         SELECT id, title, url, updated_at

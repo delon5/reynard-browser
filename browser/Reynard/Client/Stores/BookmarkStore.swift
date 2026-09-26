@@ -793,7 +793,9 @@ final class BookmarkStore {
         }
         
         let conditions = Array(
-            repeating: "(title LIKE ? COLLATE NOCASE OR url LIKE ? COLLATE NOCASE OR stripped_url LIKE ? COLLATE NOCASE OR host LIKE ? COLLATE NOCASE)",
+            // ESCAPE, as searchBookmarksPrefixLocked above already says - see
+            // fix_like_escape_clause.py.
+            repeating: "(title LIKE ? COLLATE NOCASE ESCAPE '\\' OR url LIKE ? COLLATE NOCASE ESCAPE '\\' OR stripped_url LIKE ? COLLATE NOCASE ESCAPE '\\' OR host LIKE ? COLLATE NOCASE ESCAPE '\\')",
             count: tokens.count
         ).joined(separator: " AND ")
         let sql = """
