@@ -144,8 +144,19 @@ private func configureSandboxExtension() {
     let issueFileExtension = unsafeBitCast(symbol, to: IssueFileExtension.self)
     let extensionClass = "com.apple.app-sandbox.read"
     
+    // DOWNLOADS ONLY - see fix_documents_extension_scoped_to_downloads.py.
+    // This token is consumed by CONTENT processes (IOSBootstrap.mm), and
+    // one for the whole of Documents let a compromised renderer read every
+    // download and every log kept there. The only file:// loads a tab is
+    // ever asked to make are downloads, and those live in
+    // Documents/Downloads (ReynardDirectories.downloads), so that is all
+    // the token covers. Created first: an extension names a path that
+    // has to exist.
+    let downloadsDirectoryURL = documentsDirectoryURL.appendingPathComponent("Downloads", isDirectory: true)
+    try? FileManager.default.createDirectory(at: downloadsDirectoryURL, withIntermediateDirectories: true)
+    
     guard let token = extensionClass.withCString({ extensionClassPointer in
-        documentsDirectoryURL.path.withCString { pathPointer in
+        downloadsDirectoryURL.path.withCString { pathPointer in
             issueFileExtension(extensionClassPointer, pathPointer, 0)
         }
     }) else {
