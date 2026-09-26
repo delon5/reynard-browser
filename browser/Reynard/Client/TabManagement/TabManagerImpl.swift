@@ -496,7 +496,13 @@ final class TabManagerImplementation: NSObject, TabManager {
                 return
             }
             self.persistState()
-            self.store.flushPendingWrites()
+            // Bounded - see fix_bounded_flush_before_suspension.py. A
+            // false here means the store did not drain in time. The
+            // persist is still queued and lands when it can; the task is
+            // ended rather than held open behind a stuck queue.
+            if !self.store.flushPendingWrites() {
+                logger("sessionState: tab store did not drain within its bound - ending the background task without it")
+            }
             self.endSessionStateFlushTask()
         }
     }

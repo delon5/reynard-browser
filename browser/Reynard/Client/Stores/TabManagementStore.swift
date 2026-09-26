@@ -145,11 +145,23 @@ final class TabManagementStore {
         return .regular
     }
     
-    /// Returns once every write already queued on stateQueue has run.
-    /// persistTabs is asynchronous; a caller about to be suspended uses
-    /// this so the write lands before it goes (upstream c3e85a0e).
-    func flushPendingWrites() {
-        stateQueue.sync {}
+    /// Returns once every write already queued on stateQueue has run,
+    /// or gives up after `timeout` and returns false.
+    ///
+    /// CHANGED - see fix_bounded_flush_before_suspension.py. This was a
+    /// bare stateQueue.sync {}. Its one caller runs on the main thread
+    /// during a background transition, and syncWithTimeout below exists
+    /// because this queue can be "genuinely backlogged or stuck" - a
+    /// main thread parked behind it there cannot even run the
+    /// background task's expiry handler. Same bound the emergency
+    /// persist uses. persistTabs is asynchronous; a caller about to be
+    /// suspended uses this so the write lands before it goes (upstream
+    /// c3e85a0e).
+    @discardableResult
+    func flushPendingWrites(timeout: TimeInterval = 2) -> Bool {
+        return syncWithTimeout(timeout, default: false, label: "flushPendingWrites()") {
+            true
+        }
     }
 
     func persistTabs(
