@@ -86,6 +86,19 @@ final class BoundedURLDataLoader: NSObject, URLSessionDataDelegate {
         configuration: URLSessionConfiguration,
         maximumBytes: Int
     ) async -> Output? {
+        // WEB ONLY - see fix_app_fetches_web_only_and_ephemeral.py. Every
+        // caller builds its request from a URL the PAGE supplied - a
+        // <link href>, a manifest icon, an og:image, a meta refresh,
+        // Media Session artwork - and URLSession loads file: and data:
+        // URLs from this container without complaint. Nothing that comes
+        // through here has any business loading anything but http(s).
+        // data: as well as http(s): the favicon store fetches every icon
+        // candidate through here, and a page's only icon is often a
+        // data: URL. It makes no request and carries no cookies.
+        guard let url = request.url,
+              URLUtils.isWebURL(url) || url.scheme?.lowercased() == "data" else {
+            return nil
+        }
         let loader = BoundedURLDataLoader(
             request: request,
             configuration: configuration,

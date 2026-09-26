@@ -20,9 +20,16 @@ final class SystemMediaSession: MediaSessionDelegate {
     private static let maxArtworkPixelCount = 4 * 1024 * 1024
     private static let maxArtworkDimension = 2_048
     private static let artworkNetworkConfiguration: URLSessionConfiguration = {
-        let configuration = URLSessionConfiguration.default
+        let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
+        // NO COOKIES - see fix_app_fetches_web_only_and_ephemeral.py. This
+        // is an anonymous read of a public resource, made by the app rather
+        // than by Gecko; .default shared HTTPCookieStorage.shared, a jar
+        // Gecko never sees and Clear Browsing Data never clears.
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 20
         return configuration
