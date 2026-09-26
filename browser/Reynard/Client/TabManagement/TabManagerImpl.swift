@@ -34,7 +34,19 @@ final class TabManagerImplementation: NSObject, TabManager {
     }
     private lazy var promptCoordinator = PromptCoordinator(
         presenter: PromptPresenter(),
-        onPromptFinished: requestContentKeyboardFocus
+        onPromptFinished: requestContentKeyboardFocus,
+        // A prompt from a tab that is not in front waits for it - see
+        // fix_prompts_wait_for_selected_tab.py. nil: not a tab any more
+        // (closed, or its session replaced by tab sleep), so drop it.
+        isSessionInFront: { [weak self] session in
+            guard let self else {
+                return nil
+            }
+            if self.selectedTab?.session === session {
+                return true
+            }
+            return self.tabLocation(for: session) == nil ? nil : false
+        }
     )
     // The merged presenter has no no-arg init any more; keep it stored
     // (init wires onFindSelection through it) but make it lazy so it can
