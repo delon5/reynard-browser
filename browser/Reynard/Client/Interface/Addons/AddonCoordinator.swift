@@ -48,6 +48,18 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     private let sessionManager: SessionManager
     private var browserActionsBySession: [ObjectIdentifier: [String: AddonAction]] = [:]
     private var pageActionsBySession: [ObjectIdentifier: [String: AddonAction]] = [:]
+    /// ADDED - see fix_addon_actions_forget_dead_sessions.py. Which session
+    /// each key in the two maps above was recorded for, held weakly, so an
+    /// entry can be dropped when its session dies and never answers for a
+    /// different object allocated at the same address.
+    private final class WeakSession {
+        weak var session: GeckoSession?
+        
+        init(_ session: GeckoSession) {
+            self.session = session
+        }
+    }
+    private var actionSessions: [ObjectIdentifier: WeakSession] = [:]
     private let iconCache = NSCache<NSString, UIImage>()
     private let iconLoadingQueue = DispatchQueue(label: "com.minh-ton.Reynard.AddonCoordinator.IconLoadingQueue", qos: .utility)
     private var loadingIconIDs = Set<String>()
@@ -372,6 +384,7 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
         }
         
         let key = ObjectIdentifier(session)
+        forgetDeadActionSessions(reusing: key, for: session)
         switch action.kind {
         case .browser:
             var actions = browserActionsBySession[key] ?? [:]
@@ -482,6 +495,11 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     private func mergedBrowserAction(for addon: Addon, session: GeckoSession) -> AddonAction? {
         let key = ObjectIdentifier(session)
+        // Only this session's own entry - see
+        // fix_addon_actions_forget_dead_sessions.py.
+        guard actionSessions[key]?.session === session else {
+            return addon.browserAction
+        }
         if let override = browserActionsBySession[key]?[addon.id],
            let defaultAction = addon.browserAction {
             return override.merged(with: defaultAction)
@@ -491,11 +509,29 @@ final class AddonCoordinator: NSObject, AddonEmbedderDelegate {
     
     private func mergedPageAction(for addon: Addon, session: GeckoSession) -> AddonAction? {
         let key = ObjectIdentifier(session)
+        guard actionSessions[key]?.session === session else {
+            return addon.pageAction
+        }
         if let override = pageActionsBySession[key]?[addon.id],
            let defaultAction = addon.pageAction {
             return override.merged(with: defaultAction)
         }
         return pageActionsBySession[key]?[addon.id] ?? addon.pageAction
+    }
+    
+    /// Drops the entries of sessions that died, and of a key that now
+    /// belongs to a different object than `session`; then records
+    /// `session` under `key`. See fix_addon_actions_forget_dead_sessions.py.
+    private func forgetDeadActionSessions(reusing key: ObjectIdentifier, for session: GeckoSession) {
+        for (deadKey, holder) in actionSessions
+        where holder.session == nil || (deadKey == key && holder.session !== session) {
+            actionSessions[deadKey] = nil
+            browserActionsBySession[deadKey] = nil
+            pageActionsBySession[deadKey] = nil
+        }
+        if actionSessions[key] == nil {
+            actionSessions[key] = WeakSession(session)
+        }
     }
     
     private func shouldInterceptAMOInstall(_ response: ExternalResponseInfo) -> Bool {
