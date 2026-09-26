@@ -51,16 +51,25 @@ static dispatch_queue_t vAttachStateQueue(void) {
 }
 
 static NSDate *sVAttachInFlightSince = nil;
+// COUNTED - see fix_vattach_marker_counts_concurrent_attaches.py. Up to
+// attachSlots vAttaches run at once; the date is set by the first to
+// start and cleared by the last to finish, so a reader never sees idle
+// while one is still inside the FFI.
+static NSUInteger sVAttachInFlightCount = 0;
 
 + (void)markVAttachStarted {
     dispatch_sync(vAttachStateQueue(), ^{
-        sVAttachInFlightSince = [NSDate date];
+        if (sVAttachInFlightCount++ == 0) {
+            sVAttachInFlightSince = [NSDate date];
+        }
     });
 }
 
 + (void)markVAttachFinished {
     dispatch_sync(vAttachStateQueue(), ^{
-        sVAttachInFlightSince = nil;
+        if (sVAttachInFlightCount > 0 && --sVAttachInFlightCount == 0) {
+            sVAttachInFlightSince = nil;
+        }
     });
 }
 
