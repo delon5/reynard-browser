@@ -571,6 +571,23 @@ final class SystemMediaSession: MediaSessionDelegate {
     /// AirPlay. Both acting on one element is harmless: both pause at
     /// .began and both only resume with .shouldResume.
     @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        // ON MAIN - see fix_interruption_handler_on_main.py.
+        //
+        // AVAudioSession posts this on no documented thread, and the
+        // selector form of addObserver delivers it wherever it was
+        // posted. sessionStates and interruptedPlaybackSessions are
+        // otherwise touched only from the media-session handler, which
+        // is main-actor isolated, and AVPlayerHost pins its own
+        // observer for this same notification to the main queue.
+        // Hopped rather than re-registered so deinit's removeObserver
+        // is untouched. The main queue is FIFO, so a .began and its
+        // .ended keep their order.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.handleAudioSessionInterruption(notification)
+            }
+            return
+        }
         let info = notification.userInfo ?? [:]
         guard let typeValue = (info[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
