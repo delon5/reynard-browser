@@ -39,6 +39,31 @@ public class GeckoView: UIView {
         session?.updateViewportWidth(bounds.width)
     }
     
+    /// Embeds the engine view of a session that was assigned before it
+    /// was opened. ADDED - see fix_embed_engine_view_after_open.py.
+    ///
+    /// `session`'s didSet is the only place the engine view is added,
+    /// and it gives up ("session window is unavailable during
+    /// assignment") when the session has no window yet. A slept tab
+    /// selected by a tab close and a recovered on-screen tab are both
+    /// bound in that state and opened a few milliseconds later, and
+    /// nothing re-ran the embed: the page loaded and painted into a
+    /// view that was in no hierarchy, and the tab stayed blank until a
+    /// different session was shown. The re-bind that follows every such
+    /// open lands here. A session that is still closed, already
+    /// embedded, or held by another view is left alone.
+    public func embedSessionViewIfNeeded() {
+        guard let session,
+              let window = session.window,
+              let engineView = window.view(),
+              engineView.superview == nil else {
+            return
+        }
+        NSLog("GeckoView: embedding the session view after open")
+        embedSessionView()
+        window.setInteractionDelegate(interactionDelegate)
+    }
+    
     private func embedSessionView() {
         subviews.forEach { $0.removeFromSuperview() }
         

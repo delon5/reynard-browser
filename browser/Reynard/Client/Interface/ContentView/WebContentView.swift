@@ -180,6 +180,10 @@ final class WebContentView: UIView, UIScrollViewDelegate {
         pageBackgroundView.backgroundColor = pageBackgroundColor ?? .systemBackground
         
         guard webView.session !== tab?.session else {
+            // The same session, re-bound after being opened - see
+            // fix_embed_engine_view_after_open.py. Its engine view was
+            // not there to embed when it was bound; it is now.
+            webView.embedSessionViewIfNeeded()
             return
         }
         lastScrollState = nil
