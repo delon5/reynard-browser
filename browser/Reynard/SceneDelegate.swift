@@ -982,6 +982,17 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return nil
         }
         
-        return URL(string: encodedURL)
+        // WEB ONLY - see fix_reynard_scheme_web_only.py. The inner URL comes
+        // from whichever app built the link; a javascript: or file: payload
+        // has no business arriving through a custom scheme. Same rule the
+        // http(s) branch above already applies.
+        guard let url = URL(string: encodedURL),
+              let innerScheme = url.scheme?.lowercased(),
+              innerScheme == "http" || innerScheme == "https",
+              let host = url.host,
+              !host.isEmpty else {
+            return nil
+        }
+        return url
     }
 }
