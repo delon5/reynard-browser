@@ -2208,7 +2208,16 @@ extension TabManagerImplementation: ContentDelegate {
         logger(String(format: "tabRecovery: content process %@ for tab %@ - preserving and marking for restore (%@)", reason, tab.id.uuidString, loggableURL(url, isPrivate: isPrivate)))
         
         sessionManager.close(tab.session)
-        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate)
+        // UNOPENED, exactly as evictSessionIfNeeded builds a slept tab's
+        // replacement - see fix_tab_recovery_keeps_background_tabs_asleep.py.
+        // The default opening opens the window on the spot and deactivates
+        // it: a content process per recovered BACKGROUND tab, spawned in
+        // the wake of the memory kill that took the last one, idle on
+        // about:blank until the cap retired it. Closed, it waits for
+        // selection like any slept tab; the selected tab is opened,
+        // activated and re-bound by loadRestoredURLIfNeeded below, the
+        // same path a slept tab takes when it is selected.
+        tab.session = createSession(tabID: tab.id, url: url, windowId: nil, isPrivate: isPrivate, opening: .manual)
         tab.state.restoreState = .pending(url)
         tab.state.navigationState = sessionManager.restoreNavigation(for: tab.id, isPrivate: isPrivate)
         
