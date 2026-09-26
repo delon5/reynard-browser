@@ -81,6 +81,25 @@ NSMutableSet<NSNumber *> *detachRequestedDebugSessionPIDs(void) {
     return requestedPIDs;
 }
 
+// ADDED - see fix_foreground_clear_releases_only_background_pids.py.
+//
+// The subset of detachRequestedDebugSessionPIDs that a BACKGROUND
+// teardown put there and that was not already requested when it did.
+// clearDebuggerTeardownRequest releases exactly these on a foreground.
+// A pid JIT-less mode asked to detach (JITEnabler.m's
+// detachAllJITSessions, which never sets the sticky BOOL) is not here
+// and stays requested until its loop drains, which is what that
+// request means. Same queue as its parent set: only ever touched on
+// debugSessionStateQueue.
+static NSMutableSet<NSNumber *> *backgroundDetachRequestedPIDs(void) {
+    static NSMutableSet<NSNumber *> *pids;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pids = [NSMutableSet set];
+    });
+    return pids;
+}
+
 // Sticky counterpart to detachRequestedDebugSessionPIDs, which can only
 // ever name the pids that were already attached when the teardown ran.
 // An attach still in flight at that moment completes afterwards and is
@@ -994,6 +1013,7 @@ static void registerDebugSessionPID(int32_t pid) {
         NSNumber *key = @(pid);
         [activeDebugSessionPIDs() addObject:key];
         [detachRequestedDebugSessionPIDs() removeObject:key];
+        [backgroundDetachRequestedPIDs() removeObject:key];
     });
     
     addPIDToSharedActiveSessions(pid);
@@ -1027,6 +1047,7 @@ static void unregisterDebugSessionPID(int32_t pid) {
         NSNumber *key = @(pid);
         [activeDebugSessionPIDs() removeObject:key];
         [detachRequestedDebugSessionPIDs() removeObject:key];
+        [backgroundDetachRequestedPIDs() removeObject:key];
     });
     
     removePIDFromSharedActiveSessions(pid);
@@ -1285,16 +1306,29 @@ void clearDebuggerTeardownRequest(void) {
         //
         // Same queue, same block: detachRequestedDebugSessionPIDs is
         // only ever touched on debugSessionStateQueue.
+        // ONLY THE BACKGROUND'S - see
+        // fix_foreground_clear_releases_only_background_pids.py. This
+        // used to empty the whole set, which also released a request
+        // JIT-less mode had standing underneath the background's. The
+        // guard above already protects that request when the BOOL is
+        // NO; this protects it when both requests stand at once.
         NSMutableSet<NSNumber *> *stillRequested = detachRequestedDebugSessionPIDs();
-        if (stillRequested.count > 0) {
+        NSMutableSet<NSNumber *> *fromBackground = backgroundDetachRequestedPIDs();
+        NSMutableSet<NSNumber *> *released = [stillRequested mutableCopy];
+        [released intersectSet:fromBackground];
+        if (released.count > 0) {
             NSMutableString *releasedPIDs = [NSMutableString string];
-            for (NSNumber *requestedPID in stillRequested) {
+            for (NSNumber *requestedPID in released) {
                 if (releasedPIDs.length > 0) [releasedPIDs appendString:@", "];
                 [releasedPIDs appendFormat:@"%d", requestedPID.intValue];
             }
-            logger([NSString stringWithFormat:@"clearDebuggerTeardownRequest: detachSetCleared - released %lu pid(s) [%@] from the detach set, loops that survived the background keep their JIT", (unsigned long)stillRequested.count, releasedPIDs]);
-            [stillRequested removeAllObjects];
+            logger([NSString stringWithFormat:@"clearDebuggerTeardownRequest: detachSetCleared - released %lu pid(s) [%@] from the detach set, loops that survived the background keep their JIT", (unsigned long)released.count, releasedPIDs]);
+            [stillRequested minusSet:released];
         }
+        if (stillRequested.count > 0) {
+            logger([NSString stringWithFormat:@"clearDebuggerTeardownRequest: detachSetKept - %lu pid(s) stay requested, JIT-less mode asked for them, not the background", (unsigned long)stillRequested.count]);
+        }
+        [fromBackground removeAllObjects];
 
         logger(@"clearDebuggerTeardownRequest: foreground - attaches are wanted again");
     });
@@ -1315,6 +1349,12 @@ void requestDetachForAllDebugSessions(void) {
     // thread waited, which is the thing that froze.
     dispatch_async(debugSessionStateQueue(), ^{
         NSMutableSet<NSNumber *> *active = activeDebugSessionPIDs();
+        // Only what was NOT already requested is the background's to
+        // release later - see
+        // fix_foreground_clear_releases_only_background_pids.py.
+        NSMutableSet<NSNumber *> *newlyRequested = [active mutableCopy];
+        [newlyRequested minusSet:detachRequestedDebugSessionPIDs()];
+        [backgroundDetachRequestedPIDs() unionSet:newlyRequested];
         [detachRequestedDebugSessionPIDs() unionSet:active];
         // Sticky, so an attach that lands after this point joins the
         // teardown instead of re-arming the debugger behind it.
@@ -1977,6 +2017,10 @@ void runDebugService(int32_t pid, DebugSession *session) {
         tornDown = sDebuggerTeardownRequested;
         if (tornDown) {
             [detachRequestedDebugSessionPIDs() addObject:@(pid)];
+            // Joined for the background's reason, so released with the
+            // background's pids - see
+            // fix_foreground_clear_releases_only_background_pids.py.
+            [backgroundDetachRequestedPIDs() addObject:@(pid)];
         }
     });
     if (tornDown) {
