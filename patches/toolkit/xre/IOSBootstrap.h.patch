@@ -17,12 +17,16 @@ index 2fffb86bd6d7..14bb03224129 100644
  #include <xpc/xpc.h>
  
  @protocol SwiftGeckoViewRuntime;
-@@ -28,6 +31,9 @@ MOZ_EXPORT void ChildProcessInit(xpc_connection_t aXpcConnection,
+@@ -28,6 +31,13 @@ MOZ_EXPORT void ChildProcessInit(xpc_connection_t aXpcConnection,
                                   id<GeckoProcessExtension> aProcess,
                                   id<SwiftGeckoViewRuntime> aRuntime);
  
 +MOZ_EXPORT void ReportJITStatusForChild(int32_t aPid, bool aEnabled,
 +                                        JITRuntimeInfo aRuntimeInfo);
++
++/* The per-launch secret both JIT listening keys carry; generated on first
++ * use in the parent. See fix_jit_listening_keys_carry_a_secret.py. */
++MOZ_EXPORT const char* JITListeningSecret(void);
 +
  MOZ_END_EXTERN_C
  

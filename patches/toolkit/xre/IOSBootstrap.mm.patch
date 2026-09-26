@@ -2,7 +2,7 @@ diff --git a/toolkit/xre/IOSBootstrap.mm b/toolkit/xre/IOSBootstrap.mm
 index 264320aed775..d2a65793d098 100644
 --- a/toolkit/xre/IOSBootstrap.mm
 +++ b/toolkit/xre/IOSBootstrap.mm
-@@ -8,13 +8,25 @@
+@@ -8,13 +8,26 @@
  #include "mozilla/Bootstrap.h"
  #include "mozilla/DarwinObjectPtr.h"
  #include "mozilla/GeckoArgs.h"
@@ -23,12 +23,13 @@ index 264320aed775..d2a65793d098 100644
 +// For reporting TXM support and device OS version to ProcessExecutableMemory.
 +namespace js::jit {
 +void SetJITRuntimeInfo(const JITRuntimeInfo& aRuntimeInfo);
++void SetJITListeningSecret(const char* aSecret);
 +}
 +
  static id<SwiftGeckoViewRuntime> gRuntime;
  
  id<SwiftGeckoViewRuntime> mozilla::widget::GetSwiftRuntime() {
-@@ -22,11 +34,132 @@
+@@ -22,11 +35,132 @@
  }
  
  static id<GeckoProcessExtension> gCurrentProcessExtension;
@@ -75,7 +76,7 @@ index 264320aed775..d2a65793d098 100644
 +    return finish(false);
 +  }
 +
-+  mozilla::widget::ChildJITStatus status = {0, {0, {0, 0, 0}}};
++  mozilla::widget::ChildJITStatus status = {};
 +  const ssize_t bytesRead = read(gJITReadySignalFd, &status, sizeof(status));
 +
 +  if (bytesRead != sizeof(status)) {
@@ -161,7 +162,7 @@ index 264320aed775..d2a65793d098 100644
  int MainProcessInit(int aArgc, char** aArgv,
                      id<SwiftGeckoViewRuntime> aRuntime) {
    auto bootstrap = mozilla::GetBootstrap();
-@@ -85,6 +218,11 @@ void ChildProcessInit(xpc_connection_t aXpcConnection,
+@@ -85,6 +219,32 @@ void ChildProcessInit(xpc_connection_t aXpcConnection,
    xpc_connection_activate(aXpcConnection);
  }
  
@@ -170,10 +171,31 @@ index 264320aed775..d2a65793d098 100644
 +  mozilla::widget::ReportJITStatusForChild(aPid, aEnabled, aRuntimeInfo);
 +}
 +
++// THE PER-LAUNCH SECRET for the JIT listening keys - see
++// fix_jit_listening_keys_carry_a_secret.py. Generated once, in the
++// PARENT, on first use: JITSupport.m asks for it to build the names it
++// sets, GeckoChildProcessHost asks for it to fill each child's
++// readiness status, so whichever comes first creates it and there is no
++// ordering to get wrong. 16 random bytes as 32 hex characters.
++MOZ_EXPORT __attribute__((used)) const char* JITListeningSecret(void) {
++  static char sSecret[JIT_LISTENING_SECRET_CAPACITY] = {0};
++  static dispatch_once_t sOnce;
++  static_assert(2 * 16 + 1 <= JIT_LISTENING_SECRET_CAPACITY,
++                "the secret and its terminator must fit the status field");
++  dispatch_once(&sOnce, ^{
++    uint8_t bytes[16];
++    arc4random_buf(bytes, sizeof(bytes));
++    for (size_t i = 0; i < sizeof(bytes); i++) {
++      snprintf(&sSecret[i * 2], 3, "%02x", bytes[i]);
++    }
++  });
++  return sSecret;
++}
++
  static int ChildProcessInitImpl(int aArgc, char** aArgv) {
    auto bootstrap = mozilla::GetBootstrap();
    if (bootstrap.isErr()) {
-@@ -102,6 +240,8 @@ static int ChildProcessInitImpl(int aArgc, char** aArgv) {
+@@ -102,6 +262,8 @@ static int ChildProcessInitImpl(int aArgc, char** aArgv) {
    // done later in common code.
    mozilla::SetGeckoProcessType(aArgv[aArgc - 1]);
  
@@ -182,15 +204,18 @@ index 264320aed775..d2a65793d098 100644
    XREChildData childData;
  
    mozilla::SetGeckoChildID(aArgv[aArgc - 2]);
-@@ -111,12 +251,76 @@ static int ChildProcessInitImpl(int aArgc, char** aArgv) {
+@@ -111,12 +273,79 @@ static int ChildProcessInitImpl(int aArgc, char** aArgv) {
        /* aRandomizeSmall */ !XRE_IsContentProcess());
  #endif
  
 +  const bool isContentProcess = XRE_IsContentProcess();
 +  if (isContentProcess) {
-+    mozilla::widget::ChildJITStatus status = {0, {0, {0, 0, 0}}};
++    mozilla::widget::ChildJITStatus status = {};
 +    bool isJITReady = WaitForJITReadySignal(&status);
 +    js::jit::SetJITRuntimeInfo(status.runtimeInfo);
++    // Before XRE init, so before any compile thread can read it - see
++    // fix_jit_listening_keys_carry_a_secret.py.
++    js::jit::SetJITListeningSecret(status.listeningSecret);
 +
 +    if (isJITReady) {
 +      fprintf(stderr, "[JIT]: Ready pid=%d, txm=%u, major=%d\n", getpid(),
@@ -259,7 +284,7 @@ index 264320aed775..d2a65793d098 100644
  void HandleBootstrapMessage(xpc_object_t aEvent) {
    // Set up stdout and stderr if they were provided.
    int fd = xpc_dictionary_dup_fd(aEvent, "stdout");
-@@ -132,6 +336,11 @@ void HandleBootstrapMessage(xpc_object_t aEvent) {
+@@ -132,6 +361,11 @@ void HandleBootstrapMessage(xpc_object_t aEvent) {
      close(fd);
    }
  
@@ -271,7 +296,7 @@ index 264320aed775..d2a65793d098 100644
    // Immediately send a reply with our pid
    auto reply = mozilla::AdoptDarwinObject(xpc_dictionary_create_reply(aEvent));
    xpc_dictionary_set_int64(reply.get(), "pid", getpid());
-@@ -198,6 +407,18 @@ void HandleBootstrapMessage(xpc_object_t aEvent) {
+@@ -198,6 +432,18 @@ void HandleBootstrapMessage(xpc_object_t aEvent) {
    }
    argv[argc] = nullptr;
  

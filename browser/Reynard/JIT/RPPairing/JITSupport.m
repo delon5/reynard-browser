@@ -19,6 +19,10 @@
 
 #include <arpa/inet.h>
 #include <notify.h>
+
+// From libxul (toolkit/xre/IOSBootstrap.mm): the per-launch secret both
+// listening keys carry - see fix_jit_listening_keys_carry_a_secret.py.
+extern const char *JITListeningSecret(void);
 #include <errno.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -1939,9 +1943,11 @@ void setDebugSessionListeningForPID(int32_t pid, BOOL listening) {
             return;
         }
 
-        char name[80];
+        // With the per-launch secret - see
+        // fix_jit_listening_keys_carry_a_secret.py.
+        char name[128];
         int written = snprintf(name, sizeof(name),
-                               "com.minh-ton.Reynard.JITDebuggerListening.%d", pid);
+                               "com.minh-ton.Reynard.JITDebuggerListening.%s.%d", JITListeningSecret(), pid);
         if (written <= 0 || (size_t)written >= sizeof(name)) {
             [lock unlock];
             return;
@@ -1970,7 +1976,13 @@ void setDebuggerListeningState(uint64_t listening) {
     static int token = NOTIFY_TOKEN_INVALID;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        if (notify_register_check("com.minh-ton.Reynard.JITDebuggerListening", &token) != NOTIFY_STATUS_OK) {
+        // With the per-launch secret - see
+        // fix_jit_listening_keys_carry_a_secret.py.
+        char name[128];
+        int written = snprintf(name, sizeof(name),
+                               "com.minh-ton.Reynard.JITDebuggerListening.%s", JITListeningSecret());
+        if (written <= 0 || (size_t)written >= sizeof(name) ||
+            notify_register_check(name, &token) != NOTIFY_STATUS_OK) {
             token = NOTIFY_TOKEN_INVALID;
             logger(@"jitListening: notify_register_check FAILED - content processes will not trap, so JIT is degraded");
         }

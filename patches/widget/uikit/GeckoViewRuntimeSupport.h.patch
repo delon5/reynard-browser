@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..7ea2b8158a89
 --- /dev/null
 +++ b/widget/uikit/GeckoViewRuntimeSupport.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,50 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this file,
 + * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -28,9 +28,15 @@ index 000000000000..7ea2b8158a89
 +  DeviceOSVersion deviceOSVersion;
 +} JITRuntimeInfo;
 +
++/* The per-launch secret suffix of the JIT listening notify keys, as a
++ * NUL-terminated hex string: 32 characters plus the terminator. See
++ * fix_jit_listening_keys_carry_a_secret.py. */
++#define JIT_LISTENING_SECRET_CAPACITY 40
++
 +typedef struct ChildJITStatus {
 +  uint8_t enabled;
 +  JITRuntimeInfo runtimeInfo;
++  char listeningSecret[JIT_LISTENING_SECRET_CAPACITY];
 +} ChildJITStatus;
 +
 +#ifdef __cplusplus

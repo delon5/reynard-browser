@@ -13,7 +13,7 @@ index 4a08d4a6238f..1a71c2d2373a 100644
  
  namespace js {
  namespace jit {
-@@ -77,11 +75,39 @@ enum class MustFlushICache { No, Yes };
+@@ -77,11 +75,42 @@ enum class MustFlushICache { No, Yes };
                                            ProtectionSetting protection,
                                            MustFlushICache flushICache);
  
@@ -49,11 +49,14 @@ index 4a08d4a6238f..1a71c2d2373a 100644
 +// value.
 +extern size_t ReservedCodeBytesPerProcess();
 +extern void SetJITRuntimeInfo(const JITRuntimeInfo& aRuntimeInfo);
++// The per-launch suffix of the JIT listening notify keys, from the
++// readiness status. See fix_jit_listening_keys_carry_a_secret.py.
++extern void SetJITListeningSecret(const char* aSecret);
 +
  // Allocate/deallocate executable pages.
  extern void* AllocateExecutableMemory(size_t bytes,
                                        ProtectionSetting protection,
-@@ -123,22 +149,14 @@ class MOZ_RAII AutoMarkJitCodeWritableForThread {
+@@ -123,22 +152,14 @@ class MOZ_RAII AutoMarkJitCodeWritableForThread {
  
   public:
    MOZ_ALWAYS_INLINE_EVEN_DEBUG AutoMarkJitCodeWritableForThread() {
