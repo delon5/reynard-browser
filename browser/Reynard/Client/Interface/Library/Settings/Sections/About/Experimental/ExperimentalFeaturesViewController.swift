@@ -63,8 +63,6 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case avPlayerHLS
         case siteIsolation
         case pillFloats
-        case hideUpdateNotification
-        case hideUpdateAvailableBanner
         case airPlay
         case airPlayVideo
         case airPlayFullscreen
@@ -81,7 +79,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         
         var section: Section {
             switch self {
-            case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats, .hideUpdateNotification, .hideUpdateAvailableBanner:
+            case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats:
                 return .features
             case .airPlay, .airPlayVideo, .airPlayFullscreen, .airPlayShim, .airPlayRemote:
                 return .airPlay
@@ -101,8 +99,6 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let avPlayerHLSSwitch = UISwitch()
     private let siteIsolationSwitch = UISwitch()
     private let pillFloatsSwitch = UISwitch()
-    private let hideUpdateNotificationSwitch = UISwitch()
-    private let hideUpdateAvailableBannerSwitch = UISwitch()
     private let airPlaySwitch = UISwitch()
     private let airPlayVideoSwitch = UISwitch()
     private let airPlayFullscreenSwitch = UISwitch()
@@ -188,30 +184,6 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("HLS Playback (AVPlayer)", comment: ""),
                 subtitle: NSLocalizedString("Plays HLS streams, including FairPlay, through AVFoundation", comment: ""),
                 accessoryView: avPlayerHLSSwitch
-            )
-        case .hideUpdateNotification:
-            // Same underlying preference as the "New updates" toggle
-            // in Settings > General > Homepage
-            // (Prefs.HomepageSettings.showsNewUpdates) — a second,
-            // quicker entry point to it from this screen, inverted to
-            // read as "hide" rather than "show".
-            return switchCell(
-                title: NSLocalizedString("Hide Reynard Update Notification", comment: ""),
-                accessoryView: hideUpdateNotificationSwitch
-            )
-        case .hideUpdateAvailableBanner:
-            // A completely separate mechanism from the row above -
-            // this hides the "Update Available" section header,
-            // release notes, and Update Now button shown at the top
-            // of the main Settings screen itself
-            // (SettingsViewController.Section.updates), not the
-            // homepage card. Deliberately a separate toggle rather
-            // than folded into the one above, since these two have
-            // nothing to do with each other beyond both being update
-            // notifications.
-            return switchCell(
-                title: NSLocalizedString("Hide Update Available Banner", comment: ""),
-                accessoryView: hideUpdateAvailableBannerSwitch
             )
         case .airPlay:
             return switchCell(
@@ -305,7 +277,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         }
         
         switch sectionRows[indexPath.row] {
-        case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats, .hideUpdateNotification, .hideUpdateAvailableBanner,
+        case .videoPictureInPicture, .avPlayerHLS, .siteIsolation, .pillFloats,
              .airPlay, .airPlayVideo, .airPlayFullscreen, .airPlayShim, .airPlayRemote,
              .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
@@ -327,8 +299,6 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         avPlayerHLSSwitch.addTarget(self, action: #selector(avPlayerHLSSwitchDidChange(_:)), for: .valueChanged)
         siteIsolationSwitch.addTarget(self, action: #selector(siteIsolationSwitchDidChange(_:)), for: .valueChanged)
         pillFloatsSwitch.addTarget(self, action: #selector(pillFloatsSwitchDidChange(_:)), for: .valueChanged)
-        hideUpdateNotificationSwitch.addTarget(self, action: #selector(hideUpdateNotificationSwitchDidChange(_:)), for: .valueChanged)
-        hideUpdateAvailableBannerSwitch.addTarget(self, action: #selector(hideUpdateAvailableBannerSwitchDidChange(_:)), for: .valueChanged)
         airPlaySwitch.addTarget(self, action: #selector(airPlaySwitchDidChange(_:)), for: .valueChanged)
         airPlayVideoSwitch.addTarget(self, action: #selector(airPlayVideoSwitchDidChange(_:)), for: .valueChanged)
         airPlayFullscreenSwitch.addTarget(self, action: #selector(airPlayFullscreenSwitchDidChange(_:)), for: .valueChanged)
@@ -347,8 +317,6 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         avPlayerHLSSwitch.isOn = Prefs.ExperimentalSettings.isAVPlayerHLSEnabled
         siteIsolationSwitch.isOn = Prefs.ExperimentalSettings.isSiteIsolationEnabled
         pillFloatsSwitch.isOn = Prefs.AppearanceSettings.pillFloatsOverPage
-        hideUpdateNotificationSwitch.isOn = !Prefs.HomepageSettings.showsNewUpdates
-        hideUpdateAvailableBannerSwitch.isOn = Prefs.ExperimentalSettings.hidesUpdateAvailableBanner
         airPlaySwitch.isOn = Prefs.AirPlaySettings.isEnabled
         airPlayVideoSwitch.isOn = Prefs.AirPlaySettings.allowsVideo
         airPlayFullscreenSwitch.isOn = Prefs.AirPlaySettings.usesExternalPlaybackInFullscreen
@@ -427,24 +395,6 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         Prefs.ExperimentalSettings.isAVPlayerHLSEnabled = sender.isOn
         AVPlayerPolicyController.applyAVPlayerHLS()
         showRestartAlert()
-    }
-    
-    // Inverted mirror of Settings > General > Homepage's own "New
-    // updates" toggle — same preference, no restart needed since
-    // UpdateAvailableViewController re-checks it live (via
-    // .appUpdateAvailable / viewWillAppear) rather than caching a
-    // value at launch.
-    @objc private func hideUpdateNotificationSwitchDidChange(_ sender: UISwitch) {
-        Prefs.HomepageSettings.showsNewUpdates = !sender.isOn
-    }
-    
-    // No restart needed here either -
-    // SettingsViewController.displayedSections is a plain computed
-    // property with no caching, and that screen already calls
-    // tableView.reloadData() in its own viewWillAppear, so navigating
-    // back there from here picks up the new value naturally.
-    @objc private func hideUpdateAvailableBannerSwitchDidChange(_ sender: UISwitch) {
-        Prefs.ExperimentalSettings.hidesUpdateAvailableBanner = sender.isOn
     }
     
     // MARK: - AirPlay

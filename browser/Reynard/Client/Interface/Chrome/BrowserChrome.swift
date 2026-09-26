@@ -650,11 +650,6 @@ final class BrowserChrome: UIView {
         topToolbar.updateDownload(summary)
     }
     
-    func setMenuButtonIndicatesUpdate(_ hasUpdate: Bool) {
-        topToolbar.setMenuButtonIndicatesUpdate(hasUpdate)
-        addressBar.setPageMenuIndicatesUpdate(hasUpdate)
-    }
-    
     func syncSidebarButton(splitViewController: UISplitViewController?) {
         topToolbar.syncSidebarButton(splitViewController: splitViewController)
     }

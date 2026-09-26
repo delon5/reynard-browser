@@ -17,7 +17,6 @@ extension Notification.Name {
     static let homepageSettingsDidChange = Notification.Name("Homepage.SettingsDidChange")
     /// Posted after TabManagementStore.clearRecentlyClosedTabs() succeeds.
     static let recentlyClosedTabsDidClear = Notification.Name("TabManagementStore.recentlyClosedTabsDidClear")
-    static let appUpdateAvailable = Notification.Name("Settings.AppUpdateAvailable")
     static let addonRuntimeDidChange = Notification.Name("Addons.RuntimeDidChange")
     static let addonAddressBarButtonDidChange = Notification.Name("Addons.AddressBarButtonDidChange")
     static let bookmarkStoreDidChange = Notification.Name("BookmarkStore.DidChange")

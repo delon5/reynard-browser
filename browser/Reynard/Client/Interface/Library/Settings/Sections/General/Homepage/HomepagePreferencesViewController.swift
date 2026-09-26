@@ -27,11 +27,9 @@ final class HomepagePreferencesViewController: SettingsTableViewController {
     
     private enum HomepageBannerRow: CaseIterable {
         case recommendations
-        case newUpdates
     }
     
     private let recommendationsSwitch = UISwitch()
-    private let newUpdatesSwitch = UISwitch()
     
     init() {
         super.init(style: .insetGrouped)
@@ -119,9 +117,6 @@ final class HomepagePreferencesViewController: SettingsTableViewController {
             case .recommendations:
                 cell.textLabel?.text = NSLocalizedString("Recommendations", comment: "")
                 cell.accessoryView = recommendationsSwitch
-            case .newUpdates:
-                cell.textLabel?.text = NSLocalizedString("New Updates", comment: "")
-                cell.accessoryView = newUpdatesSwitch
             }
             return cell
         }
@@ -157,19 +152,13 @@ final class HomepagePreferencesViewController: SettingsTableViewController {
     
     private func configureSwitches() {
         recommendationsSwitch.addTarget(self, action: #selector(recommendationsSwitchDidChange(_:)), for: .valueChanged)
-        newUpdatesSwitch.addTarget(self, action: #selector(newUpdatesSwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         recommendationsSwitch.isOn = Prefs.HomepageSettings.showsRecommendations
-        newUpdatesSwitch.isOn = Prefs.HomepageSettings.showsNewUpdates
     }
     
     @objc private func recommendationsSwitchDidChange(_ sender: UISwitch) {
         Prefs.HomepageSettings.showsRecommendations = sender.isOn
-    }
-    
-    @objc private func newUpdatesSwitchDidChange(_ sender: UISwitch) {
-        Prefs.HomepageSettings.showsNewUpdates = sender.isOn
     }
 }

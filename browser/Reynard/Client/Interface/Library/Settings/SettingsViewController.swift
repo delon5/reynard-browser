@@ -10,7 +10,6 @@ import UIKit
 final class SettingsViewController: SettingsTableViewController {
     enum Section: Int, CaseIterable {
         case defaultBrowser
-        case updates
         case jit
         case general
         case privacy
@@ -20,8 +19,6 @@ final class SettingsViewController: SettingsTableViewController {
             switch self {
             case .defaultBrowser:
                 return SettingsSectionText()
-            case .updates:
-                return SettingsSectionText(headerTitle: NSLocalizedString("Update Available", comment: ""))
             case .jit:
                 return SettingsSectionText(headerTitle: NSLocalizedString("JIT", comment: ""))
             case .general:
@@ -35,24 +32,17 @@ final class SettingsViewController: SettingsTableViewController {
     }
     
     private let defaultBrowserSection = DefaultBrowserSettingsSection()
-    private let updatesSection = UpdatesSettingsSection()
     private let jitSection = JITSettingsSection()
     private let generalSection = GeneralSettingsSection()
     private let privacySection = PrivacySettingsSection()
     private let aboutSection = AboutSettingsSection()
     
-    private var allowUpdate: Bool {
-        let unsandboxed = getEntitlementValue("com.apple.private.security.no-sandbox")
-        return !unsandboxed || updatesSection.installedThroughTrollStore
-    }
+    // The in-app update checker, its Settings section, homepage card, badges
+    // and hide switches were removed - see fix_remove_in_app_update_checker.py.
     
     var displayedSections: [Section] {
         var hiddenSections: Set<Section> = []
         let unsandboxed = getEntitlementValue("com.apple.private.security.no-sandbox")
-        
-        if !BrowserUpdates.shared.hasUpdate || Prefs.ExperimentalSettings.hidesUpdateAvailableBanner {
-            hiddenSections.insert(.updates)
-        }
         
         if unsandboxed {
             hiddenSections.insert(.jit)
@@ -98,8 +88,6 @@ final class SettingsViewController: SettingsTableViewController {
         switch displayedSections[section] {
         case .defaultBrowser:
             return defaultBrowserSection.rowCount
-        case .updates:
-            return updatesSection.rowCount(allowUpdate: allowUpdate)
         case .jit:
             return jitSection.rowCount
         case .general:
@@ -119,12 +107,6 @@ final class SettingsViewController: SettingsTableViewController {
         switch displayedSections[indexPath.section] {
         case .defaultBrowser:
             return defaultBrowserSection.cell(at: indexPath.row)
-        case .updates:
-            return updatesSection.cell(
-                at: indexPath.row,
-                allowUpdate: allowUpdate,
-                tintColor: view.tintColor
-            )
         case .jit:
             return jitSection.cell(at: indexPath.row, tintColor: view.tintColor)
         case .general:
@@ -156,8 +138,6 @@ final class SettingsViewController: SettingsTableViewController {
         switch displayedSections[indexPath.section] {
         case .defaultBrowser:
             defaultBrowserSection.selectRow(at: indexPath.row)
-        case .updates:
-            updatesSection.selectRow(at: indexPath.row, allowUpdate: allowUpdate, from: self)
         case .jit:
             jitSection.selectRow(at: indexPath.row, from: self)
         case .general:
@@ -182,24 +162,11 @@ final class SettingsViewController: SettingsTableViewController {
         }
         
         switch displayedSections[section] {
-        case .updates where !allowUpdate:
-            return updatesSection.unsupportedUpdatesFooterView()
-        case .updates where updatesSection.installedThroughTrollStore:
-            return updatesSection.trollStoreFooterView()
         case .jit:
             return jitSection.footerView()
         default:
             return nil
         }
-    }
-    
-    override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        guard displayedSections.indices.contains(indexPath.section),
-              displayedSections[indexPath.section] == .updates else {
-            return UITableView.automaticDimension
-        }
-        
-        return updatesSection.rowHeight(at: indexPath.row, allowUpdate: allowUpdate, in: tableView)
     }
     
     // MARK: - View Setup

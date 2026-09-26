@@ -104,7 +104,6 @@ final class AddressBar: UIView {
     private var preserveAutocompleteAfterResign = false
     private var pageMenuItems: [AddressBarMenu.Item] = []
     private weak var pageMenuOverlay: AddressBarPageMenuView?
-    private var pageMenuIndicatesUpdate = false
     
     private var lastEditingText = ""
     private var lastEditWasDelete = false
@@ -160,16 +159,6 @@ final class AddressBar: UIView {
         }
         button.isUserInteractionEnabled = false
         return button
-    }()
-
-    private let pageMenuUpdateBadge: UIView = {
-        let view = UIView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = .systemRed
-        view.layer.cornerRadius = 4
-        view.isHidden = true
-        view.isAccessibilityElement = false
-        return view
     }()
 
     private let addonButton: AddressBarButton = {
@@ -383,11 +372,6 @@ final class AddressBar: UIView {
         applyState()
     }
 
-    func setPageMenuIndicatesUpdate(_ hasUpdate: Bool) {
-        pageMenuIndicatesUpdate = hasUpdate
-        applyState()
-    }
-    
     func setEditingState(_ state: EditingState) {
         editingState = state
         applyState()
@@ -569,7 +553,6 @@ final class AddressBar: UIView {
         addressBarBackground.addSubview(addressBarContent)
         addressBarGlassBackground.install(in: addressBarContent)
         addressBarContent.addSubview(leadingButton)
-        addressBarContent.addSubview(pageMenuUpdateBadge)
         addressBarContent.addSubview(addonButton)
         addressBarContent.addSubview(trailingButton)
         addressBarContent.addSubview(textField)
@@ -610,11 +593,6 @@ final class AddressBar: UIView {
             leadingButton.centerYAnchor.constraint(equalTo: addressBarContent.centerYAnchor),
             leadingButton.widthAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
             leadingButton.heightAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
-
-            pageMenuUpdateBadge.widthAnchor.constraint(equalToConstant: 8),
-            pageMenuUpdateBadge.heightAnchor.constraint(equalToConstant: 8),
-            pageMenuUpdateBadge.topAnchor.constraint(equalTo: leadingButton.topAnchor, constant: -2),
-            pageMenuUpdateBadge.trailingAnchor.constraint(equalTo: leadingButton.trailingAnchor, constant: 2),
 
             addonButton.leadingAnchor.constraint(equalTo: leadingButton.trailingAnchor, constant: UX.addressBarButtonToTextSpacing),
             addonButton.centerYAnchor.constraint(equalTo: addressBarContent.centerYAnchor),
@@ -806,11 +784,6 @@ final class AddressBar: UIView {
     }
     
     private func applyLeadingButtonState(_ state: LeadingButtonState) {
-        let showsUpdate = state == .menu && pageMenuIndicatesUpdate
-        pageMenuUpdateBadge.isHidden = !showsUpdate
-        leadingButton.accessibilityValue = showsUpdate
-            ? NSLocalizedString("Update available", comment: "")
-            : nil
         guard state != .hidden else {
             leadingButton.isHidden = true
             leadingButton.setImage(nil, for: .normal)

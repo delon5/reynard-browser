@@ -78,7 +78,6 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
-            key("ExperimentalSettings", "hidesUpdateAvailableBanner"): false,
             
             // AirPlay
             key("AirPlaySettings", "isEnabled"): true,
@@ -130,7 +129,6 @@ final class BrowserPreferences {
             key("HomepageSettings", "showsRecentlyClosedTabs"): true,
             key("HomepageSettings", "recentlyClosedTabLimit"): 10,
             key("HomepageSettings", "showsRecommendations"): true,
-            key("HomepageSettings", "showsNewUpdates"): true,
             key("HomepageSettings", "donationRecommendationMultiplier"): 1,
             
             // Appearance
@@ -768,16 +766,6 @@ final class BrowserPreferences {
             }
         }
         
-        static var showsNewUpdates: Bool {
-            get {
-                return prefs.bool(forSetting: "HomepageSettings", key: "showsNewUpdates")
-            }
-            set {
-                prefs.set(newValue, forSetting: "HomepageSettings", key: "showsNewUpdates")
-                NotificationCenter.default.post(name: .homepageSettingsDidChange, object: nil)
-            }
-        }
-        
         static var donationRecommendationShowTime: Date {
             get {
                 return Date(timeIntervalSince1970: prefs.double(forSetting: "HomepageSettings", key: "donationRecommendationShowTime"))
@@ -1369,22 +1357,6 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isVideoPictureInPictureEnabled")
-            }
-        }
-        
-        // Gates SettingsViewController.Section.updates - the "Update
-        // Available" section header, release notes, and Update Now
-        // button shown at the top of the main Settings screen itself.
-        // Distinct from Prefs.HomepageSettings.showsNewUpdates, which
-        // gates a completely separate homepage card - these two have
-        // nothing to do with each other beyond both being update
-        // notifications, hence two separate toggles rather than one.
-        static var hidesUpdateAvailableBanner: Bool {
-            get {
-                return prefs.bool(forSetting: "ExperimentalSettings", key: "hidesUpdateAvailableBanner")
-            }
-            set {
-                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "hidesUpdateAvailableBanner")
             }
         }
         

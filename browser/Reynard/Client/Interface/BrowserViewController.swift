@@ -192,7 +192,6 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         tabOverview.restoreMode(TabOverview.Mode(tabMode: TabManagementStore.shared.preferredRestoredMode()))
         syncBrowserNavigationChrome(animated: false)
         browserChrome.syncSidebarButton(splitViewController: splitViewController)
-        applyUpdateMenuButtonBadge()
         
         // Before the first tab exists, so a page's picker request is
         // measured against the selected tab from the start - the
@@ -1051,12 +1050,6 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         )
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(applyUpdateMenuButtonBadge),
-            name: .appUpdateAvailable,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
             selector: #selector(newTabDisplayOptionDidChange),
             name: .newTabDisplayOptionDidChange,
             object: nil
@@ -1108,10 +1101,6 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     
     @objc func landscapeTabBarDidChange() {
         updateBrowserLayout(animated: true)
-    }
-    
-    @objc func applyUpdateMenuButtonBadge() {
-        browserChrome.setMenuButtonIndicatesUpdate(BrowserUpdates.shared.hasUpdate)
     }
     
     // MARK: - Keyboard

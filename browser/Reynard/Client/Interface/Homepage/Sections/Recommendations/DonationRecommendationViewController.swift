@@ -147,7 +147,6 @@ final class DonationRecommendationViewController: UIViewController, HomepageReco
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        observeUpdates()
         configureView()
         updateContentInsets()
         updateRecommendationState()
@@ -258,15 +257,6 @@ final class DonationRecommendationViewController: UIViewController, HomepageReco
         return button
     }
     
-    private func observeUpdates() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appUpdateAvailable),
-            name: .appUpdateAvailable,
-            object: nil
-        )
-    }
-    
     // MARK: - Actions
     
     @objc private func openDonationLink() {
@@ -277,10 +267,6 @@ final class DonationRecommendationViewController: UIViewController, HomepageReco
         let multiplier = max(Prefs.HomepageSettings.donationRecommendationMultiplier, 1)
         Prefs.HomepageSettings.donationRecommendationShowTime = nextDonationRecommendationShowTime(months: multiplier)
         Prefs.HomepageSettings.donationRecommendationMultiplier = multiplier * 2
-        updateRecommendationState()
-    }
-    
-    @objc private func appUpdateAvailable() {
         updateRecommendationState()
     }
     
@@ -345,13 +331,6 @@ final class DonationRecommendationViewController: UIViewController, HomepageReco
         }
         
         if PerformanceRecommendationViewController.isRecommendationShown(
-            isPrivateBrowsing: isPrivateBrowsing,
-            contentMode: contentMode
-        ) {
-            return false
-        }
-        
-        if UpdateAvailableViewController.isRecommendationShown(
             isPrivateBrowsing: isPrivateBrowsing,
             contentMode: contentMode
         ) {

@@ -34,7 +34,6 @@ final class LibraryViewController: UITabBarController, UITabBarControllerDelegat
         configureAppearance()
         installSections()
         installCloseButtonIfNeeded()
-        observeAppUpdateBadge()
         updateNavigationTitle()
     }
     
@@ -79,18 +78,6 @@ final class LibraryViewController: UITabBarController, UITabBarControllerDelegat
         }
         
         navigationItem.rightBarButtonItem = makeCloseButton()
-    }
-    
-    private func observeAppUpdateBadge() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(markSettingsUpdateAvailable),
-            name: .appUpdateAvailable,
-            object: nil
-        )
-        if BrowserUpdates.shared.hasUpdate {
-            markSettingsUpdateAvailable()
-        }
     }
     
     private func makeViewControllers() -> [UIViewController] {
@@ -162,13 +149,5 @@ final class LibraryViewController: UITabBarController, UITabBarControllerDelegat
             target: self,
             action: #selector(closeLibrary)
         )
-    }
-    
-    // MARK: - Badges
-    
-    @objc private func markSettingsUpdateAvailable() {
-        viewControllers?.first { viewController in
-            viewController.tabBarItem.tag == LibrarySection.settings.rawValue
-        }?.tabBarItem.badgeValue = ""
     }
 }

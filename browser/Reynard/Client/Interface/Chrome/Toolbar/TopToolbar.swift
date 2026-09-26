@@ -355,13 +355,6 @@ final class TopToolbar: UIView {
         updateDownloadButtonVisibility()
     }
     
-    func setMenuButtonIndicatesUpdate(_ hasUpdate: Bool) {
-        libraryButton.setImage(
-            hasUpdate ? UIImage(named: "reynard.ellipsis.circle.badge") : UIImage(named: "reynard.ellipsis.circle"),
-            for: .normal
-        )
-    }
-    
     func syncSidebarButton(splitViewController: UISplitViewController?) {
         sidebarButton.setImage(splitViewController?.displayModeButtonItem.image ?? UIImage(named: "reynard.sidebar.left"), for: .normal)
         sidebarButton.accessibilityLabel = splitViewController?.displayModeButtonItem.accessibilityLabel
