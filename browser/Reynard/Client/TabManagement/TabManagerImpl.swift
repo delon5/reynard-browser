@@ -1468,6 +1468,13 @@ final class TabManagerImplementation: NSObject, TabManager {
             setSelectedIndex(-1, for: mode)
         } else if index < selectedIndex(for: mode) {
             setSelectedIndex(selectedIndex(for: mode) - 1, for: mode)
+        } else if index == selectedIndex(for: mode), !wasSelected {
+            // That mode's selected tab, removed while the mode was not
+            // on screen: nothing below reselects for it, and the index
+            // would keep naming the vacated slot - one past the end if
+            // it was last. Point at the tab that slid in, clamped. See
+            // fix_remove_tab_keeps_the_other_modes_index_valid.py.
+            setSelectedIndex(min(index, tabs(for: mode).count - 1), for: mode)
         }
         
         if regularTabs.isEmpty && privateTabs.isEmpty {
