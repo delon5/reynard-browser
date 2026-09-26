@@ -1200,6 +1200,16 @@ final class TabManagerImplementation: NSObject, TabManager {
         let index = regularTabs.count
         regularTabs.append(tab)
         delegate?.tabManagerDidChangeTabs(self)
+        // The session on screen is deactivated HERE, as
+        // addTransferredSession and onNewSession do. selectedTabMode
+        // flips to .regular on the next line, so selectTab's own
+        // "previous tab" is the regular mode's last selection - not the
+        // private tab that was actually showing. See
+        // fix_restore_closed_tab_deactivates_the_shown_session.py.
+        if let previousSession = selectedTab?.session,
+           previousSession !== tab.session {
+            sessionManager.deactivate(previousSession)
+        }
         selectedTabMode = .regular
         delegate?.tabManager(self, animateNewTabSelectionAt: index) { [weak self] in
             self?.selectTab(at: index, mode: .regular)
