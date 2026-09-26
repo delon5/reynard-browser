@@ -2,7 +2,7 @@ diff --git a/widget/uikit/GeckoViewSwiftSupport.h b/widget/uikit/GeckoViewSwiftS
 index e68fca9134c0..63a66ada8769 100644
 --- a/widget/uikit/GeckoViewSwiftSupport.h
 +++ b/widget/uikit/GeckoViewSwiftSupport.h
-@@ -18,16 +18,312 @@
+@@ -18,16 +18,316 @@
  #endif
  
  #import <Foundation/Foundation.h>
@@ -158,6 +158,10 @@ index e68fca9134c0..63a66ada8769 100644
 +// goes on feeding its sinks in real time for as long as they last.
 +- (void)parserRetireStream:(NSUInteger)childId
 +                    stream:(NSString*)stream;
++// That child is gone without having sent any of the above - a crash,
++// or an unrequested shutdown: drop what the host keeps per child. See
++// fix_child_death_forgets_its_certificates.py.
++- (void)parserForgetChild:(NSUInteger)childId;
 +// That child's MediaKeys is gone - FairPlayCDMProxy::Shutdown. The
 +// parser key session dies with it, above all the KEYS it accumulated:
 +// an AVContentKeySession raises no request for a key it already holds,
@@ -315,7 +319,7 @@ index e68fca9134c0..63a66ada8769 100644
  @protocol GeckoProcessExtension <NSObject>
  - (void)lockdownSandbox:(NSString*)revision;
  @end
-@@ -55,8 +351,44 @@
+@@ -55,8 +355,44 @@
  @end
  
  @protocol GeckoViewWindow <NSObject>
@@ -360,7 +364,7 @@ index e68fca9134c0..63a66ada8769 100644
  @end
  
  MOZ_BEGIN_EXTERN_C
-@@ -65,6 +397,119 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
+@@ -65,6 +401,119 @@ MOZ_EXPORT id<GeckoViewWindow> GeckoViewOpenWindow(
      NSString* aId, id<SwiftEventDispatcher> aDispatcher,
      NSDictionary* aInitData, bool aPrivateMode);
  

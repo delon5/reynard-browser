@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..0385fba02e86
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,3493 @@
+@@ -0,0 +1,3511 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -1296,6 +1296,24 @@ index 000000000000..0385fba02e86
 +    [host parserSetCertificate:static_cast<NSUInteger>(aChildID)
 +                   certificate:[NSData dataWithBytes:aCert.Elements()
 +                                              length:aCert.Length()]];
++  }
++}
++
++// The child is gone - ContentParent::ActorDestroy, through
++// ReynardAVPlayerForgetOwner, after its players. Drops the one thing
++// this file keeps per CHILD, its app certificate, and has the host
++// drop its own copy and the child's parser session; a child that
++// shut down cleanly already sent both, and both are no-ops then. See
++// fix_child_death_forgets_its_certificates.py.
++void ReynardAVPlayerBrokerForgetChild(uint64_t aChildID) {
++  MOZ_ASSERT(NS_IsMainThread());
++  if (AppCertificates().erase(aChildID)) {
++    printf_stderr("avPlayer: forgot child %llu's FairPlay app certificate\n",
++                  (unsigned long long)aChildID);
++  }
++  id<GeckoAVPlayerHost> host = AVPlayerHost();
++  if (host && [host respondsToSelector:@selector(parserForgetChild:)]) {
++    [host parserForgetChild:static_cast<NSUInteger>(aChildID)];
 +  }
 +}
 +

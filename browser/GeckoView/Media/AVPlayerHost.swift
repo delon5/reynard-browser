@@ -562,6 +562,18 @@ public final class AVPlayerHost: NSObject {
         FairPlayStreamParser.shared.destroySession(sessionId)
     }
 
+    /// The content process is gone - see
+    /// fix_child_death_forgets_its_certificates.py. Its certificate was
+    /// kept per child for players and parser sessions built later, and
+    /// there will be none; its parser session, if the child never sent
+    /// the MediaKeys shutdown that destroys it, goes the same way.
+    @objc public func parserForgetChild(_ childId: UInt) {
+        if let forgotten = withState({ parserCertificates.removeValue(forKey: childId) }) {
+            avLog("child \(childId) is gone - forgot its parser certificate (\(forgotten.count) bytes)")
+        }
+        parserDestroySession(childId)
+    }
+
     /// DIAGNOSTIC + likely fix for "play() ignored": the AVPlayer runs
     /// in a content-process extension, and iOS media services refuse to
     /// start a playback timebase for a process with no active playback

@@ -10,7 +10,7 @@ index 21a9c93a1325..05aeafaca2e0 100644
  #include "nsDebugImpl.h"
  #include "nsDirectoryServiceDefs.h"
  #include "nsDocShell.h"
-@@ -344,6 +345,42 @@
+@@ -344,6 +345,45 @@
  #include "nsIToolkitProfile.h"
  #include "nsIToolkitProfileService.h"
  
@@ -33,6 +33,9 @@ index 21a9c93a1325..05aeafaca2e0 100644
 +// which outlives and predates any one element.
 +void ReynardAVPlayerBrokerSetAppCertificate(uint64_t aChildID,
 +                                            const nsTArray<uint8_t>& aCert);
++// A content process is gone: what the broker keeps per CHILD rather
++// than per player - see fix_child_death_forgets_its_certificates.py.
++void ReynardAVPlayerBrokerForgetChild(uint64_t aChildID);
 +void ReynardAVPlayerBrokerGenerateKeyRequest(
 +    uint64_t aKey, const nsCString& aContentId, const nsCString& aInitDataType,
 +    const nsTArray<uint8_t>& aInitData);
@@ -53,7 +56,7 @@ index 21a9c93a1325..05aeafaca2e0 100644
  #ifdef MOZ_WMF_CDM
  #  include "mozilla/EMEUtils.h"
  #  include "nsIWindowsMediaFoundationCDMOriginsListService.h"
-@@ -1940,6 +1977,32 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
+@@ -1940,6 +1980,32 @@ void ContentParent::ActorDestroy(ActorDestroyReason why) {
    MOZ_FUZZING_IPC_DROP_PEER("ContentParent::ActorDestroy");
  #endif
  
@@ -86,7 +89,7 @@ index 21a9c93a1325..05aeafaca2e0 100644
    if (mSendShutdownTimer) {
      mSendShutdownTimer->Cancel();
      mSendShutdownTimer = nullptr;
-@@ -3020,14 +3083,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
+@@ -3020,14 +3086,15 @@ bool ContentParent::InitInternal(ProcessPriority aInitialPriority) {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -104,7 +107,7 @@ index 21a9c93a1325..05aeafaca2e0 100644
    } else {
      // This can fail if we've already started shutting down the compositor
      // thread. See Bug 1562763 comment 8. On Android this can fail we are are
-@@ -3199,16 +3263,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
+@@ -3199,16 +3266,17 @@ void ContentParent::OnCompositorUnexpectedShutdown() {
    Endpoint<PVRManagerChild> vrBridge;
    Endpoint<PRemoteMediaManagerChild> videoManager;
    AutoTArray<uint32_t, 4> namespaces;
@@ -124,7 +127,7 @@ index 21a9c93a1325..05aeafaca2e0 100644
  }
  
  void ContentParent::OnCompositorDeviceReset() {
-@@ -8224,6 +8289,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
+@@ -8224,6 +8292,80 @@ IPCResult ContentParent::RecvKillGPUProcess() {
  }
  #endif
  
@@ -205,7 +208,7 @@ index 21a9c93a1325..05aeafaca2e0 100644
  nsCString ThreadsafeContentParentHandle::GetRemoteType() {
    return mLoadedOrigins->GetRemoteType();
  }
-@@ -8252,6 +8391,297 @@ bool ThreadsafeContentParentHandle::ValidatePrincipal(
+@@ -8252,6 +8394,301 @@ bool ThreadsafeContentParentHandle::ValidatePrincipal(
  }  // namespace dom
  }  // namespace mozilla
  
@@ -279,6 +282,10 @@ index 21a9c93a1325..05aeafaca2e0 100644
 +  for (uint64_t key : orphaned) {
 +    ReynardAVPlayerBrokerControl(key, kAVPlayerDestroyOp, 0.0);
 +  }
++  // And what the broker keeps per child, which no player teardown
++  // touches: its FairPlay app certificate, and the host's copy and
++  // parser session. See fix_child_death_forgets_its_certificates.py.
++  ReynardAVPlayerBrokerForgetChild(aChildID);
 +}
 +
 +static dom::ContentParent* AVPlayerOwner(uint64_t aKey) {
