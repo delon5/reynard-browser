@@ -155,9 +155,15 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
-            logger("carPlayLife: audio session ACTIVE (.playback/.moviePlayback)")
-            logger("CarPlay: audio session claimed for playback")
+            // NOT ACTIVATED HERE - see fix_carplay_connect_side_effects.py.
+            // setActive(true) at connect took the audio focus from whatever
+            // the user was listening to while the car window showed its
+            // start page. The category is what routes sound to the car;
+            // activation happens when something plays - cubeb activates the
+            // session at every stream init, SystemMediaSession re-activates
+            // on play, AVPlayerHost on its first player - so nothing is
+            // lost by waiting.
+            logger("carPlayLife: audio session category set (.playback/.moviePlayback) - not activated until something plays")
         } catch {
             logger(String(format: "CarPlay: audio session failed - %@", error.localizedDescription))
         }
@@ -291,6 +297,9 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
     /// activation for the life of every document it loads. This
     /// preserves that, and still writes nothing down.
     private var activationHeartbeat: Timer?
+    /// ADDED - see fix_carplay_connect_side_effects.py. onPageStop
+    /// installed the probe on every load, one more recognizer each time.
+    private var didInstallTouchProbe = false
 
     /// Stops the heartbeat - see activationHeartbeat. Called from the
     /// scene delegate's disconnect, which owns the lifetime this timer
@@ -366,6 +375,10 @@ private final class CarPlayBrowserViewController: UIViewController, ProgressDele
     // pitch and rotate. This settles it rather than
     // assuming. See fix_carplay_scale_v3.py.
     private func installTouchProbe() {
+        guard !didInstallTouchProbe else {
+            return
+        }
+        didInstallTouchProbe = true
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleProbeTap(_:)))
         view.addGestureRecognizer(tap)
     }
