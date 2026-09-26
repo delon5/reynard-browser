@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000000..0385fba02e86
 --- /dev/null
 +++ b/dom/media/AVPlayerDecoder.mm
-@@ -0,0 +1,3511 @@
+@@ -0,0 +1,3575 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -668,56 +668,73 @@ index 000000000000..0385fba02e86
 +                (unsigned long long)offset, image);
 +}
 +
-+// Walks a frame-pointer chain and SAYS WHY IT STOPPED. The last dump
++// Walks a frame-pointer chain into aOut, and records WHY IT STOPPED in
++// *aStop rather than printing it: this runs while the thread that owns
++// the stack is suspended, and nothing that runs then may take a lock -
++// see fix_content_watchdog_unwinds_without_locks.py. The last dump
 +// printed one frame and fell silent, which reads the same as "there is
 +// nothing above" and as "the chain was unusable" - two very different
-+// facts.
++// facts, so the reason still travels, as a code.
++enum ReynardWalkStop : uint8_t {
++  kWalkRanOut = 0,
++  kWalkNullFp,
++  kWalkMisalignedFp,
++  kWalkOutsideStack,
++  kWalkFpDidNotIncrease,
++};
++static const uint32_t kReynardWalkFrames = 24;
 +static uint32_t WalkFrames(uint64_t aFp, const uint8_t* aStackBottom,
-+                           const uint8_t* aStackTop, uint32_t aFirstIndex) {
++                           const uint8_t* aStackTop, uint64_t* aOut,
++                           ReynardWalkStop* aStop, uint64_t* aStopFp,
++                           uint64_t* aStopNext) {
 +  uint64_t fp = aFp;
-+  uint32_t printed = 0;
-+  for (uint32_t frame = 0; frame < 24; frame++) {
++  uint32_t walked = 0;
++  *aStop = kWalkRanOut;
++  *aStopFp = 0;
++  *aStopNext = 0;
++  for (uint32_t frame = 0; frame < kReynardWalkFrames; frame++) {
 +    const uint8_t* frameAddr = (const uint8_t*)fp;
 +    if (!fp) {
-+      printf_stderr("avPlayer:   (walk stopped: fp is null)\n");
++      *aStop = kWalkNullFp;
 +      break;
 +    }
 +    if (fp & 0xf) {
-+      printf_stderr("avPlayer:   (walk stopped: fp 0x%016llx is misaligned)\n",
-+                    (unsigned long long)fp);
++      *aStop = kWalkMisalignedFp;
++      *aStopFp = fp;
 +      break;
 +    }
 +    if (frameAddr < aStackBottom || frameAddr + 16 > aStackTop) {
-+      printf_stderr(
-+          "avPlayer:   (walk stopped: fp 0x%016llx is outside the stack "
-+          "0x%016llx-0x%016llx)\n",
-+          (unsigned long long)fp, (unsigned long long)(uintptr_t)aStackBottom,
-+          (unsigned long long)(uintptr_t)aStackTop);
++      *aStop = kWalkOutsideStack;
++      *aStopFp = fp;
 +      break;
 +    }
 +
 +    // arm64 frame record: [fp] = caller's fp, [fp+8] = return address.
 +    uint64_t record[2] = {0, 0};
 +    memcpy(record, frameAddr, sizeof(record));
-+
-+    char label[8];
-+    snprintf(label, sizeof(label), "#%02u", aFirstIndex + frame);
-+    DescribeAddress(label, record[1]);
-+    printed++;
++    aOut[walked++] = record[1];
 +
 +    if (record[0] <= fp) {
-+      printf_stderr(
-+          "avPlayer:   (walk stopped: fp did not increase: 0x%016llx -> "
-+          "0x%016llx)\n",
-+          (unsigned long long)fp, (unsigned long long)record[0]);
++      *aStop = kWalkFpDidNotIncrease;
++      *aStopFp = fp;
++      *aStopNext = record[0];
 +      break;
 +    }
 +    fp = record[0];
 +  }
-+  return printed;
++  return walked;
 +}
 +#endif
 +
++// Suspends the main thread, copies what it needs off it - registers and
++// the frame chain - and RESUMES IT before symbolising or printing a
++// word. The old order ran dladdr and printf_stderr with the thread
++// stopped; both take locks - dyld's, and stderr's stream lock, which
++// printf_stderr (fputs + fflush on stderr) holds for every line this
++// file prints from the main thread - so a main thread suspended while
++// holding one of them left this thread waiting on it forever, main
++// thread still stopped: the stall this exists to describe, turned
++// into a hang it caused. See fix_content_watchdog_unwinds_without_locks.py.
 +static void DumpMainThreadStack() {
 +#if defined(__aarch64__)
 +  if (!sContentMainThreadKnown) {
@@ -740,20 +757,39 @@ index 000000000000..0385fba02e86
 +    return;
 +  }
 +
++  // --- suspended: mach calls, memcpy and arithmetic only from here ---
 +  arm_thread_state64_t state;
 +  mach_msg_type_number_t stateCount = ARM_THREAD_STATE64_COUNT;
-+  kern_return_t kr = thread_get_state(machThread, ARM_THREAD_STATE64,
-+                                      (thread_state_t)&state, &stateCount);
++  const kern_return_t kr = thread_get_state(
++      machThread, ARM_THREAD_STATE64, (thread_state_t)&state, &stateCount);
++  uint64_t pc = 0;
++  uint64_t lr = 0;
++  uint64_t sp = 0;
++  uint64_t fp = 0;
++  uint64_t x[4] = {0, 0, 0, 0};
++  uint64_t frames[kReynardWalkFrames];
++  uint32_t walked = 0;
++  ReynardWalkStop stop = kWalkRanOut;
++  uint64_t stopFp = 0;
++  uint64_t stopNext = 0;
++  if (kr == KERN_SUCCESS) {
++    pc = (uint64_t)arm_thread_state64_get_pc(state);
++    lr = (uint64_t)arm_thread_state64_get_lr(state);
++    sp = (uint64_t)arm_thread_state64_get_sp(state);
++    fp = (uint64_t)arm_thread_state64_get_fp(state);
++    for (int i = 0; i < 4; i++) {
++      x[i] = (uint64_t)state.__x[i];
++    }
++    walked = WalkFrames(fp, stackBottom, stackTop, frames, &stop, &stopFp,
++                        &stopNext);
++  }
++  thread_resume(machThread);
++  // --- resumed: locks are allowed again ---
++
 +  if (kr != KERN_SUCCESS) {
 +    printf_stderr("avPlayer: thread_get_state failed (%d)\n", (int)kr);
-+    thread_resume(machThread);
 +    return;
 +  }
-+
-+  const uint64_t pc = (uint64_t)arm_thread_state64_get_pc(state);
-+  const uint64_t lr = (uint64_t)arm_thread_state64_get_lr(state);
-+  const uint64_t sp = (uint64_t)arm_thread_state64_get_sp(state);
-+  const uint64_t fp = (uint64_t)arm_thread_state64_get_fp(state);
 +
 +  DescribeAddress("pc", pc);
 +  DescribeAddress("lr", lr);
@@ -761,8 +797,8 @@ index 000000000000..0385fba02e86
 +      "avPlayer:   sp=0x%016llx fp=0x%016llx x0=0x%llx x1=0x%llx x2=0x%llx "
 +      "x3=0x%llx\n",
 +      (unsigned long long)sp, (unsigned long long)fp,
-+      (unsigned long long)state.__x[0], (unsigned long long)state.__x[1],
-+      (unsigned long long)state.__x[2], (unsigned long long)state.__x[3]);
++      (unsigned long long)x[0], (unsigned long long)x[1],
++      (unsigned long long)x[2], (unsigned long long)x[3]);
 +
 +  // THE QUESTION. If the instruction under the pc is a brk then this
 +  // thread trapped - an assertion or MOZ_CRASH - and something is
@@ -772,7 +808,8 @@ index 000000000000..0385fba02e86
 +  //
 +  // Read only after dladdr has confirmed the pc is inside a mapped
 +  // image: a wedged process must not be turned into a crashed one by
-+  // the thing measuring it.
++  // the thing measuring it. Code pages do not change, so a pc taken
++  // while the thread was stopped reads the same now that it runs.
 +  Dl_info pcInfo;
 +  if (pc && dladdr((const void*)pc, &pcInfo)) {
 +    uint32_t insn = 0;
@@ -784,7 +821,36 @@ index 000000000000..0385fba02e86
 +                        : "");
 +  }
 +
-+  const uint32_t walked = WalkFrames(fp, stackBottom, stackTop, 1);
++  for (uint32_t i = 0; i < walked; i++) {
++    char label[8];
++    snprintf(label, sizeof(label), "#%02u", i + 1);
++    DescribeAddress(label, frames[i]);
++  }
++  switch (stop) {
++    case kWalkRanOut:
++      break;
++    case kWalkNullFp:
++      printf_stderr("avPlayer:   (walk stopped: fp is null)\n");
++      break;
++    case kWalkMisalignedFp:
++      printf_stderr("avPlayer:   (walk stopped: fp 0x%016llx is misaligned)\n",
++                    (unsigned long long)stopFp);
++      break;
++    case kWalkOutsideStack:
++      printf_stderr(
++          "avPlayer:   (walk stopped: fp 0x%016llx is outside the stack "
++          "0x%016llx-0x%016llx)\n",
++          (unsigned long long)stopFp,
++          (unsigned long long)(uintptr_t)stackBottom,
++          (unsigned long long)(uintptr_t)stackTop);
++      break;
++    case kWalkFpDidNotIncrease:
++      printf_stderr(
++          "avPlayer:   (walk stopped: fp did not increase: 0x%016llx -> "
++          "0x%016llx)\n",
++          (unsigned long long)stopFp, (unsigned long long)stopNext);
++      break;
++  }
 +  if (!walked) {
 +    // No usable frame record - a trap, or a prologue that has not set
 +    // fp up yet. lr is then the best caller we have, and it was printed
@@ -792,8 +858,6 @@ index 000000000000..0385fba02e86
 +    printf_stderr(
 +        "avPlayer:   (no frames from fp; lr above is the likely caller)\n");
 +  }
-+
-+  thread_resume(machThread);
 +#else
 +  printf_stderr("avPlayer: stack walk is arm64-only\n");
 +#endif
