@@ -1965,6 +1965,16 @@ final class JITController {
                         guard Self.isApplicationActiveFromAnyQueue else {
                             logger(String(format: "preflightWatchdog: pid %d abandoned at the slot - the app went inactive while the retry queued", pid))
                             self.cancelPreflightWatchdog(for: pid)
+                            // Handed back to the deferred drain, as the
+                            // three other post-slot abandon sites do - see
+                            // fix_retry_abandon_defers_the_pid.py. This
+                            // path landed after 827aa4ea's amendment and
+                            // copied the older shape. Un-marked first,
+                            // because the drain skips attached pids.
+                            self.attachQueue.async {
+                                self.ledger.clearAttached(pid)
+                                _ = self.ledger.deferAttach(pid)
+                            }
                             return
                         }
                         guard !JITEnabler.hasActiveDebugSession(forPID: pid) else {
