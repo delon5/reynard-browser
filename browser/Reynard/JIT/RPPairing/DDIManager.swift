@@ -61,6 +61,9 @@ final class DDIManager: NSObject {
         var plan: DownloadPlan
         var currentIndex: Int
         var currentTask: URLSessionDownloadTask?
+        /// Whether the plan was built with includingCryptex, so the
+        /// end-of-plan re-check below builds the same one.
+        let includesCryptex: Bool
         let progressHandler: (Double) -> Void
         let completion: (Result<Void, Error>) -> Void
     }
@@ -80,8 +83,11 @@ final class DDIManager: NSObject {
         super.init()
     }
     
-    func hasRequiredDDIFiles() -> Bool {
-        guard let plan = try? makeDownloadPlan(),
+    /// `includingCryptex` also requires the Cryptex set on a device the
+    /// Personalized manifest lists - the Experimental screen asks before
+    /// switching Always Use Cryptex DDI on.
+    func hasRequiredDDIFiles(includingCryptex: Bool = false) -> Bool {
+        guard let plan = try? makeDownloadPlan(includingCryptex: includingCryptex),
               plan.items.allSatisfy({
                   fileManager.fileExists(atPath: $0.destinationURL.path)
               }),
@@ -93,7 +99,14 @@ final class DDIManager: NSObject {
             return false
         }
 
-        return receipt == validationReceipt(for: plan)
+        // Covers the plan, rather than equals it: a receipt written while
+        // Always Use Cryptex DDI was on also lists the Cryptex set, and
+        // switching it off must not make the Personalized files that same
+        // receipt validated read as missing - a launch that finds required
+        // files missing turns JIT off.
+        let expected = validationReceipt(for: plan)
+        return receipt.sourceRevision == expected.sourceRevision &&
+            expected.hashes.allSatisfy { receipt.hashes[$0.key] == $0.value }
     }
     
     // REMOVED checkDDIVersionStaleness() - see
@@ -105,10 +118,11 @@ final class DDIManager: NSObject {
     // ever read.
     
     func ensureRequiredDDIFiles(
+        includingCryptex: Bool = false,
         progress: @escaping (Double) -> Void,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
-        if hasRequiredDDIFiles() {
+        if hasRequiredDDIFiles(includingCryptex: includingCryptex) {
             DispatchQueue.main.async {
                 progress(1)
                 completion(.success(()))
@@ -123,13 +137,14 @@ final class DDIManager: NSObject {
             }
             
             do {
-                let plan = try self.makeDownloadPlan()
+                let plan = try self.makeDownloadPlan(includingCryptex: includingCryptex)
                 try self.ensureDDIRootDirectoryExists(at: plan.rootDirectoryURL)
                 
                 self.activeDownload = ActiveDownload(
                     plan: plan,
                     currentIndex: 0,
                     currentTask: nil,
+                    includesCryptex: includingCryptex,
                     progressHandler: progress,
                     completion: completion
                 )
@@ -204,7 +219,7 @@ final class DDIManager: NSObject {
             // wants the Cryptex set. Its first items are the ones already
             // fetched, in the same order, so carry on from here rather than
             // writing a receipt for half a plan.
-            if let fullPlan = try? makeDownloadPlan(),
+            if let fullPlan = try? makeDownloadPlan(includingCryptex: active.includesCryptex),
                fullPlan.items.count > active.plan.items.count,
                zip(fullPlan.items, active.plan.items).allSatisfy({
                    $0.destinationURL == $1.destinationURL && $0.expectedSHA256 == $1.expectedSHA256
@@ -450,7 +465,7 @@ final class DDIManager: NSObject {
         return String(cString: buffer)
     }
 
-    private func makeDownloadPlan() throws -> DownloadPlan {
+    private func makeDownloadPlan(includingCryptex: Bool = false) throws -> DownloadPlan {
         let rootDirectoryURL = try ddiRootDirectoryURL()
         let baseURLString = "https://raw.githubusercontent.com/delon5/DeveloperDiskImage/5423e4e955fbb3a9eef3e1212acfbfc6e7a26236/PersonalizedImages/Xcode_iOS_DDI_Personalized"
         guard let baseURL = URL(string: baseURLString) else {
@@ -473,14 +488,18 @@ final class DDIManager: NSObject {
             )
         }
 
-        // The Cryptex variant, only for a device the Personalized manifest
-        // does not list (the iPhone 18 series and later): its build
-        // identity names no device, so Apple can sign it for any model.
-        // Decided from the Personalized manifest once it is on disk, so a
-        // covered device's plan - and its receipt - is exactly what it was.
-        if Self.personalizedManifestCoversThisDevice(
-            at: rootDirectoryURL.appendingPathComponent("BuildManifest.plist", isDirectory: false)
-        ) == false {
+        // The Cryptex variant, for a device the Personalized manifest does
+        // not list (the iPhone 18 series and later): its build identity
+        // names no device, so Apple can sign it for any model. Decided from
+        // the Personalized manifest once it is on disk, so a covered
+        // device's plan - and its receipt - is exactly what it was, unless
+        // Always Use Cryptex DDI asks for the set, or the Experimental
+        // screen is fetching it before switching that on.
+        if includingCryptex ||
+            Prefs.ExperimentalSettings.alwaysUsesCryptexDDI ||
+            Self.personalizedManifestCoversThisDevice(
+                at: rootDirectoryURL.appendingPathComponent("BuildManifest.plist", isDirectory: false)
+            ) == false {
             guard let cryptexBaseURL = URL(string: Self.cryptexBaseURLString) else {
                 throw DDIError.invalidRemoteURL
             }

@@ -3130,27 +3130,43 @@ static BOOL personalizedManifestCoversThisDevice(NSURL *ddiDirectory) {
     return NO;
 }
 
-// The Cryptex variant of the DDI, for devices the Personalized manifest does
-// not list: installed through cryptexd over the RSD tunnel, personalized by
-// Apple's signing server against the Cryptex1 identity, which names no
-// device. The assets are the five files DDIManager downloads into the
-// Cryptex subdirectory of the DDI root.
-static BOOL installCryptexDDI(DeviceProvider *provider, NSURL *ddiDirectory, NSError **error) {
+// Whether a DeveloperDiskImage cryptex is already installed - by an earlier
+// launch on a Cryptex device, by Always Use Cryptex DDI, or by something
+// outside Reynard (Xcode, pymobiledevice3, upstream's own build). Asked on
+// every device before the image mounter, the order upstream 13c62a7f uses:
+// nothing shows the image mounter lists a cryptex-installed DDI, and
+// mounting the Personalized image over one is untested. Any failure answers
+// NO and ensureDDIMounted carries on exactly as it did before this check.
+static BOOL cryptexDDIIsInstalled(DeviceProvider *provider) {
     InstalledCryptexC *installed = NULL;
+    logger(@"ensureDDIMounted: starting cryptexd_installed_ddi (is a Cryptex DDI already installed?)");
     IdeviceFfiError *ffiError = cryptexd_installed_ddi(provider->adapter, provider->handshake, &installed);
     if (ffiError) {
-        logger([NSString stringWithFormat:@"ensureDDIMounted: cryptexd_installed_ddi failed - code: %ld, sub_code: %ld, message: %@ - installing anyway", (long)ffiError->code, (long)ffiError->sub_code, ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)"]);
+        logger([NSString stringWithFormat:@"ensureDDIMounted: cryptexd_installed_ddi failed - code: %ld, sub_code: %ld, message: %@ - carrying on without it", (long)ffiError->code, (long)ffiError->sub_code, ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)"]);
         idevice_error_free(ffiError);
-        installed = NULL;
-    } else if (installed) {
-        logger([NSString stringWithFormat:@"ensureDDIMounted: the Cryptex DDI is already installed (%s %s)", installed->identifier ?: "?", installed->version ?: "?"]);
-        cryptexd_free_installed_cryptex(installed);
-        return YES;
+        return NO;
     }
+    if (!installed) {
+        logger(@"ensureDDIMounted: no Cryptex DDI installed");
+        return NO;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: the Cryptex DDI is already installed (%s %s)", installed->identifier ?: "?", installed->version ?: "?"]);
+    cryptexd_free_installed_cryptex(installed);
+    return YES;
+}
 
+// The Cryptex variant of the DDI, for devices the Personalized manifest does
+// not list, and for listed ones under Always Use Cryptex DDI: installed
+// through cryptexd over the RSD tunnel, personalized by Apple's signing
+// server against the Cryptex1 identity, which names no device. The assets
+// are the five files DDIManager downloads into the Cryptex subdirectory of
+// the DDI root. Whether one is already installed was asked by
+// cryptexDDIIsInstalled at the top of ensureDDIMounted.
+static BOOL installCryptexDDI(DeviceProvider *provider, NSURL *ddiDirectory, NSError **error) {
+    InstalledCryptexC *installed = NULL;
     NSURL *cryptexDirectory = [ddiDirectory URLByAppendingPathComponent:@"Cryptex" isDirectory:YES];
     Cryptex1AssetsHandle *assets = NULL;
-    ffiError = cryptex1_assets_load(cryptexDirectory.fileSystemRepresentation, &assets);
+    IdeviceFfiError *ffiError = cryptex1_assets_load(cryptexDirectory.fileSystemRepresentation, &assets);
     if (ffiError) {
         logger([NSString stringWithFormat:@"ensureDDIMounted: cryptex1_assets_load failed for %@ - code: %ld, sub_code: %ld, message: %@", cryptexDirectory.path, (long)ffiError->code, (long)ffiError->sub_code, ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)"]);
         idevice_error_free(ffiError);
@@ -3225,6 +3241,11 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
     NSData *buildManifestData = nil;
     uint64_t uniqueChipID = 0;
     BOOL success = NO;
+    
+    if (cryptexDDIIsInstalled(provider)) {
+        success = YES;
+        goto cleanup;
+    }
     
     logger(@"ensureDDIMounted: starting image_mounter_connect_rsd");
     ffiError = image_mounter_connect_rsd(provider->adapter, provider->handshake, &mounterClient);
@@ -3310,6 +3331,22 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
     if (!personalizedManifestCoversThisDevice(ddiDirectory)) {
         success = installCryptexDDI(provider, ddiDirectory, error);
         goto cleanup;
+    }
+
+    // Always Use Cryptex DDI (Experimental) tries the Cryptex route on a
+    // listed device too, so it can be tested on hardware that does not need
+    // it. A listed device still has the Personalized image, so a failed
+    // Cryptex install falls through to it: the test costs a log line, never
+    // JIT. An image already mounted this boot returned above, so the test
+    // only runs after a device reboot.
+    if (ReynardAlwaysUsesCryptexDDI()) {
+        NSError *cryptexError = nil;
+        logger(@"ensureDDIMounted: Always Use Cryptex DDI is on - trying the Cryptex variant on a listed device");
+        if (installCryptexDDI(provider, ddiDirectory, &cryptexError)) {
+            success = YES;
+            goto cleanup;
+        }
+        logger([NSString stringWithFormat:@"ensureDDIMounted: the Cryptex variant failed on a listed device (%@) - falling back to the Personalized image", cryptexError.localizedDescription ?: @"no error"]);
     }
 
     logger(@"ensureDDIMounted: starting Image.dmg read");

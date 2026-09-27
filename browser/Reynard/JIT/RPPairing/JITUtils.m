@@ -73,6 +73,18 @@ BOOL ReynardIsJITHangBacktraceEnabled(void) {
     return gReynardJITHangBacktraceEnabled;
 }
 
+// Experimental "Always Use Cryptex DDI" - see JITUtils.h. NO until
+// JITController.start() pushes the preference down.
+static BOOL gReynardAlwaysUsesCryptexDDI = NO;
+
+void ReynardSetAlwaysUsesCryptexDDI(BOOL enabled) {
+    gReynardAlwaysUsesCryptexDDI = enabled;
+}
+
+BOOL ReynardAlwaysUsesCryptexDDI(void) {
+    return gReynardAlwaysUsesCryptexDDI;
+}
+
 static int gReynardLogFileDescriptor = -1;
 
 // Rotation. This file had no bound at all: it lives in Documents, is

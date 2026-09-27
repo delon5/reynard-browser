@@ -18,6 +18,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case carPlayScripts
         case backgroundKeepAlive
         case diagnosticLogs
+        case cryptexDDI
         case jitDiagnostics
         
         var text: SettingsSectionText {
@@ -49,6 +50,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                     headerTitle: NSLocalizedString("Diagnostic Logs", comment: ""),
                     footerTitle: NSLocalizedString("Off by default. Turn one on to capture a problem for a bug report; it takes effect after a restart. Written to the app's Documents folder and retrievable over USB in Finder.", comment: "")
                 )
+            case .cryptexDDI:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Developer Disk Image", comment: ""),
+                    footerTitle: NSLocalizedString("Installs the Cryptex variant of the Developer Disk Image, which newer iPhones need, on this iPhone too - to test that route. If the install fails, Reynard falls back to the Personalized image. Turning it on downloads the Cryptex files first. Takes effect after a restart, and only after a device reboot if a disk image is already mounted.", comment: "")
+                )
             case .jitDiagnostics:
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("JIT Diagnostics", comment: ""),
@@ -75,6 +81,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         case ideviceNativeLog
         case jitHangBacktrace
         case stdoutLog
+        case alwaysUseCryptexDDI
         case resetDDIStorage
         
         var section: Section {
@@ -89,6 +96,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 return .backgroundKeepAlive
             case .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
                 return .diagnosticLogs
+            case .alwaysUseCryptexDDI:
+                return .cryptexDDI
             case .resetDDIStorage:
                 return .jitDiagnostics
             }
@@ -110,6 +119,10 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     private let ideviceNativeLogSwitch = UISwitch()
     private let jitHangBacktraceSwitch = UISwitch()
     private let stdoutLogSwitch = UISwitch()
+    private let alwaysUseCryptexDDISwitch = UISwitch()
+    /// Identifies the Cryptex download in flight, so a cancelled one's
+    /// late completion is ignored - the JIT settings screen's pattern.
+    private var activeCryptexDownloadToken: UUID?
     
     init() {
         super.init(style: .insetGrouped)
@@ -254,6 +267,11 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 title: NSLocalizedString("Standard Output Log", comment: ""),
                 accessoryView: stdoutLogSwitch
             )
+        case .alwaysUseCryptexDDI:
+            return switchCell(
+                title: NSLocalizedString("Always Use Cryptex DDI", comment: ""),
+                accessoryView: alwaysUseCryptexDDISwitch
+            )
         case .resetDDIStorage:
             // Destructive-red — this deletes on-disk data, so it
             // should read as destructive like "Erase All Content"
@@ -281,7 +299,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
              .airPlay, .airPlayVideo, .airPlayFullscreen, .airPlayShim, .airPlayRemote,
              .carPlayScriptsEnabled,
              .backgroundAudioKeepAlive,
-             .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog:
+             .debugLogFile, .ideviceNativeLog, .jitHangBacktrace, .stdoutLog,
+             .alwaysUseCryptexDDI:
             break
         case .manageCarPlayScripts:
             navigationController?.pushViewController(CarPlayScriptsViewController(), animated: true)
@@ -310,6 +329,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         ideviceNativeLogSwitch.addTarget(self, action: #selector(ideviceNativeLogSwitchDidChange(_:)), for: .valueChanged)
         jitHangBacktraceSwitch.addTarget(self, action: #selector(jitHangBacktraceSwitchDidChange(_:)), for: .valueChanged)
         stdoutLogSwitch.addTarget(self, action: #selector(stdoutLogSwitchDidChange(_:)), for: .valueChanged)
+        alwaysUseCryptexDDISwitch.addTarget(self, action: #selector(alwaysUseCryptexDDISwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
@@ -328,6 +348,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
         ideviceNativeLogSwitch.isOn = Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled
         jitHangBacktraceSwitch.isOn = Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
         stdoutLogSwitch.isOn = Prefs.ExperimentalSettings.isStdoutLogEnabled
+        alwaysUseCryptexDDISwitch.isOn = Prefs.ExperimentalSettings.alwaysUsesCryptexDDI
     }
     
     // All three prompt for a restart, like the Picture-in-Picture
@@ -367,6 +388,89 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     @objc private func jitHangBacktraceSwitchDidChange(_ sender: UISwitch) {
         Prefs.ExperimentalSettings.isJITHangBacktraceEnabled = sender.isOn
         showRestartAlert()
+    }
+    
+    /// On: the Cryptex files are downloaded BEFORE the preference is
+    /// saved. DDIManager counts them as required while it is on, and a
+    /// launch that finds required files missing shows the missing-DDI
+    /// screen and turns JIT off, so the preference must never be on
+    /// without them. Off needs no download: hasRequiredDDIFiles accepts a
+    /// receipt that covers more than the plan.
+    @objc private func alwaysUseCryptexDDISwitchDidChange(_ sender: UISwitch) {
+        guard sender.isOn else {
+            Prefs.ExperimentalSettings.alwaysUsesCryptexDDI = false
+            showRestartAlert()
+            return
+        }
+        guard !DDIManager.shared.hasRequiredDDIFiles(includingCryptex: true) else {
+            Prefs.ExperimentalSettings.alwaysUsesCryptexDDI = true
+            showRestartAlert()
+            return
+        }
+        downloadCryptexDDI(for: sender)
+    }
+    
+    private func downloadCryptexDDI(for sender: UISwitch) {
+        sender.isEnabled = false
+        let alert = UIAlertController(
+            title: NSLocalizedString("Downloading Cryptex DDI", comment: ""),
+            message: NSLocalizedString("Reynard needs the Cryptex variant of the Developer Disk Image on this iPhone before it can use it.", comment: ""),
+            preferredStyle: .alert
+        )
+        let progressView = UIProgressView(progressViewStyle: .default)
+        progressView.translatesAutoresizingMaskIntoConstraints = false
+        progressView.progress = 0
+        
+        let token = UUID()
+        activeCryptexDownloadToken = token
+        alert.addAction(UIAlertAction(title: NSLocalizedString("Cancel", comment: ""), style: .cancel) { [weak self] _ in
+            guard let self,
+                  self.activeCryptexDownloadToken == token else {
+                return
+            }
+            self.activeCryptexDownloadToken = nil
+            DDIManager.shared.cancelActiveDownload()
+            sender.setOn(false, animated: true)
+            sender.isEnabled = true
+        })
+        
+        present(alert, animated: true) { [weak self] in
+            guard let self else {
+                return
+            }
+            SettingsViewUtils.addProgressView(progressView, to: alert)
+            DDIManager.shared.ensureRequiredDDIFiles(
+                includingCryptex: true,
+                progress: { [weak self] value in
+                    guard let self,
+                          self.activeCryptexDownloadToken == token else {
+                        return
+                    }
+                    progressView.setProgress(Float(value), animated: true)
+                },
+                completion: { [weak self] result in
+                    guard let self,
+                          self.activeCryptexDownloadToken == token else {
+                        return
+                    }
+                    self.activeCryptexDownloadToken = nil
+                    sender.isEnabled = true
+                    
+                    switch result {
+                    case .success:
+                        Prefs.ExperimentalSettings.alwaysUsesCryptexDDI = true
+                        SettingsViewUtils.dismissPresentedAlert(alert, from: self) {
+                            self.showRestartAlert()
+                        }
+                    case .failure(let error):
+                        sender.setOn(false, animated: true)
+                        SettingsViewUtils.dismissPresentedAlert(alert, from: self) {
+                            AlertPresenter.show(title: NSLocalizedString("Download Failed", comment: ""), message: error.localizedDescription)
+                        }
+                    }
+                }
+            )
+        }
     }
     
     @objc private func videoPictureInPictureSwitchDidChange(_ sender: UISwitch) {

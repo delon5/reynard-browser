@@ -1046,6 +1046,9 @@ final class JITController {
             Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled,
             Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
         )
+        // The Experimental DDI route ensureDDIMounted reads, pushed the
+        // same way and read once per launch like the toggles above.
+        ReynardSetAlwaysUsesCryptexDDI(Prefs.ExperimentalSettings.alwaysUsesCryptexDDI)
         
         guard usePtraceJIT() || !isDDIMissing() else {
             hasHandledFailure = true

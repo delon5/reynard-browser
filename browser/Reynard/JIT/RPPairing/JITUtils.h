@@ -26,6 +26,13 @@ void ReynardSetDiagnosticLoggingEnabled(BOOL jitLog,
 /// Read back by the JIT layer to gate its own file writes.
 BOOL ReynardIsIdeviceNativeLogEnabled(void);
 BOOL ReynardIsJITHangBacktraceEnabled(void);
+
+/// Experimental "Always Use Cryptex DDI": sends a device the Personalized
+/// image lists down the Cryptex route as well, so that route can be tried
+/// on hardware that does not need it. Pushed down from Swift at startup
+/// like the logging toggles, and NO until then. Read by ensureDDIMounted.
+void ReynardSetAlwaysUsesCryptexDDI(BOOL enabled);
+BOOL ReynardAlwaysUsesCryptexDDI(void);
 NSString *pairingFilePath(void);
 
 /// Resolves the App Group identifier actually granted to this process by

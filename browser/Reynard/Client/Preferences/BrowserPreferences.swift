@@ -78,6 +78,7 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
+            key("ExperimentalSettings", "alwaysUsesCryptexDDI"): false,
             
             // AirPlay
             key("AirPlaySettings", "isEnabled"): true,
@@ -1501,6 +1502,23 @@ final class BrowserPreferences {
             }
             set {
                 prefs.set(newValue, forSetting: "ExperimentalSettings", key: "isJITHangBacktraceEnabled")
+            }
+        }
+
+        /// Sends a device the Personalized DDI lists down the Cryptex route
+        /// as well - the one the iPhone 18 series and later need - so it can
+        /// be tried on hardware that does not need it. Off by default.
+        ///
+        /// Only ever switched on once the Cryptex files are on disk:
+        /// DDIManager counts them as required while this is on, and a
+        /// launch that finds required files missing turns JIT off. The
+        /// Experimental screen downloads them before saving the value.
+        static var alwaysUsesCryptexDDI: Bool {
+            get {
+                return prefs.bool(forSetting: "ExperimentalSettings", key: "alwaysUsesCryptexDDI")
+            }
+            set {
+                prefs.set(newValue, forSetting: "ExperimentalSettings", key: "alwaysUsesCryptexDDI")
             }
         }
     }
