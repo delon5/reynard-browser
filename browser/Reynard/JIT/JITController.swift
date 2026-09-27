@@ -1035,6 +1035,18 @@ final class JITController {
     }
 
     func start() {
+        // Push the diagnostic logging toggles down to the ObjC layer
+        // before anything can log - see
+        // fix_experimental_logging_toggles.py. First, ahead of the DDI
+        // guard: that guard can return, and a switched-on debug log
+        // should still cover a launch that stops at the missing-DDI
+        // screen.
+        ReynardSetDiagnosticLoggingEnabled(
+            Prefs.ExperimentalSettings.isJITDebugLogEnabled,
+            Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled,
+            Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
+        )
+        
         guard usePtraceJIT() || !isDDIMissing() else {
             hasHandledFailure = true
             presentMissingDDIFailureScreen()
@@ -1059,15 +1071,6 @@ final class JITController {
             selector: #selector(handleTargetDidExitNotification(_:)),
             name: .jitTargetDidExit,
             object: nil
-        )
-        
-        // Push the diagnostic logging toggles down to the ObjC layer
-        // before anything can log - see
-        // fix_experimental_logging_toggles.py.
-        ReynardSetDiagnosticLoggingEnabled(
-            Prefs.ExperimentalSettings.isJITDebugLogEnabled,
-            Prefs.ExperimentalSettings.isIdeviceNativeLogEnabled,
-            Prefs.ExperimentalSettings.isJITHangBacktraceEnabled
         )
         
         startListeningForHelperAttachRequests()

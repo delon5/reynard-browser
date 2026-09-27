@@ -66,12 +66,10 @@ private func configureUnsandboxedAppDataDirectories(_ directories: ReynardDirect
 /// The preference is read from a flat bridge key rather than through
 /// Prefs: this runs before UIApplicationMain, so registerDefaults() has
 /// not happened and the profile-scoped key may not exist yet. Absent
-/// means enabled, matching the registered default.
+/// means disabled, matching the registered default - bool(forKey:) is
+/// false for a missing key.
 private func redirectStandardStreamsToFile() {
-    let defaults = UserDefaults.standard
-    let wantsLogFile = defaults.object(forKey: BrowserPreferences.stdoutLogBridgeKey) == nil
-        ? true
-        : defaults.bool(forKey: BrowserPreferences.stdoutLogBridgeKey)
+    let wantsLogFile = UserDefaults.standard.bool(forKey: BrowserPreferences.stdoutLogBridgeKey)
 
     guard wantsLogFile else {
         let discard = open("/dev/null", O_WRONLY)

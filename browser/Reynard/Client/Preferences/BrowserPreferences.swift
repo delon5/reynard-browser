@@ -16,8 +16,8 @@ final class BrowserPreferences {
     static let openLinksInAppsBridgeKey = "Reynard.Browsing.openLinksInApps"
     /// Read by main.swift before UIApplicationMain, which is far earlier
     /// than registerDefaults() runs - so it is a flat key with an
-    /// explicit "absent means enabled" default there, mirrored here on
-    /// every write. Same arrangement as openLinksInAppsBridgeKey.
+    /// "absent means disabled" default there, mirrored here on every
+    /// write. Same arrangement as openLinksInAppsBridgeKey.
     static let stdoutLogBridgeKey = "Reynard.Experimental.stdoutLog"
     
     let profile: String
@@ -71,10 +71,10 @@ final class BrowserPreferences {
             key("ExperimentalSettings", "isVideoPictureInPictureEnabled"): false,
             key("ExperimentalSettings", "isAVPlayerHLSEnabled"): false,
             key("ExperimentalSettings", "isSiteIsolationEnabled"): true,
-            key("ExperimentalSettings", "isJITDebugLogEnabled"): true,
-            key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): true,
-            key("ExperimentalSettings", "isJITHangBacktraceEnabled"): true,
-            key("ExperimentalSettings", "isStdoutLogEnabled"): true,
+            key("ExperimentalSettings", "isJITDebugLogEnabled"): false,
+            key("ExperimentalSettings", "isIdeviceNativeLogEnabled"): false,
+            key("ExperimentalSettings", "isJITHangBacktraceEnabled"): false,
+            key("ExperimentalSettings", "isStdoutLogEnabled"): false,
             key("ExperimentalSettings", "isBackgroundAudioKeepAliveEnabled"): false,
             key("ExperimentalSettings", "isCarPlayScriptsEnabled"): false,
             key("ExperimentalSettings", "cancelsDebugSessionsOnBackground"): false,
@@ -1360,9 +1360,9 @@ final class BrowserPreferences {
             }
         }
         
-        // Diagnostic log files, all defaulting to true so behaviour is
-        // unchanged until deliberately switched off. Pushed down to the
-        // Objective-C layer at startup by JITController rather than
+        // Diagnostic log files, all off by default: nothing is written
+        // until one is switched on to capture a problem. Pushed down to
+        // the Objective-C layer at startup by JITController rather than
         // read there directly - see
         // fix_experimental_logging_toggles.py.
         //

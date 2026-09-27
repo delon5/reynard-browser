@@ -208,11 +208,11 @@ static void jitHangBacktraceHandler(int signalNumber) {
         NSArray<NSURL *> *documentDirs = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask];
         
         // ADDED - see fix_gate_native_log_and_backtrace.py's docstring.
-        // The flags default to YES and are overwritten when
+        // The flags default to NO and are overwritten when
         // JITController pushes the preferences down at startup. If
         // anything touched JITEnabler.shared before that call, this
         // block would run with the defaults still in place and both
-        // files would be written despite their toggles being off. That
+        // files would be skipped despite their toggles being on. That
         // failure is invisible without this line, and it distinguishes
         // "the gate is wrong" from "the push happened too late".
         logger([NSString stringWithFormat:@"diagnosticLogging: nativeLog=%@, hangBacktrace=%@ at JITEnabler init",

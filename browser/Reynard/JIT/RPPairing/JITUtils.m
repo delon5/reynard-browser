@@ -47,12 +47,15 @@
 // was changed from NSLog because NSLog was being redacted to
 // "<private>" in exported Console captures.
 // Diagnostic logging toggles - see
-// fix_experimental_logging_toggles.py. Default YES so behaviour is
-// unchanged until Swift pushes down a different value at startup, and
-// so processes that never call the setter keep logging as before.
-static BOOL gReynardJITDebugLogEnabled = YES;
-static BOOL gReynardIdeviceNativeLogEnabled = YES;
-static BOOL gReynardJITHangBacktraceEnabled = YES;
+// fix_experimental_logging_toggles.py. Default NO, matching the
+// registered preference defaults: no file is written until Swift pushes
+// down a value that turns one on. A process that never calls the setter
+// - the Helper extension, or a launch that returns before
+// JITController.start() pushes - writes no diagnostic files; os_log and
+// stderr below are unaffected.
+static BOOL gReynardJITDebugLogEnabled = NO;
+static BOOL gReynardIdeviceNativeLogEnabled = NO;
+static BOOL gReynardJITHangBacktraceEnabled = NO;
 
 void ReynardSetDiagnosticLoggingEnabled(BOOL jitLog,
                                         BOOL nativeLog,

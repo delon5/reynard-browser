@@ -15,10 +15,10 @@ void logger(NSString *message);
 /// fix_experimental_logging_toggles.py. Pushed down from Swift at
 /// startup rather than having Objective-C read BrowserPreferences,
 /// which would couple it to the profile-prefixed UserDefaults key
-/// format. All three default to YES, so any process that never calls
+/// format. All three default to NO, so any process that never calls
 /// this - notably the Helper extension, which has its own separate
-/// UserDefaults and never registers defaults - keeps logging exactly
-/// as it does today.
+/// UserDefaults and never registers defaults - writes no diagnostic
+/// files. Its logger() lines still reach os_log and stderr.
 void ReynardSetDiagnosticLoggingEnabled(BOOL jitLog,
                                         BOOL nativeLog,
                                         BOOL hangBacktrace);

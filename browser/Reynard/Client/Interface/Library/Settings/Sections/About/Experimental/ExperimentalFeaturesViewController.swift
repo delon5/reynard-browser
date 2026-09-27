@@ -47,7 +47,7 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
                 // "Reset DDI Storage" action stays last.
                 return SettingsSectionText(
                     headerTitle: NSLocalizedString("Diagnostic Logs", comment: ""),
-                    footerTitle: NSLocalizedString("Written to the app's Documents folder and retrievable over USB in Finder. Leave these enabled unless you need the disk space or want to reduce logging overhead.", comment: "")
+                    footerTitle: NSLocalizedString("Off by default. Turn one on to capture a problem for a bug report; it takes effect after a restart. Written to the app's Documents folder and retrievable over USB in Finder.", comment: "")
                 )
             case .jitDiagnostics:
                 return SettingsSectionText(
