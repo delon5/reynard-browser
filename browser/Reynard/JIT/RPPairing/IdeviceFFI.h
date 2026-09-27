@@ -67,6 +67,29 @@ IdeviceFfiError *image_mounter_mount_personalized_rsd(
                                                       const uint8_t *build_manifest, size_t build_manifest_len,
                                                       const void *info_plist, uint64_t unique_chip_id);
 
+// The Cryptex variant of the Developer Disk Image, installed through
+// cryptexd over the RSD tunnel. Its build identity names no device, so it
+// serves devices the Personalized manifest does not list (the iPhone 18
+// series and later). Signatures copied from the idevice library's own
+// generated ffi/idevice.h at delon5/idevice reynard-runtime-fixes-cryptex.
+typedef struct Cryptex1AssetsHandle Cryptex1AssetsHandle;
+typedef struct InstalledCryptexC {
+    char *identifier;
+    char *version;
+} InstalledCryptexC;
+
+IdeviceFfiError *cryptex1_assets_load(const char *restore_dir,
+                                      Cryptex1AssetsHandle **handle);
+void cryptex1_assets_free(Cryptex1AssetsHandle *handle);
+IdeviceFfiError *cryptexd_installed_ddi(AdapterHandle *provider,
+                                        RsdHandshakeHandle *handshake,
+                                        InstalledCryptexC **installed);
+IdeviceFfiError *cryptexd_install_ddi(AdapterHandle *provider,
+                                      RsdHandshakeHandle *handshake,
+                                      Cryptex1AssetsHandle *assets,
+                                      InstalledCryptexC **installed);
+void cryptexd_free_installed_cryptex(InstalledCryptexC *cryptex);
+
 void adapter_free(AdapterHandle *handle);
 
 void rsd_handshake_free(RsdHandshakeHandle *handle);

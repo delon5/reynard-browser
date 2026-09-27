@@ -3099,6 +3099,81 @@ static NSData *ddiFileData(NSURL *ddiDirectory, NSString *fileName, NSError **er
     return data;
 }
 
+// Whether the Personalized manifest in ddiDirectory has a build identity for
+// this device's model. Answers YES whenever it cannot tell, so an unreadable
+// manifest keeps the Personalized path this code has always taken.
+// DDIManager.personalizedManifestCoversThisDevice asks the same question
+// when it plans the download; the two must agree.
+static BOOL personalizedManifestCoversThisDevice(NSURL *ddiDirectory) {
+    char machine[64] = {0};
+    size_t machineSize = sizeof(machine);
+    if (sysctlbyname("hw.machine", machine, &machineSize, NULL, 0) != 0 || machine[0] == 0) {
+        return YES;
+    }
+    NSString *model = [NSString stringWithUTF8String:machine];
+    NSData *data = [NSData dataWithContentsOfURL:[ddiDirectory URLByAppendingPathComponent:@"BuildManifest.plist" isDirectory:NO]];
+    if (!data) {
+        return YES;
+    }
+    id manifest = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
+    NSArray *identities = [manifest isKindOfClass:[NSDictionary class]] ? manifest[@"BuildIdentities"] : nil;
+    if (![identities isKindOfClass:[NSArray class]]) {
+        return YES;
+    }
+    for (id identity in identities) {
+        if ([identity isKindOfClass:[NSDictionary class]] &&
+            [identity[@"Ap,ProductType"] isEqual:model]) {
+            return YES;
+        }
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: %@ is not in the Personalized manifest - using the Cryptex variant", model]);
+    return NO;
+}
+
+// The Cryptex variant of the DDI, for devices the Personalized manifest does
+// not list: installed through cryptexd over the RSD tunnel, personalized by
+// Apple's signing server against the Cryptex1 identity, which names no
+// device. The assets are the five files DDIManager downloads into the
+// Cryptex subdirectory of the DDI root.
+static BOOL installCryptexDDI(DeviceProvider *provider, NSURL *ddiDirectory, NSError **error) {
+    InstalledCryptexC *installed = NULL;
+    IdeviceFfiError *ffiError = cryptexd_installed_ddi(provider->adapter, provider->handshake, &installed);
+    if (ffiError) {
+        logger([NSString stringWithFormat:@"ensureDDIMounted: cryptexd_installed_ddi failed - code: %ld, sub_code: %ld, message: %@ - installing anyway", (long)ffiError->code, (long)ffiError->sub_code, ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)"]);
+        idevice_error_free(ffiError);
+        installed = NULL;
+    } else if (installed) {
+        logger([NSString stringWithFormat:@"ensureDDIMounted: the Cryptex DDI is already installed (%s %s)", installed->identifier ?: "?", installed->version ?: "?"]);
+        cryptexd_free_installed_cryptex(installed);
+        return YES;
+    }
+
+    NSURL *cryptexDirectory = [ddiDirectory URLByAppendingPathComponent:@"Cryptex" isDirectory:YES];
+    Cryptex1AssetsHandle *assets = NULL;
+    ffiError = cryptex1_assets_load(cryptexDirectory.fileSystemRepresentation, &assets);
+    if (ffiError) {
+        logger([NSString stringWithFormat:@"ensureDDIMounted: cryptex1_assets_load failed for %@ - code: %ld, sub_code: %ld, message: %@", cryptexDirectory.path, (long)ffiError->code, (long)ffiError->sub_code, ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)"]);
+        idevice_error_free(ffiError);
+        if (error) *error = MakeError(DDIFileReadFailed);
+        return NO;
+    }
+
+    logger(@"ensureDDIMounted: starting cryptexd_install_ddi (the Cryptex install)");
+    ffiError = cryptexd_install_ddi(provider->adapter, provider->handshake, assets, &installed);
+    cryptex1_assets_free(assets);
+    if (ffiError) {
+        logger([NSString stringWithFormat:@"ensureDDIMounted REAL failure at cryptexd_install_ddi - code: %ld, sub_code: %ld, message: %@", (long)ffiError->code, (long)ffiError->sub_code, ffiError->message ? [NSString stringWithUTF8String:ffiError->message] : @"(no message)"]);
+        idevice_error_free(ffiError);
+        if (error) *error = MakeError(ModernDDIMountFailed);
+        return NO;
+    }
+    logger([NSString stringWithFormat:@"ensureDDIMounted: cryptexd_install_ddi succeeded - Cryptex DDI installed (%s %s)", installed && installed->identifier ? installed->identifier : "?", installed && installed->version ? installed->version : "?"]);
+    if (installed) {
+        cryptexd_free_installed_cryptex(installed);
+    }
+    return YES;
+}
+
 static BOOL isDDIMounted(ImageMounterHandle *mounterClient, BOOL *mountedOut, NSError **error) {
     plist_t *devices = NULL;
     size_t deviceCount = 0;
@@ -3228,7 +3303,15 @@ BOOL ensureDDIMounted(DeviceProvider *provider, NSError **error) {
         goto cleanup;
     }
     logger([NSString stringWithFormat:@"ensureDDIMounted: ddiDirectory resolved to %@", ddiDirectory.path]);
-    
+
+    // A device the Personalized manifest does not list has no build
+    // identity to personalize it against; it takes the Cryptex variant
+    // instead. Every listed device goes on exactly as before.
+    if (!personalizedManifestCoversThisDevice(ddiDirectory)) {
+        success = installCryptexDDI(provider, ddiDirectory, error);
+        goto cleanup;
+    }
+
     logger(@"ensureDDIMounted: starting Image.dmg read");
     imageData = ddiFileData(ddiDirectory, @"Image.dmg", error);
     if (!imageData) {

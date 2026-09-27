@@ -199,6 +199,22 @@ final class DDIManager: NSObject {
         }
         
         guard active.currentIndex < active.plan.items.count else {
+            // The Personalized manifest has just landed on a device that
+            // had none: if it does not list this device, the plan now also
+            // wants the Cryptex set. Its first items are the ones already
+            // fetched, in the same order, so carry on from here rather than
+            // writing a receipt for half a plan.
+            if let fullPlan = try? makeDownloadPlan(),
+               fullPlan.items.count > active.plan.items.count,
+               zip(fullPlan.items, active.plan.items).allSatisfy({
+                   $0.destinationURL == $1.destinationURL && $0.expectedSHA256 == $1.expectedSHA256
+               }) {
+                NSLog("[DDI] this device is not in the Personalized manifest - fetching the Cryptex variant too")
+                active.plan = fullPlan
+                activeDownload = active
+                startNextDownloadLocked()
+                return
+            }
             do {
                 let receipt = validationReceipt(for: active.plan)
                 let receiptData = try JSONEncoder().encode(receipt)
@@ -365,6 +381,75 @@ final class DDIManager: NSObject {
     
     private static let ddiSourceRevision = "5423e4e955fbb3a9eef3e1212acfbfc6e7a26236"
 
+    /// JITSupport.m's installCryptexDDI loads the Cryptex assets from this
+    /// subdirectory of the DDI root; the two names must stay in step.
+    private static let cryptexDirectoryName = "Cryptex"
+    private static let cryptexBaseURLString = "https://raw.githubusercontent.com/delon5/DeveloperDiskImage/5423e4e955fbb3a9eef3e1212acfbfc6e7a26236/PersonalizedImages/Xcode_iOS_DDI_Cryptex"
+    private static let cryptexArtifacts: [(fileName: String, sha256: String)] = [
+        ("BuildManifest.plist", "27385d7582b03b36bb3104e22b520aee0c47d72fecb4e8ecfe12ef5d966c7012"),
+        ("Image.dmg", "873097f695a8b9734e2abc54f795a8874d40ff6fd11208ecb01ef29534c7c176"),
+        ("Image.dmg.trustcache", "f7f21986074eee03a215aca16ecfc78d6bf183600d8a0d2fb691f9896782e6f0"),
+        ("Image.dmg.cryptex_info", "edf49aef55aacc063d4d7be05b713bb545ce2993b3f62bcc15eccd75e610ee6c"),
+        ("Image.dmg.root_hash", "3543fad2805b88119695c417e12679380b3b5a2742994bbcc839c8e2de5d7302"),
+    ]
+
+    /// Whether the Personalized manifest has a build identity for this
+    /// device's model. nil when it cannot tell - no manifest yet, or one it
+    /// cannot read - and the caller then keeps the Personalized-only plan.
+    /// JITSupport.m's personalizedManifestCoversThisDevice asks the same
+    /// question at mount time; the two must agree.
+    private static let coverageLock = NSLock()
+    private static var coverageCache: (size: Int, modified: Date, covers: Bool?)?
+
+    private static func personalizedManifestCoversThisDevice(at manifestURL: URL) -> Bool? {
+        // hasRequiredDDIFiles rebuilds the plan on every call, and the
+        // manifest is 800 KB: parse it once per version of the file.
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: manifestURL.path),
+              let size = attributes[.size] as? Int,
+              let modified = attributes[.modificationDate] as? Date else {
+            return nil
+        }
+        coverageLock.lock()
+        if let cached = coverageCache, cached.size == size, cached.modified == modified {
+            coverageLock.unlock()
+            return cached.covers
+        }
+        coverageLock.unlock()
+        let covers = parsePersonalizedManifestCoverage(at: manifestURL)
+        coverageLock.lock()
+        coverageCache = (size, modified, covers)
+        coverageLock.unlock()
+        return covers
+    }
+
+    private static func parsePersonalizedManifestCoverage(at manifestURL: URL) -> Bool? {
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? PropertyListSerialization.propertyList(
+                from: data,
+                format: nil
+              ) as? [String: Any],
+              let identities = manifest["BuildIdentities"] as? [[String: Any]] else {
+            return nil
+        }
+        let model = deviceProductType()
+        guard !model.isEmpty else {
+            return nil
+        }
+        return identities.contains { ($0["Ap,ProductType"] as? String) == model }
+    }
+
+    private static func deviceProductType() -> String {
+        var size = 0
+        guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0, size > 0 else {
+            return ""
+        }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.machine", &buffer, &size, nil, 0) == 0 else {
+            return ""
+        }
+        return String(cString: buffer)
+    }
+
     private func makeDownloadPlan() throws -> DownloadPlan {
         let rootDirectoryURL = try ddiRootDirectoryURL()
         let baseURLString = "https://raw.githubusercontent.com/delon5/DeveloperDiskImage/5423e4e955fbb3a9eef3e1212acfbfc6e7a26236/PersonalizedImages/Xcode_iOS_DDI_Personalized"
@@ -377,7 +462,7 @@ final class DDIManager: NSObject {
             ("Image.dmg", "05fd807da5e19f030fa4941f24800c965c6c77982ab572dd5d1ef778fb69f9ca"),
             ("Image.dmg.trustcache", "36af60889ff5a737874a26daeb8e1a0139ebfebec6ec2e4d8f6a3c1bf1dce35c"),
         ]
-        let items = artifacts.map { artifact in
+        var items = artifacts.map { artifact in
             DownloadItem(
                 remoteURL: baseURL.appendingPathComponent(artifact.fileName),
                 destinationURL: rootDirectoryURL.appendingPathComponent(
@@ -386,6 +471,33 @@ final class DDIManager: NSObject {
                 ),
                 expectedSHA256: artifact.sha256
             )
+        }
+
+        // The Cryptex variant, only for a device the Personalized manifest
+        // does not list (the iPhone 18 series and later): its build
+        // identity names no device, so Apple can sign it for any model.
+        // Decided from the Personalized manifest once it is on disk, so a
+        // covered device's plan - and its receipt - is exactly what it was.
+        if Self.personalizedManifestCoversThisDevice(
+            at: rootDirectoryURL.appendingPathComponent("BuildManifest.plist", isDirectory: false)
+        ) == false {
+            guard let cryptexBaseURL = URL(string: Self.cryptexBaseURLString) else {
+                throw DDIError.invalidRemoteURL
+            }
+            let cryptexDirectoryURL = rootDirectoryURL.appendingPathComponent(
+                Self.cryptexDirectoryName,
+                isDirectory: true
+            )
+            items += Self.cryptexArtifacts.map { artifact in
+                DownloadItem(
+                    remoteURL: cryptexBaseURL.appendingPathComponent(artifact.fileName),
+                    destinationURL: cryptexDirectoryURL.appendingPathComponent(
+                        artifact.fileName,
+                        isDirectory: false
+                    ),
+                    expectedSHA256: artifact.sha256
+                )
+            }
         }
 
         return DownloadPlan(
@@ -401,12 +513,25 @@ final class DDIManager: NSObject {
     private func validationReceipt(for plan: DownloadPlan) -> DDIValidationReceipt {
         DDIValidationReceipt(
             sourceRevision: Self.ddiSourceRevision,
+            // Keyed by the path under the DDI root: a Personalized file's
+            // key is its bare name, exactly as before, and a Cryptex file's
+            // is "Cryptex/<name>" - the two sets share three file names,
+            // and uniqueKeysWithValues traps on a duplicate.
             hashes: Dictionary(
                 uniqueKeysWithValues: plan.items.map {
-                    ($0.destinationURL.lastPathComponent, $0.expectedSHA256)
+                    (Self.receiptKey(for: $0.destinationURL, under: plan.rootDirectoryURL), $0.expectedSHA256)
                 }
             )
         )
+    }
+
+    private static func receiptKey(for fileURL: URL, under rootDirectoryURL: URL) -> String {
+        let root = rootDirectoryURL.standardizedFileURL.path
+        let path = fileURL.standardizedFileURL.path
+        guard path.hasPrefix(root + "/") else {
+            return fileURL.lastPathComponent
+        }
+        return String(path.dropFirst(root.count + 1))
     }
 
     private static func sha256(at fileURL: URL) throws -> String {
