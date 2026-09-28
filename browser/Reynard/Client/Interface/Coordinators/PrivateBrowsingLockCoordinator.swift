@@ -27,6 +27,17 @@ final class PrivateBrowsingLockCoordinator {
     /// tab - see fix_private_lock_covers_every_route_into_private_tabs.py.
     private var wasOnPrivateTabs = false
     private var presentedLockViewController: PrivateBrowsingLockViewController?
+    /// The dismissal in flight, by serial number - see
+    /// fix_private_lock_dismisses_via_presenter.py. Its completion and
+    /// its fallback timer both try to settle it; the first to run wins.
+    private var lockDismissalInFlight: Int?
+    private var lockDismissalSerial = 0
+    /// A lock was asked for while the previous one was still leaving -
+    /// review amendment to fix_private_lock_dismisses_via_presenter.py.
+    /// The recorded lock is kept until its dismissal settles, so
+    /// presentLockScreen would otherwise read it as "already up" and
+    /// present nothing; settleLockDismissal presents it instead.
+    private var lockWantedDuringDismissal = false
 
     /// One authentication at a time. LAContext cancels an in-flight
     /// evaluation when a new one starts, so overlapping requests cancel
@@ -220,7 +231,10 @@ final class PrivateBrowsingLockCoordinator {
             }
             return
         }
-        guard isLocked, presentedLockViewController == nil else {
+        // A lock that is on its way out does not count as up: the curtain
+        // goes up now and presentLockScreen defers the new lock until the
+        // old one is gone.
+        guard isLocked, presentedLockViewController == nil || lockDismissalInFlight != nil else {
             return
         }
         guard host?.viewIfLoaded?.window != nil else {
@@ -239,6 +253,13 @@ final class PrivateBrowsingLockCoordinator {
             return
         }
         guard presentedLockViewController == nil else {
+            if lockDismissalInFlight != nil {
+                // Presenting over a lock mid-dismissal would be refused;
+                // settleLockDismissal presents once it has gone.
+                lockWantedDuringDismissal = true
+                logger("privateLock: presentLockScreen DEFERRED - the previous lock is still being dismissed")
+                return
+            }
             logger(String(
                 format: "privateLock: presentLockScreen SKIPPED - already presented (onScreen=%@)",
                 presentedLockViewController?.viewIfLoaded?.window != nil ? "YES" : "NO"
@@ -359,8 +380,7 @@ final class PrivateBrowsingLockCoordinator {
         // STILL LOCKED: nothing was authenticated. The lock screen and the
         // curtain go because regular tabs are now on screen. See
         // fix_private_lock_covers_every_route_into_private_tabs.py.
-        presentedLockViewController?.dismiss(animated: true)
-        presentedLockViewController = nil
+        dismissPresentedLock(animated: true)
         hidePrivacyCurtain()
         isLocked = true
     }
@@ -368,10 +388,97 @@ final class PrivateBrowsingLockCoordinator {
     private func dismissLockScreen(unlocked: Bool) {
         os_log("dismissLockScreen: unlocked=%{public}@", log: lockLog, type: .debug, String(unlocked))
         isLocked = !unlocked
-        presentedLockViewController?.dismiss(animated: true)
-        presentedLockViewController = nil
+        dismissPresentedLock(animated: true)
         if unlocked {
             hidePrivacyCurtain()
+        }
+    }
+
+    /// Dismisses the lock from its PRESENTER and forgets it only once it
+    /// is gone. ADDED - see fix_private_lock_dismisses_via_presenter.py.
+    ///
+    /// `presentedLockViewController?.dismiss(animated:)` asks the lock to
+    /// dismiss itself - unless something has been presented ON the lock,
+    /// in which case UIKit dismisses that child and leaves the lock where
+    /// it is. Capture 2026-09-28 15:54:37: a JIT attach failed while the
+    /// lock was mid-presentation, the "Failed to enable JIT" sheet landed
+    /// on the topmost controller - the lock - and the first Face ID
+    /// success dismissed the sheet, then set the reference to nil. The
+    /// lock stayed up with no owner; five more successes dismissed
+    /// nothing. Dismissing from the presenter takes the lock and
+    /// everything above it, and the reference survives until the
+    /// dismissal is settled - so a refused one is retried, here once the
+    /// blocking transition has finished and again on the next unlock,
+    /// instead of being forgotten.
+    private func dismissPresentedLock(animated: Bool, attempt: Int = 0) {
+        guard let lockViewController = presentedLockViewController else {
+            return
+        }
+        guard let presenter = lockViewController.presentingViewController else {
+            logger("privateLock: lock is not presented - clearing the recorded lock")
+            presentedLockViewController = nil
+            return
+        }
+        lockDismissalSerial += 1
+        let serial = lockDismissalSerial
+        lockDismissalInFlight = serial
+        logger(String(
+            format: "privateLock: dismissing the lock via its presenter (lockHasChild=%@, attempt %ld)",
+            lockViewController.presentedViewController != nil ? "YES" : "NO",
+            attempt
+        ))
+        presenter.dismiss(animated: animated) { [weak self] in
+            self?.settleLockDismissal(serial: serial, of: lockViewController, animated: animated, attempt: attempt)
+        }
+        // UIKit does not run the completion of a dismissal it declines
+        // (another transition in progress), so a timer judges it too.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(animated ? 700 : 100)) { [weak self] in
+            self?.settleLockDismissal(serial: serial, of: lockViewController, animated: animated, attempt: attempt)
+        }
+    }
+
+    private func settleLockDismissal(
+        serial: Int,
+        of lockViewController: PrivateBrowsingLockViewController,
+        animated: Bool,
+        attempt: Int
+    ) {
+        guard lockDismissalInFlight == serial else {
+            return
+        }
+        lockDismissalInFlight = nil
+        let lockWasWanted = lockWantedDuringDismissal
+        lockWantedDuringDismissal = false
+        guard presentedLockViewController === lockViewController else {
+            return
+        }
+        guard lockViewController.presentingViewController != nil else {
+            logger("privateLock: lock dismissed")
+            presentedLockViewController = nil
+            if lockWasWanted {
+                // presentLockIfNeeded re-checks locked / protection / on
+                // private tabs, so a request that no longer applies - the
+                // user left private tabs meanwhile - presents nothing.
+                logger("privateLock: a lock was requested while this one was leaving - presenting it now")
+                presentLockIfNeeded(animated: false)
+            }
+            return
+        }
+        if lockWasWanted {
+            // UIKit refused the dismissal, and a lock is wanted again
+            // anyway: this one stays, and no retry takes it down.
+            logger("privateLock: lock STILL presented and wanted again - keeping it")
+            return
+        }
+        // Still up: UIKit declined. The reference stays so the next unlock
+        // retries; retry here as well once the transition that blocked it
+        // has had time to finish - three attempts at most.
+        logger(String(format: "privateLock: lock STILL presented after dismiss (attempt %ld)", attempt))
+        guard attempt < 2 else {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(350)) { [weak self] in
+            self?.dismissPresentedLock(animated: animated, attempt: attempt + 1)
         }
     }
 }
