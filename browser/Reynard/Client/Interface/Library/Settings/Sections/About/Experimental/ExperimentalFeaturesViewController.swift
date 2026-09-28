@@ -392,8 +392,8 @@ final class ExperimentalFeaturesViewController: SettingsTableViewController {
     
     /// On: the Cryptex files are downloaded BEFORE the preference is
     /// saved. DDIManager counts them as required while it is on, and a
-    /// launch that finds required files missing shows the missing-DDI
-    /// screen and turns JIT off, so the preference must never be on
+    /// launch that finds required files missing runs with no JIT at all
+    /// (start() stops at its missing-DDI guard), so the preference must never be on
     /// without them. Off needs no download: hasRequiredDDIFiles accepts a
     /// receipt that covers more than the plan.
     @objc private func alwaysUseCryptexDDISwitchDidChange(_ sender: UISwitch) {

@@ -103,7 +103,7 @@ final class DDIManager: NSObject {
         // Always Use Cryptex DDI was on also lists the Cryptex set, and
         // switching it off must not make the Personalized files that same
         // receipt validated read as missing - a launch that finds required
-        // files missing turns JIT off.
+        // files missing runs with no JIT at all.
         let expected = validationReceipt(for: plan)
         return receipt.sourceRevision == expected.sourceRevision &&
             expected.hashes.allSatisfy { receipt.hashes[$0.key] == $0.value }

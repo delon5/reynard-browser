@@ -1511,7 +1511,7 @@ final class BrowserPreferences {
         ///
         /// Only ever switched on once the Cryptex files are on disk:
         /// DDIManager counts them as required while this is on, and a
-        /// launch that finds required files missing turns JIT off. The
+        /// launch that finds required files missing runs with no JIT. The
         /// Experimental screen downloads them before saving the value.
         static var alwaysUsesCryptexDDI: Bool {
             get {
