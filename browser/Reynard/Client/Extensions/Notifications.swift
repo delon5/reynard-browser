@@ -33,4 +33,8 @@ extension Notification.Name {
     /// back and clears the JIT-less latch, so new content processes
     /// attach again. See fix_jitless_recovers_when_tunnel_returns.py.
     static let jitlessModeDidDeactivate = Notification.Name("JITless.ModeDidDeactivate")
+    /// Posted by PrivateBrowsingLockCoordinator whenever the lock screen it
+    /// recorded is gone. JITController holds a failure screen back while the
+    /// lock is up - one presented on top of it would be dismissed with it.
+    static let privateBrowsingLockDidDismiss = Notification.Name("PrivateBrowsingLock.DidDismiss")
 }

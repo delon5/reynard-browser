@@ -317,6 +317,7 @@ final class PrivateBrowsingLockCoordinator {
             guard lockViewController.presentingViewController != nil else {
                 logger("privateLock: presentation did not take - clearing the recorded lock")
                 self.presentedLockViewController = nil
+                self.postLockDidDismiss()
                 return
             }
             let window = lockViewController.viewIfLoaded?.window
@@ -417,6 +418,7 @@ final class PrivateBrowsingLockCoordinator {
         guard let presenter = lockViewController.presentingViewController else {
             logger("privateLock: lock is not presented - clearing the recorded lock")
             presentedLockViewController = nil
+            postLockDidDismiss()
             return
         }
         lockDismissalSerial += 1
@@ -462,6 +464,9 @@ final class PrivateBrowsingLockCoordinator {
                 logger("privateLock: a lock was requested while this one was leaving - presenting it now")
                 presentLockIfNeeded(animated: false)
             }
+            // After any re-presentation above, so a failure screen waiting
+            // on this lock sees the new one and keeps waiting.
+            postLockDidDismiss()
             return
         }
         if lockWasWanted {
@@ -480,5 +485,11 @@ final class PrivateBrowsingLockCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(350)) { [weak self] in
             self?.dismissPresentedLock(animated: animated, attempt: attempt + 1)
         }
+    }
+
+    /// Tells whatever is holding UI back for the lock - JITController's
+    /// failure screen - that the recorded lock is gone.
+    private func postLockDidDismiss() {
+        NotificationCenter.default.post(name: .privateBrowsingLockDidDismiss, object: nil)
     }
 }

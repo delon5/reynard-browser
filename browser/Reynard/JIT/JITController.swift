@@ -1075,6 +1075,14 @@ final class JITController {
             name: .jitTargetDidExit,
             object: nil
         )
+        // A failure screen held back while the private-tab lock was up is
+        // presented once the lock is gone - see isPrivateBrowsingLockPresented.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePrivateBrowsingLockDidDismiss),
+            name: .privateBrowsingLockDidDismiss,
+            object: nil
+        )
         
         startListeningForHelperAttachRequests()
     }
@@ -2113,6 +2121,14 @@ final class JITController {
             return
         }
         
+        guard !Self.isPrivateBrowsingLockPresented() else {
+            logger("jitFailure: the private-tab lock is up - holding the failure screen until it is dismissed")
+            pendingFailureAction = { [weak self] in
+                self?.presentEnablementFailureScreen(error: error, showsErrorDetails: showsErrorDetails)
+            }
+            return
+        }
+        
         guard let presenter = UIApplication.shared.topViewController() else {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150)) {
                 self.presentEnablementFailureScreen(error: error, showsErrorDetails: showsErrorDetails, retryCount: retryCount + 1)
@@ -2150,6 +2166,14 @@ final class JITController {
         }
         
         guard Self.canPresentFailureUI() else {
+            pendingFailureAction = { [weak self] in
+                self?.presentMissingDDIFailureScreen()
+            }
+            return
+        }
+        
+        guard !Self.isPrivateBrowsingLockPresented() else {
+            logger("jitFailure: the private-tab lock is up - holding the missing-DDI screen until it is dismissed")
             pendingFailureAction = { [weak self] in
                 self?.presentMissingDDIFailureScreen()
             }
@@ -2271,6 +2295,40 @@ final class JITController {
             .contains { $0.activationState == .foregroundActive }
     }
     
+    /// Whether the private-tab lock is anywhere in the presentation chain
+    /// of the controller a failure screen would be presented on.
+    ///
+    /// The failure screens present on topViewController(), which is the
+    /// lock - or something above it - while the lock is up. Unlocking
+    /// dismisses the lock from its presenter and everything above it goes
+    /// too, so the sheet vanished and its forced choice (JIT-Less Mode or
+    /// Quit) was never made: JIT stayed off for the launch with nothing on
+    /// screen to say so. The screen waits instead, and
+    /// .privateBrowsingLockDidDismiss presents it once the lock is gone.
+    /// A lock presented AFTER the sheet sits on top of it and leaves it in
+    /// place when dismissed, so that order needs nothing.
+    private static func isPrivateBrowsingLockPresented() -> Bool {
+        var controller = UIApplication.shared.topViewController()
+        while let current = controller {
+            if current is PrivateBrowsingLockViewController {
+                return true
+            }
+            controller = current.presentingViewController
+        }
+        return false
+    }
+    
+    @objc private func handlePrivateBrowsingLockDidDismiss() {
+        guard let action = pendingFailureAction else {
+            return
+        }
+        pendingFailureAction = nil
+        logger("jitFailure: the private-tab lock is gone - presenting the held failure screen")
+        // Re-checks everything, the lock included, so a lock that was
+        // re-presented straight away holds it again.
+        action()
+    }
+    
     @objc private func handleApplicationDidBecomeActive() {
         let action = pendingFailureAction
         pendingFailureAction = nil
@@ -2355,6 +2413,14 @@ final class JITController {
             // notification thread - actually see the recovery.
             self.hasHandledFailure = false
             self.setJITLessModeActive(false)
+            // A failure screen still waiting - held behind the private-tab
+            // lock, or for the app to become active - would now report a
+            // failure that has cleared, and offer JIT-Less Mode for a
+            // tunnel that works.
+            if self.pendingFailureAction != nil {
+                logger("jitRecovery: dropping the failure screen that was waiting - the failure it reported has cleared")
+                self.pendingFailureAction = nil
+            }
             // The probe's success is the same evidence recordAttachOutcome
             // treats as "tunnel is back"; reset the health counters on
             // their own queue like it does.
