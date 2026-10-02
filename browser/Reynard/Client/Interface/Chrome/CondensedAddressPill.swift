@@ -41,6 +41,13 @@ final class CondensedAddressPill: UIView {
     
     private let glassBackground = ToolbarGlassBackgroundView()
     
+    // Morph state - see fix_pill_morphs_from_the_address_capsule.py.
+    private var heightConstraint: NSLayoutConstraint!
+    private var morphReplica: UIView?
+    /// Holds the label at its resting width while the pill is somewhere
+    /// else - review amendment to fix_pill_morphs_from_the_address_capsule.py.
+    private var labelMorphWidthConstraint: NSLayoutConstraint?
+
     private let locationLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -89,17 +96,107 @@ final class CondensedAddressPill: UIView {
     }
     
     private func configureConstraints() {
+        heightConstraint = heightAnchor.constraint(equalToConstant: CondensedAddressPill.height)
+        // CHANGED - see fix_pill_morphs_from_the_address_capsule.py. The
+        // label used to be pinned to both edges, which made it as wide
+        // as the capsule: while the capsule changes width the label's
+        // bitmap would be dragged along or stretched with it. It now
+        // keeps its own width, centred, and the capsule hugs it at a
+        // priority the morph's explicit width overrides. At rest this
+        // lays out exactly as before: text width plus the padding,
+        // truncating once the pill reaches its limits.
+        let hugsLabel = contentView.widthAnchor.constraint(
+            equalTo: locationLabel.widthAnchor,
+            constant: UX.horizontalPadding * 2
+        )
+        hugsLabel.priority = .defaultHigh
+        locationLabel.setContentCompressionResistancePriority(UILayoutPriority(749), for: .horizontal)
         NSLayoutConstraint.activate([
             contentView.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: trailingAnchor),
             contentView.topAnchor.constraint(equalTo: topAnchor),
             contentView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: CondensedAddressPill.height),
+            heightConstraint,
             
-            locationLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: UX.horizontalPadding),
-            locationLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -UX.horizontalPadding),
+            hugsLabel,
+            locationLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            locationLabel.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: UX.horizontalPadding),
+            locationLabel.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -UX.horizontalPadding),
             locationLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
         ])
+    }
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // A capsule at every height - see
+        // fix_pill_morphs_from_the_address_capsule.py. Set here so the
+        // radius animates with the bounds inside the morph's layout pass.
+        contentView.layer.cornerRadius = bounds.height / 2
+    }
+    
+    // MARK: - Morph
+    
+    /// The pill's height while it stands in for the address capsule, or
+    /// nil for its own.
+    func setMorphHeight(_ height: CGFloat?) {
+        heightConstraint.constant = height ?? CondensedAddressPill.height
+        // Review amendment: the label keeps its RESTING width for the
+        // whole trip. hugsLabel (750) outranks the label's own hugging
+        // (250), so without this the label would be stretched to the
+        // capsule's width - 350pt for 378 - and its width animated with
+        // the pill. A UILabel draws once for its final size and scales
+        // that drawing while its bounds animate, so the URL would
+        // visibly stretch as it fades in. Pinned on the way out, from
+        // the width the resting layout gave it; released on the way
+        // back, where that layout gives it the same width again. 999,
+        // not required, so a capsule narrower than the label can never
+        // make the constraints unsatisfiable.
+        guard height != nil else {
+            labelMorphWidthConstraint?.isActive = false
+            labelMorphWidthConstraint = nil
+            return
+        }
+        let restingWidth = locationLabel.bounds.width
+        guard labelMorphWidthConstraint == nil, restingWidth > 0 else {
+            return
+        }
+        let pin = locationLabel.widthAnchor.constraint(equalToConstant: restingWidth)
+        pin.priority = UILayoutPriority(999)
+        pin.isActive = true
+        labelMorphWidthConstraint = pin
+    }
+    
+    func setLabelAlpha(_ alpha: CGFloat) {
+        locationLabel.alpha = alpha
+    }
+    
+    /// Shows `replica` - the address capsule's own text and icons - in
+    /// front of the glass, centred at its own size, so the pill can BE
+    /// that capsule for the first or last frames of the morph. The
+    /// capsule clips it as it narrows.
+    func installMorphReplica(_ replica: UIView, alpha: CGFloat) {
+        removeMorphReplica()
+        let size = replica.bounds.size
+        replica.translatesAutoresizingMaskIntoConstraints = false
+        replica.isUserInteractionEnabled = false
+        replica.alpha = alpha
+        contentView.addSubview(replica)
+        NSLayoutConstraint.activate([
+            replica.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            replica.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            replica.widthAnchor.constraint(equalToConstant: size.width),
+            replica.heightAnchor.constraint(equalToConstant: size.height),
+        ])
+        morphReplica = replica
+    }
+    
+    func setMorphReplicaAlpha(_ alpha: CGFloat) {
+        morphReplica?.alpha = alpha
+    }
+    
+    func removeMorphReplica() {
+        morphReplica?.removeFromSuperview()
+        morphReplica = nil
     }
     
     private func configureGesture() {

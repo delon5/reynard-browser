@@ -288,6 +288,42 @@ final class AddressBar: UIView {
         return UX.addressBarBackgroundCornerRadius
     }
     
+    /// Hides the whole capsule - glass, shadow and content - while the
+    /// condensed pill is standing in for it. ADDED - see
+    /// fix_pill_morphs_from_the_address_capsule.py. Alpha rather than
+    /// isHidden, so nothing about layout or first responder changes.
+    func setCapsuleHiddenForPillMorph(_ hidden: Bool) {
+        addressBarBackground.alpha = hidden ? 0 : 1
+    }
+    
+    /// What the capsule shows in front of its glass - the label, the
+    /// buttons, the progress bar - as a replica the pill can wear while
+    /// it is the capsule. Each visible subview is replicated on its own
+    /// and the glass is left out: a replica of a visual effect view has
+    /// no backdrop to sample, and the pill brings its own glass.
+    func capsuleForegroundReplica() -> UIView? {
+        let contentBounds = addressBarContent.bounds
+        guard contentBounds.width > 1, contentBounds.height > 1 else {
+            return nil
+        }
+        let container = UIView(frame: contentBounds)
+        container.backgroundColor = .clear
+        for subview in addressBarContent.subviews {
+            guard subview !== addressBarGlassBackground,
+                  !subview.isHidden,
+                  subview.alpha > 0.01,
+                  subview.bounds.width > 0,
+                  subview.bounds.height > 0,
+                  let replica = subview.snapshotView(afterScreenUpdates: false) else {
+                continue
+            }
+            replica.frame = subview.frame
+            replica.alpha = subview.alpha
+            container.addSubview(replica)
+        }
+        return container
+    }
+    
     override func becomeFirstResponder() -> Bool {
         return textField.becomeFirstResponder()
     }

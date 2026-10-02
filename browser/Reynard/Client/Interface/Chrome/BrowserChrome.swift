@@ -132,6 +132,16 @@ final class BrowserChrome: UIView {
     private var actionBarTopConstraint: NSLayoutConstraint?
     private var actionBarBottomConstraint: NSLayoutConstraint?
     
+    // The pill's travel between the address capsule and its resting
+    // place - see fix_pill_morphs_from_the_address_capsule.py. The
+    // first line is the off switch: false restores the cross-fade.
+    private static let pillMorphsFromAddressCapsule = true
+    private var pillCenterXConstraint: NSLayoutConstraint!
+    private var pillBottomConstraint: NSLayoutConstraint!
+    private var pillRestingConstraints: [NSLayoutConstraint] = []
+    private var pillMorphWidthConstraint: NSLayoutConstraint!
+    private var pillMorphGeneration = 0
+    
     private var state: State?
     private(set) var isScrollCondensed = false
     /// Fires whenever `setScrollCondensed` actually changes state (not on
@@ -496,11 +506,32 @@ final class BrowserChrome: UIView {
         guard condensed != isScrollCondensed else {
             return
         }
+        // Where the address capsule is ON SCREEN and what it shows, read
+        // before the callback below moves anything - see
+        // fix_pill_morphs_from_the_address_capsule.py.
+        let morphSource = animated && condensed ? pillMorphSource() : nil
         isScrollCondensed = condensed
         onScrollCondensedChange?(condensed)
+        // After the callback, not before: it can re-enter this method,
+        // and the call that finishes last is the one whose completion
+        // has to settle the pill.
+        pillMorphGeneration += 1
+        let morphGeneration = pillMorphGeneration
         
         if condensed {
             condensedPill.isHidden = false
+        }
+        
+        // The pill travels between the capsule and its resting place
+        // instead of cross-fading where it ends up. The LIVE flag once
+        // more: a morph prepared for a state the re-entrant call
+        // already reversed would strand the pill on the capsule.
+        let requestedCondensed = condensed
+        let morphDestination = animated && isScrollCondensed == condensed
+            ? preparePillMorph(condensing: condensed, source: morphSource)
+            : nil
+        if morphDestination == nil {
+            settlePillMorph()
         }
         
         let animations = {
@@ -525,7 +556,21 @@ final class BrowserChrome: UIView {
             self.bottomToolbar.transform = condensed
                 ? CGAffineTransform(scaleX: 0.92, y: 0.92)
                 : .identity
-            self.condensedPill.alpha = condensed ? 1 : 0
+            if let morphDestination, condensed == requestedCondensed {
+                // Travels rather than fades - see
+                // fix_pill_morphs_from_the_address_capsule.py. Opaque
+                // the whole way; an expand's completion retires it.
+                self.condensedPill.alpha = 1
+                switch morphDestination {
+                case .resting:
+                    self.setPillMorphRect(nil)
+                case .capsule(let rect):
+                    self.setPillMorphRect(rect)
+                }
+                self.layoutIfNeeded()
+            } else {
+                self.condensedPill.alpha = condensed ? 1 : 0
+            }
             // Assert the CONTENT alpha too, not just the view's.
             //
             // Two systems drive this toolbar and neither knew about the
@@ -554,8 +599,22 @@ final class BrowserChrome: UIView {
             // returns while condensed, which is exactly half the
             // transitions and the half the pill is meant to be visible
             // for.
+            // Only the latest transition settles the pill - see
+            // fix_pill_morphs_from_the_address_capsule.py. An earlier
+            // one's completion can land while its successor is still
+            // moving the pill, and hiding it there would cut the
+            // successor off mid-flight.
+            let isLatest = morphGeneration == self.pillMorphGeneration
+            if isLatest {
+                if !self.isScrollCondensed {
+                    // The pill and the real capsule trade places in
+                    // one frame: same rect, same glass, same content.
+                    self.condensedPill.alpha = 0
+                }
+                self.settlePillMorph()
+            }
             self.logChromeState("settled")
-            guard !self.isScrollCondensed else {
+            guard isLatest, !self.isScrollCondensed else {
                 return
             }
             self.condensedPill.isHidden = true
@@ -568,14 +627,225 @@ final class BrowserChrome: UIView {
         }
         
         UIView.animate(
-            withDuration: 0.28,
+            // A travelling capsule wants a little longer than a
+            // cross-fade - see fix_pill_morphs_from_the_address_capsule.py.
+            withDuration: morphDestination == nil ? 0.28 : 0.42,
             delay: 0,
-            usingSpringWithDamping: 0.85,
+            usingSpringWithDamping: morphDestination == nil ? 0.85 : 0.88,
             initialSpringVelocity: 0,
             options: [.beginFromCurrentState],
             animations: animations,
             completion: completion
         )
+    }
+    
+    // MARK: - Pill Morph
+    //
+    // ADDED - see fix_pill_morphs_from_the_address_capsule.py.
+    //
+    // Condensing used to cross-fade two things that never touched: the
+    // toolbars faded where they stood and the pill faded in 70pt lower
+    // at its final size. The pill is now the element that travels. For
+    // the first frame it sits exactly on the address capsule, wearing a
+    // replica of the capsule's text and icons over the same glass; then
+    // its real frame - not a transform, so it stays a capsule and its
+    // text is never stretched - animates to the resting place. Expanding
+    // runs it the other way and hands back to the real capsule.
+    
+    private enum PillMorphTarget {
+        case resting
+        case capsule(CGRect)
+    }
+    
+    private struct PillMorphSource {
+        let rect: CGRect
+        let replica: UIView?
+        let contentAlpha: CGFloat
+    }
+    
+    /// Whether the pill can travel at all. The address bar has to be the
+    /// bottom toolbar's - from the top toolbar the trip would cross the
+    /// whole screen - and Reduce Motion keeps the cross-fade.
+    ///
+    /// Floating pill only. When the page STOPS at the pill instead, the
+    /// content view's bottom edge IS the pill's top edge
+    /// (condensedContentBottomAnchor), and a travelling pill would drag
+    /// the page's edge along for the length of the animation - the
+    /// continuously-changing size onScrollCondensedChange exists to
+    /// avoid. Floating, nothing outside this view depends on the pill.
+    private var canMorphPill: Bool {
+        return Self.pillMorphsFromAddressCapsule
+            && Prefs.AppearanceSettings.pillFloatsOverPage
+            && !UIAccessibility.isReduceMotionEnabled
+            && window != nil
+            && addressBar.isDescendant(of: bottomToolbar)
+            && !bottomToolbar.isHidden
+    }
+    
+    /// The capsule as it is on screen at this instant: its rect in this
+    /// view, slide and all, and a replica of what it shows.
+    private func pillMorphSource() -> PillMorphSource? {
+        guard canMorphPill, bottomToolbar.alpha > 0.01, !addressBar.isEditingText else {
+            return nil
+        }
+        let rect = addressBar.capsuleFrame(in: self)
+        guard rect.width > 1, rect.height > 1 else {
+            return nil
+        }
+        return PillMorphSource(
+            rect: rect,
+            replica: addressBar.capsuleForegroundReplica(),
+            contentAlpha: bottomToolbar.contentAlpha
+        )
+    }
+    
+    /// Where the capsule sits once the toolbar is back at rest: its rect
+    /// inside the toolbar, placed by the toolbar's LAID-OUT frame. The
+    /// toolbar wears a slide or the condense scale while the pill is up,
+    /// and convert() through it would honour either.
+    private func addressCapsuleRestingRect() -> CGRect? {
+        guard canMorphPill else {
+            return nil
+        }
+        let local = addressBar.capsuleFrame(in: bottomToolbar)
+        guard local.width > 1, local.height > 1 else {
+            return nil
+        }
+        return local.offsetBy(
+            dx: bottomToolbar.center.x - bottomToolbar.bounds.midX,
+            dy: bottomToolbar.center.y - bottomToolbar.bounds.midY
+        )
+    }
+    
+    /// Puts the pill at `rect` in this view's coordinates, or back on its
+    /// resting constraints for nil. Layout only - the caller decides
+    /// whether the pass that follows is animated.
+    private func setPillMorphRect(_ rect: CGRect?) {
+        guard let rect else {
+            pillMorphWidthConstraint.isActive = false
+            NSLayoutConstraint.activate(pillRestingConstraints)
+            pillCenterXConstraint.constant = 0
+            pillBottomConstraint.constant = -Self.condensedPillBottomMargin
+            condensedPill.setMorphHeight(nil)
+            return
+        }
+        NSLayoutConstraint.deactivate(pillRestingConstraints)
+        pillMorphWidthConstraint.constant = rect.width
+        pillMorphWidthConstraint.isActive = true
+        pillCenterXConstraint.constant = rect.midX - bounds.midX
+        pillBottomConstraint.constant = rect.maxY - bounds.maxY
+        condensedPill.setMorphHeight(rect.height)
+    }
+    
+    /// Readies the pill to travel and returns where to, or nil when this
+    /// transition cross-fades as before.
+    private func preparePillMorph(condensing: Bool, source: PillMorphSource?) -> PillMorphTarget? {
+        if condensing {
+            if condensedPill.alpha > 0.01 {
+                // An expand being reversed: the pill is already out and
+                // carries on from wherever it has got to.
+                guard canMorphPill else {
+                    return nil
+                }
+                // The callback's layout is snapped, never animated -
+                // see onScrollCondensedChange. Flushed here so the
+                // animated pass that follows cannot pick it up.
+                UIView.performWithoutAnimation {
+                    layoutIfNeeded()
+                }
+                condensedPill.removeMorphReplica()
+                addressBar.setCapsuleHiddenForPillMorph(true)
+                UIView.animate(
+                    withDuration: 0.18,
+                    delay: 0,
+                    options: [.beginFromCurrentState, .curveEaseOut],
+                    animations: { self.condensedPill.setLabelAlpha(1) },
+                    completion: nil
+                )
+                return .resting
+            }
+            guard let source else {
+                return nil
+            }
+            UIView.performWithoutAnimation {
+                // Flush what the callback changed first. Its resize of
+                // the content view is deliberately snapped, so the
+                // engine gets its final size at once; the animated
+                // pass that follows must move the pill and nothing else.
+                layoutIfNeeded()
+                condensedPill.setLabelAlpha(0)
+                if let replica = source.replica {
+                    condensedPill.installMorphReplica(replica, alpha: source.contentAlpha)
+                } else {
+                    condensedPill.removeMorphReplica()
+                }
+                setPillMorphRect(source.rect)
+                condensedPill.alpha = 1
+                layoutIfNeeded()
+                addressBar.setCapsuleHiddenForPillMorph(true)
+            }
+            UIView.animate(
+                withDuration: 0.16,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseOut],
+                animations: { self.condensedPill.setMorphReplicaAlpha(0) },
+                completion: nil
+            )
+            UIView.animate(
+                withDuration: 0.24,
+                delay: 0.1,
+                options: [.beginFromCurrentState, .curveEaseOut],
+                animations: { self.condensedPill.setLabelAlpha(1) },
+                completion: nil
+            )
+            return .resting
+        }
+        
+        guard condensedPill.alpha > 0.01, !condensedPill.isHidden,
+              let destination = addressCapsuleRestingRect() else {
+            return nil
+        }
+        UIView.performWithoutAnimation {
+            layoutIfNeeded()
+            if let replica = addressBar.capsuleForegroundReplica() {
+                condensedPill.installMorphReplica(replica, alpha: 0)
+            } else {
+                condensedPill.removeMorphReplica()
+            }
+            addressBar.setCapsuleHiddenForPillMorph(true)
+        }
+        UIView.animate(
+            withDuration: 0.14,
+            delay: 0,
+            options: [.beginFromCurrentState, .curveEaseOut],
+            animations: { self.condensedPill.setLabelAlpha(0) },
+            completion: nil
+        )
+        UIView.animate(
+            withDuration: 0.22,
+            delay: 0.14,
+            options: [.beginFromCurrentState, .curveEaseIn],
+            animations: { self.condensedPill.setMorphReplicaAlpha(1) },
+            completion: nil
+        )
+        return .capsule(destination)
+    }
+    
+    /// Returns the pill and the capsule to their own places: the capsule
+    /// visible again, the replica gone, the pill on its resting
+    /// constraints. Safe at any time and from either state; it forces a
+    /// layout pass only when the pill really is somewhere else.
+    private func settlePillMorph() {
+        addressBar.setCapsuleHiddenForPillMorph(false)
+        condensedPill.removeMorphReplica()
+        condensedPill.setLabelAlpha(1)
+        guard pillMorphWidthConstraint.isActive else {
+            return
+        }
+        UIView.performWithoutAnimation {
+            setPillMorphRect(nil)
+            layoutIfNeeded()
+        }
     }
     
     func updateAddressBarMenu(url: String?, usesDesktopWebsite: Bool?, airPlayTitle: String?) {
@@ -786,6 +1056,21 @@ final class BrowserChrome: UIView {
         bottomConstraint = bottomToolbar.bottomAnchor.constraint(equalTo: bottomAnchor)
         overlayWidthConstraint = overlayContentView.widthAnchor.constraint(equalToConstant: 0)
         overlayHeightConstraint = overlayContentView.heightAnchor.constraint(equalToConstant: 0)
+        // Held so the pill can be moved onto the address capsule and
+        // back - see fix_pill_morphs_from_the_address_capsule.py. The
+        // same constraints as before; the resting three are swapped for
+        // an explicit width only while the pill is somewhere else.
+        pillCenterXConstraint = condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor)
+        pillBottomConstraint = condensedPill.bottomAnchor.constraint(
+            equalTo: bottomAnchor,
+            constant: -Self.condensedPillBottomMargin
+        )
+        pillRestingConstraints = [
+            condensedPill.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+            condensedPill.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+            condensedPill.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+        ]
+        pillMorphWidthConstraint = condensedPill.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             topToolbar.leadingAnchor.constraint(equalTo: leadingAnchor),
             topToolbar.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -806,7 +1091,7 @@ final class BrowserChrome: UIView {
             actionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             actionBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             
-            condensedPill.centerXAnchor.constraint(equalTo: centerXAnchor),
+            pillCenterXConstraint,
             // CHANGED - bottomAnchor, not safeAreaLayoutGuide.bottomAnchor.
             // See fix_repin_pill_to_screen_bottom.py. Against the guide
             // the pill could never sit below the home indicator, and it
@@ -815,11 +1100,9 @@ final class BrowserChrome: UIView {
             // bottom it has one fixed position everywhere, and
             // condensedPillBottomMargin becomes the only knob that moves
             // it.
-            condensedPill.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.condensedPillBottomMargin),
-            condensedPill.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
-            condensedPill.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
-            condensedPill.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+            pillBottomConstraint,
         ])
+        NSLayoutConstraint.activate(pillRestingConstraints)
         bottomToolbar.configureTopAnchor(to: safeAreaLayoutGuide.bottomAnchor)
     }
     
