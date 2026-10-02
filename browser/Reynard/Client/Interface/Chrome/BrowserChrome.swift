@@ -558,18 +558,13 @@ final class BrowserChrome: UIView {
                 : .identity
             if let morphDestination, condensed == requestedCondensed {
                 // Travels rather than fades - see
-                // fix_pill_morphs_from_the_address_capsule.py.
+                // fix_pill_morphs_from_the_address_capsule.py. Opaque
+                // the whole way; an expand's completion retires it.
+                self.condensedPill.alpha = 1
                 switch morphDestination {
                 case .resting:
-                    // Opaque: it is standing in for the capsule. This
-                    // is also what brings it back when an expand's
-                    // dissolve is reversed part-way.
-                    self.condensedPill.alpha = 1
                     self.setPillMorphRect(nil)
                 case .capsule(let rect):
-                    // Its alpha is the dissolve's, scheduled in
-                    // preparePillMorph - see
-                    // fix_pill_dissolves_into_the_capsule.py.
                     self.setPillMorphRect(rect)
                 }
                 self.layoutIfNeeded()
@@ -612,9 +607,8 @@ final class BrowserChrome: UIView {
             let isLatest = morphGeneration == self.pillMorphGeneration
             if isLatest {
                 if !self.isScrollCondensed {
-                    // Already dissolved by now - see
-                    // fix_pill_dissolves_into_the_capsule.py. This is
-                    // the backstop, and what a cross-fade relies on.
+                    // The pill and the real capsule trade places in
+                    // one frame: same rect, same glass, same content.
                     self.condensedPill.alpha = 0
                 }
                 self.settlePillMorph()
@@ -655,15 +649,8 @@ final class BrowserChrome: UIView {
     // the first frame it sits exactly on the address capsule, wearing a
     // replica of the capsule's text and icons over the same glass; then
     // its real frame - not a transform, so it stays a capsule and its
-    // text is never stretched - animates to the resting place.
-    //
-    // Expanding is NOT the mirror image - see
-    // fix_pill_dissolves_into_the_capsule.py. The pill travels back onto
-    // the capsule's rect and dissolves; the real capsule is never hidden
-    // on the way, so it fades in with the toolbar as it always did. This
-    // glass takes its appearance at visibility changes (5181b339), and a
-    // capsule revealed at the end of the trip is evaluated with the pill
-    // sitting on it - it latched bright frosted beside a clear pill.
+    // text is never stretched - animates to the resting place. Expanding
+    // runs it the other way and hands back to the real capsule.
     
     private enum PillMorphTarget {
         case resting
@@ -794,18 +781,6 @@ final class BrowserChrome: UIView {
                 }
                 setPillMorphRect(source.rect)
                 condensedPill.alpha = 1
-                // Review amendment to fix_pill_dissolves_into_the_capsule.py.
-                // An expand reversed part-way leaves its dissolve (alpha
-                // 1 -> 0) in flight, and its model write already made the
-                // pill read as alpha 0 - which is why a reversal now lands
-                // on this path rather than the one above. The write just
-                // above does not stop that animation: the pill would keep
-                // fading over the capsule hidden below, then pop back when
-                // the dissolve ran out. Stopping it makes the pill opaque
-                // now, as the stand-in for a hidden capsule has to be.
-                condensedPill.layer.animationKeys()?
-                    .filter { $0.hasPrefix("opacity") }
-                    .forEach { condensedPill.layer.removeAnimation(forKey: $0) }
                 layoutIfNeeded()
                 addressBar.setCapsuleHiddenForPillMorph(true)
             }
@@ -832,13 +807,12 @@ final class BrowserChrome: UIView {
         }
         UIView.performWithoutAnimation {
             layoutIfNeeded()
-            condensedPill.removeMorphReplica()
-            // CHANGED - see fix_pill_dissolves_into_the_capsule.py. The
-            // capsule is NOT hidden for the trip back. Its glass takes
-            // its appearance when it becomes visible, and that has to
-            // be now, with the toolbar's fade-in and nothing but the
-            // page in its place - not at the end, under the pill.
-            addressBar.setCapsuleHiddenForPillMorph(false)
+            if let replica = addressBar.capsuleForegroundReplica() {
+                condensedPill.installMorphReplica(replica, alpha: 0)
+            } else {
+                condensedPill.removeMorphReplica()
+            }
+            addressBar.setCapsuleHiddenForPillMorph(true)
         }
         UIView.animate(
             withDuration: 0.14,
@@ -847,13 +821,11 @@ final class BrowserChrome: UIView {
             animations: { self.condensedPill.setLabelAlpha(0) },
             completion: nil
         )
-        // The dissolve: the second half of the trip, once the pill is
-        // most of the way onto the capsule fading in beneath it.
         UIView.animate(
             withDuration: 0.22,
-            delay: 0.16,
+            delay: 0.14,
             options: [.beginFromCurrentState, .curveEaseIn],
-            animations: { self.condensedPill.alpha = 0 },
+            animations: { self.condensedPill.setMorphReplicaAlpha(1) },
             completion: nil
         )
         return .capsule(destination)
