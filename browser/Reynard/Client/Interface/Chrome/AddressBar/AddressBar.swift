@@ -147,6 +147,31 @@ final class AddressBar: UIView {
     // the same Liquid Glass, over the cutout's page pixels.
     private let addressBarGlassBackground = ToolbarGlassBackgroundView()
     
+    // Everything drawn on the capsule except its glass - see
+    // fix_address_bar_is_the_pill.py. One view so it has ONE alpha: the
+    // capsule empties itself as it becomes the condensed pill, and the
+    // glass underneath is never faded, hidden or rebuilt on the way.
+    private let addressBarForeground: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = .clear
+        return view
+    }()
+    
+    // CondensedAddressPill's label, on this capsule. Invisible until the
+    // capsule is most of the way to being the pill.
+    private let pillLabel: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .systemFont(ofSize: 14, weight: .medium)
+        label.textColor = .label
+        label.textAlignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.alpha = 0
+        label.isAccessibilityElement = false
+        return label
+    }()
+    
     private let leadingButton: AddressBarButton = {
         let button = AddressBarButton(type: .system)
         if #available(iOS 13.4, *) {
@@ -251,6 +276,16 @@ final class AddressBar: UIView {
     private var dismissWidthConstraint: NSLayoutConstraint!
     private var dismissHeightConstraint: NSLayoutConstraint!
     
+    // Pill form - see fix_address_bar_is_the_pill.py.
+    private var foregroundPinnedConstraints: [NSLayoutConstraint] = []
+    private var foregroundFloatingConstraints: [NSLayoutConstraint] = []
+    private var foregroundWidthConstraint: NSLayoutConstraint!
+    /// 0 is the capsule at rest in the toolbar, 1 is the condensed pill.
+    private(set) var pillProgress: CGFloat = 0
+    /// A tap on the capsule while it is the pill. It expands the chrome
+    /// instead of opening the keyboard, as CondensedAddressPill's did.
+    var onPillTap: (() -> Void)?
+    
     // MARK: - Lifecycle
     
     override init(frame: CGRect) {
@@ -288,6 +323,95 @@ final class AddressBar: UIView {
         return UX.addressBarBackgroundCornerRadius
     }
     
+    // MARK: - Pill Form
+    //
+    // ADDED - see fix_address_bar_is_the_pill.py. The condensed pill is
+    // not a second view any more: it is this capsule, narrower, 4pt
+    // shorter, showing the pill's label instead of its own content.
+    // BottomToolbar owns where the capsule is and how wide; this owns
+    // what it looks like on the way there. Everything is a plain function
+    // of one number so a scroll tick and an animation frame take the same
+    // path and no two properties can disagree.
+    
+    /// The capsule's height at rest, for layout that must not follow it
+    /// while it shrinks.
+    static var capsuleRestingHeight: CGFloat {
+        return UX.addressBarHeight
+    }
+    
+    /// The radius right now - capsuleCornerRadius is the resting one.
+    var currentCapsuleCornerRadius: CGFloat {
+        return addressBarBackground.layer.cornerRadius
+    }
+    
+    /// More pill than capsule: taps expand, swipes do nothing.
+    var isPillForm: Bool {
+        return pillProgress >= 0.5
+    }
+    
+    func setPillText(_ text: String?) {
+        pillLabel.text = text
+    }
+    
+    /// CondensedAddressPill's width for the same text: the label plus
+    /// 14pt either side, never narrower than it is tall.
+    func pillWidth(maximum: CGFloat) -> CGFloat {
+        let width = ceil(pillLabel.intrinsicContentSize.width) + 28
+        return min(max(width, CondensedAddressPill.height), max(maximum, CondensedAddressPill.height))
+    }
+    
+    private static func capsuleHeight(forPillProgress progress: CGFloat) -> CGFloat {
+        return UX.addressBarHeight + (CondensedAddressPill.height - UX.addressBarHeight) * progress
+    }
+    
+    /// The pill's shadow is a little lighter and tighter than the
+    /// capsule's (CondensedAddressPill: 0.15 and 8).
+    private static func shadowOpacity(forPillProgress progress: CGFloat) -> Float {
+        return UX.addressBarBackgroundShadowOpacity + (0.15 - UX.addressBarBackgroundShadowOpacity) * Float(progress)
+    }
+    
+    /// `restingWidth` is the capsule's full width in the toolbar. The
+    /// foreground keeps that width while the capsule narrows around it,
+    /// so the address text is cropped and faded, never squeezed or
+    /// re-truncated.
+    func setPillProgress(_ progress: CGFloat, restingWidth: CGFloat) {
+        let progress = min(max(progress, 0), 1)
+        let wasFloating = pillProgress > 0
+        pillProgress = progress
+        
+        let height = Self.capsuleHeight(forPillProgress: progress)
+        if backgroundHeightConstraint.constant != height {
+            backgroundHeightConstraint.constant = height
+        }
+        addressBarBackground.layer.cornerRadius = height / 2
+        addressBarContent.layer.cornerRadius = height / 2
+        addressBarBackground.layer.shadowOpacity = Self.shadowOpacity(forPillProgress: progress)
+        addressBarBackground.layer.shadowRadius = UX.addressBarBackgroundShadowRadius
+            + (8 - UX.addressBarBackgroundShadowRadius) * progress
+        
+        // One after the other, not a cross-fade: the capsule's own
+        // content is gone by half way and the pill's label only starts
+        // there, so the two texts are never on screen together.
+        addressBarForeground.alpha = 1 - min(progress / 0.5, 1)
+        pillLabel.alpha = max((progress - 0.5) / 0.5, 0)
+        addressBarForeground.isUserInteractionEnabled = progress < 0.5
+        
+        let floats = progress > 0
+        if floats, foregroundWidthConstraint.constant != restingWidth, restingWidth > 0 {
+            foregroundWidthConstraint.constant = restingWidth
+        }
+        if floats != wasFloating {
+            if floats {
+                NSLayoutConstraint.deactivate(foregroundPinnedConstraints)
+                NSLayoutConstraint.activate(foregroundFloatingConstraints)
+            } else {
+                NSLayoutConstraint.deactivate(foregroundFloatingConstraints)
+                NSLayoutConstraint.activate(foregroundPinnedConstraints)
+            }
+        }
+        setNeedsLayout()
+    }
+    
     override func becomeFirstResponder() -> Bool {
         return textField.becomeFirstResponder()
     }
@@ -300,7 +424,7 @@ final class AddressBar: UIView {
         super.layoutSubviews()
         addressBarBackground.layer.shadowPath = UIBezierPath(
             roundedRect: addressBarBackground.bounds,
-            cornerRadius: UX.addressBarBackgroundCornerRadius
+            cornerRadius: addressBarBackground.layer.cornerRadius
         ).cgPath
     }
     
@@ -387,7 +511,11 @@ final class AddressBar: UIView {
     func updateLayout(position: BrowserChromePosition, chromeMode: BrowserChromeMode) {
         self.position = position
         self.chromeMode = chromeMode
-        backgroundHeightConstraint.constant = UX.addressBarHeight
+        // Not the bare resting height: this runs on every chrome layout,
+        // including the one a condense triggers, and would make a pill
+        // 44pt tall until the next scroll tick. See
+        // fix_address_bar_is_the_pill.py.
+        backgroundHeightConstraint.constant = Self.capsuleHeight(forPillProgress: pillProgress)
         dismissWidthConstraint.constant = UX.addressBarHeight
         dismissHeightConstraint.constant = UX.addressBarHeight
         applyState()
@@ -552,14 +680,20 @@ final class AddressBar: UIView {
         addSubview(dismissButton)
         addressBarBackground.addSubview(addressBarContent)
         addressBarGlassBackground.install(in: addressBarContent)
-        addressBarContent.addSubview(leadingButton)
-        addressBarContent.addSubview(addonButton)
-        addressBarContent.addSubview(trailingButton)
-        addressBarContent.addSubview(textField)
-        addressBarContent.addSubview(autocompleteButton)
-        addressBarContent.addSubview(addressLabel)
-        addressBarContent.addSubview(autocompleteLabel)
-        addressBarContent.addSubview(progressView)
+        // CHANGED - see fix_address_bar_is_the_pill.py. The same eight
+        // views in the same order, one level down, so they share an
+        // alpha. Their constraints still resolve against
+        // addressBarContent, which is now an ancestor.
+        addressBarContent.addSubview(addressBarForeground)
+        addressBarForeground.addSubview(leadingButton)
+        addressBarForeground.addSubview(addonButton)
+        addressBarForeground.addSubview(trailingButton)
+        addressBarForeground.addSubview(textField)
+        addressBarForeground.addSubview(autocompleteButton)
+        addressBarForeground.addSubview(addressLabel)
+        addressBarForeground.addSubview(autocompleteLabel)
+        addressBarForeground.addSubview(progressView)
+        addressBarContent.addSubview(pillLabel)
     }
     
     private func configureConstraints() {
@@ -571,6 +705,30 @@ final class AddressBar: UIView {
         backgroundHeightConstraint = addressBarBackground.heightAnchor.constraint(equalToConstant: UX.addressBarHeight)
         dismissWidthConstraint = dismissButton.widthAnchor.constraint(equalToConstant: UX.addressBarHeight)
         dismissHeightConstraint = dismissButton.heightAnchor.constraint(equalToConstant: UX.addressBarHeight)
+        
+        // The foreground is the capsule's content area at rest (pinned),
+        // and a fixed-width strip centred on the capsule while it is
+        // any part pill (floating) - see setPillProgress. Every
+        // horizontal edge below that used to read addressBarContent now
+        // reads addressBarForeground; pinned, those are the same line.
+        foregroundPinnedConstraints = [
+            addressBarForeground.leadingAnchor.constraint(equalTo: addressBarContent.leadingAnchor),
+            addressBarForeground.trailingAnchor.constraint(equalTo: addressBarContent.trailingAnchor),
+        ]
+        foregroundWidthConstraint = addressBarForeground.widthAnchor.constraint(equalToConstant: 0)
+        foregroundFloatingConstraints = [
+            addressBarForeground.centerXAnchor.constraint(equalTo: addressBarContent.centerXAnchor),
+            foregroundWidthConstraint,
+        ]
+        NSLayoutConstraint.activate(foregroundPinnedConstraints)
+        NSLayoutConstraint.activate([
+            addressBarForeground.topAnchor.constraint(equalTo: addressBarContent.topAnchor),
+            addressBarForeground.bottomAnchor.constraint(equalTo: addressBarContent.bottomAnchor),
+            
+            pillLabel.centerXAnchor.constraint(equalTo: addressBarContent.centerXAnchor),
+            pillLabel.centerYAnchor.constraint(equalTo: addressBarContent.centerYAnchor),
+            pillLabel.widthAnchor.constraint(lessThanOrEqualTo: addressBarContent.widthAnchor, constant: -28),
+        ])
         
         NSLayoutConstraint.activate([
             addressBarBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -589,7 +747,7 @@ final class AddressBar: UIView {
             dismissWidthConstraint,
             dismissHeightConstraint,
             
-            leadingButton.leadingAnchor.constraint(equalTo: addressBarContent.leadingAnchor, constant: UX.addressBarContentHorizontalInset),
+            leadingButton.leadingAnchor.constraint(equalTo: addressBarForeground.leadingAnchor, constant: UX.addressBarContentHorizontalInset),
             leadingButton.centerYAnchor.constraint(equalTo: addressBarContent.centerYAnchor),
             leadingButton.widthAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
             leadingButton.heightAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
@@ -599,7 +757,7 @@ final class AddressBar: UIView {
             addonButton.widthAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
             addonButton.heightAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
 
-            trailingButton.trailingAnchor.constraint(equalTo: addressBarContent.trailingAnchor, constant: -UX.addressBarContentHorizontalInset),
+            trailingButton.trailingAnchor.constraint(equalTo: addressBarForeground.trailingAnchor, constant: -UX.addressBarContentHorizontalInset),
             trailingButton.centerYAnchor.constraint(equalTo: addressBarContent.centerYAnchor),
             trailingButton.widthAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
             trailingButton.heightAnchor.constraint(equalToConstant: UX.addressBarButtonSize),
@@ -620,22 +778,22 @@ final class AddressBar: UIView {
             addressLabel.topAnchor.constraint(equalTo: addressBarContent.topAnchor),
             addressLabel.bottomAnchor.constraint(equalTo: addressBarContent.bottomAnchor),
             
-            progressView.leadingAnchor.constraint(equalTo: addressBarContent.leadingAnchor),
-            progressView.trailingAnchor.constraint(equalTo: addressBarContent.trailingAnchor),
+            progressView.leadingAnchor.constraint(equalTo: addressBarForeground.leadingAnchor),
+            progressView.trailingAnchor.constraint(equalTo: addressBarForeground.trailingAnchor),
             progressView.bottomAnchor.constraint(equalTo: addressBarContent.bottomAnchor),
             progressView.heightAnchor.constraint(equalToConstant: UX.addressBarLoadingProgressHeight),
         ])
         
         textLeadingToButtonConstraint = textField.leadingAnchor.constraint(equalTo: leadingButton.trailingAnchor, constant: UX.addressBarButtonToTextSpacing)
         textLeadingToAddonButtonConstraint = textField.leadingAnchor.constraint(equalTo: addonButton.trailingAnchor, constant: UX.addressBarButtonToTextSpacing)
-        textLeadingToBackgroundConstraint = textField.leadingAnchor.constraint(equalTo: addressBarContent.leadingAnchor, constant: UX.addressBarContentHorizontalInset)
+        textLeadingToBackgroundConstraint = textField.leadingAnchor.constraint(equalTo: addressBarForeground.leadingAnchor, constant: UX.addressBarContentHorizontalInset)
         textTrailingToButtonConstraint = textField.trailingAnchor.constraint(equalTo: trailingButton.leadingAnchor, constant: -UX.addressBarButtonToTextSpacing)
-        textTrailingToBackgroundConstraint = textField.trailingAnchor.constraint(equalTo: addressBarContent.trailingAnchor, constant: -UX.addressBarContentHorizontalInset)
+        textTrailingToBackgroundConstraint = textField.trailingAnchor.constraint(equalTo: addressBarForeground.trailingAnchor, constant: -UX.addressBarContentHorizontalInset)
         labelLeadingToButtonConstraint = addressLabel.leadingAnchor.constraint(equalTo: leadingButton.trailingAnchor, constant: UX.addressBarButtonToTextSpacing)
         labelLeadingToAddonButtonConstraint = addressLabel.leadingAnchor.constraint(equalTo: addonButton.trailingAnchor, constant: UX.addressBarButtonToTextSpacing)
-        labelLeadingToBackgroundConstraint = addressLabel.leadingAnchor.constraint(equalTo: addressBarContent.leadingAnchor, constant: UX.addressBarContentHorizontalInset)
+        labelLeadingToBackgroundConstraint = addressLabel.leadingAnchor.constraint(equalTo: addressBarForeground.leadingAnchor, constant: UX.addressBarContentHorizontalInset)
         labelTrailingToButtonConstraint = addressLabel.trailingAnchor.constraint(equalTo: trailingButton.leadingAnchor, constant: -UX.addressBarButtonToTextSpacing)
-        labelTrailingToBackgroundConstraint = addressLabel.trailingAnchor.constraint(equalTo: addressBarContent.trailingAnchor, constant: -UX.addressBarContentHorizontalInset)
+        labelTrailingToBackgroundConstraint = addressLabel.trailingAnchor.constraint(equalTo: addressBarForeground.trailingAnchor, constant: -UX.addressBarContentHorizontalInset)
     }
     
     private func configureTargets() {
@@ -672,7 +830,7 @@ final class AddressBar: UIView {
     private func applyState() {
         applyRenderModel(resolveRenderModel())
         applyLoadingState()
-        addressBarBackground.layer.shadowOpacity = UX.addressBarBackgroundShadowOpacity
+        addressBarBackground.layer.shadowOpacity = Self.shadowOpacity(forPillProgress: pillProgress)
         setNeedsLayout()
     }
     
@@ -890,6 +1048,13 @@ final class AddressBar: UIView {
     
     @objc
     private func handleBarTap() {
+        if isPillForm {
+            // The capsule is the condensed pill - see
+            // fix_address_bar_is_the_pill.py. Expand, do not edit.
+            onPillTap?()
+            return
+        }
+        
         if textField.isFirstResponder {
             if isShowingOverlay {
                 handleOverlayTap()

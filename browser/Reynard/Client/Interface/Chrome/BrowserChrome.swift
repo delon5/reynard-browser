@@ -142,6 +142,26 @@ final class BrowserChrome: UIView {
     /// stays pinned to where the toolbar's top edge always was.
     var onScrollCondensedChange: ((Bool) -> Void)?
     
+    /// The address bar doubles as the condensed pill - see
+    /// fix_address_bar_is_the_pill.py. True in the phone layout with the
+    /// floating pill, which is where the bar lives in the bottom toolbar
+    /// and the pill's place is that toolbar's own ground. Everywhere else
+    /// (the bar in the top toolbar, or the pill reserving its strip in
+    /// stop mode) CondensedAddressPill and the cross-fade are unchanged.
+    private var usesAddressPill = false
+    /// Asked whenever the chrome expands for a reason other than a
+    /// scroll (expandBringingToolbarHome), for the dynamic toolbar to be
+    /// sent home in one step (ToolbarController.reset(animated: false)).
+    /// The bottom toolbar turns that step into a glide. Without it the
+    /// chrome would expand with the toolbar still slid away - and the
+    /// bar still a pill.
+    var onAddressPillExpand: (() -> Void)?
+    /// The dynamic toolbar has slid fully away while the chrome still
+    /// counts as expanded, which leaves the address bar showing as the
+    /// pill over a page that has not been told to clear one. Wired to
+    /// ScrollChromeCoordinator, which condenses if condensing is allowed.
+    var onAddressPillStranded: (() -> Void)?
+    
     // MARK: - Lifecycle
     
     init() {
@@ -155,6 +175,9 @@ final class BrowserChrome: UIView {
         configureOverlayDismissGesture()
         condensedPill.onTap = { [weak self] in
             self?.setScrollCondensed(false, animated: true)
+        }
+        addressBar.onPillTap = { [weak self] in
+            self?.expandBringingToolbarHome(animated: true)
         }
     }
     
@@ -222,6 +245,7 @@ final class BrowserChrome: UIView {
             // rules and scroll-driven condensing would just be confusing.
             setScrollCondensed(false, animated: false)
         }
+        updateAddressPillMode(for: state)
         addressBar.updateLayout(position: state.position, chromeMode: state.mode)
         attachAddressBar(for: state.mode)
         attachActionBar(for: state.mode)
@@ -362,7 +386,13 @@ final class BrowserChrome: UIView {
     }
     
     private func updateOverlayWidth() {
-        overlayWidthConstraint.constant = overlayContentView.layoutMode.resolvedWidth(addressBarWidth: addressBar.bounds.width)
+        // The bar's RESTING width in the pill mode: its live width is
+        // the pill's while condensed, and this is not re-run when the
+        // bar widens again. See fix_address_bar_is_the_pill.py.
+        let addressBarWidth = usesAddressPill
+            ? bottomToolbar.addressBarRestingWidth
+            : addressBar.bounds.width
+        overlayWidthConstraint.constant = overlayContentView.layoutMode.resolvedWidth(addressBarWidth: addressBarWidth)
     }
     
     private func overlayLayoutMode(for state: State) -> ChromeOverlayContentView.LayoutMode {
@@ -422,6 +452,62 @@ final class BrowserChrome: UIView {
             showsBarMenu: showsBarMenu
         )
         condensedPill.setLocationText(locationText ?? text)
+        // The same text on the address bar's own pill label, and the
+        // pill's width with it. See fix_address_bar_is_the_pill.py.
+        addressBar.setPillText(locationText ?? text)
+        bottomToolbar.refreshPillLayout()
+    }
+    
+    // MARK: - Address Pill
+    
+    /// Decides whether the address bar is the pill, and moves the chrome
+    /// between the two schemes when that changes (rotation into the
+    /// compact layout, the float setting).
+    private func updateAddressPillMode(for state: State) {
+        // hidesToolbarOnScroll off means nothing ever condenses: the
+        // toolbar just slides, and must take its address bar with it.
+        let uses = state.mode == .phone
+            && Prefs.AppearanceSettings.pillFloatsOverPage
+            && Prefs.AppearanceSettings.hidesToolbarOnScroll
+        guard uses != usesAddressPill else {
+            return
+        }
+        usesAddressPill = uses
+        UIView.performWithoutAnimation {
+            bottomToolbar.setUsesAddressPill(uses, condensed: isScrollCondensed)
+            guard isScrollCondensed else {
+                return
+            }
+            // Condensed looks different in the two schemes: the toolbar
+            // faded out under a separate pill, or the toolbar in place
+            // with only its capsule showing.
+            bottomToolbar.alpha = uses ? 1 : 0
+            bottomToolbar.setContentAlpha(uses ? 1 : 0)
+            condensedPill.alpha = uses ? 0 : 1
+            condensedPill.isHidden = uses
+        }
+    }
+    
+    /// Expanding from anything other than a scroll: a tap on the address
+    /// bar while it is the pill, a new document, a tab switch.
+    ///
+    /// A scroll brings the toolbar home itself, and the pill waits for
+    /// it. Nothing else does: with the address bar as the pill, clearing
+    /// the condensed flag alone would leave the toolbar slid away and
+    /// the bar still a pill. (The cross-fade never met this because it
+    /// reset the toolbar's transform on every expand.)
+    func expandBringingToolbarHome(animated: Bool) {
+        guard usesAddressPill else {
+            setScrollCondensed(false, animated: animated)
+            return
+        }
+        // Send the dynamic toolbar home first, held by the bottom
+        // toolbar so nothing jumps, then expand: the flip and the slide
+        // home become one movement of the capsule.
+        bottomToolbar.glidePillOffset { [weak self] in
+            self?.onAddressPillExpand?()
+        }
+        setScrollCondensed(false, animated: animated)
     }
     
     /// Condenses the top and bottom toolbars into a small floating pill
@@ -480,11 +566,17 @@ final class BrowserChrome: UIView {
         // by the OLED overlay, translucent without it, and in both cases
         // exactly the band that was being reported while every value
         // logged here said the chrome was fine.
-        let line = String(format: "condensed=%d | %@ ca=%.2f | %@ ca=%.2f | %@",
+        // bar: the address bar, which is the pill when pill=1 - see
+        // fix_address_bar_is_the_pill.py. In that mode the bottom
+        // toolbar's own frame and alpha stop changing (its parts move
+        // instead), so the slide (o), the condensed blend (c) and how
+        // far the capsule is towards the pill (t) are reported here.
+        let line = String(format: "condensed=%d | %@ ca=%.2f | %@ ca=%.2f | %@ | %@ %@",
                           isScrollCondensed ? 1 : 0,
                           describe("top", topToolbar), topToolbar.contentAlpha,
                           describe("bottom", bottomToolbar), bottomToolbar.contentAlpha,
-                          describe("pill", condensedPill))
+                          describe("pill", condensedPill),
+                          describe("bar", addressBar), bottomToolbar.pillStateDescription)
         guard line != lastChromeState else {
             return
         }
@@ -499,8 +591,23 @@ final class BrowserChrome: UIView {
         isScrollCondensed = condensed
         onScrollCondensedChange?(condensed)
         
-        if condensed {
+        // Read after the callback above: it runs apply(state:), which is
+        // where the scheme is chosen.
+        if condensed, !usesAddressPill {
             condensedPill.isHidden = false
+        }
+        
+        if usesAddressPill {
+            // The address bar is the pill - see
+            // fix_address_bar_is_the_pill.py. The bottom toolbar keeps
+            // its capsule and loses the rest, on its own per-frame
+            // spring rather than in the block below, so the capsule, its
+            // label, its shadow and the cutout behind it move as one and
+            // a scroll tick landing mid-flight cannot split them. The
+            // LIVE flag, for the same reason the block below reads it.
+            bottomToolbar.setPillCondensed(isScrollCondensed, animated: animated) { [weak self] in
+                self?.logChromeState("pill settled")
+            }
         }
         
         let animations = {
@@ -521,11 +628,19 @@ final class BrowserChrome: UIView {
             self.topToolbar.transform = condensed
                 ? CGAffineTransform(scaleX: 0.92, y: 0.92)
                 : .identity
-            self.bottomToolbar.alpha = condensed ? 0 : 1
-            self.bottomToolbar.transform = condensed
-                ? CGAffineTransform(scaleX: 0.92, y: 0.92)
-                : .identity
-            self.condensedPill.alpha = condensed ? 1 : 0
+            if self.usesAddressPill {
+                // Never faded or scaled in this scheme: its capsule is
+                // the pill. setPillCondensed above does the rest.
+                self.bottomToolbar.alpha = 1
+                self.bottomToolbar.transform = .identity
+                self.condensedPill.alpha = 0
+            } else {
+                self.bottomToolbar.alpha = condensed ? 0 : 1
+                self.bottomToolbar.transform = condensed
+                    ? CGAffineTransform(scaleX: 0.92, y: 0.92)
+                    : .identity
+                self.condensedPill.alpha = condensed ? 1 : 0
+            }
             // Assert the CONTENT alpha too, not just the view's.
             //
             // Two systems drive this toolbar and neither knew about the
@@ -542,7 +657,9 @@ final class BrowserChrome: UIView {
             // Expanding means fully shown, so 1 is not a guess about what
             // the scroll left behind; it is what expanded means.
             self.topToolbar.setContentAlpha(condensed ? 0 : 1)
-            self.bottomToolbar.setContentAlpha(condensed ? 0 : 1)
+            if !self.usesAddressPill {
+                self.bottomToolbar.setContentAlpha(condensed ? 0 : 1)
+            }
             self.logChromeState("applied")
         }
 
@@ -742,9 +859,33 @@ final class BrowserChrome: UIView {
     ) {
         topToolbar.transform = CGAffineTransform(translationX: 0, y: topOffset)
         topToolbar.setContentAlpha(topContentAlpha)
-        bottomToolbar.transform = CGAffineTransform(translationX: 0, y: bottomOffset)
-        bottomToolbar.setContentAlpha(bottomContentAlpha)
+        // CHANGED - see fix_address_bar_is_the_pill.py. The bottom
+        // toolbar applies its own slide: with CondensedAddressPill it
+        // does exactly what the two lines here did (transform and
+        // content alpha); with the address bar as the pill it slides its
+        // background and buttons and leaves the capsule behind.
+        bottomToolbar.setScrollTransition(offset: bottomOffset, contentAlpha: bottomContentAlpha)
         actionBar.transform = CGAffineTransform(translationX: 0, y: bottomOffset)
+        
+        // Expanded, but the toolbar is gone and what is left on screen is
+        // the pill: a short scroll up that stopped before the toolbar was
+        // half way home (it snaps back down), or a flick too short to
+        // cross the condense threshold. Before, that state drew nothing
+        // at all. Now it draws the pill, so it has to BE the condensed
+        // state, or the page is not lifted clear of it. Next turn of the
+        // run loop: this is called from inside ToolbarController's own
+        // offset update.
+        if usesAddressPill, !isScrollCondensed, bottomToolbar.isSlidFullyAway {
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.usesAddressPill,
+                      !self.isScrollCondensed,
+                      self.bottomToolbar.isSlidFullyAway else {
+                    return
+                }
+                self.onAddressPillStranded?()
+            }
+        }
     }
     
     func setChromeTransition(topAlpha: CGFloat, bottomAlpha: CGFloat, bottomTranslationY: CGFloat = 0) {

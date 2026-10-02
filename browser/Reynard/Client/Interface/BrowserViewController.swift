@@ -257,6 +257,18 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         toolbarController.bottomReservation = { [weak self] in
             self?.tabManager.selectedTab?.state.bottomReservation
         }
+        // ADDED - see fix_address_bar_is_the_pill.py. The chrome is
+        // expanding for a reason other than a scroll - a tap on the
+        // address bar while it is the condensed pill, a new document:
+        // the dynamic toolbar goes home in one step and the chrome
+        // glides the capsule there. Not animated here - the snap is
+        // 0.15s, and the capsule would be dragged along it.
+        browserChrome.onAddressPillExpand = { [weak self] in
+            self?.toolbarController.reset(animated: false)
+        }
+        browserChrome.onAddressPillStranded = { [weak self] in
+            self?.scrollChromeCoordinator.condenseAfterToolbarSlidAway()
+        }
         browserChrome.onScrollCondensedChange = { [weak self] condensed in
             guard let self else {
                 return

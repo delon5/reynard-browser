@@ -923,6 +923,13 @@ extension AddressBarGestures: UIGestureRecognizerDelegate {
             return false
         }
         
+        // ADDED - see fix_address_bar_is_the_pill.py. While the capsule
+        // is the condensed pill it takes a tap and nothing else, as
+        // CondensedAddressPill did.
+        guard !addressBar.isPillForm else {
+            return false
+        }
+        
         guard gestureRecognizer.view !== addressBar,
               let delegate else {
             return true

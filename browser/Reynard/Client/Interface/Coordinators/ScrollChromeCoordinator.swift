@@ -82,7 +82,23 @@ final class ScrollChromeCoordinator: NSObject {
     /// navigating to a new page or switching tabs, so a condensed state
     /// never persists somewhere it wouldn't make sense.
     func resetVisible(animated: Bool = false) {
-        browserChrome?.setScrollCondensed(false, animated: animated)
+        // CHANGED - see fix_address_bar_is_the_pill.py. Was
+        // setScrollCondensed(false, ...), which this still is wherever
+        // CondensedAddressPill is in use. With the address bar as the
+        // pill the dynamic toolbar has to be brought home as well.
+        browserChrome?.expandBringingToolbarHome(animated: animated)
+    }
+    
+    /// ADDED - see fix_address_bar_is_the_pill.py. The dynamic toolbar
+    /// slid fully away while the chrome was still expanded, so the
+    /// address bar is on screen as the pill. Condense, under the same
+    /// rule as a scroll: the pill and the condensed state are one thing,
+    /// and only the condensed state lifts the page clear of the pill.
+    func condenseAfterToolbarSlidAway() {
+        guard let browserChrome, isEnabled(), !browserChrome.isScrollCondensed else {
+            return
+        }
+        browserChrome.setScrollCondensed(true, animated: true)
     }
     
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
@@ -151,7 +167,10 @@ final class ScrollChromeCoordinator: NSObject {
             // user performed, now that the resize cannot land under
             // a held pull.
             if isEnabled(), browserChrome.isScrollCondensed {
-                browserChrome.setScrollCondensed(false, animated: true)
+                // The finger is up and a pull at the top of the page
+                // scrolled nothing, so no scroll will bring the toolbar
+                // home - see fix_address_bar_is_the_pill.py.
+                browserChrome.expandBringingToolbarHome(animated: true)
             }
         default:
             break
