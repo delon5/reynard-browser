@@ -701,6 +701,12 @@ final class BrowserChrome: UIView {
     
     func setAddressBarLoadingProgress(_ progress: Float, isLoading: Bool) {
         addressBar.setLoadingProgress(progress, isLoading: isLoading)
+        // A load starting or ending changes the buttons beside the
+        // address text, and with them how much of the text fits - which
+        // is now the pill's width. See
+        // fix_address_text_travels_to_the_pill.py. Does nothing unless
+        // the address bar is the pill.
+        bottomToolbar.refreshPillLayout()
     }
     
     func setAddressBarEditingState(_ state: AddressBar.EditingState) {

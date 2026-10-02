@@ -319,8 +319,10 @@ final class BottomToolbar: UIView {
         /// work done at the flip delays the animation rather than
         /// skipping its start.
         static let maximumFrameStep: CFTimeInterval = 1.0 / 30.0
-        /// CondensedAddressPill's limits, from BrowserChrome's constraints.
-        static let maximumPillWidth: CGFloat = 280
+        /// CondensedAddressPill's side margin, from BrowserChrome's
+        /// constraints. Its 280pt width limit now lives with the address
+        /// bar, which applies it only to the pill's own label - see
+        /// fix_address_text_travels_to_the_pill.py.
         static let minimumPillSideMargin: CGFloat = 24
     }
     
@@ -562,7 +564,7 @@ final class BottomToolbar: UIView {
             progress = slide + (1 - slide) * blend
             travel = slid + (distance - slid) * blend
             let pillWidth = addressBar.pillWidth(
-                maximum: min(PillUX.maximumPillWidth, bounds.width - 2 * PillUX.minimumPillSideMargin)
+                maximum: bounds.width - 2 * PillUX.minimumPillSideMargin
             )
             let width = restingWidth + (min(pillWidth, restingWidth) - restingWidth) * progress
             inset = (contentView.bounds.width - width) / 2

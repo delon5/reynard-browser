@@ -327,7 +327,8 @@ final class AddressBar: UIView {
     //
     // ADDED - see fix_address_bar_is_the_pill.py. The condensed pill is
     // not a second view any more: it is this capsule, narrower, 4pt
-    // shorter, showing the pill's label instead of its own content.
+    // shorter, with its own address text moved to the middle (see
+    // fix_address_text_travels_to_the_pill.py).
     // BottomToolbar owns where the capsule is and how wide; this owns
     // what it looks like on the way there. Everything is a plain function
     // of one number so a scroll tick and an animation frame take the same
@@ -353,11 +354,96 @@ final class AddressBar: UIView {
         pillLabel.text = text
     }
     
-    /// CondensedAddressPill's width for the same text: the label plus
-    /// 14pt either side, never narrower than it is tall.
+    // MARK: Pill text
+    //
+    // ADDED - see fix_address_text_travels_to_the_pill.py. The pill
+    // shows the text the capsule shows. It is the same label: it does
+    // not fade and nothing fades in over it. It slides from its place
+    // beside the buttons to the middle of the capsule and shrinks to the
+    // size CondensedAddressPill set its label in, both in step with the
+    // capsule's own narrowing.
+    //
+    // Only a transform moves it. Its layout slot stays where it is at
+    // rest (the foreground keeps its resting width - setPillProgress),
+    // so the text is never laid out again on the way: what is truncated
+    // in the toolbar is truncated at the same character in the pill.
+    
+    /// CondensedAddressPill's 14pt against the capsule's 17. Make this 1
+    /// to keep the text at full size in the pill.
+    private static let pillTextScale: CGFloat = 14 / UX.addressBarTextFontSize
+    /// CondensedAddressPill's width limit, kept for its own label.
+    private static let pillLabelMaximumWidth: CGFloat = 280
+    
+    /// The capsule is showing a page's address in addressLabel. When it
+    /// is not - no page, so a placeholder in the text field - the pill
+    /// falls back to pillLabel and the cross-fade.
+    private var pillTextTravels: Bool {
+        return !addressLabel.isHidden
+    }
+    
+    /// How wide the address text is drawn at rest: its content, cut to
+    /// its slot.
+    private var restingTextWidth: CGFloat {
+        return min(ceil(addressLabel.intrinsicContentSize.width), addressLabel.bounds.width)
+    }
+    
+    /// The text plus 14pt either side, never narrower than the pill is
+    /// tall - CondensedAddressPill's rule, for the text shown here.
     func pillWidth(maximum: CGFloat) -> CGFloat {
-        let width = ceil(pillLabel.intrinsicContentSize.width) + 28
-        return min(max(width, CondensedAddressPill.height), max(maximum, CondensedAddressPill.height))
+        let minimum = CondensedAddressPill.height
+        guard pillTextTravels else {
+            let width = ceil(pillLabel.intrinsicContentSize.width) + 28
+            return min(max(width, minimum), max(min(maximum, Self.pillLabelMaximumWidth), minimum))
+        }
+        // The label's slot must be current: a text or button change
+        // moves it and only marks this view for layout.
+        layoutIfNeeded()
+        // No 280pt cap here. The text was already cut to its slot in the
+        // toolbar, and scaled it always fits inside `maximum`, so the
+        // pill is as wide as the text and the text is never cut again.
+        let width = ceil(restingTextWidth * Self.pillTextScale) + 28
+        return min(max(width, minimum), max(maximum, minimum))
+    }
+    
+    /// What is visible on the capsule for the current progress.
+    private func applyPillContentAlpha() {
+        let progress = pillProgress
+        // The buttons and the rest go in the first half.
+        addressBarForeground.alpha = 1 - min(progress / 0.5, 1)
+        addressBarForeground.isUserInteractionEnabled = progress < 0.5
+        // pillLabel only when there is no address text to carry over.
+        pillLabel.alpha = pillTextTravels ? 0 : max((progress - 0.5) / 0.5, 0)
+    }
+    
+    /// Places the address text for the current progress. Run after
+    /// layout, from the frames layout produced.
+    private func updatePillTextTransform() {
+        let progress = pillProgress
+        guard progress > 0, pillTextTravels else {
+            if addressLabel.transform != .identity {
+                addressLabel.transform = .identity
+            }
+            return
+        }
+        // bounds and center, never frame: they do not move with the
+        // transform this sets.
+        let slotWidth = addressLabel.bounds.width
+        let textWidth = restingTextWidth
+        let scale = 1 + (Self.pillTextScale - 1) * progress
+        // How far the text's centre sits from the capsule's, untouched:
+        // it is left-aligned in its slot. The same number at every
+        // progress, because the slot is centred on the capsule.
+        let offCentre = addressLabel.center.x - slotWidth / 2 + textWidth / 2
+            - addressBarContent.bounds.width / 2
+        // Close that distance in step with the capsule narrowing, and
+        // take out what scaling about the slot's centre adds. The gap
+        // between the text and the capsule's edge then runs evenly from
+        // its resting value to the pill's 14pt, on both sides.
+        let shift = -progress * offCentre - (slotWidth - textWidth) * (1 - scale) / 2
+        let transform = CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: shift, ty: 0)
+        if addressLabel.transform != transform {
+            addressLabel.transform = transform
+        }
     }
     
     private static func capsuleHeight(forPillProgress progress: CGFloat) -> CGFloat {
@@ -372,8 +458,8 @@ final class AddressBar: UIView {
     
     /// `restingWidth` is the capsule's full width in the toolbar. The
     /// foreground keeps that width while the capsule narrows around it,
-    /// so the address text is cropped and faded, never squeezed or
-    /// re-truncated.
+    /// so nothing on it is squeezed or laid out again - which is also
+    /// what holds the address text's slot still while the text travels.
     func setPillProgress(_ progress: CGFloat, restingWidth: CGFloat) {
         let progress = min(max(progress, 0), 1)
         let wasFloating = pillProgress > 0
@@ -389,12 +475,10 @@ final class AddressBar: UIView {
         addressBarBackground.layer.shadowRadius = UX.addressBarBackgroundShadowRadius
             + (8 - UX.addressBarBackgroundShadowRadius) * progress
         
-        // One after the other, not a cross-fade: the capsule's own
-        // content is gone by half way and the pill's label only starts
-        // there, so the two texts are never on screen together.
-        addressBarForeground.alpha = 1 - min(progress / 0.5, 1)
-        pillLabel.alpha = max((progress - 0.5) / 0.5, 0)
-        addressBarForeground.isUserInteractionEnabled = progress < 0.5
+        // CHANGED - see fix_address_text_travels_to_the_pill.py. The
+        // address text is no longer part of what fades; it travels
+        // (updatePillTextTransform, from layoutSubviews).
+        applyPillContentAlpha()
         
         let floats = progress > 0
         if floats, foregroundWidthConstraint.constant != restingWidth, restingWidth > 0 {
@@ -426,6 +510,11 @@ final class AddressBar: UIView {
             roundedRect: addressBarBackground.bounds,
             cornerRadius: addressBarBackground.layer.cornerRadius
         ).cgPath
+        // The address text is placed from its laid-out slot, which is
+        // three levels down and not laid out yet at this point. See
+        // fix_address_text_travels_to_the_pill.py.
+        addressBarBackground.layoutIfNeeded()
+        updatePillTextTransform()
     }
     
     // MARK: - Configuration
@@ -690,9 +779,14 @@ final class AddressBar: UIView {
         addressBarForeground.addSubview(trailingButton)
         addressBarForeground.addSubview(textField)
         addressBarForeground.addSubview(autocompleteButton)
-        addressBarForeground.addSubview(addressLabel)
         addressBarForeground.addSubview(autocompleteLabel)
         addressBarForeground.addSubview(progressView)
+        // MOVED out of the foreground - see
+        // fix_address_text_travels_to_the_pill.py. The foreground fades
+        // as the capsule becomes the pill and this text must not. Its
+        // constraints are unchanged and still run to the buttons inside
+        // the foreground, so it is laid out exactly where it was.
+        addressBarContent.addSubview(addressLabel)
         addressBarContent.addSubview(pillLabel)
     }
     
@@ -831,6 +925,9 @@ final class AddressBar: UIView {
         applyRenderModel(resolveRenderModel())
         applyLoadingState()
         addressBarBackground.layer.shadowOpacity = Self.shadowOpacity(forPillProgress: pillProgress)
+        // Whether there is address text to carry to the pill can change
+        // here. See fix_address_text_travels_to_the_pill.py.
+        applyPillContentAlpha()
         setNeedsLayout()
     }
     
