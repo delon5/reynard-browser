@@ -1387,7 +1387,19 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     /// Silent and free on a glance and return: the session is untouched,
     /// owner is the same live object as the selected tab's, and a video
     /// that really is still fullscreen stays fullscreen.
-    private func reynardStandDownFromOrphanedFullscreen() {
+    ///
+    /// NO LONGER PRIVATE - see
+    /// fix_stand_down_when_selected_session_is_replaced.py. The
+    /// foreground notification is too early for the other way a session
+    /// is lost: the selected tab is never slept, so its content process
+    /// is killed while the app is suspended, and that kill is only
+    /// noticed AFTER willEnterForeground has run this and found the old
+    /// session still in place. Recovery then replaces the session and
+    /// nothing asked again - Netflix, 2026-10-02: toolbar hidden from
+    /// 12:59:55 until the next real trip to the background at 13:02:03.
+    /// The chrome's session-replacement paths in
+    /// BrowserViewController+TabManager now ask as well.
+    func reynardStandDownFromOrphanedFullscreen() {
         guard isShowingFullscreenMedia else {
             return
         }

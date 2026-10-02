@@ -141,6 +141,10 @@ extension BrowserViewController: TabManagerDelegate {
             )
         }
         addonCoordinator.handleSelectedTabSessionReplacement(from: previousSession, to: replacementSession)
+        // A fullscreen request does not survive its session - see
+        // fix_stand_down_when_selected_session_is_replaced.py. Silent
+        // while the fullscreen owner is still the selected tab's session.
+        reynardStandDownFromOrphanedFullscreen()
     }
 
     func tabManager(_ tabManager: TabManager, didFirstCompositeFor tabID: UUID) {
@@ -284,6 +288,12 @@ extension BrowserViewController: TabManagerDelegate {
                     // looking. A session that is somehow not open yet
                     // logs "activate SKIPPED" rather than failing quietly.
                     sessionManager.activate(tab.session)
+                    // ADDED - see
+                    // fix_stand_down_when_selected_session_is_replaced.py.
+                    // The page that asked for fullscreen went with the
+                    // old session, and the foreground check ran before
+                    // the kill was noticed.
+                    reynardStandDownFromOrphanedFullscreen()
                 }
                 
                 browserChrome.setAddressBarLoadingProgress(
